@@ -27,9 +27,10 @@ dynamic = [
 dependencies = [
   "anndata",
   "click",
+  "dask[array]",
   "dask-image",
   "h5py",
-  "imagecodecs",
+  "imagecodecs>=2026.5.10",
   "joblib",
   "numpy",
   "ome-types",
@@ -40,8 +41,9 @@ dependencies = [
   # for debug logging (referenced from the issue template)
   "session-info2",
   "spatialdata>=0.7.3a0",
-  "tifffile>=2023.8.12",
+  "tifffile>=2026.5.2",
   "xmltodict",
+  "zarr>=3.1",
 ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://spatialdata-io.readthedocs.io/"
