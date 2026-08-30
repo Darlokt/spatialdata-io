@@ -5,42 +5,28 @@ from __future__ import annotations
 import argparse
 import shutil
 import tempfile
-import time
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pooch
+import requests
 from manifest import DATASETS, TestDataset, validate_datasets
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-# Some providers reject Python's default user agent even for public files.
-REQUEST_HEADERS = {
-    "User-Agent": "curl/8.0.0",
-    "Accept": "*/*",
-}
-DOWNLOAD_TIMEOUT_SEC = 60
-MAX_DOWNLOAD_ATTEMPTS = 3
-RETRY_DELAY_SEC = 2.0
-TRANSIENT_HTTP_STATUS_CODES = {408, 429}
+DOWNLOAD_RETRIES = 2
 
 
 class DatasetDownloadError(RuntimeError):
     """Error raised when a test dataset cannot be downloaded or extracted."""
 
-    def __init__(self, dataset: TestDataset, action: str, reason: str, suggestion: str | None = None) -> None:
+    def __init__(self, dataset: TestDataset, reason: str) -> None:
         self.dataset = dataset
-        self.action = action
         self.reason = reason
-        self.suggestion = suggestion
-        message = f"{dataset.key}: failed to {action} {dataset.url}: {reason}"
-        if suggestion is not None:
-            message = f"{message}. {suggestion}"
-        super().__init__(message)
+        super().__init__(f"{dataset.key}: {reason}")
 
 
 def download_dataset(dataset: TestDataset, output: Path, force: bool) -> None:
@@ -59,7 +45,7 @@ def download_dataset(dataset: TestDataset, output: Path, force: bool) -> None:
     Raises
     ------
     DatasetDownloadError
-        If the archive cannot be downloaded, extracted, or validated.
+        If the dataset files cannot be downloaded, extracted, or validated.
     """
     target = output / dataset.extracted_dir
     if target.exists() and not force:
@@ -69,18 +55,19 @@ def download_dataset(dataset: TestDataset, output: Path, force: bool) -> None:
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f"{dataset.key}-", dir=output) as tmpdir:
         tmp_path = Path(tmpdir)
-        archive_path = tmp_path / dataset.archive_name
         extracted_path = tmp_path / dataset.extracted_dir
         extracted_path.mkdir()
 
         # Stage work in a temporary directory so interrupted downloads do not leave partial datasets.
-        _download(dataset, archive_path)
-        _extract_zip(dataset, archive_path, extracted_path)
+        try:
+            _fetch_dataset(dataset, tmp_path, extracted_path)
+        except (requests.exceptions.RequestException, ValueError, zipfile.BadZipFile, OSError) as exc:
+            raise DatasetDownloadError(dataset, str(exc)) from exc
+
         if not extracted_path.is_dir() or not any(extracted_path.iterdir()):
             raise DatasetDownloadError(
                 dataset,
-                "extract",
-                f"archive did not produce expected directory {dataset.extracted_dir!r}",
+                f"download did not produce expected directory {dataset.extracted_dir!r}",
             )
 
         if target.exists():
@@ -146,63 +133,29 @@ def _selected_datasets(dataset_keys: list[str] | None, groups: list[str] | None)
     return [dataset for dataset in DATASETS if dataset.key in selected_keys or dataset.group in selected_groups]
 
 
-def _is_transient_error(error: BaseException) -> bool:
-    """Return whether a download error is worth retrying."""
-    if isinstance(error, urllib.error.HTTPError):
-        return error.code in TRANSIENT_HTTP_STATUS_CODES or 500 <= error.code < 600
-    return isinstance(error, urllib.error.URLError | TimeoutError)
+def _fetch_dataset(dataset: TestDataset, temporary_path: Path, extracted_path: Path) -> None:
+    """Fetch and verify a dataset using its Pooch registry."""
+    if dataset.doi:
+        manager = pooch.create(
+            path=extracted_path,
+            base_url=f"doi:{dataset.doi}/",
+            registry={},
+            retry_if_failed=DOWNLOAD_RETRIES,
+        )
+        # DOI repositories publish a per-file registry; Pooch loads its hashes and verifies each fetch.
+        manager.load_registry_from_doi()
+        if not manager.registry_files:
+            raise ValueError(f"DOI repository {dataset.doi!r} contains no files")
+        for file_name in manager.registry_files:
+            manager.fetch(file_name)
+        return
 
-
-def _download_error(dataset: TestDataset, error: BaseException) -> DatasetDownloadError:
-    """Translate urllib and timeout failures into dataset-aware errors."""
-    if isinstance(error, urllib.error.HTTPError):
-        reason = f"HTTP {error.code} {error.reason}"
-        suggestion = None
-        if error.code == 403:
-            suggestion = (
-                "The server rejected the request. The downloader sends a curl-like User-Agent; "
-                "if this persists, verify the URL in a browser or with curl and check whether the provider changed access rules"
-            )
-        return DatasetDownloadError(dataset, "download", reason, suggestion)
-    if isinstance(error, urllib.error.URLError):
-        return DatasetDownloadError(dataset, "download", f"URL error: {error.reason}")
-    if isinstance(error, TimeoutError):
-        return DatasetDownloadError(dataset, "download", f"timed out after {DOWNLOAD_TIMEOUT_SEC} seconds")
-    return DatasetDownloadError(dataset, "download", str(error))
-
-
-def _download(dataset: TestDataset, archive_path: Path) -> None:
-    """Download ``dataset`` to ``archive_path`` with bounded retries."""
-    print(f"Downloading {dataset.key} from {dataset.url}")
-    for attempt in range(1, MAX_DOWNLOAD_ATTEMPTS + 1):
-        request = urllib.request.Request(dataset.url, headers=REQUEST_HEADERS)
-        try:
-            with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SEC) as response:
-                with archive_path.open("wb") as handle:
-                    shutil.copyfileobj(response, handle)
-            return
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
-            if attempt < MAX_DOWNLOAD_ATTEMPTS and _is_transient_error(exc):
-                print(f"Retrying {dataset.key} after download failure ({attempt}/{MAX_DOWNLOAD_ATTEMPTS}): {exc}")
-                time.sleep(RETRY_DELAY_SEC)
-                continue
-            raise _download_error(dataset, exc) from exc
-
-
-def _extract_zip(dataset: TestDataset, archive_path: Path, destination: Path) -> None:
-    """Extract ``archive_path`` into ``destination`` after validating member paths."""
-    try:
-        with zipfile.ZipFile(archive_path) as archive:
-            destination_root = destination.resolve()
-            for member in archive.infolist():
-                # Guard against zip-slip archives that contain absolute paths or ``..`` components.
-                member_path = (destination / member.filename).resolve()
-                if not member_path.is_relative_to(destination_root):
-                    raise DatasetDownloadError(
-                        dataset,
-                        "extract",
-                        f"archive member {member.filename!r} would be extracted outside {destination}",
-                    )
-            archive.extractall(destination)
-    except zipfile.BadZipFile as exc:
-        raise DatasetDownloadError(dataset, "extract", "downloaded file is not a valid zip archive") from exc
+    archive_name = f"{dataset.key}.zip"
+    manager = pooch.create(
+        path=temporary_path,
+        base_url="",
+        registry={archive_name: dataset.known_hash},
+        urls={archive_name: dataset.url},
+        retry_if_failed=DOWNLOAD_RETRIES,
+    )
+    manager.fetch(archive_name, processor=pooch.Unzip(extract_dir=dataset.extracted_dir))

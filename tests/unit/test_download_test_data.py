@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 import sys
-import urllib.error
-import urllib.request
-import zipfile
-from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pooch
 import pytest
+import requests
 
 if TYPE_CHECKING:
     from types import ModuleType
 
 
 SCRIPT_DIR = Path(__file__).parents[2] / "scripts" / "test_data_downloader"
+SHA256 = "sha256:" + "0" * 64
 
 
 def _load_module(module_name: str, module_path: Path) -> ModuleType:
@@ -38,90 +36,114 @@ def _make_dataset(
     *,
     group: str = "group",
     url: str | None = None,
-    archive_name: str | None = None,
     extracted_dir: str | None = None,
     source: str = "example",
     test_path: str = "",
+    doi: str = "",
 ) -> Any:
     return download_test_data.TestDataset(
         key=key,
         group=group,
-        url=url or f"https://example.com/{key}.zip",
-        archive_name=archive_name or f"{key}.zip",
         extracted_dir=extracted_dir or key,
         source=source,
         test_path=test_path,
+        url="" if doi else url or f"https://example.com/{key}.zip",
+        known_hash="" if doi else SHA256,
+        doi=doi,
     )
 
 
-def _write_zip(path: Path) -> None:
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("payload.txt", "ok")
-
-
-class _BytesResponse(io.BytesIO):
-    def __enter__(self) -> _BytesResponse:
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-
-class TestDownload:
+class TestFetchDataset:
     def test_uses_dataset_manifest_module(self) -> None:
         assert download_test_data.TestDataset.__module__ == "manifest"
         assert all(isinstance(dataset, manifest.TestDataset) for dataset in download_test_data.DATASETS)
 
-    def test_sends_explicit_headers(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        seen_request: urllib.request.Request | None = None
+    def test_fetches_archive_with_pooch_registry_and_unzip(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        dataset = _make_dataset()
+        seen_create: dict[str, Any] = {}
+        seen_fetch: dict[str, Any] = {}
 
-        def urlopen(request: urllib.request.Request, timeout: int) -> _BytesResponse:
-            nonlocal seen_request
-            seen_request = request
-            assert timeout == download_test_data.DOWNLOAD_TIMEOUT_SEC
-            return _BytesResponse(b"payload")
+        class Manager:
+            def fetch(self, file_name: str, processor: Any = None) -> None:
+                seen_fetch.update(file_name=file_name, processor=processor)
 
-        monkeypatch.setattr(download_test_data.urllib.request, "urlopen", urlopen)
+        def create(**kwargs: Any) -> Manager:
+            seen_create.update(kwargs)
+            return Manager()
 
-        download_test_data._download(_make_dataset(), tmp_path / "archive.zip")
+        monkeypatch.setattr(download_test_data.pooch, "create", create)
 
-        assert seen_request is not None
-        assert seen_request.get_header("User-agent") == "curl/8.0.0"
-        assert seen_request.get_header("Accept") == "*/*"
+        download_test_data._fetch_dataset(dataset, tmp_path, tmp_path / dataset.extracted_dir)
 
-    def test_reports_http_403_with_actionable_message(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        dataset = _make_dataset("forbidden")
+        archive_name = f"{dataset.key}.zip"
+        assert seen_create == {
+            "path": tmp_path,
+            "base_url": "",
+            "registry": {archive_name: dataset.known_hash},
+            "urls": {archive_name: dataset.url},
+            "retry_if_failed": download_test_data.DOWNLOAD_RETRIES,
+        }
+        assert seen_fetch["file_name"] == archive_name
+        assert isinstance(seen_fetch["processor"], pooch.Unzip)
+        assert seen_fetch["processor"].extract_dir == dataset.extracted_dir
 
-        def urlopen(request: object, timeout: int) -> None:
-            raise urllib.error.HTTPError(dataset.url, 403, "Forbidden", hdrs=Message(), fp=None)
+    def test_loads_hashes_and_fetches_all_files_from_doi_registry(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        dataset = _make_dataset("doi", doi="10.5281/zenodo.123")
+        fetched: list[str] = []
+        registry_loaded = False
 
-        monkeypatch.setattr(download_test_data.urllib.request, "urlopen", urlopen)
+        class Manager:
+            registry: dict[str, str] = {}
 
-        with pytest.raises(download_test_data.DatasetDownloadError, match="HTTP 403 Forbidden") as exc_info:
-            download_test_data._download(dataset, tmp_path / dataset.archive_name)
+            @property
+            def registry_files(self) -> list[str]:
+                return list(self.registry)
 
-        message = str(exc_info.value)
-        assert dataset.key in message
-        assert dataset.url in message
-        assert "rejected the request" in message
+            def load_registry_from_doi(self) -> None:
+                nonlocal registry_loaded
+                registry_loaded = True
+                self.registry = {
+                    "first.tif": "md5:" + "0" * 32,
+                    "second.tif": "md5:" + "1" * 32,
+                }
 
-    def test_retries_transient_failures(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        dataset = _make_dataset("retry")
-        attempts = 0
+            def fetch(self, file_name: str) -> None:
+                assert self.registry[file_name].startswith("md5:")
+                fetched.append(file_name)
 
-        def urlopen(request: object, timeout: int) -> _BytesResponse:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise urllib.error.HTTPError(dataset.url, 503, "Service Unavailable", hdrs=Message(), fp=None)
-            return _BytesResponse(b"payload")
+        def create(**kwargs: Any) -> Manager:
+            assert kwargs == {
+                "path": tmp_path / dataset.extracted_dir,
+                "base_url": "doi:10.5281/zenodo.123/",
+                "registry": {},
+                "retry_if_failed": download_test_data.DOWNLOAD_RETRIES,
+            }
+            return Manager()
 
-        monkeypatch.setattr(download_test_data.urllib.request, "urlopen", urlopen)
-        monkeypatch.setattr(download_test_data.time, "sleep", lambda seconds: None)
+        monkeypatch.setattr(download_test_data.pooch, "create", create)
 
-        download_test_data._download(dataset, tmp_path / dataset.archive_name)
+        download_test_data._fetch_dataset(dataset, tmp_path, tmp_path / dataset.extracted_dir)
 
-        assert attempts == 2
+        assert registry_loaded
+        assert fetched == ["first.tif", "second.tif"]
+
+    def test_rejects_empty_doi_registry(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        dataset = _make_dataset("doi", doi="10.5281/zenodo.123")
+
+        class Manager:
+            registry_files: list[str] = []
+
+            def load_registry_from_doi(self) -> None:
+                return None
+
+        monkeypatch.setattr(download_test_data.pooch, "create", lambda **kwargs: Manager())
+
+        with pytest.raises(ValueError, match="contains no files"):
+            download_test_data._fetch_dataset(dataset, tmp_path, tmp_path / dataset.extracted_dir)
 
 
 class TestDatasetManifest:
@@ -131,35 +153,31 @@ class TestDatasetManifest:
     def test_returns_dataset_by_key(self) -> None:
         dataset = manifest.get_dataset("seqfish")
 
-        assert dataset.key == "seqfish"
         assert dataset.extracted_dir == "seqfish-2-test-dataset"
+        assert dataset.known_hash.startswith("sha256:")
 
     def test_reports_unknown_dataset_key(self) -> None:
         with pytest.raises(KeyError, match="Unknown test dataset key 'missing'"):
             manifest.get_dataset("missing")
 
-    def test_test_path_defaults_to_extracted_directory_root(self) -> None:
-        dataset = manifest.get_dataset("xenium_breast")
-
-        assert dataset.test_path == ""
-
     def test_can_filter_datasets_by_group(self) -> None:
         datasets = manifest.datasets_by_group("macsima")
 
         assert {dataset.key for dataset in datasets} == {"macsima_omap10", "macsima_omap23"}
+        assert all(dataset.doi for dataset in datasets)
 
-    def test_loads_datasets_from_toml(self, tmp_path: Path) -> None:
+    def test_loads_archive_dataset_from_toml(self, tmp_path: Path) -> None:
         manifest_path = tmp_path / "datasets.toml"
         manifest_path.write_text(
-            """
+            f"""
 [[datasets]]
 key = "example"
 group = "group"
-url = "https://example.com/example.zip"
-archive_name = "example.zip"
 extracted_dir = "example"
 source = "example source"
 test_path = "nested"
+url = "https://example.com/example.zip"
+known_hash = "{SHA256}"
 """,
             encoding="utf-8",
         )
@@ -170,13 +188,33 @@ test_path = "nested"
             manifest.TestDataset(
                 key="example",
                 group="group",
-                url="https://example.com/example.zip",
-                archive_name="example.zip",
                 extracted_dir="example",
                 source="example source",
                 test_path="nested",
+                url="https://example.com/example.zip",
+                known_hash=SHA256,
             ),
         )
+
+    def test_loads_doi_dataset_from_toml(self, tmp_path: Path) -> None:
+        manifest_path = tmp_path / "datasets.toml"
+        manifest_path.write_text(
+            """
+[[datasets]]
+key = "example"
+group = "group"
+extracted_dir = "example"
+source = "example source"
+doi = "10.5281/zenodo.123"
+""",
+            encoding="utf-8",
+        )
+
+        (dataset,) = manifest.load_datasets(manifest_path)
+
+        assert dataset.url == ""
+        assert dataset.known_hash == ""
+        assert dataset.doi == "10.5281/zenodo.123"
 
     def test_rejects_duplicate_dataset_keys(self) -> None:
         first = _make_dataset("duplicate", extracted_dir="first")
@@ -204,6 +242,43 @@ test_path = "nested"
         with pytest.raises(ValueError, match="test_path must be a relative path"):
             manifest.validate_datasets((dataset,))
 
+    def test_rejects_invalid_known_hash(self) -> None:
+        dataset = _make_dataset("invalid-hash")
+        dataset = manifest.TestDataset(
+            key=dataset.key,
+            group=dataset.group,
+            extracted_dir=dataset.extracted_dir,
+            source=dataset.source,
+            url=dataset.url,
+            known_hash="sha256:not-a-hash",
+        )
+
+        with pytest.raises(ValueError, match="known_hash"):
+            manifest.validate_datasets((dataset,))
+
+    @pytest.mark.parametrize(
+        ("url", "known_hash", "doi"),
+        [
+            ("", "", ""),
+            ("https://example.com/example.zip", "", ""),
+            ("", SHA256, ""),
+            ("https://example.com/example.zip", SHA256, "10.5281/zenodo.123"),
+        ],
+    )
+    def test_rejects_incomplete_or_ambiguous_download_source(self, url: str, known_hash: str, doi: str) -> None:
+        dataset = manifest.TestDataset(
+            key="example",
+            group="group",
+            extracted_dir="example",
+            source="example",
+            url=url,
+            known_hash=known_hash,
+            doi=doi,
+        )
+
+        with pytest.raises(ValueError, match="either doi|both an archive"):
+            manifest.validate_datasets((dataset,))
+
     def test_rejects_manifest_without_datasets_array(self, tmp_path: Path) -> None:
         manifest_path = tmp_path / "datasets.toml"
         manifest_path.write_text("datasets = { key = 'example' }\n", encoding="utf-8")
@@ -220,20 +295,7 @@ test_path = "nested"
 
     def test_rejects_unknown_root_manifest_field(self, tmp_path: Path) -> None:
         manifest_path = tmp_path / "datasets.toml"
-        manifest_path.write_text(
-            """
-version = 1
-
-[[datasets]]
-key = "example"
-group = "group"
-url = "https://example.com/example.zip"
-archive_name = "example.zip"
-extracted_dir = "example"
-source = "example source"
-""",
-            encoding="utf-8",
-        )
+        manifest_path.write_text("version = 1\ndatasets = []\n", encoding="utf-8")
 
         with pytest.raises(ValueError, match="unknown root field"):
             manifest.load_datasets(manifest_path)
@@ -241,13 +303,13 @@ source = "example source"
     def test_rejects_missing_required_manifest_field(self, tmp_path: Path) -> None:
         manifest_path = tmp_path / "datasets.toml"
         manifest_path.write_text(
-            """
+            f"""
 [[datasets]]
 key = "example"
 group = "group"
-url = "https://example.com/example.zip"
-archive_name = "example.zip"
 extracted_dir = "example"
+url = "https://example.com/example.zip"
+known_hash = "{SHA256}"
 """,
             encoding="utf-8",
         )
@@ -258,14 +320,14 @@ extracted_dir = "example"
     def test_rejects_unknown_manifest_field(self, tmp_path: Path) -> None:
         manifest_path = tmp_path / "datasets.toml"
         manifest_path.write_text(
-            """
+            f"""
 [[datasets]]
 key = "example"
 group = "group"
-url = "https://example.com/example.zip"
-archive_name = "example.zip"
 extracted_dir = "example"
-source = "example source"
+source = "example"
+url = "https://example.com/example.zip"
+known_hash = "{SHA256}"
 checksum = "unexpected"
 """,
             encoding="utf-8",
@@ -275,37 +337,17 @@ checksum = "unexpected"
             manifest.load_datasets(manifest_path)
 
 
-class TestExtractZip:
-    def test_reports_invalid_archive(self, tmp_path: Path) -> None:
-        archive_path = tmp_path / "bad.zip"
-        archive_path.write_bytes(b"not a zip")
-
-        with pytest.raises(download_test_data.DatasetDownloadError, match="not a valid zip archive"):
-            download_test_data._extract_zip(_make_dataset(), archive_path, tmp_path / "extract")
-
-    def test_rejects_archive_members_outside_destination(self, tmp_path: Path) -> None:
-        archive_path = tmp_path / "unsafe.zip"
-        with zipfile.ZipFile(archive_path, "w") as archive:
-            archive.writestr("../escape.txt", "bad")
-
-        with pytest.raises(download_test_data.DatasetDownloadError, match="outside"):
-            download_test_data._extract_zip(_make_dataset(), archive_path, tmp_path / "extract")
-
-        assert not (tmp_path / "escape.txt").exists()
-
-
 class TestDownloadDataset:
     def test_skips_existing_dataset_without_force(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         dataset = _make_dataset("existing")
-        target = tmp_path / dataset.extracted_dir
-        target.mkdir()
-
-        def fail_download(dataset: object, archive_path: Path) -> None:
-            raise AssertionError("download should have been skipped")
-
-        monkeypatch.setattr(download_test_data, "_download", fail_download)
+        (tmp_path / dataset.extracted_dir).mkdir()
+        monkeypatch.setattr(
+            download_test_data,
+            "_fetch_dataset",
+            lambda *args: pytest.fail("download should have been skipped"),
+        )
 
         download_test_data.download_dataset(dataset, tmp_path, force=False)
 
@@ -317,24 +359,30 @@ class TestDownloadDataset:
         target.mkdir()
         (target / "old.txt").write_text("old", encoding="utf-8")
 
-        def write_archive(dataset: object, archive_path: Path) -> None:
-            _write_zip(archive_path)
+        def fetch(dataset: object, temporary_path: Path, extracted_path: Path) -> None:
+            (extracted_path / "payload.txt").write_text("ok", encoding="utf-8")
 
-        monkeypatch.setattr(download_test_data, "_download", write_archive)
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
 
         download_test_data.download_dataset(dataset, tmp_path, force=True)
 
         assert not (target / "old.txt").exists()
         assert (target / "payload.txt").read_text(encoding="utf-8") == "ok"
 
-    def test_reports_archive_without_expected_contents(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_wraps_pooch_download_errors(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        dataset = _make_dataset("error")
+
+        def fetch(dataset: object, temporary_path: Path, extracted_path: Path) -> None:
+            raise requests.HTTPError("403 Client Error")
+
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
+
+        with pytest.raises(download_test_data.DatasetDownloadError, match="error: 403 Client Error"):
+            download_test_data.download_dataset(dataset, tmp_path, force=False)
+
+    def test_reports_download_without_expected_contents(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         dataset = _make_dataset("empty")
-
-        def write_empty_archive(dataset: object, archive_path: Path) -> None:
-            with zipfile.ZipFile(archive_path, "w"):
-                pass
-
-        monkeypatch.setattr(download_test_data, "_download", write_empty_archive)
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", lambda *args: None)
 
         with pytest.raises(download_test_data.DatasetDownloadError, match="expected directory"):
             download_test_data.download_dataset(dataset, tmp_path, force=False)
@@ -365,7 +413,6 @@ class TestMain:
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         dataset = _make_dataset("listed", group="group", extracted_dir="listed-dir", source="listed source")
-
         monkeypatch.setattr(download_test_data, "DATASETS", (dataset,))
 
         download_test_data.main(["--list"])
@@ -382,7 +429,7 @@ class TestMain:
         def download_dataset(dataset: Any, output: Path, force: bool) -> None:
             attempted.append(dataset.key)
             if dataset == first:
-                raise download_test_data.DatasetDownloadError(dataset, "download", "HTTP 403 Forbidden")
+                raise download_test_data.DatasetDownloadError(dataset, "HTTP 403 Forbidden")
 
         monkeypatch.setattr(download_test_data, "DATASETS", (first, second))
         monkeypatch.setattr(download_test_data, "download_dataset", download_dataset)

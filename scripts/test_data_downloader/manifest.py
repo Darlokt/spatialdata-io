@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from functools import cache
@@ -9,9 +10,10 @@ from pathlib import Path, PurePath
 from typing import Any
 
 DATASETS_TOML = Path(__file__).with_name("datasets.toml")
-REQUIRED_FIELDS = frozenset({"key", "group", "url", "archive_name", "extracted_dir", "source"})
-OPTIONAL_FIELDS = frozenset({"test_path"})
-ALLOWED_FIELDS = REQUIRED_FIELDS | OPTIONAL_FIELDS
+COMMON_REQUIRED_FIELDS = frozenset({"key", "group", "extracted_dir", "source"})
+OPTIONAL_FIELDS = frozenset({"test_path", "url", "known_hash", "doi"})
+ALLOWED_FIELDS = COMMON_REQUIRED_FIELDS | OPTIONAL_FIELDS
+KNOWN_HASH_PATTERN = re.compile(r"sha256:[0-9a-fA-F]{64}")
 
 
 @dataclass(frozen=True)
@@ -26,26 +28,31 @@ class TestDataset:
     group : str
         Logical grouping of the dataset, for example ``"xenium"``,
         ``"visium_hd"``, ``"seqfish"``, or ``"macsima"``.
-    url : str
-        Direct URL to the dataset archive, for example a ZIP file.
-    archive_name : str
-        Expected filename of the downloaded archive.
     extracted_dir : str
-        Expected name of the directory created when the archive is extracted.
+        Name of the final directory containing the downloaded dataset.
     source : str
         Human-readable description of the dataset source and license.
     test_path : str
         Optional path inside the extracted directory that should be passed to
         integration tests.
+    url : str
+        Direct URL to a ZIP archive. Used together with ``known_hash`` when a
+        DOI is unavailable.
+    known_hash : str
+        Pooch-compatible SHA-256 hash of the dataset archive.
+    doi : str
+        DOI for a repository whose files and published hashes should be loaded
+        through Pooch instead of downloading a single archive.
     """
 
     key: str
     group: str
-    url: str
-    archive_name: str
     extracted_dir: str
     source: str
     test_path: str = ""
+    url: str = ""
+    known_hash: str = ""
+    doi: str = ""
 
 
 def load_datasets(path: str | Path = DATASETS_TOML) -> tuple[TestDataset, ...]:
@@ -81,8 +88,9 @@ def validate_datasets(datasets: tuple[TestDataset, ...] | None = None) -> None:
     Raises
     ------
     ValueError
-        If a required field is empty, a key or extracted directory is
-        duplicated, or ``test_path`` points outside the extracted directory.
+        If a required field is empty, a hash or path is invalid, a key or
+        extracted directory is duplicated, or the download source is
+        incomplete or ambiguous.
     """
     if datasets is None:
         datasets = DATASETS
@@ -91,14 +99,28 @@ def validate_datasets(datasets: tuple[TestDataset, ...] | None = None) -> None:
     seen_extracted_dirs: set[str] = set()
 
     for dataset in datasets:
-        for field_name in REQUIRED_FIELDS:
+        for field_name in COMMON_REQUIRED_FIELDS:
             value = getattr(dataset, field_name)
             if not isinstance(value, str):
                 raise ValueError(f"Dataset {dataset.key!r} field {field_name!r} must be a string.")
             if not value.strip():
                 raise ValueError(f"Dataset {dataset.key!r} has empty {field_name}.")
-        if not isinstance(dataset.test_path, str):
-            raise ValueError(f"Dataset {dataset.key!r} field 'test_path' must be a string.")
+
+        for field_name in OPTIONAL_FIELDS:
+            if not isinstance(getattr(dataset, field_name), str):
+                raise ValueError(f"Dataset {dataset.key!r} field {field_name!r} must be a string.")
+
+        has_url = bool(dataset.url.strip())
+        has_hash = bool(dataset.known_hash.strip())
+        has_doi = bool(dataset.doi.strip())
+        if has_doi and (has_url or has_hash):
+            raise ValueError(f"Dataset {dataset.key!r} cannot define both an archive and a DOI.")
+        if not has_doi and not (has_url and has_hash):
+            raise ValueError(f"Dataset {dataset.key!r} must define either doi or both url and known_hash.")
+        if has_url:
+            _validate_known_hash(dataset.key, dataset.known_hash)
+        if has_doi and (not dataset.doi.startswith("10.") or any(character.isspace() for character in dataset.doi)):
+            raise ValueError(f"Dataset {dataset.key!r} doi must be a DOI without a 'doi:' prefix.")
 
         test_path = PurePath(dataset.test_path)
         # Test paths are appended to extracted_dir by tests, so they must stay inside that directory.
@@ -142,16 +164,22 @@ def _parse_dataset(raw_dataset: object, index: int) -> TestDataset:
         unknown = ", ".join(sorted(unknown_fields))
         raise ValueError(f"Dataset manifest entry at index {index} has unknown field(s): {unknown}.")
 
-    missing_fields = REQUIRED_FIELDS - dataset_fields
+    missing_fields = COMMON_REQUIRED_FIELDS - dataset_fields
     if missing_fields:
         missing = ", ".join(sorted(missing_fields))
         raise ValueError(f"Dataset manifest entry at index {index} is missing required field(s): {missing}.")
 
     values: dict[str, Any] = dict(raw_dataset)
-    values.setdefault("test_path", "")
+    for field_name in OPTIONAL_FIELDS:
+        values.setdefault(field_name, "")
     dataset = TestDataset(**values)
     validate_datasets((dataset,))
     return dataset
+
+
+def _validate_known_hash(dataset_key: str, known_hash: str) -> None:
+    if not KNOWN_HASH_PATTERN.fullmatch(known_hash):
+        raise ValueError(f"Dataset {dataset_key!r} known_hash must be formatted as 'sha256:<64 hex characters>'.")
 
 
 # Keep keys and groups stable because CI workflows and pytest markers may refer to them.

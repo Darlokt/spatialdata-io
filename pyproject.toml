@@ -52,7 +52,9 @@ urls.Source = "https://github.com/scverse/spatialdata-io"
 dev = [
   "mypy",
   "pandas-stubs",
+  "pooch>=1.9",
   "prek",
+  "requests",
   "scipy-stubs",
   "twine>=4.0.2",
   "types-geopandas",
@@ -154,6 +156,7 @@ module = [
   "dask_image.*",
   "h5py.*",
   "multiscale_spatial_image.*",
+  "pooch.*",
   "pyarrow.*",
   "rasterio.*",
   "readfcs.*",

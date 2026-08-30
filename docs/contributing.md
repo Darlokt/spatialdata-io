@@ -492,7 +492,12 @@ python scripts/test_data_downloader
 ```
 
 By default, the downloader skips datasets that already exist. Use `--force` to redownload selected datasets, `--dataset` for a single dataset key, and `--list` to show the available keys.
-The dataset registry lives in `scripts/test_data_downloader/datasets.toml`; append new entries there when adding or updating test datasets.
+The downloader verifies every downloaded file with [Pooch](https://www.fatiando.org/pooch/). The dataset manifest lives in
+`scripts/test_data_downloader/datasets.toml`; append new entries there when adding or updating test datasets. This manifest
+stores project-specific metadata such as dataset keys, groups, output directories, and sources; it is not a separate Pooch
+registry. Prefer a stable repository DOI when one is available. For DOI entries, Pooch loads the repository's per-file hashes
+at runtime and verifies every downloaded file. Otherwise, register the archive URL and its SHA-256 hash as
+`known_hash = "sha256:..."`.
 
 #### Testing multiple versions
 
