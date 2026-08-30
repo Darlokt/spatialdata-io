@@ -280,15 +280,15 @@ def test_cli_macsima(runner: CliRunner, dataset: str, require_test_dataset: Call
             macsima_wrapper,
             [
                 "--input",
-                f,
+                str(f),
                 "--output",
-                output_zarr,
+                str(output_zarr),
                 "--subset",
-                500,
+                "500",
                 "--c-subset",
-                1,
+                "1",
                 "--multiscale",
-                False,
+                "False",
             ],
         )
         assert result.exit_code == 0, result.output

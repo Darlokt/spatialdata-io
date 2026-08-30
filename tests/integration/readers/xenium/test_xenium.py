@@ -158,9 +158,9 @@ def test_cli_xenium(runner: CliRunner, dataset: str, require_test_dataset: Calla
             xenium_wrapper,
             [
                 "--input",
-                f,
+                str(f),
                 "--output",
-                output_zarr,
+                str(output_zarr),
             ],
         )
         assert result.exit_code == 0, result.output

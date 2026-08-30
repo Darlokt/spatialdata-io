@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import ModuleType
 
-    from manifest import TestDataset as TestDatasetType
+    from scripts.test_data_downloader.manifest import TestDataset as TestDatasetType
 
 
 def _load_dataset_manifest() -> ModuleType:

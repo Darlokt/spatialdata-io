@@ -9,6 +9,7 @@ import pytest
 from ome_types import OME
 from ome_types.model import (
     Image,
+    Map,
     MapAnnotation,
     Pixels,
     Pixels_DimensionOrder,
@@ -229,8 +230,8 @@ def test_collect_map_annotation_values_with_no_duplicate_keys() -> None:
     ome = OME(
         structured_annotations=StructuredAnnotations(
             map_annotations=[
-                MapAnnotation(value={"a": "1", "b": "2"}),
-                MapAnnotation(value={"c": "3"}),
+                MapAnnotation(value=Map.model_validate({"a": "1", "b": "2"})),
+                MapAnnotation(value=Map.model_validate({"c": "3"})),
             ]
         )
     )
@@ -244,8 +245,8 @@ def test_collect_map_annotations_values_with_duplicate_keys_identical_values() -
     ome = OME(
         structured_annotations=StructuredAnnotations(
             map_annotations=[
-                MapAnnotation(value={"a": "1", "b": "2"}),
-                MapAnnotation(value={"b": "2", "c": "3"}),
+                MapAnnotation(value=Map.model_validate({"a": "1", "b": "2"})),
+                MapAnnotation(value=Map.model_validate({"b": "2", "c": "3"})),
             ]
         )
     )
@@ -259,8 +260,8 @@ def test_collect_map_annotations_values_with_duplicate_keys_different_values() -
     ome = OME(
         structured_annotations=StructuredAnnotations(
             map_annotations=[
-                MapAnnotation(value={"a": "1", "b": "2"}),
-                MapAnnotation(value={"b": "99", "c": "3"}),
+                MapAnnotation(value=Map.model_validate({"a": "1", "b": "2"})),
+                MapAnnotation(value=Map.model_validate({"b": "99", "c": "3"})),
             ]
         )
     )
@@ -330,13 +331,15 @@ def test_parse_v0_ome_metadata_basic_extraction_and_conversions() -> None:
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "Fluorochrome": "AF488",
-                        "Exposure time": "123.4",
-                        "Cycle": "5",
-                        "ROI ID": "7",
-                        "MICS cycle type": "AntigenCycle",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "Fluorochrome": "AF488",
+                            "Exposure time": "123.4",
+                            "Cycle": "5",
+                            "ROI ID": "7",
+                            "MICS cycle type": "AntigenCycle",
+                        }
+                    )
                 )
             ]
         ),
@@ -361,11 +364,13 @@ def test_parse_v0_ome_metadata_handles_missing_or_invalid_numeric_fields() -> No
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "Exposure time": "not-a-number",
-                        "Cycle": "NaN",
-                        "ROI ID": "x",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "Exposure time": "not-a-number",
+                            "Cycle": "NaN",
+                            "ROI ID": "x",
+                        }
+                    )
                 )
             ]
         ),
@@ -390,9 +395,11 @@ def test_parse_v0_ome_metadata_falls_back_to_MICScycleID_if_no_cycle_keyword() -
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "MICS cycle ID": "5",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "MICS cycle ID": "5",
+                        }
+                    )
                 )
             ]
         ),
@@ -405,7 +412,7 @@ def test_parse_v0_ome_metadata_falls_back_to_MICScycleID_if_no_cycle_keyword() -
 def test_parse_v0_ome_metadata_prefers_Cycle_over_MICScycleID_keyword() -> None:
     ome = OME(
         structured_annotations=StructuredAnnotations(
-            map_annotations=[MapAnnotation(value={"MICS cycle ID": "5", "Cycle": "1"})]
+            map_annotations=[MapAnnotation(value=Map.model_validate({"MICS cycle ID": "5", "Cycle": "1"}))]
         ),
     )
 
@@ -418,9 +425,11 @@ def test_parse_v0_ome_metadata_bleach_cycle_appends_background() -> None:
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "MICS cycle type": "BleachCycle",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "MICS cycle type": "BleachCycle",
+                        }
+                    )
                 )
             ]
         ),
@@ -438,9 +447,11 @@ def test_parse_v0_ome_metadata_handles_unknown_imagetypes() -> None:
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "MICS cycle type": "NOT A VALID TYPE",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "MICS cycle type": "NOT A VALID TYPE",
+                        }
+                    )
                 )
             ]
         ),
@@ -458,15 +469,17 @@ def test_parse_v1_ome_metadata_basic_extraction_and_conversions() -> None:
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "Clone": "OKT3",
-                        "Biomarker": "CD3",
-                        "Fluorochrome": "AF488",
-                        "ExposureTime": "45.6",
-                        "Cycle": "3",
-                        "RoiId": "10",
-                        "ScanType": "S",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "Clone": "OKT3",
+                            "Biomarker": "CD3",
+                            "Fluorochrome": "AF488",
+                            "ExposureTime": "45.6",
+                            "Cycle": "3",
+                            "RoiId": "10",
+                            "ScanType": "S",
+                        }
+                    )
                 )
             ]
         ),
@@ -490,11 +503,13 @@ def test_parse_v1_ome_metadata_invalid_numerics_become_none() -> None:
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "ExposureTime": "x",
-                        "Cycle": "NaN",
-                        "RoiId": "ABC",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "ExposureTime": "x",
+                            "Cycle": "NaN",
+                            "RoiId": "ABC",
+                        }
+                    )
                 )
             ]
         ),
@@ -512,9 +527,11 @@ def test_parse_v1_ome_metadata_handles_unknown_imagetypes() -> None:
         structured_annotations=StructuredAnnotations(
             map_annotations=[
                 MapAnnotation(
-                    value={
-                        "ScanType": "NOT A VALID TYPE",
-                    }
+                    value=Map.model_validate(
+                        {
+                            "ScanType": "NOT A VALID TYPE",
+                        }
+                    )
                 )
             ]
         ),
@@ -592,7 +609,7 @@ def make_ome(extra_ma: dict[str, Any] | None = None) -> OME:
                 )
             )
         ],
-        structured_annotations=StructuredAnnotations(map_annotations=[MapAnnotation(value=base)]),
+        structured_annotations=StructuredAnnotations(map_annotations=[MapAnnotation(value=Map.model_validate(base))]),
     )
 
 

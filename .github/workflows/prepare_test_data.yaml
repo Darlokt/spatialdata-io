@@ -1,68 +1,74 @@
 name: Prepare test data
 
 on:
-    schedule:
-        - cron: "0 0 1 */2 *" # Run on the first day of every other month at midnight
-    workflow_dispatch:
-        inputs:
-            force_all:
-                description: "Download all registered datasets. Set to false to use dataset_keys."
-                required: true
-                type: boolean
-                default: true
-            dataset_keys:
-                description: "Dataset keys to download when force_all is false. Separate keys with spaces or commas."
-                required: false
-                type: string
-                default: ""
-            force_redownload:
-                description: "Redownload and replace existing selected datasets."
-                required: true
-                type: boolean
-                default: false
-    push:
-        branches:
-            - main
-        paths:
-            - ".github/workflows/prepare_test_data.yaml"
-            - "scripts/test_data_downloader/**"
+  schedule:
+    - cron: "0 0 1 * *" # run once a month to prevent artifact expiration
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: "Download all registered datasets. Set to false to use dataset_keys."
+        required: true
+        type: boolean
+        default: true
+      dataset_keys:
+        description: "Dataset keys to download when force_all is false. Separate keys with spaces or commas."
+        required: false
+        type: string
+        default: ""
+      force_redownload:
+        description: "Redownload and replace existing selected datasets."
+        required: true
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/prepare_test_data.yaml"
+      - "scripts/test_data_downloader/**"
+
+permissions:
+  contents: read
 
 jobs:
-    prepare-data:
-        runs-on: ubuntu-latest
+  prepare-data:
+    runs-on: ubuntu-latest
 
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v6
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          filter: blob:none
+          persist-credentials: false
 
-            - name: Set up Python
-              uses: actions/setup-python@v6
-              with:
-                  python-version: "3.13"
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
 
-            - name: Download test datasets
-              run: |
-                  args=(--output ./data)
-                  if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_all }}" == "false" ]]; then
-                      dataset_keys="${{ inputs.dataset_keys }}"
-                      if [[ -z "${dataset_keys}" ]]; then
-                          echo "::error::dataset_keys must be provided when force_all is false."
-                          exit 1
-                      fi
-                      dataset_keys="${dataset_keys//,/ }"
-                      for dataset_key in ${dataset_keys}; do
-                          args+=(--dataset "${dataset_key}")
-                      done
-                  fi
-                  if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_redownload }}" == "true" ]]; then
-                      args+=(--force)
-                  fi
-                  python scripts/test_data_downloader "${args[@]}"
+      - name: Download test datasets
+        env:
+          DATASET_KEYS: ${{ inputs.dataset_keys }}
+        run: |
+          args=(--output ./data)
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_all }}" == "false" ]]; then
+            dataset_keys="${DATASET_KEYS}"
+            if [[ -z "${dataset_keys}" ]]; then
+              echo "::error::dataset_keys must be provided when force_all is false."
+              exit 1
+            fi
+            dataset_keys="${dataset_keys//,/ }"
+            for dataset_key in ${dataset_keys}; do
+              args+=(--dataset "${dataset_key}")
+            done
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force_redownload }}" == "true" ]]; then
+            args+=(--force)
+          fi
+          uv run --python 3.13 python scripts/test_data_downloader "${args[@]}"
 
-            - name: Upload artifacts
-              uses: actions/upload-artifact@v7
-              with:
-                  name: data
-                  path: ./data
-                  if-no-files-found: error
-                  retention-days: 64
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: data
+          path: ./data
+          if-no-files-found: error
+          retention-days: 64

@@ -48,9 +48,9 @@ def test_cli_seqfish(runner: CliRunner, dataset: str, require_test_dataset: Call
             seqfish_wrapper,
             [
                 "--input",
-                f,
+                str(f),
                 "--output",
-                output_zarr,
+                str(output_zarr),
             ],
         )
         assert result.exit_code == 0, result.output
