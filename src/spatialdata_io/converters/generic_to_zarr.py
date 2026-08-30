@@ -1,10 +1,22 @@
+"""Persist generic SpatialData elements to Zarr stores."""
+
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from spatialdata import SpatialData
 from spatialdata._docs import docstring_parameter
 from spatialdata.models.models import DEFAULT_COORDINATE_SYSTEM
 
-from spatialdata_io.readers.generic import VALID_IMAGE_TYPES, VALID_SHAPE_TYPES
+from spatialdata_io.readers.generic import (
+    VALID_IMAGE_TYPES,
+    VALID_SHAPE_TYPES,
+    generic,
+)
+
+if TYPE_CHECKING:
+    from spatialdata_io.readers.generic._images import Chunks
 
 __all__ = ["generic_to_zarr"]
 
@@ -14,70 +26,86 @@ __all__ = ["generic_to_zarr"]
     valid_shape_types=", ".join(VALID_SHAPE_TYPES),
     default_coordinate_system=DEFAULT_COORDINATE_SYSTEM,
 )
-def generic_to_zarr(
-    input: str | Path,
+# Explicit public options mirror the reader and CLI without an opaque options mapping.
+def generic_to_zarr(  # noqa: PLR0913, RUF100
+    path: str | Path,
     output: str | Path,
     name: str | None = None,
     data_axes: str | None = None,
     coordinate_system: str | None = None,
+    *,
+    tiff_series: int = 0,
+    tiff_level: int = 0,
+    chunks: Chunks | None = None,
 ) -> None:
-    """Read generic data from an input file and save it as a SpatialData zarr store.
+    """Read a generic element and persist it in a SpatialData Zarr store.
 
     Parameters
     ----------
-    input
-        Path to the image/shapes input file. The file must exist and have a supported extension.
-        Supported image extensions: {valid_image_types}.
-        Supported shapes extensions: {valid_shape_types}.
+    path
+        Image or GeoJSON input. Supported image extensions are
+        {valid_image_types}; supported shape extensions are {valid_shape_types}.
     output
-        Path to the zarr store to write to. If the zarr store does not exist, it will be created from the input.
+        Destination SpatialData Zarr store. A missing store is created and an
+        existing store receives one new element.
     name
-        Name of the element to be stored. If not provided, the name will default to the stem of the input file.
+        Element name. Defaults to the input filename stem.
     data_axes
-        Axes of the data for image files. Valid values are 'cyx' and 'czyx'. If not provided, it defaults to None.
+        Explicit image axes. Required for images and invalid for GeoJSON.
     coordinate_system
-        Coordinate system in the spatialdata object to which an element should belong. If not provided, it defaults
-        to {default_coordinate_system}.
+        Coordinate system for the element. Defaults to
+        {default_coordinate_system}.
+    tiff_series
+        Zero-based TIFF series. Must remain zero for non-TIFF inputs.
+    tiff_level
+        Zero-based TIFF pyramid level. Must remain zero for non-TIFF inputs.
+    chunks
+        Requested image chunks in canonical output-axis order or by canonical
+        axis name. Invalid for GeoJSON inputs. By default, only ``Y`` and ``X``
+        are rechunked to 1024; ``C`` and ``Z`` retain source chunking.
 
     Raises
     ------
+    TypeError
+        If an image chunk specification contains unsupported value types.
     ValueError
-        If the name already exists in the output zarr store, a ValueError is raised, prompting the user to provide
-        a different name or delete the existing element.
+        If the input options are invalid or ``name`` already exists.
 
     Notes
     -----
-    This function reads data using the `generic()` method from `spatialdata_io` and writes it to a zarr store
-    using the `SpatialData` class. It handles both existing and new zarr stores, ensuring that data is appropriately
-    appended or initialized.
+    The function writes no status text to standard output. CLI presentation is
+    owned by the command wrapper.
     """
-    from spatialdata_io.readers.generic import generic
+    input_path = Path(path)
+    output_path = Path(output)
+    element_name = input_path.stem if name is None else name
+    target_coordinate_system = coordinate_system
+    if target_coordinate_system is None:
+        target_coordinate_system = DEFAULT_COORDINATE_SYSTEM
 
-    input = Path(input)
-    output = Path(output)
-
-    if name is None:
-        name = input.stem
-    if not data_axes:
-        data_axes = None
-    if not coordinate_system:
-        coordinate_system = "global"
+    spatial_data: SpatialData | None = None
+    if output_path.exists():
+        spatial_data = SpatialData.read(output_path)
+        if element_name in spatial_data:
+            message = (
+                f"Name {element_name!r} already exists in {output_path}; provide a different "
+                "name or delete the existing element."
+            )
+            raise ValueError(message)
 
     element = generic(
-        input=input, data_axes=list(data_axes) if data_axes is not None else None, coordinate_system=coordinate_system
+        path=input_path,
+        data_axes=data_axes,
+        coordinate_system=target_coordinate_system,
+        tiff_series=tiff_series,
+        tiff_level=tiff_level,
+        chunks=chunks,
     )
 
-    if output.exists():
-        sdata = SpatialData.read(output)
-        if name in sdata:
-            raise ValueError(
-                f"Name {name} already exists in {output}; please provide a different name or delete the "
-                f"existing element."
-            )
-        sdata[name] = element
-        sdata.write_element(element_name=name)
-        print(f"Element {name} written to {output}")
-    else:
-        sdata = SpatialData.init_from_elements(elements={name: element})
-        sdata.write(output)
-        print(f"Data written to {output}")
+    if spatial_data is not None:
+        spatial_data[element_name] = element
+        spatial_data.write_element(element_name=element_name)
+        return
+
+    spatial_data = SpatialData.init_from_elements(elements={element_name: element})
+    spatial_data.write(output_path)

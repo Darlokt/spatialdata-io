@@ -54,6 +54,7 @@ I/O for the `spatialdata` project.
 
     experimental.from_legacy_anndata
     experimental.to_legacy_anndata
+    generic_to_zarr
 ```
 
 ### Utility functions

@@ -929,7 +929,30 @@ def macsima_wrapper(
 @click.option(
     "--data-axes",
     type=str,
-    help="Axes of the data for image files. Valid values are permutations of 'cyx' and 'czyx'.",
+    help="Image axes: a permutation of yx, cyx, zyx, or czyx.",
+)
+@click.option(
+    "--tiff-series",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Zero-based TIFF series; only valid for TIFF-family inputs.",
+)
+@click.option(
+    "--tiff-level",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Zero-based TIFF pyramid level; only valid for TIFF-family inputs.",
+)
+@click.option(
+    "--chunks",
+    type=click.IntRange(min=1),
+    multiple=True,
+    help=(
+        "Requested image chunks. Pass once to chunk every axis, or repeat in canonical "
+        "CYX/CZYX order. If omitted, only Y/X are rechunked to 1024."
+    ),
 )
 @click.option(
     "--coordinate-system",
@@ -942,14 +965,30 @@ def read_generic_wrapper(
     output: str,
     name: str | None = None,
     data_axes: str | None = None,
+    tiff_series: int = 0,
+    tiff_level: int = 0,
+    chunks: tuple[int, ...] = (),
     coordinate_system: str | None = None,
 ) -> None:
     """Read generic data to SpatialData."""
     from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
 
-    if data_axes is not None and "".join(sorted(data_axes)) not in ["cxy", "cxyz"]:
-        raise ValueError("data_axes must be a permutation of 'cyx' or 'czyx'.")
-    generic_to_zarr(input=input, output=output, name=name, data_axes=data_axes, coordinate_system=coordinate_system)
+    output_existed = Path(output).exists()
+    generic_to_zarr(
+        path=input,
+        output=output,
+        name=name,
+        data_axes=data_axes,
+        coordinate_system=coordinate_system,
+        tiff_series=tiff_series,
+        tiff_level=tiff_level,
+        chunks=None if not chunks else chunks[0] if len(chunks) == 1 else chunks,
+    )
+    element_name = Path(input).stem if name is None else name
+    if output_existed:
+        click.echo(f"Element {element_name} written to {output}")
+    else:
+        click.echo(f"Data written to {output}")
 
 
 if __name__ == "__main__":
