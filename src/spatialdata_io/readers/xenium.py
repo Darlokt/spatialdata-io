@@ -191,7 +191,7 @@ class _XeniumCells:
             if version is not None and version >= packaging.version.parse("1.3.0"):
                 cell_id_raw = np.asarray(_zarr_array(group, "cell_id")[:])
                 cell_id_prefix, dataset_suffix = cell_id_raw[:, 0], cell_id_raw[:, 1]
-            cell_id_str = cell_id_str_from_prefix_suffix_uint32(cell_id_prefix, dataset_suffix)
+                cell_id_str = cell_id_str_from_prefix_suffix_uint32(cell_id_prefix, dataset_suffix)
 
             has_polygon_sets = "polygon_sets" in group
             has_seg_mask_value = "seg_mask_value" in group
