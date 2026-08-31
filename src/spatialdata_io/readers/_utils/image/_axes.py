@@ -36,10 +36,19 @@ def _normalize_selectors(
     source: tuple[str, ...],
     target: tuple[str, ...],
 ) -> dict[str, int]:
-    normalized = {axis.lower(): index for axis, index in (selectors or {}).items()}
-    if len(normalized) != len(selectors or {}):
-        message = "selectors contains duplicate axes after case normalization."
-        raise ValueError(message)
+    normalized: dict[str, int] = {}
+    for axis, index in (selectors or {}).items():
+        if not isinstance(axis, str):
+            message = f"selectors keys must be axis-name strings; found {axis!r}."
+            raise TypeError(message)
+        if isinstance(index, bool) or not isinstance(index, int):
+            message = f"Selector for axis {axis!r} must be an integer; found {index!r}."
+            raise TypeError(message)
+        normalized_axis = axis.lower()
+        if normalized_axis in normalized:
+            message = "selectors contains duplicate axes after case normalization."
+            raise ValueError(message)
+        normalized[normalized_axis] = index
     unknown = set(normalized).difference(source)
     if unknown:
         message = f"selectors contains axes absent from source_axes: {sorted(unknown)}."
@@ -109,10 +118,12 @@ def normalize_raster_axes(
 ) -> da.Array:
     """Select, add, and transpose explicitly named raster axes without computing pixels.
 
-    Names are case-insensitive. Unwanted non-singleton axes require explicit
-    integer selectors; unwanted singleton axes may be dropped. Missing target
-    axes are added only when named in ``add_missing``. Both source and target
-    must contain the spatial axes ``x`` and ``y``.
+    Names are case-insensitive single letters. Readers may use a format's
+    declared axis labels or an explicit reader-owned override; this helper does
+    not assign semantics to unfamiliar labels. Unwanted non-singleton axes
+    require explicit integer selectors; unwanted singleton axes may be dropped.
+    Missing target axes are added only when named in ``add_missing``. Both
+    source and target must contain the spatial axes ``x`` and ``y``.
 
     Parameters
     ----------
@@ -136,6 +147,8 @@ def normalize_raster_axes(
 
     Raises
     ------
+    TypeError
+        If selector keys are not strings or selector values are not integers.
     ValueError
         If axes are invalid, ambiguous, incomplete, or require an implicit
         non-singleton selection.

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import pickle
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import cloudpickle  # type: ignore[import-untyped]  # third-party package has no type information
 import dask
 import numpy as np
 import pytest
@@ -15,6 +15,7 @@ from tifffile.zarr import ZarrTiffStore
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
 from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
 from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
+from spatialdata_io.readers._utils.image.tiff._dask import _read_tiff_selection
 from spatialdata_io.readers._utils.image.tiff._types import _TiffReadSpec
 from tests.integration.readers._utils.image.conftest import TiffOptions
 
@@ -33,16 +34,22 @@ class TestReadTiff:
     @pytest.mark.parametrize(
         "storage",
         [
-            (None, None, 5, (1, 5, 23)),
-            ("deflate", (16, 16), None, (1, 16, 16)),
-            ("lzw", (16, 16), None, (1, 16, 16)),
+            (None, None, 5, ((1, 1, 1), (5, 5, 5, 4), (23,))),
+            (None, (16, 16), None, ((1, 1, 1), (16, 3), (16, 7))),
+            ("deflate", (16, 16), None, ((1, 1, 1), (16, 3), (16, 7))),
+            ("lzw", (16, 16), None, ((1, 1, 1), (16, 3), (16, 7))),
         ],
     )
     def test_reads_native_chunks_exactly(
         self,
         cyx_data: NDArray[np.uint16],
         write_tiff: TiffFactory,
-        storage: tuple[str | None, tuple[int, int] | None, int | None, tuple[int, ...]],
+        storage: tuple[
+            str | None,
+            tuple[int, int] | None,
+            int | None,
+            tuple[tuple[int, ...], ...],
+        ],
     ) -> None:
         compression, tile, rowsperstrip, expected_chunks = storage
         path = write_tiff(
@@ -52,7 +59,7 @@ class TestReadTiff:
 
         result = read_tiff(inspect_tiff(path), series=0, level=0)
 
-        assert tuple(axis_chunks[0] for axis_chunks in result.data.chunks) == expected_chunks
+        assert result.data.chunks == expected_chunks
         assert result.axes == ("C", "Y", "X")
         np.testing.assert_array_equal(result.data.compute(), cyx_data)
 
@@ -70,12 +77,75 @@ class TestReadTiff:
             dtype=metadata.series[0].levels[0].dtype,
         )
 
-        result = tiff_dask._read_tiff_selection(
+        result = _read_tiff_selection(
             spec,
             (slice(1, 2), slice(3, 9), slice(4, 11)),
         )
 
         np.testing.assert_array_equal(result, cyx_data[1:2, 3:9, 4:11])
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            TiffOptions(compression="deflate", tile=(16, 16)),
+            TiffOptions(compression="deflate", rowsperstrip=5),
+        ],
+    )
+    def test_small_selection_reads_only_one_native_segment(
+        self,
+        cyx_data: NDArray[np.uint16],
+        write_tiff: TiffFactory,
+        mocker: MockerFixture,
+        options: TiffOptions,
+    ) -> None:
+        path = write_tiff(cyx_data, options)
+        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        with tifffile.TiffFile(path) as tiff:
+            payload_ranges = tuple(
+                (offset, offset + byte_count)
+                for page in tiff.pages
+                for offset, byte_count in zip(page.dataoffsets, page.databytecounts, strict=True)
+            )
+
+        reads: list[tuple[int, int]] = []
+        original_read = tifffile.FileHandle.read
+        original_file_close = tifffile.FileHandle.close
+        original_store_close = ZarrTiffStore.close
+        closed_handles: list[tifffile.FileHandle] = []
+        closed_stores: list[ZarrTiffStore] = []
+
+        def tracked_read(handle: tifffile.FileHandle, size: int = -1, /) -> bytes:
+            start = handle.tell()
+            value = original_read(handle, size)
+            reads.append((start, start + len(value)))
+            return value
+
+        def tracked_file_close(handle: tifffile.FileHandle) -> None:
+            original_file_close(handle)
+            closed_handles.append(handle)
+
+        def tracked_store_close(store: ZarrTiffStore) -> None:
+            original_store_close(store)
+            closed_stores.append(store)
+
+        mocker.patch.object(tifffile.FileHandle, "read", new=tracked_read)
+        mocker.patch.object(tifffile.FileHandle, "close", new=tracked_file_close)
+        mocker.patch.object(ZarrTiffStore, "close", new=tracked_store_close)
+
+        np.testing.assert_array_equal(
+            result.data[:1, :2, :3].compute(scheduler="synchronous"),
+            cyx_data[:1, :2, :3],
+        )
+
+        read_payloads = {
+            index
+            for index, (payload_start, payload_stop) in enumerate(payload_ranges)
+            if any(max(payload_start, read_start) < min(payload_stop, read_stop) for read_start, read_stop in reads)
+        }
+        assert read_payloads == {0}
+        assert len(closed_handles) == 1
+        assert closed_handles[0].closed
+        assert len(closed_stores) == 1
 
     def test_reads_jpeg_compressed_tiles(self, tmp_path: Path) -> None:
         path = tmp_path / "jpeg-compressed.tif"
@@ -171,13 +241,13 @@ class TestReadTiff:
             "Blockwise",
             "MaterializedLayer",
         }
-        pickle.dumps(first)
+        restored = cloudpickle.loads(cloudpickle.dumps(first))
         graph_text = repr(first.dask)
         assert "TiffFile" not in graph_text
         assert "ZarrTiffStore" not in graph_text
         assert "FileHandle" not in graph_text
         with dask.config.set(scheduler="processes"):
-            np.testing.assert_array_equal(first.compute(), cyx_data)
+            np.testing.assert_array_equal(restored.compute(), cyx_data)
 
     def test_optimized_small_slice_culls_unrelated_source_tasks(
         self,

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import pickle
 from typing import TYPE_CHECKING
 
+import cloudpickle  # type: ignore[import-untyped]  # third-party package has no type information
 import imagecodecs
 import numpy as np
 import pytest
@@ -62,9 +62,11 @@ class TestEncodedResult:
         result = reader(path)
 
         assert spy.call_count == 0
-        pickle.dumps(result.data)
+        cloudpickle.dumps(result.data)
         result.data[:2, :3].compute(scheduler="synchronous")
         assert spy.call_count == 1
+        mapped = spy.call_args.args[0]
+        assert mapped.closed is True
 
     def test_closes_memory_map_before_shape_validation_failure(
         self,

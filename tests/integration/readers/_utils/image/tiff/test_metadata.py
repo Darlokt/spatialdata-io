@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 import tifffile
+from tifffile.zarr import ZarrTiffStore
 
 from spatialdata_io.readers._utils.image import inspect_tiff
 from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
@@ -57,6 +58,35 @@ class TestInspectTiff:
         assert level.dtype == cyx_data.dtype
         assert level.axes == ("C", "Y", "X")
         assert level.native_chunks == expected_chunks
+
+    def test_closes_successful_inspection_resources(
+        self,
+        cyx_data: NDArray[np.uint16],
+        write_tiff: TiffFactory,
+        mocker: MockerFixture,
+    ) -> None:
+        path = write_tiff(cyx_data, TiffOptions(tile=(16, 16)))
+        original_file_close = tifffile.FileHandle.close
+        original_store_close = ZarrTiffStore.close
+        closed_handles: list[tifffile.FileHandle] = []
+        closed_stores: list[ZarrTiffStore] = []
+
+        def tracked_file_close(handle: tifffile.FileHandle) -> None:
+            original_file_close(handle)
+            closed_handles.append(handle)
+
+        def tracked_store_close(store: ZarrTiffStore) -> None:
+            original_store_close(store)
+            closed_stores.append(store)
+
+        mocker.patch.object(tifffile.FileHandle, "close", new=tracked_file_close)
+        mocker.patch.object(ZarrTiffStore, "close", new=tracked_store_close)
+
+        inspect_tiff(path)
+
+        assert len(closed_handles) == 1
+        assert closed_handles[0].closed
+        assert len(closed_stores) == 1
 
     def test_inspects_bigtiff_btf(self, cyx_data: NDArray[np.uint16], write_tiff: TiffFactory) -> None:
         path = write_tiff(
@@ -232,6 +262,24 @@ class TestInspectTiff:
         path.with_name("second.ome.tif").write_bytes(b"not a TIFF")
 
         with pytest.raises(RasterFormatError, match="signature"):
+            inspect_tiff(path)
+
+    def test_rejects_linked_ome_path_outside_source_directory(
+        self,
+        linked_ome_tiff: tuple[Path, NDArray[np.uint16]],
+    ) -> None:
+        path, _ = linked_ome_tiff
+        second_path = path.with_name("second.ome.tif")
+        outside_path = path.parent.parent / "outside.tif"
+        second_path.replace(outside_path)
+        ome_xml = tifffile.tiffcomment(path)
+        assert isinstance(ome_xml, str)
+        tifffile.tiffcomment(
+            path,
+            ome_xml.replace("second.ome.tif", "../outside.tif").encode(),
+        )
+
+        with pytest.raises(RasterFormatError, match="escapes the TIFF source directory"):
             inspect_tiff(path)
 
     def test_rejects_inconsistent_ome_image_mapping(self, tmp_path: Path) -> None:

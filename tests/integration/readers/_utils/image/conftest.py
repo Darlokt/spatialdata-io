@@ -72,8 +72,10 @@ def write_tiff(tmp_path: Path) -> TiffFactory:
 @pytest.fixture
 def linked_ome_tiff(tmp_path: Path) -> tuple[Path, NDArray[np.uint16]]:
     """Write a deterministic two-file, two-plane linked OME-TIFF."""
-    first_path = tmp_path / "first.ome.tif"
-    second_path = tmp_path / "second.ome.tif"
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    first_path = dataset / "first.ome.tif"
+    second_path = dataset / "second.ome.tif"
     first_uuid = "11111111-1111-4111-8111-111111111111"
     second_uuid = "22222222-2222-4222-8222-222222222222"
     ome_xml = f"""<?xml version="1.0" encoding="UTF-8"?>

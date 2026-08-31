@@ -100,6 +100,11 @@ pixel tasks. The package does not copy selected OME fields into parallel custom
 types, and readers must not reopen the TIFF to parse metadata already available
 through this model.
 
+Linked OME `UUID FileName` references are resolved relative to the inspected
+TIFF and must remain within that file's directory. Absolute references, parent
+traversal, and symlinks resolving outside that directory are rejected before
+linked pixels are opened.
+
 Baseline TIFF resolution tags are not automatically interpreted as microscopy
 calibration. A supported non-OME format may use them only when its documented
 contract establishes their scientific meaning.
@@ -120,7 +125,9 @@ whole frame.
 Axis normalization performs only lazy slicing, singleton insertion, and
 transposition. It never guesses an axis from dimension size. A non-singleton
 axis omitted from the target requires an explicit selector, and a missing target
-axis requires explicit permission to insert it.
+axis requires explicit permission to insert it. Axis labels are abstract
+single-letter names at this boundary: the calling reader must interpret unknown
+TIFF axes or replace them with an explicit, validated format-specific override.
 
 ## Adding another format
 

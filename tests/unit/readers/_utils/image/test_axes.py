@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import dask.array as da
 import numpy as np
 import pytest
@@ -100,4 +102,16 @@ class TestNormalizeRasterAxes:
                 target_axes=target_axes,
                 selectors=selectors,
                 add_missing=add_missing,
+            )
+
+    @pytest.mark.parametrize("selectors", [{1: 0}, {"z": True}, {"z": 1.5}])
+    def test_rejects_invalid_selector_types(self, selectors: object) -> None:
+        data = da.zeros((2, 3, 4), chunks=(1, 3, 4))
+
+        with pytest.raises(TypeError, match=r"(?:Selector|selectors keys)"):
+            normalize_raster_axes(
+                data,
+                ("z", "y", "x"),
+                target_axes=("y", "x"),
+                selectors=cast("dict[str, int]", selectors),
             )

@@ -104,7 +104,7 @@ def _validate_ome_image_mappings(ome: OME | None, root: Path) -> None:
             (
                 root
                 if block.uuid is None or block.uuid.file_name is None
-                else (root.parent / block.uuid.file_name).resolve(),
+                else _resolve_linked_path(root, block.uuid.file_name),
                 block.ifd or 0,
             )
             for block in image.pixels.tiff_data_blocks
@@ -119,13 +119,24 @@ def _validate_ome_image_mappings(ome: OME | None, root: Path) -> None:
         mapped_by_previous_images.update(image_mappings)
 
 
+def _resolve_linked_path(root: Path, file_name: str) -> Path:
+    linked = (root.parent / file_name).resolve()
+    if not linked.is_relative_to(root.parent):
+        message = (
+            f"OME metadata reference escapes the TIFF source directory {root.parent}: "
+            f"{file_name!r} resolves to {linked}."
+        )
+        raise RasterFormatError(message)
+    return linked
+
+
 def _validate_linked_paths(root: Path, ome: OME | None) -> None:
     if ome is not None:
         for image in ome.images:
             for tiff_data in image.pixels.tiff_data_blocks:
                 if tiff_data.uuid is None or tiff_data.uuid.file_name is None:
                     continue
-                linked = (root.parent / tiff_data.uuid.file_name).resolve()
+                linked = _resolve_linked_path(root, tiff_data.uuid.file_name)
                 if not linked.is_file():
                     message = f"OME metadata references a non-file TIFF source: {linked}"
                     raise RasterFormatError(message)
@@ -166,6 +177,7 @@ def inspect_tiff(
     with tifffile.TiffFile(normalized_path) as tiff:
         ome_xml = tiff.ome_metadata
         ome = _parse_ome_xml(normalized_path, ome_xml)
+        _validate_linked_paths(normalized_path, ome)
         _validate_ome_series(ome, len(tiff.series))
         _validate_ome_image_mappings(ome, normalized_path)
         series_metadata: list[TiffSeriesMetadata] = []
@@ -180,8 +192,6 @@ def inspect_tiff(
                 for level_index, level in enumerate(series.levels)
             )
             series_metadata.append(TiffSeriesMetadata(levels=levels))
-
-    _validate_linked_paths(normalized_path, ome)
     return TiffMetadata(
         path=normalized_path,
         series=tuple(series_metadata),
