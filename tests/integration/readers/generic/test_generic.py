@@ -16,7 +16,7 @@ from xarray import DataArray, DataTree
 
 from spatialdata_io.__main__ import read_generic_wrapper
 from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers.generic import generic, image
 

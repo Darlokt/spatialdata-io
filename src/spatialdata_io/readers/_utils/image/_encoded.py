@@ -8,7 +8,7 @@ import numpy as np
 from dask.array.core import Array
 from dask.base import tokenize
 
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image._types import (
     LazyRaster,
     _EncodedHeader,

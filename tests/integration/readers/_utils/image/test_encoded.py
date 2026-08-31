@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 import spatialdata_io.readers._utils.image._encoded as encoded
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image import read_jpeg, read_png
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Callable

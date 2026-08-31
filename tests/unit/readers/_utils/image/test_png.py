@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image._encoded import MAX_HEADER_BYTES
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
 from spatialdata_io.readers._utils.image._png import inspect_png_header
 
 if TYPE_CHECKING:

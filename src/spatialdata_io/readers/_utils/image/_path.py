@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError
 
 
 def normalize_file_path(path: str | Path) -> Path:

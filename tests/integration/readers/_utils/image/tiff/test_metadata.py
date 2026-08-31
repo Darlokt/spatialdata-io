@@ -9,8 +9,8 @@ import pytest
 import tifffile
 from tifffile.zarr import ZarrTiffStore
 
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
 from tests.integration.readers._utils.image.conftest import TiffOptions
 
 if TYPE_CHECKING:

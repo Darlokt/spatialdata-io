@@ -13,8 +13,8 @@ import tifffile
 from tifffile.zarr import ZarrTiffStore
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
 from spatialdata_io.readers._utils.image.tiff._dask import _read_tiff_selection
 from spatialdata_io.readers._utils.image.tiff._types import _TiffReadSpec
 from tests.integration.readers._utils.image.conftest import TiffOptions

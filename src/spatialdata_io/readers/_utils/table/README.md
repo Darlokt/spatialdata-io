@@ -105,6 +105,19 @@ reader that intentionally exposes secondary expression should construct a
 normalized named layer where practical rather than forcing an expensive rebuild
 of `raw` here. `X=None` remains valid for metadata-only tables.
 
+## Errors
+
+This representation boundary deliberately raises precise `TypeError` and
+`ValueError` failures for unsupported storage, dtypes, shapes, coordinates, and
+owned-`AnnData` state. Those failures describe direct low-level function inputs
+and are not replaced by a generic reader exception.
+
+Reader orchestration and later linkage or count-source utilities use
+`ReaderErrorContext`, `ReaderFormatError`, and `add_reader_context` from
+`spatialdata_io.readers._utils.errors` when an external artifact, schema, or
+layout needs reader and version context. Raster storage retains the specialized
+`RasterFormatError` from the same centralized module.
+
 ## Sparse-array semantics
 
 SciPy sparse arrays deliberately follow NumPy array semantics rather than the

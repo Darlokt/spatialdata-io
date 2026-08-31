@@ -67,6 +67,17 @@ jpeg = read_jpeg(jpeg_path)
 All three readers return `LazyRaster(data, axes)`. Shape and dtype are available
 from `data.shape` and `data.dtype`; the result does not duplicate them.
 
+Raster paths are expanded, strictly resolved to canonical regular-file targets,
+and then stored in delayed tasks. Layout readers may validate paths earlier via
+the shared path package, but this boundary independently protects its direct
+entry points and never stores a symlink alias in a graph.
+
+Malformed encoded raster storage raises `RasterFormatError` from
+`spatialdata_io.readers._utils.errors`. The error type is centralized with other
+reader utility errors, while its raster-specific meaning and all decisions about
+when to raise it remain owned by this package. Axis-option and array-contract
+failures retain their precise `TypeError` or `ValueError` contracts.
+
 ## TIFF and OME metadata
 
 `TiffMetadata.series` describes the arrays that `tifffile` can read. Every

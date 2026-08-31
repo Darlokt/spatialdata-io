@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image._encoded import encoded_result, validate_decoded_size
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
 from spatialdata_io.readers._utils.image._types import _EncodedHeader
 
 

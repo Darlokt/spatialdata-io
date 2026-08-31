@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image._path import normalize_file_path
 
 if TYPE_CHECKING:

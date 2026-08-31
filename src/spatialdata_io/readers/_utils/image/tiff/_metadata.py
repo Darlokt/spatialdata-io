@@ -7,7 +7,7 @@ import tifffile
 import zarr
 from ome_types import from_xml
 
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image._path import normalize_file_path
 from spatialdata_io.readers._utils.image.tiff._types import (
     TiffLevelMetadata,

@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image import read_png
-from spatialdata_io.readers._utils.image._exceptions import RasterFormatError
 
 if TYPE_CHECKING:
     from pathlib import Path
