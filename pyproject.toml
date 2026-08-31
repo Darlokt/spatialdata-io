@@ -38,6 +38,7 @@ dependencies = [
   "readfcs",
   "scanpy",
   "scikit-image",
+  "scipy>=1.15",
   # for debug logging (referenced from the issue template)
   "session-info2",
   "spatialdata>=0.7.3a0",
