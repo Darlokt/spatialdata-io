@@ -16,6 +16,8 @@ The package owns:
 - deterministic duplicate summation and sorted sparse indices;
 - input non-mutation and explicit storage-sharing behavior;
 - normalization of owned, in-memory `AnnData.X` and named expression layers;
+- exact region, instance, and optional target linkage validation;
+- one isolated call to the public `TableModel.parse()` boundary;
 - rejection of implicit computation and densification.
 
 A vendor reader owns:
@@ -26,7 +28,9 @@ A vendor reader owns:
 - filtering, joins, and the meaning of aggregation;
 - choosing a value dtype wide enough for valid duplicate sums;
 - deciding which layers semantically contain expression or counts;
-- table linkage and SpatialData model construction.
+- constructing linkage identifiers and selecting their semantic dtypes;
+- selecting regions and independently known target indexes;
+- SpatialData assembly.
 
 ## Package layout
 
@@ -34,9 +38,9 @@ A vendor reader owns:
   dependencies.
 - `_normalize.py` mutates explicitly reader-owned, in-memory `AnnData` objects
   without copying the complete table.
-- A later `_linkage.py` may validate table-to-element linkage and call
-  `TableModel.parse()` after that contract is independently implemented and
-  tested.
+- `_linkage.py` validates reader-created linkage and optional exact target
+  membership, normalizes expression storage, and calls the public
+  `TableModel.parse()` API exactly once.
 
 Only intentional reader-facing functions are re-exported from `table.__init__`.
 Private modules should not become parallel reader APIs.
@@ -105,6 +109,70 @@ reader that intentionally exposes secondary expression should construct a
 normalized named layer where practical rather than forcing an expensive rebuild
 of `raw` here. `X=None` remains valid for metadata-only tables.
 
+## Linked tables
+
+`TableLinkage` carries the correlated parser arguments as immutable, ordered
+state. Build final reader-owned region and instance columns before linkage,
+then call `parse_linked_table()` once:
+
+```python
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
+
+table = parse_linked_table(
+    table,
+    TableLinkage(("cell_shapes",), "region", "cell_id"),
+    context=ReaderErrorContext(reader="example", artifact="cell table"),
+    expression_layers=("counts",),
+    expected_instance_ids={"cell_shapes": shapes.index},
+)
+```
+
+For a multi-region table, descriptor order remains explicit and target
+validation can cover only the independently known regions:
+
+```python
+table = parse_linked_table(
+    table,
+    TableLinkage(("sample_a", "sample_b"), "region", "cell_id"),
+    context=ReaderErrorContext(reader="example", artifact="combined cell table"),
+    expected_instance_ids={"sample_b": sample_b_shapes.index},
+)
+```
+
+Every declared region must occur in the table, and `(region, instance)` pairs
+must be unique. The same instance value may occur in different regions. Region
+values are strings. Instance values are homogeneous strings or the fixed-width
+integer dtypes accepted by the public SpatialData parser. Readers choose these
+values and their semantic dtypes; the shared boundary never invents or rewrites
+stored identifiers.
+
+`expected_instance_ids` is optional and may cover a subset of regions. Supply
+only independently known, already-materialized indexes such as a final shape or
+point index or a small source mapping. Do not compute a labels raster merely to
+enumerate identifiers. For every supplied region, target and table identifiers
+must form exactly equal sets; order is irrelevant.
+
+String and integer identifiers occupy distinct semantic families. Numeric
+strings are not integers, booleans are not integers, and leading zeros remain
+significant. Integer target indexes, including categorical indexes, may use a
+different width or signedness when every value is losslessly representable by
+the table's integer dtype. Temporary comparison arrays use that validated
+dtype, avoiding pandas' lossy mixed signed/unsigned promotion. Borrowed target
+indexes are never mutated.
+
+Linkage validation precedes expression mutation. Missing or malformed linkage,
+duplicate pairs, and target mismatches therefore leave the table unchanged.
+Normalization and public parsing are deliberately non-transactional: a failure
+at either boundary, or during final compatibility checks, can leave the owned
+table partially mutated and the reader must discard it.
+
+The public parser is called once, without `overwrite_metadata`. The adapter
+does not import private SpatialData validators or write model metadata itself.
+It verifies only stable public postconditions: object identity, retained
+canonical CSR expression objects, categorical region storage, and exact parser
+metadata.
+
 ## Errors
 
 This representation boundary deliberately raises precise `TypeError` and
@@ -117,6 +185,14 @@ Reader orchestration and later linkage or count-source utilities use
 `spatialdata_io.readers._utils.errors` when an external artifact, schema, or
 layout needs reader and version context. Raster storage retains the specialized
 `RasterFormatError` from the same centralized module.
+
+Malformed linkage values and target membership raise `ReaderFormatError` with
+reader context. Invalid reader-authored descriptors, stale parser metadata, and
+mapping keys outside the descriptor raise `ValueError`. Expression failures
+retain the precise normalization exception and location note. Public parser
+failures retain their original type, identity, traceback, and cause while
+gaining reader context. A failed parser postcondition is reported as a local
+compatibility `RuntimeError`.
 
 ## Sparse-array semantics
 
@@ -200,6 +276,14 @@ and `float32`, `float64`, or the platform `longdouble` dtype. SciPy does not
 support `float16` sparse storage, so `float16` is rejected rather than silently
 promoted. Each reader must select a value dtype capable of representing valid
 aggregates.
+
+Linkage validation constructs one in-memory pair index and performs a constant
+number of linear scans over observation and supplied target identifiers. It
+allocates no expression-sized validation array and performs no dataframe
+`groupby`; the public SpatialData parser may perform its own model validation.
+Canonical integer CSR arrays are reused. Canonical floating CSR arrays are also
+reused, but their mutable stored values are rescanned for finiteness because no
+trustworthy normalization marker is retained.
 
 ## Extending the package
 

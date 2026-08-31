@@ -15,6 +15,16 @@ if TYPE_CHECKING:
 type _ExpressionData = np.ndarray[tuple[int, ...], np.dtype[np.generic]] | sparse.sparray | sparse.spmatrix
 
 
+def _require_owned_in_memory_anndata(adata: AnnData, /) -> None:
+    """Reject AnnData storage that cannot be safely mutated in place."""
+    if adata.is_view:
+        message = "Table normalization requires an owned AnnData, not a view."
+        raise ValueError(message)
+    if adata.isbacked:
+        message = "Table normalization requires an in-memory AnnData, not a backed table."
+        raise TypeError(message)
+
+
 def _normalized_expression(data: object, *, location: str) -> sparse.csr_array:
     try:
         return as_csr_array(cast("_ExpressionData", data))
@@ -92,13 +102,7 @@ def normalize_owned_anndata(
     This is an eager representation boundary. It never computes or loads lazy
     or backed storage and never copies the complete :class:`~anndata.AnnData`.
     """
-    if adata.is_view:
-        message = "normalize_owned_anndata() requires an owned AnnData, not a view."
-        raise ValueError(message)
-    if adata.isbacked:
-        message = "normalize_owned_anndata() requires an in-memory AnnData, not a backed table."
-        raise TypeError(message)
-
+    _require_owned_in_memory_anndata(adata)
     _validate_expression_layers(adata, expression_layers)
 
     expression = adata.X

@@ -14,6 +14,7 @@ _FORBIDDEN_ARRAY_IMPORTS = {
     "spatialdata_io",
 }
 _FORBIDDEN_NORMALIZE_IMPORTS = _FORBIDDEN_ARRAY_IMPORTS - {"anndata", "spatialdata_io"}
+_FORBIDDEN_LINKAGE_IMPORTS = {"dask", "geopandas", "shapely", "xarray"}
 _FORBIDDEN_CALLS = {"compute", "load", "todense", "toarray", "to_memory"}
 _NORMALIZE_INTERNAL_IMPORTS = {"spatialdata_io.readers._utils.table._arrays"}
 
@@ -48,6 +49,25 @@ class TestTableArchitecture:
             attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
             assert calls.isdisjoint(_FORBIDDEN_CALLS), path
             assert "A" not in attributes, path
+
+    def test_linkage_is_model_adapter_without_spatial_element_dependencies(self) -> None:
+        path = Path("src/spatialdata_io/readers/_utils/table/_linkage.py")
+        tree = ast.parse(path.read_text())
+        imported_modules = {module for node in ast.walk(tree) for module in self._imported_modules(node)}
+        import_roots = {module.split(".")[0] for module in imported_modules}
+        calls = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assigned_attributes = {
+            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
+        }
+
+        assert import_roots.isdisjoint(_FORBIDDEN_LINKAGE_IMPORTS)
+        assert "groupby" not in calls
+        assert "copy" not in calls
+        assert "uns" not in assigned_attributes
 
     @staticmethod
     def _imported_modules(node: ast.AST) -> tuple[str, ...]:
