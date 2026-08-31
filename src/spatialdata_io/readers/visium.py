@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from dask_image.imread import imread
 from imageio import imread as imread2
+from PIL import Image as PILImage
 from spatialdata import SpatialData
 from spatialdata._logging import logger
 from spatialdata.models import Image2DModel, ShapesModel, TableModel
@@ -257,21 +258,22 @@ def visium(
     return _set_reader_metadata(sdata, "visium")
 
 
-def _read_image(image_file: Path, imread_kwargs: dict[str, Any]) -> Any:
-    if "MAX_IMAGE_PIXELS" in imread_kwargs:
-        from PIL import Image as ImagePIL
+def _read_image(image_file: Path, imread_kwargs: Mapping[str, Any]) -> Any:
+    options = dict(imread_kwargs)
+    previous_max_image_pixels = PILImage.MAX_IMAGE_PIXELS
+    PILImage.MAX_IMAGE_PIXELS = options.pop("MAX_IMAGE_PIXELS", previous_max_image_pixels)
+    try:
+        if image_file.suffix != ".btf":
+            im = imread(image_file, **options)
+        else:
+            # dask_image doesn't recognize .btf automatically
+            im = imread2(image_file, **options)
+    finally:
+        PILImage.MAX_IMAGE_PIXELS = previous_max_image_pixels
 
-        ImagePIL.MAX_IMAGE_PIXELS = imread_kwargs.pop("MAX_IMAGE_PIXELS")
-    if image_file.suffix != ".btf":
-        im = imread(image_file, **imread_kwargs)
-    else:
-        # dask_image doesn't recognize .btf automatically
-        im = imread2(image_file, **imread_kwargs)
-        # Depending on the versions of the pipeline, the axes of the image file from the tiff data is ordered in
-        # different ways; here let's implement a simple check on the shape to determine the axes ordering.
-        # Note that a more robust check could be implemented; this could be the work of a future PR. Unfortunately,
-        # the tif data does not (or does not always) have OME metadata, so even such more general parser could lead
-        # to edge cases that could be addressed by a more interoperable file format.
+    # Pipeline versions can write TIFF axes in different orders, and these files do not always include OME metadata.
+    # The shape-based heuristic below identifies the channel axis as a compatibility fallback rather than a general
+    # axis parser.
     if len(im.shape) not in [3, 4]:
         raise ValueError(f"Image shape {im.shape} is not supported.")
     if len(im.shape) == 4:

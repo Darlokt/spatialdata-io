@@ -112,46 +112,66 @@ def stereoseq(
     # create table using .h5ad and cellbin.gef
     adata = ad.read_h5ad(path / SK.CELLCLUSTER / table_filename[0])
     path_cellbin = path / SK.CELLCUT / cellbin_gef_filename[0]
-    cellbin_gef = h5py.File(str(path_cellbin), "r")
+    with h5py.File(path_cellbin, "r") as cellbin_gef:
+        cell_bin = cellbin_gef[SK.CELL_BIN]
 
-    # add cell info to obs
-    obs = pd.DataFrame(cellbin_gef[SK.CELL_BIN][SK.CELL_DATASET][:])
-    obs.columns = [
-        SK.CELL_ID,
-        SK.COORD_X,
-        SK.COORD_Y,
-        SK.OFFSET,
-        SK.GENE_COUNT,
-        SK.EXP_COUNT,
-        SK.DNBCOUNT,
-        SK.CELL_AREA,
-        SK.CELL_TYPE_ID,
-        SK.CLUSTER_ID,
-    ]
-    obs[SK.CELL_EXON] = cellbin_gef[SK.CELL_BIN][SK.CELL_EXON][:]
-
-    # add centroids to obsm
-    obsm_spatial = obs[[SK.COORD_X, SK.COORD_Y]].to_numpy()
-    obs = obs.drop([SK.COORD_X, SK.COORD_Y], axis=1)
-
-    adata.obsm[SK.SPATIAL_KEY] = obsm_spatial
-
-    # add gene info to var
-    var = pd.DataFrame(
-        cellbin_gef[SK.CELL_BIN][SK.FEATURE_KEY][:],
-        columns=[
-            SK.GENE_NAME,
+        # add cell info to obs
+        obs = pd.DataFrame(cell_bin[SK.CELL_DATASET][:])
+        obs.columns = [
+            SK.CELL_ID,
+            SK.COORD_X,
+            SK.COORD_Y,
             SK.OFFSET,
-            SK.CELL_COUNT,
+            SK.GENE_COUNT,
             SK.EXP_COUNT,
-            SK.MAX_MID_COUNT,
-        ],
-    )
-    var[SK.GENE_NAME] = var[SK.GENE_NAME].str.decode("utf-8")
-    var[SK.GENE_EXON] = cellbin_gef[SK.CELL_BIN][SK.GENE_EXON][:]
+            SK.DNBCOUNT,
+            SK.CELL_AREA,
+            SK.CELL_TYPE_ID,
+            SK.CLUSTER_ID,
+        ]
+        obs[SK.CELL_EXON] = cell_bin[SK.CELL_EXON][:]
+
+        # add centroids to obsm
+        obsm_spatial = obs[[SK.COORD_X, SK.COORD_Y]].to_numpy()
+        obs = obs.drop([SK.COORD_X, SK.COORD_Y], axis=1)
+        adata.obsm[SK.SPATIAL_KEY] = obsm_spatial
+
+        # add gene info to var
+        var = pd.DataFrame(
+            cell_bin[SK.FEATURE_KEY][:],
+            columns=[
+                SK.GENE_NAME,
+                SK.OFFSET,
+                SK.CELL_COUNT,
+                SK.EXP_COUNT,
+                SK.MAX_MID_COUNT,
+            ],
+        )
+        var[SK.GENE_NAME] = var[SK.GENE_NAME].str.decode("utf-8")
+        var[SK.GENE_EXON] = cell_bin[SK.GENE_EXON][:]
+
+        # add all leftover columns in cellbin which don't fit .obs or .var to uns
+        cell_exp = cell_bin[SK.CELL_EXP]
+        gene_exp = cell_bin[SK.GENE_EXP]
+        cellbin_uns = {
+            SK.GENE_ID: cell_exp[SK.GENE_ID][:],
+            SK.CELL_EXP: cell_exp[SK.COUNT][:],
+            SK.GENE_EXP_EXON: cell_bin[SK.CELL_EXP_EXON][:],
+            SK.CELL_ID: gene_exp[SK.CELL_ID][:],
+            SK.GENE_EXP: gene_exp[SK.COUNT][:],
+            SK.GENE_EXP_EXON: cell_bin[SK.GENE_EXP_EXON][:],
+        }
+        adata.uns["cellBin_cell_gene_exon_exp"] = pd.DataFrame(cellbin_uns)
+        adata.uns["cellBin_blockIndex"] = cell_bin[SK.BLOCK_INDEX][:]
+        adata.uns["cellBin_blockSize"] = cell_bin[SK.BLOCK_SIZE][:]
+        adata.uns["cellBin_cellTypeList"] = cell_bin[SK.CELL_TYPE_LIST][:]
+        # add cellbin attrs to uns
+        adata.uns["cellBin_attrs"] = dict(cellbin_gef.attrs)
+        cell_border = cell_bin[SK.CELL_BORDER][:]
 
     # merge columns of obs and var to adata.obs and adata.var
-    assert isinstance(adata.obs, pd.DataFrame) and isinstance(adata.var, pd.DataFrame)
+    if not isinstance(adata.obs, pd.DataFrame) or not isinstance(adata.var, pd.DataFrame):
+        raise TypeError("Stereo-seq annotation data must expose pandas DataFrame 'obs' and 'var' tables.")
     obs.index = adata.obs.index
     adata.obs = pd.merge(adata.obs, obs, left_index=True, right_index=True)
     var.index = adata.var.index
@@ -161,30 +181,6 @@ def stereoseq(
     adata.obs[SK.REGION_KEY] = f"{SK.REGION}_circles"
     adata.obs[SK.REGION_KEY] = adata.obs[SK.REGION_KEY].astype("category")
     adata.obs[SK.INSTANCE_KEY] = adata.obs.index
-
-    # add all leftover columns in cellbin which don't fit .obs or .var to uns
-    cell_exp = cellbin_gef[SK.CELL_BIN][SK.CELL_EXP]
-    gene_exp = cellbin_gef[SK.CELL_BIN][SK.GENE_EXP]
-    cellbin_uns = {
-        SK.GENE_ID: cell_exp[SK.GENE_ID][:],
-        SK.CELL_EXP: cell_exp[SK.COUNT][:],
-        SK.GENE_EXP_EXON: cellbin_gef[SK.CELL_BIN][SK.CELL_EXP_EXON][:],
-        SK.CELL_ID: gene_exp[SK.CELL_ID][:],
-        SK.GENE_EXP: gene_exp[SK.COUNT][:],
-        SK.GENE_EXP_EXON: cellbin_gef[SK.CELL_BIN][SK.GENE_EXP_EXON][:],
-    }
-    cellbin_uns_df = pd.DataFrame(cellbin_uns)
-
-    adata.uns["cellBin_cell_gene_exon_exp"] = cellbin_uns_df
-    adata.uns["cellBin_blockIndex"] = cellbin_gef[SK.CELL_BIN][SK.BLOCK_INDEX][:]
-    adata.uns["cellBin_blockSize"] = cellbin_gef[SK.CELL_BIN][SK.BLOCK_SIZE][:]
-    adata.uns["cellBin_cellTypeList"] = cellbin_gef[SK.CELL_BIN][SK.CELL_TYPE_LIST][:]
-
-    # add cellbin attrs to uns
-    cellbin_attrs = {}
-    for i in cellbin_gef.attrs.keys():
-        cellbin_attrs[i] = cellbin_gef.attrs[i]
-    adata.uns["cellBin_attrs"] = cellbin_attrs
 
     # let's correct the dtype for some columns
     for column_name in [SK.CELL_TYPE_ID, SK.CLUSTER_ID]:
@@ -217,96 +213,99 @@ def stereoseq(
     if read_square_bin:
         # create points model using SquareBin.gef
         path_squarebin = path / SK.TISSUECUT / squarebin_gef_filename[0]
-        squarebin_gef = h5py.File(str(path_squarebin), "r")
+        with h5py.File(path_squarebin, "r") as squarebin_gef:
+            gene_expression = squarebin_gef[SK.GENE_EXP]
+            for i in gene_expression.keys():
+                bin_attrs = dict(gene_expression[i][SK.EXPRESSION].attrs)
+                # this is the center to center distance between bins and could be used to calculate the radius of the
+                # circles (or side of the square) to represent the bins as circles (squares)
+                bin_attrs[SK.RESOLUTION].item()
+                # get gene info
+                arr = gene_expression[i][SK.FEATURE_KEY][:]
+                df_gene = pd.DataFrame(arr, columns=[SK.FEATURE_KEY, SK.OFFSET, SK.COUNT])
+                df_gene[SK.FEATURE_KEY] = df_gene[SK.FEATURE_KEY].str.decode("utf-8")
 
-        for i in squarebin_gef[SK.GENE_EXP].keys():
-            bin_attrs = dict(squarebin_gef[SK.GENE_EXP][i][SK.EXPRESSION].attrs)
-            # this is the center to center distance between bins and could be used to calculate the radius of the
-            # circles (or side of the square) to represent the bins as circles (squares)
-            bin_attrs[SK.RESOLUTION].item()
-            # get gene info
-            arr = squarebin_gef[SK.GENE_EXP][i][SK.FEATURE_KEY][:]
-            df_gene = pd.DataFrame(arr, columns=[SK.FEATURE_KEY, SK.OFFSET, SK.COUNT])
-            df_gene[SK.FEATURE_KEY] = df_gene[SK.FEATURE_KEY].str.decode("utf-8")
+                # create df for points model
+                arr = gene_expression[i][SK.EXPRESSION][:]
+                df_points = pd.DataFrame(arr, columns=[SK.COORD_X, SK.COORD_Y, SK.COUNT])
+                # the exon information is skipped for the moment, but it could be added analogously to what is done for the
+                # 'count' column; in such a case it should be added in a separate table (one per bin)
+                # df_points[SK.EXON] = squarebin_gef[SK.GENE_EXP][i][SK.EXON][:]
 
-            # create df for points model
-            arr = squarebin_gef[SK.GENE_EXP][i][SK.EXPRESSION][:]
-            df_points = pd.DataFrame(arr, columns=[SK.COORD_X, SK.COORD_Y, SK.COUNT])
-            # the exon information is skipped for the moment, but it could be added analogously to what is done for the
-            # 'count' column; in such a case it should be added in a separate table (one per bin)
-            # df_points[SK.EXON] = squarebin_gef[SK.GENE_EXP][i][SK.EXON][:]
+                # check that the column 'offset' is redundant with information in 'count'
+                expected_offsets = np.insert(np.cumsum(df_gene[SK.COUNT]), 0, 0)[:-1]
+                if not np.array_equal(df_gene[SK.OFFSET], expected_offsets):
+                    raise ValueError(
+                        f"Invalid Stereo-seq square-bin GEF {path_squarebin}: feature offsets do not match counts."
+                    )
+                # unroll gene names by count such that there exists a mapping between coordinate counts and gene names
+                df_points[SK.FEATURE_KEY] = [
+                    name
+                    for _, (name, cell_count) in df_gene[[SK.FEATURE_KEY, SK.COUNT]].iterrows()
+                    for _ in range(cell_count)
+                ]
+                df_points[SK.FEATURE_KEY] = df_points[SK.FEATURE_KEY].astype("category")
+                # this is unique for a given bin; also the "wholeExp" information (not parsed here) may use more bins than
+                # the ones used for the gene expression, so ids constructed from there are different from the ones
+                # constructed here from "geneExp" (in fact max_y would likely be different, leading to a different set of
+                # bin ids)
+                # df_points["bin_id"] = df_points[SK.COORD_Y] + df_points[SK.COORD_X] * (max_y + 1)
+                points_coords = df_points[[SK.COORD_X, SK.COORD_Y]].copy()
+                points_coords.drop_duplicates(inplace=True)
+                points_coords.reset_index(inplace=True, drop=True)
+                points_coords["bin_id"] = points_coords.index
 
-            # check that the column 'offset' is redundant with information in 'count'
-            assert np.array_equal(df_gene[SK.OFFSET], np.insert(np.cumsum(df_gene[SK.COUNT]), 0, 0)[:-1])
-            # unroll gene names by count such that there exists a mapping between coordinate counts and gene names
-            df_points[SK.FEATURE_KEY] = [
-                name
-                for _, (name, cell_count) in df_gene[[SK.FEATURE_KEY, SK.COUNT]].iterrows()
-                for _ in range(cell_count)
-            ]
-            df_points[SK.FEATURE_KEY] = df_points[SK.FEATURE_KEY].astype("category")
-            # this is unique for a given bin; also the "wholeExp" information (not parsed here) may use more bins than
-            # the ones used for the gene expression, so ids constructed from there are different from the ones
-            # constructed here from "geneExp" (in fact max_y would likely be different, leading to a different set of
-            # bin ids)
-            # df_points["bin_id"] = df_points[SK.COORD_Y] + df_points[SK.COORD_X] * (max_y + 1)
-            points_coords = df_points[[SK.COORD_X, SK.COORD_Y]].copy()
-            points_coords.drop_duplicates(inplace=True)
-            points_coords.reset_index(inplace=True, drop=True)
-            points_coords["bin_id"] = points_coords.index
+                name_points_element = f"{i}_genes"
+                name_table_element = f"{i}_table"
+                index_to_bin_id = pd.merge(
+                    df_points[[SK.COORD_X, SK.COORD_Y]],
+                    points_coords,
+                    on=[SK.COORD_X, SK.COORD_Y],
+                    how="left",
+                    validate="many_to_one",
+                )
 
-            name_points_element = f"{i}_genes"
-            name_table_element = f"{i}_table"
-            index_to_bin_id = pd.merge(
-                df_points[[SK.COORD_X, SK.COORD_Y]],
-                points_coords,
-                on=[SK.COORD_X, SK.COORD_Y],
-                how="left",
-                validate="many_to_one",
-            )
+                obs = pd.DataFrame({SK.INSTANCE_KEY: points_coords.index, SK.REGION_KEY: name_points_element})
+                obs[SK.REGION_KEY] = obs[SK.REGION_KEY].astype("category")
 
-            obs = pd.DataFrame({SK.INSTANCE_KEY: points_coords.index, SK.REGION_KEY: name_points_element})
-            obs[SK.REGION_KEY] = obs[SK.REGION_KEY].astype("category")
-
-            expression = coo_matrix(
-                (
-                    df_points[SK.COUNT].to_numpy(),
+                expression = coo_matrix(
                     (
-                        index_to_bin_id.loc[df_points.index]["bin_id"].to_numpy(),
-                        df_points[SK.FEATURE_KEY].cat.codes.to_numpy(),
+                        df_points[SK.COUNT].to_numpy(),
+                        (
+                            index_to_bin_id.loc[df_points.index]["bin_id"].to_numpy(),
+                            df_points[SK.FEATURE_KEY].cat.codes.to_numpy(),
+                        ),
                     ),
-                ),
-                shape=(len(points_coords), len(df_points[SK.FEATURE_KEY].cat.categories)),
-            ).tocsr()
+                    shape=(len(points_coords), len(df_points[SK.FEATURE_KEY].cat.categories)),
+                ).tocsr()
 
-            points_coords.drop(columns=["bin_id"], inplace=True)
-            # it would be more natural to use shapes, but for performance reasons we use points
-            points_element = PointsModel.parse(
-                points_coords,
-                coordinates={"x": SK.COORD_X, "y": SK.COORD_Y},
-            )
+                points_coords.drop(columns=["bin_id"], inplace=True)
+                # it would be more natural to use shapes, but for performance reasons we use points
+                points_element = PointsModel.parse(
+                    points_coords,
+                    coordinates={"x": SK.COORD_X, "y": SK.COORD_Y},
+                )
 
-            # add more gene info to var
-            df_gene = df_gene.set_index(SK.FEATURE_KEY)
-            df_gene.index.name = None
-            df_gene = df_gene.loc[df_points[SK.FEATURE_KEY].cat.categories, :]
-            adata = ad.AnnData(expression, obs=obs, var=df_gene)
+                # add more gene info to var
+                df_gene = df_gene.set_index(SK.FEATURE_KEY)
+                df_gene.index.name = None
+                df_gene = df_gene.loc[df_points[SK.FEATURE_KEY].cat.categories, :]
+                adata = ad.AnnData(expression, obs=obs, var=df_gene)
 
-            table = TableModel.parse(
-                adata,
-                region=name_points_element,
-                region_key=SK.REGION_KEY.value,
-                instance_key=SK.INSTANCE_KEY.value,
-            )
+                table = TableModel.parse(
+                    adata,
+                    region=name_points_element,
+                    region_key=SK.REGION_KEY.value,
+                    instance_key=SK.INSTANCE_KEY.value,
+                )
 
-            tables[name_table_element] = table
-            points[name_points_element] = points_element
+                tables[name_table_element] = table
+                points[name_points_element] = points_element
 
     # add cell border shapes element
     cell_coordinates = [x for i in range(1, 33) for x in ("x_" + str(i), "y_" + str(i))]
-    n_cells, n_coords, xy = cellbin_gef[SK.CELL_BIN][SK.CELL_BORDER][:].shape
-    arr = cellbin_gef[SK.CELL_BIN][SK.CELL_BORDER][:]
-    new_arr = arr.reshape(n_cells, n_coords * xy)
+    n_cells, n_coords, xy = cell_border.shape
+    new_arr = cell_border.reshape(n_cells, n_coords * xy)
     df_coords = pd.DataFrame(new_arr, columns=cell_coordinates, index=cells_table.obs.index)
 
     x_original = shapes[f"{SK.REGION}_circles"].geometry.centroid.x
@@ -318,13 +317,21 @@ def stereoseq(
     for (x_index, x_row), (y_index, y_row) in tqdm(
         zip(x_coords.iterrows(), y_coords.iterrows(), strict=False), desc="creating polygons", total=len(df_coords)
     ):
-        assert x_index == y_index
+        if x_index != y_index:
+            raise ValueError(
+                f"Invalid Stereo-seq cell borders in {path_cellbin}: x/y coordinate rows are not aligned "
+                f"({x_index!r} != {y_index!r})."
+            )
         # the polygonal cells coordinates are stored as offsets from the centroids, so let's add the centroids
         x = x_row[x_row != int(SK.PADDING_VALUE)]
         y = y_row[y_row != int(SK.PADDING_VALUE)]
         x = x + x_original[x_index]
         y = y + y_original[y_index]
-        assert len(x) == len(y)
+        if len(x) != len(y):
+            raise ValueError(
+                f"Invalid Stereo-seq cell border for {x_index!r} in {path_cellbin}: "
+                f"found {len(x)} x coordinates and {len(y)} y coordinates."
+            )
         xy_pairs = np.vstack((x, y)).T
         polygon = Polygon(xy_pairs)
         polygons.append(polygon)

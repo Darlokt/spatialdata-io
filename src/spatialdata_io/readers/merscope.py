@@ -61,9 +61,9 @@ def _get_file_paths(path: Path, vpt_outputs: Path | str | dict[str, Any] | None)
         ]
         valid_boundaries = [path for path in plausible_boundaries if path.exists()]
 
-        assert valid_boundaries, (
-            f"Boundary file not found - expected to find one of these files: {', '.join(map(str, plausible_boundaries))}"
-        )
+        if not valid_boundaries:
+            expected = ", ".join(map(str, plausible_boundaries))
+            raise FileNotFoundError(f"MERSCOPE boundary file not found; expected one of: {expected}")
 
         return (
             vpt_outputs / MerscopeKeys.COUNTS_FILE,
@@ -151,20 +151,12 @@ def merscope(
     -------
     :class:`spatialdata.SpatialData`
     """
-    if "chunks" not in image_models_kwargs:
-        if isinstance(image_models_kwargs, MappingProxyType):
-            image_models_kwargs = {}
-        assert isinstance(image_models_kwargs, dict)
-        image_models_kwargs["chunks"] = (1, 4096, 4096)
-    if "scale_factors" not in image_models_kwargs:
-        if isinstance(image_models_kwargs, MappingProxyType):
-            image_models_kwargs = {}
-        assert isinstance(image_models_kwargs, dict)
-        image_models_kwargs["scale_factors"] = [2, 2, 2, 2]
+    image_models_kwargs = dict(image_models_kwargs)
+    image_models_kwargs.setdefault("chunks", (1, 4096, 4096))
+    image_models_kwargs.setdefault("scale_factors", [2, 2, 2, 2])
 
-    assert backend is None or backend in SUPPORTED_BACKENDS, (
-        f"Backend '{backend} not supported. Should be one of: {', '.join(SUPPORTED_BACKENDS)}"
-    )
+    if backend is not None and backend not in SUPPORTED_BACKENDS:
+        raise ValueError(f"Unsupported MERSCOPE backend {backend!r}; expected one of {SUPPORTED_BACKENDS}.")
 
     path = Path(path).absolute()
     count_path, obs_path, boundaries_path = _get_file_paths(path, vpt_outputs)
@@ -258,23 +250,22 @@ def _rioxarray_load_merscope(
         ) from None
     from rasterio.errors import NotGeoreferencedWarning
 
-    warnings.simplefilter("ignore", category=NotGeoreferencedWarning)
-
-    im = xarray.concat(
-        [
-            rioxarray.open_rasterio(
-                images_dir / f"mosaic_{stain}_z{z_layer}.tif",
-                chunks=image_models_kwargs["chunks"],
-                **kwargs,
-            )
-            .rename({"band": "c"})
-            .reset_coords("spatial_ref", drop=True)
-            for stain in stainings
-        ],
-        dim="c",
-    )
-
-    return Image2DModel.parse(im, c_coords=stainings, rgb=None, **image_models_kwargs)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=NotGeoreferencedWarning)
+        im = xarray.concat(
+            [
+                rioxarray.open_rasterio(
+                    images_dir / f"mosaic_{stain}_z{z_layer}.tif",
+                    chunks=image_models_kwargs["chunks"],
+                    **kwargs,
+                )
+                .rename({"band": "c"})
+                .reset_coords("spatial_ref", drop=True)
+                for stain in stainings
+            ],
+            dim="c",
+        )
+        return Image2DModel.parse(im, c_coords=stainings, rgb=None, **image_models_kwargs)
 
 
 def _dask_image_load_merscope(
@@ -335,7 +326,8 @@ def _get_table(
     is_gene = ~data.columns.str.lower().str.contains("blank")
     adata = anndata.AnnData(data.loc[:, is_gene], obs=obs)
 
-    assert isinstance(adata.obs, pd.DataFrame)
+    if not isinstance(adata.obs, pd.DataFrame):
+        raise TypeError("MERSCOPE cell metadata must produce a pandas DataFrame.")
     adata.obsm["blank"] = data.loc[:, ~is_gene]  # blank fields are excluded from adata.X
     adata.obsm["spatial"] = adata.obs[[MerscopeKeys.CELL_X, MerscopeKeys.CELL_Y]].values
     adata.obs["region"] = pd.Series(vizgen_region, index=adata.obs_names, dtype="category")

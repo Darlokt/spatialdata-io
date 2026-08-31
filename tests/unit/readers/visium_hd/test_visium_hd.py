@@ -1,9 +1,24 @@
+"""Test Visium HD image and projective-transform helpers."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, cast
+
 import numpy as np
+import pytest
+from PIL import Image as PILImage
 
 from spatialdata_io.readers.visium_hd import (
     _decompose_projective_matrix,
+    _load_image,
     _projective_matrix_is_affine,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pytest_mock import MockerFixture
+    from xarray import DataArray, DataTree
 
 # --- UNIT TESTS FOR HELPER FUNCTIONS ---
 
@@ -30,3 +45,36 @@ def test_decompose_projective_matrix() -> None:
     assert np.allclose(affine, expected_affine)
     # Recomposing the affine and shift matrices should yield the original projective matrix
     assert np.allclose(affine @ shift, projective_matrix)
+
+
+class TestLoadImage:
+    """Test Pillow global-state ownership while reading Visium HD images."""
+
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_max_image_pixels_and_options_are_restored(
+        self,
+        tmp_path: Path,
+        mocker: MockerFixture,
+        *,
+        fail: bool,
+    ) -> None:
+        image_path = tmp_path / "image.btf"
+        image_path.touch()
+        images = cast("dict[str, DataArray | DataTree]", {})
+        options = {"MAX_IMAGE_PIXELS": 321, "mode": "I"}
+        previous = PILImage.MAX_IMAGE_PIXELS
+        reader = mocker.patch("spatialdata_io.readers.visium_hd.imread2")
+        if fail:
+            reader.side_effect = RuntimeError("injected")
+            with pytest.raises(RuntimeError, match="injected"):
+                _load_image(image_path, images, "_image", "sample", options, {}, None)
+        else:
+            reader.return_value = np.zeros((3, 4, 6), dtype=np.uint8)
+            parsed = mocker.sentinel.parsed
+            mocker.patch("spatialdata_io.readers.visium_hd.Image2DModel.parse", return_value=parsed)
+            _load_image(image_path, images, "_image", "sample", options, {}, None)
+            assert images == {"sample_image": parsed}
+
+        assert previous == PILImage.MAX_IMAGE_PIXELS
+        assert options == {"MAX_IMAGE_PIXELS": 321, "mode": "I"}
+        reader.assert_called_once_with(image_path, mode="I")

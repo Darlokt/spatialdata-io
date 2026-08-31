@@ -16,6 +16,7 @@ from dask_image.imread import imread
 from geopandas import GeoDataFrame
 from imageio import imread as imread2
 from numpy.random import default_rng
+from PIL import Image as PILImage
 from scipy.sparse import csc_matrix
 from shapely.geometry import Polygon
 from skimage.transform import ProjectiveTransform, warp
@@ -27,7 +28,7 @@ from spatialdata import (
 )
 from spatialdata.models import Image2DModel, ShapesModel, TableModel
 from spatialdata.transformations import Affine, Identity, Scale, set_transformation
-from xarray import DataArray
+from xarray import DataArray, DataTree
 
 from spatialdata_io._constants._constants import VisiumHDKeys
 from spatialdata_io._docs import inject_docs
@@ -37,8 +38,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from anndata import AnnData
-    from multiscale_spatial_image import MultiscaleSpatialImage
-    from spatial_image import SpatialImage
     from spatialdata._types import ArrayLike
 
 RNG = default_rng(0)
@@ -606,7 +605,7 @@ def _infer_dataset_id(path: Path) -> str:
 
 def _load_image(
     path: Path,
-    images: dict[str, SpatialImage | MultiscaleSpatialImage],
+    images: dict[str, DataArray | DataTree],
     suffix: str,
     dataset_id: str,
     imread_kwargs: Mapping[str, Any],
@@ -620,18 +619,21 @@ def _load_image(
                 # this happens for the cytassist, hires and lowres images; the umi image doesn't need processing
                 data = data.squeeze()
         else:
-            if "MAX_IMAGE_PIXELS" in imread_kwargs:
-                from PIL import Image as ImagePIL
-
-                ImagePIL.MAX_IMAGE_PIXELS = dict(imread_kwargs).pop("MAX_IMAGE_PIXELS")
-            # dask_image doesn't recognize .btf automatically and imageio v3 throws error due to pixel limit -> use imageio v2
-            data = imread2(path, **imread_kwargs).squeeze()
+            options = dict(imread_kwargs)
+            previous_max_image_pixels = PILImage.MAX_IMAGE_PIXELS
+            PILImage.MAX_IMAGE_PIXELS = options.pop("MAX_IMAGE_PIXELS", previous_max_image_pixels)
+            try:
+                # dask_image doesn't recognize .btf automatically and imageio v3 throws error due to pixel limit -> use imageio v2
+                data = imread2(path, **options).squeeze()
+            finally:
+                PILImage.MAX_IMAGE_PIXELS = previous_max_image_pixels
 
         if data.shape[-1] == 3:  # HE image in RGB format
             data = data.transpose(2, 0, 1)
-        else:
-            assert data.shape[0] == min(data.shape), (
-                "When the image is not in RGB, the first dimension should be the number of channels."
+        elif data.shape[0] != min(data.shape):
+            raise ValueError(
+                f"Unsupported Visium HD image shape {data.shape} for {path}: expected RGB data with channels last "
+                "or non-RGB data with channels first."
             )
 
         image = DataArray(data, dims=("c", "y", "x"))
@@ -645,7 +647,6 @@ def _load_image(
         images[dataset_id + suffix] = parsed
     else:
         warnings.warn(f"File {path} does not exist, skipping it.", UserWarning, stacklevel=2)
-    return None
 
 
 def _projective_matrix_transform_point(projective_shift: ArrayLike, x: float, y: float) -> tuple[float, float]:

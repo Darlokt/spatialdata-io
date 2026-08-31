@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, cast
 
-import geopandas as gpd
 import imagecodecs
 import numpy as np
 import pytest
 import tifffile
 from dask.callbacks import Callback
-from shapely.geometry import Polygon
 from spatialdata import SpatialData
 from spatialdata.transformations import get_transformation
 from xarray import DataArray, DataTree
@@ -49,11 +48,23 @@ def _write_tiff(
 
 
 def _write_geojson(path: Path) -> None:
-    source = gpd.GeoDataFrame(
-        {"instance": [1]},
-        geometry=[Polygon(((0, 0), (1, 0), (1, 1), (0, 0)))],
+    feature_collection = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"instance": 1},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]],
+                },
+            }
+        ],
+    }
+    path.write_text(
+        json.dumps(feature_collection),
+        encoding="utf-8",
     )
-    source.to_file(path, driver="GeoJSON")
 
 
 class TestImage:
