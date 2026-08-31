@@ -1,8 +1,9 @@
 # Sparse table boundary
 
 This package is the sparse expression-representation boundary for
-`spatialdata-io` readers. It turns reader-selected in-memory values or
-coordinate records into canonical SciPy CSR sparse arrays.
+`spatialdata-io` readers. It turns reader-selected in-memory values,
+coordinate records, or explicitly reader-owned `AnnData` expression storage
+into canonical SciPy CSR sparse arrays.
 
 ## Responsibilities
 
@@ -14,6 +15,7 @@ The package owns:
 - two-dimensional shape and coordinate-bound validation;
 - deterministic duplicate summation and sorted sparse indices;
 - input non-mutation and explicit storage-sharing behavior;
+- normalization of owned, in-memory `AnnData.X` and named expression layers;
 - rejection of implicit computation and densification.
 
 A vendor reader owns:
@@ -23,15 +25,15 @@ A vendor reader owns:
 - identifier construction and semantic dtypes;
 - filtering, joins, and the meaning of aggregation;
 - choosing a value dtype wide enough for valid duplicate sums;
-- expression-layer selection;
+- deciding which layers semantically contain expression or counts;
 - table linkage and SpatialData model construction.
 
 ## Package layout
 
 - `_arrays.py` constructs canonical CSR sparse arrays without vendor or model
   dependencies.
-- A later `_normalize.py` may normalize explicitly reader-owned `AnnData`
-  objects after that contract is independently implemented and tested.
+- `_normalize.py` mutates explicitly reader-owned, in-memory `AnnData` objects
+  without copying the complete table.
 - A later `_linkage.py` may validate table-to-element linkage and call
   `TableModel.parse()` after that contract is independently implemented and
   tested.
@@ -54,6 +56,10 @@ x = as_csr_array(expression)
 The helper does not accept a pandas object directly because doing so would hide
 column interpretation and conversion behavior.
 
+Readers should construct this CSR value before constructing `AnnData` whenever
+they already own dense columns or coordinate triplets. This avoids holding an
+avoidable second dense expression copy inside `AnnData` before normalization.
+
 ## Existing sparse data
 
 SciPy sparse matrices and sparse arrays of any two-dimensional format are
@@ -72,6 +78,32 @@ assert not isinstance(x, sparse.spmatrix)
 assert isinstance(x, sparse.csr_array)
 assert sparse.issparse(x) and x.format == "csr"
 ```
+
+## Owned AnnData normalization
+
+Third-party readers such as `read_h5ad()` and Scanpy can return an in-memory
+`AnnData` containing dense values or legacy sparse matrices. Once the reader
+owns that table, normalize its primary expression and any explicitly documented
+count layers in place:
+
+```python
+from spatialdata_io.readers._utils.table import normalize_owned_anndata
+
+adata = normalize_owned_anndata(adata, expression_layers=("counts",))
+```
+
+`normalize_owned_anndata()` returns the identical object. It rejects views and
+backed tables before accessing `X`, validates every requested layer name before
+mutation, and then normalizes `X` and selected layers sequentially. Sequential
+conversion bounds peak memory but is deliberately not transactional: if a later
+layer is invalid, earlier values can already be normalized and the caller must
+discard the failed owned table.
+
+Unspecified layers, `raw.X`, annotations, aligned mappings, identifiers, and
+ordering are unchanged. `raw.X` has no writable public boundary; a future
+reader that intentionally exposes secondary expression should construct a
+normalized named layer where practical rather than forcing an expensive rebuild
+of `raw` here. `X=None` remains valid for metadata-only tables.
 
 ## Sparse-array semantics
 
@@ -133,12 +165,14 @@ no_features = csr_array_from_triplets(empty, indices, indices, shape=(5, 0))
 ## Eager execution and ownership
 
 SciPy sparse arrays are eager in-memory objects. Dask arrays, backed datasets,
-masked arrays, pandas objects, and generic `ArrayLike` values are rejected
-before coercion. Readers must keep large projected CSV, Parquet, transcript, or
-event-table ingestion lazy at its storage boundary, then pass only the intended
-materialized expression representation here. Finite-value validation scans
-floating data in bounded chunks, so it remains linear in stored values without
-allocating an additional array proportional to the table size.
+masked arrays, GPU arrays, pandas objects, and generic `ArrayLike` values are
+rejected before coercion. AnnData views are also rejected because assigning
+their expression would implicitly materialize a full owned copy. Readers must
+keep large projected CSV, Parquet, transcript, or event-table ingestion lazy at
+its storage boundary, then pass only the intended materialized expression
+representation here. Finite-value validation scans floating data in bounded
+chunks, so it remains linear in stored values without allocating an additional
+array proportional to the table size.
 
 A canonical CSR array is returned unchanged. A canonical CSR matrix can be
 wrapped without copying its buffers. Callers must explicitly copy the result
@@ -146,10 +180,11 @@ when independent mutable ownership is required. Noncanonical CSR inputs are
 copied before sorting or duplicate summation, so this utility never changes an
 input's data, indices, or structural flags.
 
-The utility never calls `toarray()`, `todense()`, or an equivalent operation.
-It preserves SciPy-supported boolean and fixed-width integer dtypes and
-`float32`, `float64`, or the platform `longdouble` dtype. SciPy does not support
-`float16` sparse storage, so `float16` is rejected rather than silently
+The utility never calls `compute()`, `load()`, `to_memory()`, `toarray()`,
+`todense()`, or an equivalent operation, and it never copies a complete
+`AnnData`. It preserves SciPy-supported boolean and fixed-width integer dtypes
+and `float32`, `float64`, or the platform `longdouble` dtype. SciPy does not
+support `float16` sparse storage, so `float16` is rejected rather than silently
 promoted. Each reader must select a value dtype capable of representing valid
 aggregates.
 

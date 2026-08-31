@@ -8,5 +8,6 @@ aggregation meaning, and SpatialData model construction.
 from __future__ import annotations
 
 from spatialdata_io.readers._utils.table._arrays import as_csr_array, csr_array_from_triplets
+from spatialdata_io.readers._utils.table._normalize import normalize_owned_anndata
 
-__all__ = ["as_csr_array", "csr_array_from_triplets"]
+__all__ = ["as_csr_array", "csr_array_from_triplets", "normalize_owned_anndata"]

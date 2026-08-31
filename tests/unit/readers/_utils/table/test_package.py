@@ -6,7 +6,7 @@ from spatialdata_io.readers._utils import table
 
 
 class TestTablePackage:
-    """Keep reader-facing exports explicit and model-independent."""
+    """Keep reader-facing exports explicit."""
 
-    def test_exports_only_sparse_array_construction(self) -> None:
-        assert table.__all__ == ["as_csr_array", "csr_array_from_triplets"]
+    def test_exports_only_sparse_representation_boundaries(self) -> None:
+        assert table.__all__ == ["as_csr_array", "csr_array_from_triplets", "normalize_owned_anndata"]
