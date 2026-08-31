@@ -46,7 +46,9 @@ class TestPathsPackage:
         assert paths.ArtifactDirectory is not paths.ArtifactFile
 
     def test_only_path_core_mints_validated_path_markers(self) -> None:
-        readers = Path("src/spatialdata_io/readers")
+        repository_root = Path(__file__).resolve().parents[5]
+        readers = repository_root / "src" / "spatialdata_io" / "readers"
+        assert readers.is_dir(), f"reader source directory does not exist: {readers}"
         constructors = {"ArtifactDirectory", "ArtifactFile", "DatasetRoot"}
 
         for path in readers.rglob("*.py"):
