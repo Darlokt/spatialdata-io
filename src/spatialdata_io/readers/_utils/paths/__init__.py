@@ -8,6 +8,8 @@ and data loading.
 from __future__ import annotations
 
 from spatialdata_io.readers._utils.paths._core import (
+    ArtifactDirectory,
+    ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
     optional_directory,
@@ -24,6 +26,8 @@ from spatialdata_io.readers._utils.paths._core import (
 )
 
 __all__ = [
+    "ArtifactDirectory",
+    "ArtifactFile",
     "DatasetRoot",
     "normalize_dataset_root",
     "optional_directory",

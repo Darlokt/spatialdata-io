@@ -5,12 +5,14 @@ from __future__ import annotations
 import errno
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_type
 
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
+    ArtifactDirectory,
+    ArtifactFile,
     DatasetRoot,
     _core,
     normalize_dataset_root,
@@ -37,6 +39,24 @@ _CONTEXT = ReaderErrorContext(reader="test_reader", artifact="test_artifact", de
 
 def _root(path: Path) -> DatasetRoot:
     return normalize_dataset_root(path, context=_CONTEXT)
+
+
+def _accept_artifact_directory(path: ArtifactDirectory) -> ArtifactDirectory:
+    return path
+
+
+def _static_return_contract(path: Path, root: DatasetRoot) -> None:
+    """Exercise the complete nominal return contract for strict type checkers."""
+    assert_type(normalize_dataset_root(path, context=_CONTEXT), DatasetRoot)
+    assert_type(require_file(path, context=_CONTEXT), ArtifactFile)
+    assert_type(optional_file(path, context=_CONTEXT), ArtifactFile | None)
+    assert_type(require_directory(path, context=_CONTEXT), ArtifactDirectory)
+    assert_type(optional_directory(path, context=_CONTEXT), ArtifactDirectory | None)
+    assert_type(require_caller_file(root, path, context=_CONTEXT), ArtifactFile)
+    assert_type(require_caller_directory(root, path, context=_CONTEXT), ArtifactDirectory)
+    assert_type(require_metadata_file(root, path, context=_CONTEXT), ArtifactFile)
+    assert_type(require_metadata_directory(root, path, context=_CONTEXT), ArtifactDirectory)
+    assert_type(_accept_artifact_directory(root), ArtifactDirectory)
 
 
 class _OneShotPaths:

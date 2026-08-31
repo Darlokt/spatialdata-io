@@ -33,19 +33,39 @@ The package supports local `str` and `Path` values only. URLs, fsspec stores,
 generic discovery callbacks, vendor manifests, and layout base classes are
 outside this boundary.
 
-## Canonical path representation
+## Canonical and kind-marked path representation
 
-`normalize_dataset_root()` expands the caller value, strictly resolves it, and
-requires a directory. It returns `DatasetRoot`, a zero-runtime-cost `NewType`
-around a canonical absolute `Path`. Strict typing can therefore distinguish a
-validated root from an arbitrary path without a runtime wrapper.
+The validation functions return allocation-free nominal types around ordinary
+canonical absolute `Path` objects:
 
-Every successful file or directory validator returns the canonical resolved
-target. This gives path-backed delayed tasks one stable source location and
-prevents a validated symlink alias from later being redirected elsewhere.
-Readers that derive scientific identifiers from a candidate's lexical filename
-must record that identifier before validation or store it separately from the
-canonical I/O path.
+```python
+ArtifactFile = NewType("ArtifactFile", Path)
+ArtifactDirectory = NewType("ArtifactDirectory", Path)
+DatasetRoot = NewType("DatasetRoot", ArtifactDirectory)
+```
+
+`ArtifactFile` records successful regular-file validation,
+`ArtifactDirectory` records successful directory validation, and `DatasetRoot`
+additionally records that caller root normalization was applied. A dataset root
+is therefore accepted wherever an `ArtifactDirectory` is required. All three
+remain `Path` subtypes to static type checkers and are the identical `Path`
+objects at runtime: no wrapper object, copying, or conversion is introduced.
+
+Only this package's validation functions construct these markers. Reader code
+imports them for annotations and stores returned values; it must not call the
+`NewType` constructors to relabel an unvalidated `Path`.
+
+Every successful validator returns the canonical resolved target. This gives
+path-backed delayed tasks one stable source spelling and prevents a validated
+symlink alias from later being redirected elsewhere. Readers that derive
+scientific identifiers from a candidate's lexical filename must record that
+identifier before validation or store it separately from the canonical I/O
+path.
+
+The marker records validation at the reader boundary; it does not pin the
+filesystem entry or guarantee that another process cannot replace or remove it
+later. Downstream consumers still own their ordinary open/read error behavior.
+Repeating a kind check cannot remove that time-of-check/time-of-use limitation.
 
 Aliases remain distinct during candidate discovery. Two names pointing at one
 target can still make a vendor layout ambiguous; canonicalization happens only
@@ -58,11 +78,16 @@ Reader-owned exact paths use `require_file()`, `require_directory()`,
 
 ```python
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
-from spatialdata_io.readers._utils.paths import normalize_dataset_root, require_file
+from spatialdata_io.readers._utils.paths import (
+    ArtifactFile,
+    DatasetRoot,
+    normalize_dataset_root,
+    require_file,
+)
 
 context = ReaderErrorContext(reader="example", artifact="counts")
-root = normalize_dataset_root("dataset", context=context)
-counts = require_file(root / "counts.h5", context=context)
+root: DatasetRoot = normalize_dataset_root("dataset", context=context)
+counts: ArtifactFile = require_file(root / "counts.h5", context=context)
 ```
 
 Caller and metadata origins have different authority:
@@ -94,7 +119,59 @@ store = require_metadata_directory(root, manifest.store, context=store_context)
 ```
 
 These functions resolve, contain, and kind-check once. Downstream private
-parsers receive a canonical `Path` and do not repeat origin validation.
+parsers receive a canonical `ArtifactFile` or `ArtifactDirectory` and do not
+repeat origin or kind validation.
+
+## Reader layouts and downstream consumers
+
+Reader-owned frozen layouts should retain the most precise returned type:
+
+```python
+from dataclasses import dataclass
+
+from spatialdata_io.readers._utils.paths import (
+    ArtifactDirectory,
+    ArtifactFile,
+    DatasetRoot,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExampleLayout:
+    root: DatasetRoot
+    counts_h5: ArtifactFile
+    matrix_directory: ArtifactDirectory | None
+    morphology: ArtifactFile
+```
+
+The values are directly consumable by APIs that accept `Path` or
+`os.PathLike[str]`; callers do not unwrap or reconstruct them:
+
+```python
+import scanpy as sc
+
+from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
+
+adata = sc.read_10x_h5(layout.counts_h5)
+metadata = inspect_tiff(layout.morphology)
+image = read_tiff(metadata, series=0, level=0)
+```
+
+The direct Scanpy call demonstrates ecosystem compatibility. Vendor readers
+should use the focused shared count-source boundary once it is available so
+sparse-array normalization and source error context remain centralized.
+
+Likewise, a `DatasetRoot` can be passed directly to a directory consumer such
+as `scanpy.read_10x_mtx()`. Focused shared source utilities should accept the
+nominal artifact type and trust its path contract instead of resolving or
+kind-checking it again. Broad direct-entry utilities such as the existing image
+inspection functions may retain their own input normalization while accepting
+the marker as an ordinary `Path`.
+
+The markers do not change execution semantics. TIFF metadata inspection remains
+bounded and eager, TIFF pixels remain lazy and native-chunked, PNG/JPEG pixel
+decoding remains delayed, and count-table sparsity is owned by the count/table
+boundaries rather than this path package.
 
 ## Optional artifacts
 
@@ -162,6 +239,10 @@ reader-layout exception.
 Successful validation performs one strict canonical resolution and one explicit
 kind inspection. Additional `lstat` work is limited to optional-leaf handling or
 failure diagnosis. Directory validators never scan directory contents.
+
+Creating an artifact marker is an identity call with no wrapper allocation.
+The type follow-up adds no filesystem access, file opening, content loading, or
+copying.
 
 Unique selectors necessarily snapshot candidate names once. `sorted_paths()`
 sorts its input directly and returns one immutable tuple, without first creating

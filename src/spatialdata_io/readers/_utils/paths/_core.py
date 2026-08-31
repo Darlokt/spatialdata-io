@@ -13,7 +13,9 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-DatasetRoot = NewType("DatasetRoot", Path)
+ArtifactDirectory = NewType("ArtifactDirectory", Path)
+ArtifactFile = NewType("ArtifactFile", Path)
+DatasetRoot = NewType("DatasetRoot", ArtifactDirectory)
 
 type _PathKind = Literal["file", "directory"]
 type _PathOrigin = Literal["caller", "metadata"]
@@ -240,8 +242,9 @@ def normalize_dataset_root(
     Returns
     -------
     DatasetRoot
-        Canonical absolute directory path. This zero-cost ``NewType`` marks a
-        root that downstream layout functions may trust without revalidation.
+        Canonical absolute directory path. This allocation-free ``NewType`` is
+        also an :class:`ArtifactDirectory` and records successful root
+        normalization for downstream layout functions.
 
     Raises
     ------
@@ -257,10 +260,11 @@ def normalize_dataset_root(
     """
     lexical = _lexical_absolute(path, expand_user=True)
     target = _resolve_existing(lexical, context=context, expected="an existing directory")
-    return DatasetRoot(_require_resolved_kind(lexical, target, context=context, kind="directory"))
+    directory = ArtifactDirectory(_require_resolved_kind(lexical, target, context=context, kind="directory"))
+    return DatasetRoot(directory)
 
 
-def require_file(path: Path, /, *, context: ReaderErrorContext) -> Path:
+def require_file(path: Path, /, *, context: ReaderErrorContext) -> ArtifactFile:
     """Return the canonical target of a required regular file.
 
     Parameters
@@ -272,7 +276,7 @@ def require_file(path: Path, /, *, context: ReaderErrorContext) -> Path:
 
     Returns
     -------
-    Path
+    ArtifactFile
         Canonical absolute path to the validated regular file.
 
     Raises
@@ -286,10 +290,10 @@ def require_file(path: Path, /, *, context: ReaderErrorContext) -> Path:
     OSError
         If another filesystem operation fails.
     """
-    return _require_kind(path, context=context, kind="file")
+    return ArtifactFile(_require_kind(path, context=context, kind="file"))
 
 
-def optional_file(path: Path, /, *, context: ReaderErrorContext) -> Path | None:
+def optional_file(path: Path, /, *, context: ReaderErrorContext) -> ArtifactFile | None:
     """Return a canonical regular file, or ``None`` for an absent leaf.
 
     Parameters
@@ -303,7 +307,7 @@ def optional_file(path: Path, /, *, context: ReaderErrorContext) -> Path | None:
 
     Returns
     -------
-    Path | None
+    ArtifactFile | None
         Canonical absolute file target, or ``None`` when only the final path
         component is absent.
 
@@ -321,10 +325,11 @@ def optional_file(path: Path, /, *, context: ReaderErrorContext) -> Path | None:
     OSError
         If another filesystem operation fails.
     """
-    return _optional_kind(path, context=context, kind="file")
+    result = _optional_kind(path, context=context, kind="file")
+    return None if result is None else ArtifactFile(result)
 
 
-def require_directory(path: Path, /, *, context: ReaderErrorContext) -> Path:
+def require_directory(path: Path, /, *, context: ReaderErrorContext) -> ArtifactDirectory:
     """Return the canonical target of a required directory.
 
     Parameters
@@ -336,7 +341,7 @@ def require_directory(path: Path, /, *, context: ReaderErrorContext) -> Path:
 
     Returns
     -------
-    Path
+    ArtifactDirectory
         Canonical absolute path to the validated directory. Its contents are
         not scanned.
 
@@ -351,10 +356,10 @@ def require_directory(path: Path, /, *, context: ReaderErrorContext) -> Path:
     OSError
         If another filesystem operation fails.
     """
-    return _require_kind(path, context=context, kind="directory")
+    return ArtifactDirectory(_require_kind(path, context=context, kind="directory"))
 
 
-def optional_directory(path: Path, /, *, context: ReaderErrorContext) -> Path | None:
+def optional_directory(path: Path, /, *, context: ReaderErrorContext) -> ArtifactDirectory | None:
     """Return a canonical directory, or ``None`` for an absent leaf.
 
     Parameters
@@ -368,7 +373,7 @@ def optional_directory(path: Path, /, *, context: ReaderErrorContext) -> Path | 
 
     Returns
     -------
-    Path | None
+    ArtifactDirectory | None
         Canonical absolute directory target, or ``None`` when only the final
         path component is absent. Directory contents are not scanned.
 
@@ -384,7 +389,8 @@ def optional_directory(path: Path, /, *, context: ReaderErrorContext) -> Path | 
     OSError
         If another filesystem operation fails.
     """
-    return _optional_kind(path, context=context, kind="directory")
+    result = _optional_kind(path, context=context, kind="directory")
+    return None if result is None else ArtifactDirectory(result)
 
 
 def require_caller_file(
@@ -393,7 +399,7 @@ def require_caller_file(
     /,
     *,
     context: ReaderErrorContext,
-) -> Path:
+) -> ArtifactFile:
     """Resolve and validate a caller-provided regular file.
 
     Parameters
@@ -409,7 +415,7 @@ def require_caller_file(
 
     Returns
     -------
-    Path
+    ArtifactFile
         Canonical absolute path to the validated regular file.
 
     Raises
@@ -423,7 +429,7 @@ def require_caller_file(
     OSError
         If another filesystem operation fails.
     """
-    return _require_origin_kind(root, path, context=context, origin="caller", kind="file")
+    return ArtifactFile(_require_origin_kind(root, path, context=context, origin="caller", kind="file"))
 
 
 def require_caller_directory(
@@ -432,7 +438,7 @@ def require_caller_directory(
     /,
     *,
     context: ReaderErrorContext,
-) -> Path:
+) -> ArtifactDirectory:
     """Resolve and validate a caller-provided directory.
 
     Parameters
@@ -448,7 +454,7 @@ def require_caller_directory(
 
     Returns
     -------
-    Path
+    ArtifactDirectory
         Canonical absolute path to the validated directory. Its contents are
         not scanned.
 
@@ -463,7 +469,7 @@ def require_caller_directory(
     OSError
         If another filesystem operation fails.
     """
-    return _require_origin_kind(root, path, context=context, origin="caller", kind="directory")
+    return ArtifactDirectory(_require_origin_kind(root, path, context=context, origin="caller", kind="directory"))
 
 
 def require_metadata_file(
@@ -472,7 +478,7 @@ def require_metadata_file(
     /,
     *,
     context: ReaderErrorContext,
-) -> Path:
+) -> ArtifactFile:
     """Resolve a literal metadata-derived file path contained by ``root``.
 
     Parameters
@@ -487,7 +493,7 @@ def require_metadata_file(
 
     Returns
     -------
-    Path
+    ArtifactFile
         Canonical absolute path to the validated regular file.
 
     Raises
@@ -501,7 +507,7 @@ def require_metadata_file(
     OSError
         If another filesystem operation fails.
     """
-    return _require_origin_kind(root, path, context=context, origin="metadata", kind="file")
+    return ArtifactFile(_require_origin_kind(root, path, context=context, origin="metadata", kind="file"))
 
 
 def require_metadata_directory(
@@ -510,7 +516,7 @@ def require_metadata_directory(
     /,
     *,
     context: ReaderErrorContext,
-) -> Path:
+) -> ArtifactDirectory:
     """Resolve a literal metadata-derived directory path contained by ``root``.
 
     Parameters
@@ -525,7 +531,7 @@ def require_metadata_directory(
 
     Returns
     -------
-    Path
+    ArtifactDirectory
         Canonical absolute path to the validated directory. Its contents are
         not scanned.
 
@@ -540,7 +546,7 @@ def require_metadata_directory(
     OSError
         If another filesystem operation fails.
     """
-    return _require_origin_kind(root, path, context=context, origin="metadata", kind="directory")
+    return ArtifactDirectory(_require_origin_kind(root, path, context=context, origin="metadata", kind="directory"))
 
 
 def sorted_paths(
@@ -687,6 +693,8 @@ def optional_unique_path(
 
 
 __all__ = [
+    "ArtifactDirectory",
+    "ArtifactFile",
     "DatasetRoot",
     "normalize_dataset_root",
     "optional_directory",

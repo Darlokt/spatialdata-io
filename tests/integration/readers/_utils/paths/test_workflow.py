@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.paths import (
@@ -11,6 +12,25 @@ from spatialdata_io.readers._utils.paths import (
     require_file,
     require_unique_path,
 )
+
+if TYPE_CHECKING:
+    import scanpy as sc
+
+    from spatialdata_io.readers._utils.image import inspect_tiff, read_jpeg, read_png
+    from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, DatasetRoot
+
+    def _consumer_type_contract(
+        file_path: ArtifactFile,
+        directory: ArtifactDirectory,
+        root: DatasetRoot,
+    ) -> None:
+        """Prove that validated paths compose with current ecosystem boundaries."""
+        _ = sc.read_10x_h5(file_path)
+        _ = sc.read_10x_mtx(directory)
+        _ = sc.read_10x_mtx(root)
+        _ = inspect_tiff(file_path)
+        _ = read_png(file_path)
+        _ = read_jpeg(file_path)
 
 
 class TestPathWorkflow:
