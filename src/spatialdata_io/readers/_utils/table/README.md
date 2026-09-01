@@ -164,14 +164,14 @@ indexes are never mutated.
 Linkage validation precedes expression mutation. Missing or malformed linkage,
 duplicate pairs, and target mismatches therefore leave the table unchanged.
 Normalization and public parsing are deliberately non-transactional: a failure
-at either boundary, or during final compatibility checks, can leave the owned
-table partially mutated and the reader must discard it.
+at either boundary can leave the owned table partially mutated and the reader
+must discard it.
 
 The public parser is called once, without `overwrite_metadata`. The adapter
 does not import private SpatialData validators or write model metadata itself.
-It verifies only stable public postconditions: object identity, retained
-canonical CSR expression objects, categorical region storage, and exact parser
-metadata.
+Compatibility with the parser's object identity, categorical region storage,
+expression preservation, and linkage metadata is covered through real public
+SpatialData composition tests rather than repeated after every reader call.
 
 ## Errors
 
@@ -191,8 +191,7 @@ reader context. Invalid reader-authored descriptors, stale parser metadata, and
 mapping keys outside the descriptor raise `ValueError`. Expression failures
 retain the precise normalization exception and location note. Public parser
 failures retain their original type, identity, traceback, and cause while
-gaining reader context. A failed parser postcondition is reported as a local
-compatibility `RuntimeError`.
+gaining reader context.
 
 ## Sparse-array semantics
 

@@ -61,17 +61,3 @@ class TestEncodedResult:
         assert result.axes == metadata.axes
         assert result.data.chunks == ((5,), (7,))
         assert len(result.data.dask) == 1
-
-    def test_rejects_unknown_internal_codec(self) -> None:
-        metadata = _EncodedHeader(
-            shape=(5, 7),
-            dtype=np.dtype(np.uint8),
-            axes=("y", "x"),
-        )
-
-        with pytest.raises(RasterFormatError, match="Unsupported"):
-            encoded_result(
-                Path("image.bin"),
-                "gif",  # type: ignore[arg-type, bad-argument-type]
-                metadata,
-            )

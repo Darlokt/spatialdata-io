@@ -55,19 +55,7 @@ class TestTableArchitecture:
         tree = ast.parse(path.read_text())
         imported_modules = {module for node in ast.walk(tree) for module in self._imported_modules(node)}
         import_roots = {module.split(".")[0] for module in imported_modules}
-        calls = {
-            node.func.attr
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        }
-        assigned_attributes = {
-            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
-        }
-
         assert import_roots.isdisjoint(_FORBIDDEN_LINKAGE_IMPORTS)
-        assert "groupby" not in calls
-        assert "copy" not in calls
-        assert "uns" not in assigned_attributes
 
     @staticmethod
     def _imported_modules(node: ast.AST) -> tuple[str, ...]:

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
-from scipy import sparse
 from spatialdata.models import TableModel
 
 from spatialdata_io.readers._utils.errors import (
@@ -59,12 +58,6 @@ type _ObservedIdentifiers = _IntegerIdentifiers | _StringIdentifiers
 class _ValidatedIdentifiers:
     pairs: pd.MultiIndex
     identifiers: _ObservedIdentifiers
-
-
-@dataclass(frozen=True, slots=True)
-class _NormalizedExpression:
-    x: object
-    layers: Mapping[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,47 +374,6 @@ def _validated_pairs(
     return _ValidatedIdentifiers(observed_pairs, identifiers)
 
 
-def _raise_compatibility_error(context: ReaderErrorContext, failure: str) -> None:
-    message = f"{context.describe()}: SpatialData TableModel.parse() compatibility failure: {failure}."
-    raise RuntimeError(message)
-
-
-def _verify_canonical_expression(data: object, *, context: ReaderErrorContext, location: str) -> None:
-    if not isinstance(data, sparse.csr_array) or not data.has_canonical_format:
-        _raise_compatibility_error(context, f"{location} is not a canonical scipy.sparse.csr_array")
-
-
-def _verify_postconditions(
-    parsed: AnnData,
-    adata: AnnData,
-    linkage: TableLinkage,
-    normalized: _NormalizedExpression,
-    *,
-    context: ReaderErrorContext,
-) -> None:
-    if parsed is not adata:
-        _raise_compatibility_error(context, "the parser returned a different AnnData object")
-    if adata.X is not normalized.x:
-        _raise_compatibility_error(context, "the parser replaced adata.X")
-    if normalized.x is not None:
-        _verify_canonical_expression(adata.X, context=context, location="adata.X")
-    for name, layer in normalized.layers.items():
-        if adata.layers[name] is not layer:
-            _raise_compatibility_error(context, f"the parser replaced adata.layers[{name!r}]")
-        _verify_canonical_expression(adata.layers[name], context=context, location=f"adata.layers[{name!r}]")
-    if not isinstance(adata.obs[linkage.region_key].dtype, pd.CategoricalDtype):
-        _raise_compatibility_error(context, f"adata.obs[{linkage.region_key!r}] is not categorical")
-
-    region: str | list[str] = linkage.regions[0] if len(linkage.regions) == 1 else list(linkage.regions)
-    expected_metadata = {
-        TableModel.REGION_KEY: region,
-        TableModel.REGION_KEY_KEY: linkage.region_key,
-        TableModel.INSTANCE_KEY: linkage.instance_key,
-    }
-    if adata.uns.get(TableModel.ATTRS_KEY) != expected_metadata:
-        _raise_compatibility_error(context, "the parser installed unexpected linkage metadata")
-
-
 def parse_linked_table(
     adata: AnnData,
     linkage: TableLinkage,
@@ -470,14 +422,12 @@ def parse_linked_table(
         If a declared expression layer is absent.
     ReaderFormatError
         If external linkage identifiers or target membership are malformed.
-    RuntimeError
-        If the public SpatialData parser violates required postconditions.
 
     Notes
     -----
     Linkage failures before normalization leave ``adata`` unchanged. A
-    normalization, parser, or postcondition failure can leave the exclusively
-    owned table partially mutated; callers must discard it. The function never
+    normalization or parser failure can leave the exclusively owned table
+    partially mutated; callers must discard it. The function never
     copies the complete table, densifies expression data, or computes a spatial
     element. Its local validation uses linear identifier work and storage;
     SpatialData may perform additional public model validation.
@@ -502,13 +452,9 @@ def parse_linked_table(
         )
 
     normalize_owned_anndata(adata, expression_layers=expression_layers)
-    normalized = _NormalizedExpression(
-        x=adata.X,
-        layers={name: adata.layers[name] for name in expression_layers},
-    )
     region: str | list[str] = linkage.regions[0] if len(linkage.regions) == 1 else list(linkage.regions)
     try:
-        parsed = TableModel.parse(
+        return TableModel.parse(
             adata,
             region=region,
             region_key=linkage.region_key,
@@ -517,12 +463,3 @@ def parse_linked_table(
     except Exception as error:
         add_reader_context(error, context=context)
         raise
-
-    _verify_postconditions(
-        parsed,
-        adata,
-        linkage,
-        normalized,
-        context=context,
-    )
-    return parsed

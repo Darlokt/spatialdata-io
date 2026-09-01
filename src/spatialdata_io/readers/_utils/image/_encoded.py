@@ -62,9 +62,6 @@ def _decode_encoded(spec: _EncodedReadSpec) -> NDArray[np.generic]:
 
 def encoded_result(path: Path, codec: Literal["png", "jpeg"], metadata: _EncodedHeader) -> LazyRaster:
     """Construct a one-task lazy array for a previously inspected encoded image."""
-    if codec not in {"png", "jpeg"}:
-        message = f"Unsupported encoded raster codec: {codec!r}."
-        raise RasterFormatError(message)
     spec = _EncodedReadSpec(
         path=path,
         codec=codec,

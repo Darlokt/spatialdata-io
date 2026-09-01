@@ -27,15 +27,17 @@ class TestNormalizeRasterAxes:
     def test_selects_non_singleton_axes_and_drops_singletons(self) -> None:
         source = np.arange(2 * 1 * 3 * 4).reshape(2, 1, 3, 4)
         data = da.from_array(source, chunks=(1, 1, 3, 4))
+        selectors = {"T": 1}
 
         result = normalize_raster_axes(
             data,
             ("t", "z", "y", "x"),
             target_axes=("y", "x"),
-            selectors={"T": 1},
+            selectors=selectors,
         )
 
         np.testing.assert_array_equal(result.compute(), source[1, 0])
+        assert selectors == {"T": 1}
 
     def test_adds_only_explicit_missing_singleton_axes(self) -> None:
         source = np.arange(12).reshape(3, 4)

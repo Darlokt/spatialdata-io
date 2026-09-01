@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping  # Required for runtime type-hint resolution.
+from typing import TYPE_CHECKING
 
 from spatialdata_io import __version__
+
+if TYPE_CHECKING:
+    from collections.abc import MutableMapping
 
 _FORMAT_VERSION_KEY = "spatialdata_io_format_version"
 _READER_KEY = "spatialdata_io_reader"

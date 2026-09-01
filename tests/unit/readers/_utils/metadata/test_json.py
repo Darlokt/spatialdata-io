@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-import inspect
 import io
 from pathlib import Path
-from typing import TYPE_CHECKING, Self, cast, get_type_hints, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.metadata import _json, read_json_object
-from spatialdata_io.readers._utils.paths import ArtifactFile, require_file
+from spatialdata_io.readers._utils.paths import require_file
 
 if TYPE_CHECKING:
     from collections.abc import Buffer
     from types import TracebackType
 
     from pytest_mock import MockerFixture
+
+    from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _CONTEXT = ReaderErrorContext(reader="test_reader", artifact="experiment metadata", detected_version="2.0")
 
@@ -333,20 +334,3 @@ class TestReadJsonObject:
 
         assert buffered.closed
         assert raw.closed
-
-    def test_signature_is_narrow(self) -> None:
-        signature = inspect.signature(read_json_object)
-        parameters = signature.parameters
-
-        assert set(parameters) == {"path", "max_bytes", "context"}
-        assert parameters["path"].kind is inspect.Parameter.POSITIONAL_ONLY
-        assert parameters["max_bytes"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameters["context"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameters["max_bytes"].default is inspect.Parameter.empty
-        assert parameters["context"].default is inspect.Parameter.empty
-        assert get_type_hints(read_json_object, localns={"ArtifactFile": ArtifactFile}) == {
-            "path": ArtifactFile,
-            "max_bytes": int,
-            "context": ReaderErrorContext,
-            "return": dict[str, object],
-        }

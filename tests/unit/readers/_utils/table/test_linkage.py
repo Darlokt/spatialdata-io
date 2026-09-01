@@ -16,8 +16,6 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from pytest_mock import MockerFixture
 
 
@@ -62,15 +60,6 @@ def _public_parser_stub(
     obs = cast("pd.DataFrame", adata.obs)
     obs[region_key] = pd.Categorical(obs[region_key])
     return adata
-
-
-def _different_table(table: ad.AnnData) -> ad.AnnData:
-    obs = cast("pd.DataFrame", table.obs)
-    return ad.AnnData(table.X, obs=obs.copy())
-
-
-def _same_table(table: ad.AnnData) -> ad.AnnData:
-    return table
 
 
 class TestTableLinkage:
@@ -119,9 +108,22 @@ class TestParseLinkedTable:
             events.append("normalize")
             return real_normalize(table, expression_layers=expression_layers)
 
-        def parse(*args: object, **kwargs: object) -> ad.AnnData:
+        def parse(
+            table: ad.AnnData,
+            region: str | list[str] | None = None,
+            region_key: str | None = None,
+            instance_key: str | None = None,
+            *,
+            overwrite_metadata: bool = False,
+        ) -> ad.AnnData:
             events.append("parse")
-            return _public_parser_stub(*args, **kwargs)  # type: ignore[arg-type]
+            return _public_parser_stub(
+                table,
+                region=region,
+                region_key=region_key,
+                instance_key=instance_key,
+                overwrite_metadata=overwrite_metadata,
+            )
 
         normalization = mocker.patch(
             "spatialdata_io.readers._utils.table._linkage.normalize_owned_anndata",
@@ -324,52 +326,6 @@ class TestParseLinkedTable:
         assert raised.value is original
         assert "test_reader" in raised.value.__notes__[0]
         assert isinstance(adata.X, sparse.csr_array)
-
-    @pytest.mark.parametrize(
-        "mutate",
-        [
-            _different_table,
-            _same_table,
-        ],
-        ids=["different-object", "missing-metadata"],
-    )
-    def test_rejects_incompatible_parser_result(
-        self,
-        mocker: MockerFixture,
-        mutate: Callable[[ad.AnnData], ad.AnnData],
-    ) -> None:
-        adata = _table()
-
-        def parse(table: ad.AnnData, **_: object) -> ad.AnnData:
-            return mutate(table)
-
-        mocker.patch.object(TableModel, "parse", side_effect=parse)
-
-        with pytest.raises(RuntimeError, match="compatibility failure"):
-            parse_linked_table(
-                adata,
-                TableLinkage(("cells",), "region", "instance"),
-                context=_CONTEXT,
-            )
-
-    def test_rejects_parser_expression_replacement(self, mocker: MockerFixture) -> None:
-        adata = _table()
-
-        def replace_expression(table: ad.AnnData, **kwargs: object) -> ad.AnnData:
-            parsed = _public_parser_stub(table, **kwargs)  # type: ignore[arg-type]
-            expression = parsed.X
-            assert isinstance(expression, sparse.csr_array)
-            parsed.X = expression.copy()
-            return parsed
-
-        mocker.patch.object(TableModel, "parse", side_effect=replace_expression)
-
-        with pytest.raises(RuntimeError, match=r"replaced adata.X"):
-            parse_linked_table(
-                adata,
-                TableLinkage(("cells",), "region", "instance"),
-                context=_CONTEXT,
-            )
 
 
 class TestExpectedInstanceIds:

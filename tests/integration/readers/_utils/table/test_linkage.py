@@ -35,6 +35,14 @@ def _adata(
     return ad.AnnData(expression, obs=obs)
 
 
+def _assert_csr_unchanged(actual: sparse.csr_array, expected: sparse.csr_array) -> None:
+    assert actual.shape == expected.shape
+    assert actual.dtype == expected.dtype
+    np.testing.assert_array_equal(actual.data, expected.data)
+    np.testing.assert_array_equal(actual.indices, expected.indices)
+    np.testing.assert_array_equal(actual.indptr, expected.indptr)
+
+
 class TestParseLinkedTable:
     """Compose linkage with the installed public TableModel parser."""
 
@@ -152,17 +160,57 @@ class TestParseLinkedTable:
             index=shape_index,
         )
         shapes = ShapesModel.parse(frame)
-        adata = _adata(["cells", "cells"], np.asarray([20, 10], dtype=np.int64))
+        target_index = shapes.index
+        target_name = target_index.name
+        target_dtype = target_index.dtype
+        target_values = target_index.to_numpy(copy=True)
+        instance_values = np.asarray([20, 10], dtype=np.int64)
+        expression = sparse.csr_array(np.asarray([[1, 0], [0, 2]], dtype=np.int16))
+        expected_expression = expression.copy()
+        counts = sparse.csr_array(np.asarray([[3, 0], [0, 4]], dtype=np.int32))
+        expected_counts = counts.copy()
+        adata = _adata(["cells", "cells"], instance_values, expression=expression)
+        adata.layers["counts"] = counts
 
         with pytest.warns(UserWarning, match="categorical"):
             table = parse_linked_table(
                 adata,
                 TableLinkage(("cells",), "region", "instance"),
                 context=_CONTEXT,
-                expected_instance_ids={"cells": shapes.index},
+                expression_layers=("counts",),
+                expected_instance_ids={"cells": target_index},
             )
         sdata = SpatialData(shapes={"cells": shapes}, tables={"table": table})
 
+        table_expression = table.X
+        table_counts = table.layers["counts"]
         assert sdata.tables["table"] is table
-        assert isinstance(sdata.tables["table"].X, sparse.csr_array)
-        assert sdata.shapes["cells"].index.tolist() == [10, 20]
+        assert table is adata
+        assert table_expression is expression
+        assert isinstance(table_expression, sparse.csr_array)
+        assert isinstance(table_expression, sparse.sparray)
+        assert not isinstance(table_expression, sparse.spmatrix)
+        canonical_expression = cast("sparse.csr_array", table_expression)
+        assert canonical_expression.has_canonical_format
+        _assert_csr_unchanged(canonical_expression, expected_expression)
+        assert table_counts is counts
+        assert isinstance(table_counts, sparse.csr_array)
+        assert isinstance(table_counts, sparse.sparray)
+        assert not isinstance(table_counts, sparse.spmatrix)
+        canonical_counts = cast("sparse.csr_array", table_counts)
+        assert canonical_counts.has_canonical_format
+        _assert_csr_unchanged(canonical_counts, expected_counts)
+        assert table.uns[TableModel.ATTRS_KEY] == {
+            TableModel.REGION_KEY: "cells",
+            TableModel.REGION_KEY_KEY: "region",
+            TableModel.INSTANCE_KEY: "instance",
+        }
+        assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
+        assert table.obs["region"].cat.categories.tolist() == ["cells"]
+        assert table.obs["instance"].dtype == np.dtype(np.int64)
+        np.testing.assert_array_equal(table.obs["instance"].to_numpy(), instance_values)
+        result_index = sdata.shapes["cells"].index
+        assert result_index.name == target_name
+        assert result_index.dtype == target_dtype
+        np.testing.assert_array_equal(result_index.to_numpy(), target_values)
+        assert set(table.obs["instance"]) == set(result_index)
