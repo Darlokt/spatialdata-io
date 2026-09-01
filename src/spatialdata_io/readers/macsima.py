@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from ome_types.model import Pixels
 
-__all__ = ["macsima"]
+__all__ = ["MACSimaParsingStyle", "macsima"]
 
 # Dictionary to harmonize imagetype across metadata versions
 IMAGETYPE_DICT = {
@@ -156,18 +156,17 @@ class MultiChannelImage:
         """Get the channel names."""
         if self.include_cycle_in_channel_name:
             return [f"R{c.cycle} {c.name}" for c in self.metadata]
-        else:
-            # if name is duplicated, add (i) to the name
-            names = [c.name for c in self.metadata]
-            name_dict: dict[str, int] = defaultdict(int)
-            name_counter: dict[str, int] = defaultdict(int)
-            for name in names:
-                name_dict[name] += 1
-            output = []
-            for name in names:
-                name_counter[name] += 1
-                output.append(f"{name} ({name_counter[name]})" if name_dict[name] > 1 else name)
-            return output
+        # if name is duplicated, add (i) to the name
+        names = [c.name for c in self.metadata]
+        name_dict: dict[str, int] = defaultdict(int)
+        name_counter: dict[str, int] = defaultdict(int)
+        for name in names:
+            name_dict[name] += 1
+        output = []
+        for name in names:
+            name_counter[name] += 1
+            output.append(f"{name} ({name_counter[name]})" if name_dict[name] > 1 else name)
+        return output
 
     def get_cycles(self) -> list[int]:
         """Get the cycle numbers."""
@@ -408,7 +407,7 @@ def macsima(
             for p in path.iterdir()
             if p.is_dir() and (not filter_folder_names or not any(f in p.name for f in filter_folder_names))
         ]:
-            if not len(list(p.glob("*.tif*"))):
+            if not list(p.glob("*.tif*")):
                 warnings.warn(f"No tif files found in {p}, skipping it!", UserWarning, stacklevel=2)
                 continue
             sdatas[p.stem] = parse_processed_folder(
@@ -452,14 +451,13 @@ def _collect_map_annotation_values(ome: OME) -> dict[str, Any]:
         for k, v in value.items():
             if k not in merged:
                 merged[k] = v
-            else:
-                # We do expect repeated keys with different values, because the same key is reused for different annotations.
-                # But the order is fixed and fine for what we need.
-                # Therefore log this for debugging, if it becomes a problem, but don't throw warnings to the user.
-                if v != merged[k]:
-                    logger.debug(
-                        f"Found different value for {k}: {v}. The parser will only use the first found value, which is {merged[k]}!"
-                    )
+            # We do expect repeated keys with different values, because the same key is reused for different annotations.
+            # But the order is fixed and fine for what we need.
+            # Therefore log this for debugging, if it becomes a problem, but don't throw warnings to the user.
+            elif v != merged[k]:
+                logger.debug(
+                    f"Found different value for {k}: {v}. The parser will only use the first found value, which is {merged[k]}!"
+                )
 
     return merged
 
@@ -624,16 +622,16 @@ def _parse_v1_ome_metadata(ome: OME) -> dict[str, Any]:
         metadata["clone"] = ma_values["Clone"]
 
     antigen_name = None
-    if "Biomarker" in ma_values and ma_values["Biomarker"]:
+    if ma_values.get("Biomarker"):
         antigen_name = ma_values["Biomarker"]
-    elif "Dye" in ma_values and ma_values["Dye"]:
+    elif ma_values.get("Dye"):
         antigen_name = ma_values["Dye"]
 
     metadata["name"] = antigen_name
 
-    if "Fluorochrome" in ma_values and ma_values["Fluorochrome"]:
+    if ma_values.get("Fluorochrome"):
         metadata["fluorophore"] = ma_values["Fluorochrome"]
-    elif "Dye" in ma_values and ma_values["Dye"]:
+    elif ma_values.get("Dye"):
         metadata["fluorophore"] = ma_values["Dye"]
 
     if "ExposureTime" in ma_values:
@@ -776,7 +774,7 @@ def parse_processed_folder(
     if subset:
         mci = mci.subset(subset)
     if c_subset:
-        mci = MultiChannelImage.subset_by_index(mci, indices=list(range(0, c_subset)))
+        mci = MultiChannelImage.subset_by_index(mci, indices=list(range(c_subset)))
     if multiscale and not scale_factors:
         scale_factors = mci.calc_scale_factors(default_scale_factor=default_scale_factor)
     if not multiscale:

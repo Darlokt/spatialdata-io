@@ -12,7 +12,7 @@ import packaging.version
 import pytest
 import tifffile
 
-from spatialdata_io.__main__ import xenium_wrapper
+from spatialdata_io._cli.commands.xenium import xenium_command
 from spatialdata_io.readers.xenium import (
     _cell_id_str_from_prefix_suffix_uint32_reference,
     _get_labels,
@@ -211,7 +211,7 @@ class TestGetMorphologyFocus:
 def test_cli_xenium_invalid_json_rejected(runner: CliRunner, tmp_path: Path, kwarg_name: str) -> None:
     """Invalid JSON for any kwargs option must produce a non-zero exit and a clear error."""
     result = runner.invoke(
-        xenium_wrapper,
+        xenium_command,
         [
             "--input",
             str(tmp_path),
@@ -240,7 +240,7 @@ def test_cli_xenium_valid_json_forwarded(
     mock_xenium = mocker.patch("spatialdata_io.readers.xenium.xenium")
     mock_xenium.return_value = mocker.MagicMock()
     result = runner.invoke(
-        xenium_wrapper,
+        xenium_command,
         [
             "--input",
             str(tmp_path),

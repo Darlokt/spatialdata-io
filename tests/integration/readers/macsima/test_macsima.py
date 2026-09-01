@@ -14,7 +14,7 @@ from spatialdata import read_zarr
 from spatialdata.models import get_channel_names
 from tifffile import imwrite
 
-from spatialdata_io.__main__ import macsima_wrapper
+from spatialdata_io._cli.commands.macsima import macsima_command
 from spatialdata_io.readers.macsima import macsima
 
 
@@ -277,7 +277,7 @@ def test_cli_macsima(runner: CliRunner, dataset: str, require_test_dataset: Call
     with TemporaryDirectory() as tmpdir:
         output_zarr = Path(tmpdir) / "data.zarr"
         result = runner.invoke(
-            macsima_wrapper,
+            macsima_command,
             [
                 "--input",
                 str(f),

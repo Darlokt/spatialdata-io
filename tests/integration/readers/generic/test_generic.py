@@ -14,7 +14,7 @@ from spatialdata import SpatialData
 from spatialdata.transformations import get_transformation
 from xarray import DataArray, DataTree
 
-from spatialdata_io.__main__ import read_generic_wrapper
+from spatialdata_io._cli.commands.generic import generic_command
 from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
 from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
@@ -154,7 +154,7 @@ class TestImage:
         source = np.arange(2 * 3 * 19 * 23, dtype=np.uint16).reshape(2, 3, 19, 23)
         _write_tiff(path, source, "CZYX", compression="deflate")
 
-        result = generic(path, "czyx", chunks=(1, 2, 8, 9))
+        result = generic(path, data_axes="czyx", chunks=(1, 2, 8, 9))
 
         assert isinstance(result, DataArray)
         assert result.chunksizes == {
@@ -301,7 +301,7 @@ class TestReadGenericWrapper:
             writer.write(second, photometric="minisblack", metadata={"axes": "YX"})
 
         result = runner.invoke(
-            read_generic_wrapper,
+            generic_command,
             [
                 "--input",
                 str(path),
@@ -333,7 +333,7 @@ class TestReadGenericWrapper:
         path.write_bytes(imagecodecs.png_encode(np.zeros((5, 7), dtype=np.uint8)))
 
         result = runner.invoke(
-            read_generic_wrapper,
+            generic_command,
             ["--input", str(path), "--output", str(output), "--data-axes", "invalid"],
         )
 
@@ -348,13 +348,13 @@ class TestReadGenericWrapper:
         image_path.write_bytes(imagecodecs.png_encode(np.zeros((5, 7), dtype=np.uint8)))
         _write_geojson(shapes_path)
         create = runner.invoke(
-            read_generic_wrapper,
+            generic_command,
             ["--input", str(image_path), "--output", str(output), "--data-axes", "yx"],
         )
         assert create.exit_code == 0, create.output
 
         append = runner.invoke(
-            read_generic_wrapper,
+            generic_command,
             ["--input", str(shapes_path), "--output", str(output), "--name", "regions"],
         )
 

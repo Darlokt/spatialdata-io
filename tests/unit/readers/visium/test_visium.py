@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 from PIL import Image as PILImage
 
-from spatialdata_io.__main__ import visium_wrapper
+from spatialdata_io._cli import cli
+from spatialdata_io._cli.commands.visium import visium_command
 from spatialdata_io.readers.visium import _read_image, visium
 
 if TYPE_CHECKING:
@@ -42,12 +43,11 @@ class TestVisium:
         assert dict(reader_signature.parameters["imread_kwargs"].default) == {}
         assert dict(reader_signature.parameters["image_models_kwargs"].default) == {}
 
-        callback = visium_wrapper.callback
-        assert callback is not None
-        wrapper_signature = inspect.signature(callback)
-        assert list(wrapper_signature.parameters) == [
-            "input",
-            "output",
+        assert cli.commands["visium"] is visium_command
+        options = {parameter.name: parameter for parameter in visium_command.params}
+        assert list(options) == [
+            "input_path",
+            "output_path",
             "dataset_id",
             "counts_file",
             "fullres_image_file",
@@ -57,11 +57,11 @@ class TestVisium:
             "imread_kwargs",
             "image_models_kwargs",
         ]
-        assert wrapper_signature.parameters["dataset_id"].default is None
-        assert wrapper_signature.parameters["counts_file"].default == "filtered_feature_bc_matrix.h5"
-        assert wrapper_signature.parameters["var_names_make_unique"].default is True
-        assert wrapper_signature.parameters["imread_kwargs"].default == "{}"
-        assert wrapper_signature.parameters["image_models_kwargs"].default == "{}"
+        assert options["dataset_id"].default is None
+        assert options["counts_file"].default == "filtered_feature_bc_matrix.h5"
+        assert options["var_names_make_unique"].default is True
+        assert options["imread_kwargs"].default == "{}"
+        assert options["image_models_kwargs"].default == "{}"
 
 
 class TestReadImage:

@@ -80,7 +80,7 @@ def require_test_dataset(test_data_dir: Path) -> Callable[[str], Path]:
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Apply scope and reader markers from the test path."""
+    """Apply scope, interface, and reader markers from test directories."""
     for item in items:
         path = Path(str(item.fspath))
         parts = path.parts
@@ -88,7 +88,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.unit)
         if "integration" in parts:
             item.add_marker(pytest.mark.integration)
-        if "cli" in parts or "cli" in item.name:
+        if "cli" in parts:
             item.add_marker(pytest.mark.cli)
         if "require_test_dataset" in getattr(item, "fixturenames", ()):
             item.add_marker(pytest.mark.data)

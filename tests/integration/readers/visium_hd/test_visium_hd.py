@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from spatialdata import get_extent, read_zarr
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.__main__ import visium_hd_wrapper
+from spatialdata_io._cli.commands.visium_hd import visium_hd_command
 from spatialdata_io._constants._constants import VisiumHDKeys
 from spatialdata_io.readers.visium_hd import visium_hd
 
@@ -169,7 +169,7 @@ def test_cli_visium_hd(runner: CliRunner, dataset: str, require_test_dataset: Ca
     with TemporaryDirectory() as tmpdir:
         output_zarr = Path(tmpdir) / "data.zarr"
         result = runner.invoke(
-            visium_hd_wrapper,
+            visium_hd_command,
             [
                 "--input",
                 str(f),

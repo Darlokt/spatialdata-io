@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from spatialdata.models._utils import DEFAULT_COORDINATE_SYSTEM
-
 from spatialdata_io.readers.generic._images import VALID_IMAGE_TYPES, image
 from spatialdata_io.readers.generic._shapes import VALID_SHAPE_TYPES, geojson
 
@@ -18,13 +16,15 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers.generic._images import Chunks
 
+_DEFAULT_COORDINATE_SYSTEM = "global"
+
 
 # Explicit public options keep format and model contracts inspectable.
 def generic(  # noqa: PLR0913, RUF100
     path: str | Path,
+    *,
     data_axes: Sequence[str] | None = None,
     coordinate_system: str | None = None,
-    *,
     tiff_series: int = 0,
     tiff_level: int = 0,
     chunks: Chunks | None = None,
@@ -67,7 +67,7 @@ def generic(  # noqa: PLR0913, RUF100
     """
     normalized_path = Path(path)
     suffix = normalized_path.suffix.lower()
-    target_coordinate_system = coordinate_system or DEFAULT_COORDINATE_SYSTEM
+    target_coordinate_system = coordinate_system or _DEFAULT_COORDINATE_SYSTEM
 
     if suffix in VALID_SHAPE_TYPES:
         if data_axes is not None:

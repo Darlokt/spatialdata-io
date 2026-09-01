@@ -27,22 +27,28 @@ dynamic = [
 dependencies = [
   "anndata>=0.12",
   "click",
-  "dask[array]",
+  "dask[array,dataframe]",
   "dask-image",
+  "geopandas",
   "h5py",
   "imagecodecs>=2026.5.10",
-  "joblib",
+  "imageio",
   "numpy",
   "ome-types",
+  "packaging",
+  "pandas",
+  "pillow",
   "pyarrow",
+  "pyyaml",
   "readfcs",
   "scanpy",
   "scikit-image",
   "scipy>=1.15",
-  # for debug logging (referenced from the issue template)
-  "session-info2",
+  "shapely",
   "spatialdata>=0.7.3a0",
   "tifffile>=2026.5.2",
+  "tqdm",
+  "xarray",
   "xmltodict",
   "zarr>=3.2",
 ]
@@ -68,6 +74,7 @@ dev = [
 ]
 test = [
   "coverage>=7.10",
+  # PyArrow 22 cannot read two deliberately truncated Xenium test fixtures.
   # https://github.com/scverse/spatialdata-io/issues/334
   "pyarrow!=22",
   "pytest",

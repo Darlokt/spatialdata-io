@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from spatialdata import SpatialData
 from spatialdata._docs import docstring_parameter
-from spatialdata.models.models import DEFAULT_COORDINATE_SYSTEM
 
 from spatialdata_io.readers.generic import (
     VALID_IMAGE_TYPES,
@@ -24,7 +23,6 @@ __all__ = ["generic_to_zarr"]
 @docstring_parameter(
     valid_image_types=", ".join(VALID_IMAGE_TYPES),
     valid_shape_types=", ".join(VALID_SHAPE_TYPES),
-    default_coordinate_system=DEFAULT_COORDINATE_SYSTEM,
 )
 # Explicit public options mirror the reader and CLI without an opaque options mapping.
 def generic_to_zarr(  # noqa: PLR0913, RUF100
@@ -53,8 +51,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     data_axes
         Explicit image axes. Required for images and invalid for GeoJSON.
     coordinate_system
-        Coordinate system for the element. Defaults to
-        {default_coordinate_system}.
+        Coordinate system for the element. Defaults to ``"global"``.
     tiff_series
         Zero-based TIFF series. Must remain zero for non-TIFF inputs.
     tiff_level
@@ -79,9 +76,6 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     input_path = Path(path)
     output_path = Path(output)
     element_name = input_path.stem if name is None else name
-    target_coordinate_system = coordinate_system
-    if target_coordinate_system is None:
-        target_coordinate_system = DEFAULT_COORDINATE_SYSTEM
 
     spatial_data: SpatialData | None = None
     if output_path.exists():
@@ -96,7 +90,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     element = generic(
         path=input_path,
         data_axes=data_axes,
-        coordinate_system=target_coordinate_system,
+        coordinate_system=coordinate_system,
         tiff_series=tiff_series,
         tiff_level=tiff_level,
         chunks=chunks,

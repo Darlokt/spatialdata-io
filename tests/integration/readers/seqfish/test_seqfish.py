@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 from spatialdata import read_zarr
 
-from spatialdata_io.__main__ import seqfish_wrapper
+from spatialdata_io._cli.commands.seqfish import seqfish_command
 from spatialdata_io.readers.seqfish import seqfish
 
 
@@ -45,7 +45,7 @@ def test_cli_seqfish(runner: CliRunner, dataset: str, require_test_dataset: Call
     with TemporaryDirectory() as tmpdir:
         output_zarr = Path(tmpdir) / "data.zarr"
         result = runner.invoke(
-            seqfish_wrapper,
+            seqfish_command,
             [
                 "--input",
                 str(f),

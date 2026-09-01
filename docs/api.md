@@ -23,6 +23,7 @@ I/O for the `spatialdata` project.
     curio
     dbit
     experimental.iss
+    macsima
     mcmicro
     merscope
     seqfish
@@ -67,4 +68,15 @@ I/O for the `spatialdata` project.
 
     xenium_aligned_image
     xenium_explorer_selection
+```
+
+### Reader option types
+
+```{eval-rst}
+.. currentmodule:: spatialdata_io.readers.macsima
+
+.. autosummary::
+    :toctree: generated
+
+    MACSimaParsingStyle
 ```
