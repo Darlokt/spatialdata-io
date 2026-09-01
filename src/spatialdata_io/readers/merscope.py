@@ -23,7 +23,7 @@ from spatialdata.transformations import Affine, BaseTransformation
 
 from spatialdata_io._constants._constants import MerscopeKeys
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -222,7 +222,8 @@ def merscope(
             )
 
     sdata = SpatialData(shapes=shapes, points=points, images=images, tables=tables)
-    return _set_reader_metadata(sdata, "merscope")
+    set_reader_provenance(sdata.attrs, reader="merscope")
+    return sdata
 
 
 def _get_reader(backend: str | None) -> Callable[..., Image2DModel]:

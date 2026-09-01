@@ -40,7 +40,7 @@ from zarr.storage import ZipStore
 from spatialdata_io._constants._constants import XeniumKeys
 from spatialdata_io._docs import inject_docs
 from spatialdata_io._utils import deprecation_alias
-from spatialdata_io.readers._utils._utils import _initialize_raster_models_kwargs, _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -427,9 +427,12 @@ def xenium(
             DeprecationWarning,
             stacklevel=2,
         )
-    image_models_kwargs, labels_models_kwargs = _initialize_raster_models_kwargs(
-        image_models_kwargs, labels_models_kwargs
-    )
+    image_models_kwargs = dict(image_models_kwargs)
+    image_models_kwargs.setdefault("chunks", (1, 4096, 4096))
+    image_models_kwargs.setdefault("scale_factors", [2, 2, 2, 2])
+    labels_models_kwargs = dict(labels_models_kwargs)
+    labels_models_kwargs.setdefault("chunks", (4096, 4096))
+    labels_models_kwargs.setdefault("scale_factors", [2, 2, 2, 2])
     path = Path(path)
     with open(path / XeniumKeys.XENIUM_SPECS) as f:
         specs = json.load(f)
@@ -527,7 +530,8 @@ def xenium(
         for key, value in extra_images.items():
             sdata.images[key] = value
 
-    return _set_reader_metadata(sdata, "xenium")
+    set_reader_provenance(sdata.attrs, reader="xenium")
+    return sdata
 
 
 def _assert_arrays_equal_sampled(a: ArrayLike, b: ArrayLike, n: int = 1000) -> None:

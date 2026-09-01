@@ -21,7 +21,7 @@ from spatialdata.transformations.transformations import Affine, Identity
 
 from spatialdata_io._constants._constants import CosmxKeys
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -292,4 +292,5 @@ def cosmx(
     #             continue
 
     sdata = SpatialData(images=images, labels=labels, points=points, tables={"table": table})
-    return _set_reader_metadata(sdata, "cosmx")
+    set_reader_provenance(sdata.attrs, reader="cosmx")
+    return sdata

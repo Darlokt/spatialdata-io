@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,6 +20,7 @@ from spatialdata_io.readers.xenium import (
     _XeniumCells,
     cell_id_str_from_prefix_suffix_uint32,
     prefix_suffix_uint32_from_cell_id_str,
+    xenium,
 )
 
 if TYPE_CHECKING:
@@ -149,6 +151,22 @@ class TestXeniumCells:
             labels = _get_labels(cells, mask_index=0)
 
         np.testing.assert_array_equal(labels.data.compute(), expected)
+
+
+class TestXeniumOptions:
+    def test_raster_model_options_are_not_mutated_on_layout_failure(self, tmp_path: Path) -> None:
+        image_options = MappingProxyType({"chunks": (1, 8, 8), "scale_factors": [4, 4]})
+        labels_options = MappingProxyType({"chunks": (8, 8), "scale_factors": [4, 4]})
+
+        with pytest.raises(FileNotFoundError):
+            xenium(
+                tmp_path,
+                image_models_kwargs=image_options,
+                labels_models_kwargs=labels_options,
+            )
+
+        assert dict(image_options) == {"chunks": (1, 8, 8), "scale_factors": [4, 4]}
+        assert dict(labels_options) == {"chunks": (8, 8), "scale_factors": [4, 4]}
 
 
 class TestGetMorphologyFocus:

@@ -14,18 +14,17 @@ import pandas as pd
 import spatialdata as sd
 from dask_image.imread import imread
 from ome_types import OME, from_tiff
+from ome_types.model import UnitsLength
 from spatialdata import SpatialData
 from spatialdata._logging import logger
 
 from spatialdata_io._constants._enum import ModeEnum
-from spatialdata_io.readers._utils._utils import (
-    _set_reader_metadata,
-    calc_scale_factors,
-    parse_physical_size,
-)
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from ome_types.model import Pixels
 
 __all__ = ["macsima"]
 
@@ -37,6 +36,7 @@ IMAGETYPE_DICT = {
     "S": "stain",  # v1
     "AF": "autofluorescence",  # v1
 }
+_MINIMUM_PYRAMID_EXTENT = 1000
 
 
 class MACSimaParsingStyle(ModeEnum):
@@ -214,8 +214,17 @@ class MultiChannelImage:
         return self
 
     def calc_scale_factors(self, default_scale_factor: int = 2) -> list[int]:
+        """Calculate pyramid factors from spatial shape metadata without reading pixels."""
+        if default_scale_factor <= 1:
+            raise ValueError("default_scale_factor must be greater than 1.")
+
         lower_scale_limit = min(self.data[0].shape[1:])
-        return calc_scale_factors(lower_scale_limit, default_scale_factor=default_scale_factor)
+        scale_factors = [default_scale_factor]
+        lower_scale_limit /= default_scale_factor
+        while lower_scale_limit >= _MINIMUM_PYRAMID_EXTENT:
+            scale_factors.append(default_scale_factor)
+            lower_scale_limit /= default_scale_factor
+        return scale_factors
 
     def get_stack(self) -> da.Array:
         return da.stack(self.data, axis=0).squeeze(axis=1)
@@ -704,6 +713,32 @@ def parse_metadata(path: Path) -> dict[str, Any]:
     return _parse_ome_metadata(ome)
 
 
+def _physical_size_micrometers(pixels: Pixels) -> float:
+    """Interpret MACSima's isotropic OME pixel size in micrometers."""
+    logger.debug(pixels)
+    if pixels.physical_size_x_unit != pixels.physical_size_y_unit:
+        logger.error("Physical units for x and y dimensions are not the same.")
+        raise NotImplementedError
+    if pixels.physical_size_x != pixels.physical_size_y:
+        logger.error("Physical sizes for x and y dimensions are not the same.")
+        raise NotImplementedError
+    if pixels.physical_size_x is None:
+        logger.error("Physical size for the x dimension is not set.")
+        raise ValueError("The OME-TIFF metadata does not define a physical size for the x dimension.")
+    if pixels.physical_size_x_unit == UnitsLength.NANOMETER:
+        return pixels.physical_size_x / 1000
+    if pixels.physical_size_x_unit == UnitsLength.MICROMETER:
+        return pixels.physical_size_x
+
+    logger.error(f"Physical unit not recognized: '{pixels.physical_size_x_unit}'.")
+    raise NotImplementedError
+
+
+def _read_physical_size_micrometers(path: Path) -> float:
+    """Read the temporary path-backed OME metadata used by the legacy MACSima flow."""
+    return _physical_size_micrometers(from_tiff(path).images[0].pixels)
+
+
 def parse_processed_folder(
     path: Path,
     imread_kwargs: Mapping[str, Any] = MappingProxyType({}),
@@ -797,7 +832,7 @@ def create_sdata(
         pixels_to_microns = None
         for p in path_files:
             try:
-                pixels_to_microns = parse_physical_size(p)
+                pixels_to_microns = _read_physical_size_micrometers(p)
             except (OSError, ValueError, IndexError, NotImplementedError):
                 logger.debug(f"Could not parse physical size from {p}. Trying next file.")
                 continue
@@ -840,7 +875,8 @@ def create_sdata(
         sdata.images[f"{filtered_name}_nuclei_image"] = nuclei_image_element
         sdata.tables[f"{filtered_name}_nuclei_table"] = table_nuclei
 
-    return _set_reader_metadata(sdata, "macsima")
+    set_reader_provenance(sdata.attrs, reader="macsima")
+    return sdata
 
 
 def create_table(mci: MultiChannelImage) -> ad.AnnData:

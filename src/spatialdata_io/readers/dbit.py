@@ -18,7 +18,7 @@ from xarray import DataArray
 
 from spatialdata_io._constants._constants import DbitKeys
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -369,4 +369,5 @@ def dbit(
     if hasimage:
         imgname = dataset_id + "_image"
         sdata.images[imgname] = image_sd
-    return _set_reader_metadata(sdata, "dbit")
+    set_reader_provenance(sdata.attrs, reader="dbit")
+    return sdata

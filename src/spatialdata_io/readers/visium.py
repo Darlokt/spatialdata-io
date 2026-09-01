@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+import scanpy as sc
+from anndata.io import read_text
 from dask_image.imread import imread
+from h5py import File
 from imageio import imread as imread2
 from PIL import Image as PILImage
 from spatialdata import SpatialData
@@ -20,12 +23,68 @@ from xarray import DataArray
 
 from spatialdata_io._constants._constants import VisiumKeys
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _read_counts, _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from anndata import AnnData
+
 __all__ = ["visium"]
+
+
+def _read_counts(
+    path: str | Path,
+    counts_file: str,
+    library_id: str | None = None,
+    **kwargs: Any,
+) -> tuple[AnnData, str]:
+    """Read counts through the temporary legacy Visium orchestration path."""
+    path = Path(path)
+    if counts_file.endswith(".h5"):
+        adata: AnnData = sc.read_10x_h5(path / counts_file, **kwargs)
+        with File(path / counts_file, mode="r") as file:
+            attrs = dict(file.attrs)
+            if library_id is None:
+                try:
+                    source_library_id = attrs.pop("library_ids")[0]
+                    library_id = (
+                        source_library_id.decode("utf-8")
+                        if isinstance(source_library_id, bytes)
+                        else str(source_library_id)
+                    )
+                except ValueError:
+                    raise KeyError(
+                        "Unable to extract library id from attributes. Please specify one explicitly."
+                    ) from None
+
+            source_metadata: dict[str, object] = {}
+            adata.uns["spatial"] = {library_id: {"metadata": source_metadata}}
+            for key in ["chemistry_description", "software_version"]:
+                if key not in attrs:
+                    continue
+                metadata = attrs[key].decode("utf-8") if isinstance(attrs[key], bytes) else attrs[key]
+                source_metadata[key] = metadata
+
+        return adata, library_id
+    if library_id is None:
+        raise ValueError("Please explicitly specify `library id`.")
+
+    if counts_file.endswith((".csv", ".txt")):
+        adata = read_text(path / counts_file, **kwargs)
+    elif counts_file.endswith(".mtx.gz"):
+        try:
+            from scanpy.readwrite import read_10x_mtx
+        except ImportError:
+            raise ImportError("Please install scanpy to read 10x mtx files, `pip install scanpy`.") from None
+        prefix = counts_file.replace("matrix.mtx.gz", "")
+        adata = read_10x_mtx(path, prefix=prefix, **kwargs)
+    else:
+        raise NotImplementedError("TODO")
+
+    source_metadata = {}
+    adata.uns["spatial"] = {library_id: {"metadata": source_metadata}}
+    return adata, library_id
 
 
 @inject_docs(vx=VisiumKeys)
@@ -255,7 +314,8 @@ def visium(
         )
 
     sdata = SpatialData(images=images, shapes=shapes, tables={"table": table})
-    return _set_reader_metadata(sdata, "visium")
+    set_reader_provenance(sdata.attrs, reader="visium")
+    return sdata
 
 
 def _read_image(image_file: Path, imread_kwargs: Mapping[str, Any]) -> Any:

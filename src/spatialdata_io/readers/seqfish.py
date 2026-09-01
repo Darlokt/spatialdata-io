@@ -27,7 +27,7 @@ from spatialdata.transformations.transformations import Identity, Scale
 
 from spatialdata_io._constants._constants import SeqfishKeys as SK
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -271,7 +271,8 @@ def seqfish(
 
     sdata = SpatialData(images=images, labels=labels, points=points, tables=tables, shapes=shapes)
 
-    return _set_reader_metadata(sdata, "seqfish")
+    set_reader_provenance(sdata.attrs, reader="seqfish")
+    return sdata
 
 
 def _is_ome_tiff_multiscale(ome_tiff_file: Path) -> bool:

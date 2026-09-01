@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 from spatialdata_io._constants._constants import StereoseqKeys as SK
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _initialize_raster_models_kwargs, _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -64,7 +64,9 @@ def stereoseq(
     object and not as labels object (i.e. (y, x)). If you want to visualize this binary image with napari you will
     have to adjust the color limit to be able to see the cells.
     """
-    image_models_kwargs, _ = _initialize_raster_models_kwargs(image_models_kwargs, {})
+    image_models_kwargs = dict(image_models_kwargs)
+    image_models_kwargs.setdefault("chunks", (1, 4096, 4096))
+    image_models_kwargs.setdefault("scale_factors", [2, 2, 2, 2])
     path = Path(path)
 
     if dataset_id is None:
@@ -350,4 +352,5 @@ def stereoseq(
         images[Path(cell_mask_name).stem] = masks
 
     sdata = SpatialData(images=images, tables=tables, shapes=shapes, points=points)
-    return _set_reader_metadata(sdata, "stereoseq")
+    set_reader_provenance(sdata.attrs, reader="stereoseq")
+    return sdata

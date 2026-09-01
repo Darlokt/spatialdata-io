@@ -14,7 +14,7 @@ from spatialdata.models import Image2DModel, Labels2DModel, TableModel
 from spatialdata.transformations.transformations import Identity
 
 from spatialdata_io._constants._constants import SteinbockKeys
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -128,7 +128,8 @@ def steinbock(
     table = TableModel.parse(adata, region=regions.unique().tolist(), region_key="region", instance_key="cell_id")
 
     sdata = SpatialData(images=images, labels=labels, tables={"table": table})
-    return _set_reader_metadata(sdata, "steinbock")
+    set_reader_provenance(sdata.attrs, reader="steinbock")
+    return sdata
 
 
 def _get_images(

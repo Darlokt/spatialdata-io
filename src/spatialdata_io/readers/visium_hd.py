@@ -32,7 +32,7 @@ from xarray import DataArray, DataTree
 
 from spatialdata_io._constants._constants import VisiumHDKeys
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -589,7 +589,8 @@ def visium_hd(
                 sdata=sdata, table_name=bin_size_str, rasterized_labels_name=labels_name
             )
 
-    return _set_reader_metadata(sdata, "visium_hd")
+    set_reader_provenance(sdata.attrs, reader="visium_hd")
+    return sdata
 
 
 def _infer_dataset_id(path: Path) -> str:

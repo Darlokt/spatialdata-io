@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -117,6 +118,14 @@ def _return_table(table: object, **_: object) -> object:
 
 class TestStereoseq:
     """Test explicit ownership of Stereo-seq HDF5 inputs."""
+
+    def test_image_model_options_are_not_mutated_on_layout_failure(self, tmp_path: Path) -> None:
+        options = MappingProxyType({"chunks": (1, 8, 8), "scale_factors": [4, 4]})
+
+        with pytest.raises(FileNotFoundError):
+            stereoseq(tmp_path, dataset_id="sample", image_models_kwargs=options)
+
+        assert dict(options) == {"chunks": (1, 8, 8), "scale_factors": [4, 4]}
 
     def test_cell_bin_file_closes_on_read_failure(self, tmp_path: Path, mocker: MockerFixture) -> None:
         _stereoseq_layout(tmp_path)

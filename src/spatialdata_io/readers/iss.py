@@ -12,7 +12,7 @@ from spatialdata.transformations.transformations import Identity
 from xarray import DataArray
 
 from spatialdata_io._docs import inject_docs
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -112,4 +112,5 @@ def iss(
         labels={REGION: labels_image_parsed},
         table=table,
     )
-    return _set_reader_metadata(sdata, "iss")
+    set_reader_provenance(sdata.attrs, reader="iss")
+    return sdata

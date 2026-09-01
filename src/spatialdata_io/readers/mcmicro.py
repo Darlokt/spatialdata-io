@@ -17,7 +17,7 @@ from spatialdata.transformations import Identity, Translation, set_transformatio
 from yaml.loader import SafeLoader
 
 from spatialdata_io._constants._constants import McmicroKeys
-from spatialdata_io.readers._utils._utils import _set_reader_metadata
+from spatialdata_io.readers._utils.provenance import set_reader_provenance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -191,7 +191,8 @@ def mcmicro(
     tables_dict = _get_tables(path, markers, tma)
 
     sdata = SpatialData(images=images, labels=labels, tables=tables_dict)
-    return _set_reader_metadata(sdata, "mcmicro")
+    set_reader_provenance(sdata.attrs, reader="mcmicro")
+    return sdata
 
 
 def _load_params(path: Path) -> Any:

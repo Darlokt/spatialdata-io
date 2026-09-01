@@ -6,6 +6,7 @@ from typing import Any
 import dask.array as da
 import numpy as np
 import pytest
+from dask import delayed
 from ome_types import OME
 from ome_types.model import (
     Image,
@@ -19,6 +20,7 @@ from ome_types.model import (
     Reagent,
     Screen,
     StructuredAnnotations,
+    UnitsLength,
     Well,
 )
 from tifffile import imwrite
@@ -33,6 +35,7 @@ from spatialdata_io.readers.macsima import (
     _parse_ome_metadata,
     _parse_v0_ome_metadata,
     _parse_v1_ome_metadata,
+    _physical_size_micrometers,
     macsima,
 )
 
@@ -193,6 +196,112 @@ def test_mci_sort_by_channel() -> None:
     mci.sort_by_channel()
     assert mci.get_channel_names() == ["test3", "test2", "test11"]
     assert [x.shape[0] for x in mci.data] == [200, 300, 100]
+
+
+class TestMultiChannelImageCalcScaleFactors:
+    def test_uses_shape_metadata_without_computing_pixels(self) -> None:
+        def fail_on_compute() -> np.ndarray:
+            raise AssertionError("pixel task was computed")
+
+        image = da.from_delayed(
+            delayed(fail_on_compute)(),
+            shape=(1, 8000, 4000),
+            dtype=np.uint16,
+        )
+        mci = MultiChannelImage(data=[image], metadata=[make_ChannelMetadata(name="DAPI", cycle=0)])
+
+        assert mci.calc_scale_factors() == [2, 2, 2]
+        assert mci.calc_scale_factors(default_scale_factor=4) == [4, 4]
+
+    @pytest.mark.parametrize("default_scale_factor", [0, 1])
+    def test_rejects_nonterminating_scale_factor(self, default_scale_factor: int) -> None:
+        image = da.zeros((1, 8, 8), chunks=(1, 8, 8))
+        mci = MultiChannelImage(data=[image], metadata=[make_ChannelMetadata(name="DAPI", cycle=0)])
+
+        with pytest.raises(ValueError, match="greater than 1"):
+            mci.calc_scale_factors(default_scale_factor=default_scale_factor)
+
+
+class TestPhysicalSizeMicrometers:
+    @pytest.mark.parametrize(
+        ("value", "unit", "expected"),
+        [
+            (0.75, UnitsLength.MICROMETER, 0.75),
+            (750.0, UnitsLength.NANOMETER, 0.75),
+        ],
+    )
+    def test_converts_supported_isotropic_units(
+        self,
+        value: float,
+        unit: UnitsLength,
+        expected: float,
+    ) -> None:
+        pixels = Pixels(
+            dimension_order=Pixels_DimensionOrder("XYZCT"),
+            type=PixelType.UINT16,
+            size_x=1,
+            size_y=1,
+            size_z=1,
+            size_c=1,
+            size_t=1,
+            physical_size_x=value,
+            physical_size_x_unit=unit,
+            physical_size_y=value,
+            physical_size_y_unit=unit,
+        )
+
+        assert _physical_size_micrometers(pixels) == pytest.approx(expected)
+
+    def test_rejects_missing_size(self) -> None:
+        pixels = Pixels(
+            dimension_order=Pixels_DimensionOrder("XYZCT"),
+            type=PixelType.UINT16,
+            size_x=1,
+            size_y=1,
+            size_z=1,
+            size_c=1,
+            size_t=1,
+        )
+
+        with pytest.raises(ValueError, match="does not define a physical size"):
+            _physical_size_micrometers(pixels)
+
+    @pytest.mark.parametrize("mismatch", ["size", "unit"])
+    def test_rejects_anisotropic_metadata(self, mismatch: str) -> None:
+        pixels = Pixels(
+            dimension_order=Pixels_DimensionOrder("XYZCT"),
+            type=PixelType.UINT16,
+            size_x=1,
+            size_y=1,
+            size_z=1,
+            size_c=1,
+            size_t=1,
+            physical_size_x=1.0,
+            physical_size_x_unit=UnitsLength.MICROMETER,
+            physical_size_y=2.0 if mismatch == "size" else 1.0,
+            physical_size_y_unit=UnitsLength.NANOMETER if mismatch == "unit" else UnitsLength.MICROMETER,
+        )
+
+        with pytest.raises(NotImplementedError):
+            _physical_size_micrometers(pixels)
+
+    def test_rejects_unsupported_unit(self) -> None:
+        pixels = Pixels(
+            dimension_order=Pixels_DimensionOrder("XYZCT"),
+            type=PixelType.UINT16,
+            size_x=1,
+            size_y=1,
+            size_z=1,
+            size_c=1,
+            size_t=1,
+            physical_size_x=1.0,
+            physical_size_x_unit=UnitsLength.MILLIMETER,
+            physical_size_y=1.0,
+            physical_size_y_unit=UnitsLength.MILLIMETER,
+        )
+
+        with pytest.raises(NotImplementedError):
+            _physical_size_micrometers(pixels)
 
 
 def test_mci_array_reference() -> None:
