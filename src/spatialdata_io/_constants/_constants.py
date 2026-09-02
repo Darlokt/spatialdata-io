@@ -164,30 +164,6 @@ class XeniumKeys(ModeEnum):
 
 
 @unique
-class VisiumKeys(ModeEnum):
-    """Keys for *10X Genomics Visium* formatted dataset."""
-
-    # files and directories
-    FILTERED_COUNTS_FILE = "filtered_feature_bc_matrix.h5"
-    RAW_COUNTS_FILE = "raw_feature_bc_matrix.h5"
-
-    # images
-    IMAGE_HIRES_FILE = "spatial/tissue_hires_image.png"
-    IMAGE_LOWRES_FILE = "spatial/tissue_lowres_image.png"
-
-    # scalefactors
-    SCALEFACTORS_FILE = "scalefactors_json.json"
-    SCALEFACTORS_HIRES = "tissue_hires_scalef"
-    SCALEFACTORS_LOWRES = "tissue_lowres_scalef"
-
-    # spots
-    SPOTS_FILE_1 = "tissue_positions_list.csv"
-    SPOTS_FILE_2 = "tissue_positions.csv"
-    SPOTS_X = "pxl_col_in_fullres"
-    SPOTS_Y = "pxl_row_in_fullres"
-
-
-@unique
 class SteinbockKeys(ModeEnum):
     """Keys for *Steinbock* formatted dataset."""
 

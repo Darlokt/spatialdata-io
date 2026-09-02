@@ -61,6 +61,46 @@ extracted_dir = "Xenium_V1_Protein_Human_Kidney_tiny_outs"
 source = "10x Genomics Xenium 4.0.0, CC BY 4.0"
 
 # -------
+# Classic Visium source datasets are licensed as CC BY 4.0:
+# https://www.10xgenomics.com/datasets/human-lymph-node-1-standard-1-1-0
+# https://www.10xgenomics.com/datasets/adult-mouse-brain-coronal-section-fresh-frozen-1-standard
+# Versioned test assets retain only the filtered count matrix and spatial output.
+
+[[datasets]]
+key = "visium_v1_human_lymph_node"
+group = "visium"
+extracted_dir = "V1_Human_Lymph_Node"
+source = "10x Genomics Visium, Space Ranger 1.1.0, CC BY 4.0"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/spatial-exp/1.1.0/V1_Human_Lymph_Node/V1_Human_Lymph_Node_filtered_feature_bc_matrix.h5"
+known_hash = "sha256:86fd533eb907450e7125b9820183a0ca73776eeafcc5eddae5695b6aabfd9139"
+target = "filtered_feature_bc_matrix.h5"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/spatial-exp/1.1.0/V1_Human_Lymph_Node/V1_Human_Lymph_Node_spatial.tar.gz"
+known_hash = "sha256:812808883366ff9623dc8354847a7211b0d922b2bfc4c9359d6e12e993ea6a73"
+target = "."
+extract = true
+
+[[datasets]]
+key = "visium_v2_1_mouse_brain"
+group = "visium"
+extracted_dir = "V1_Adult_Mouse_Brain"
+source = "10x Genomics Visium, Space Ranger 2.1.0, CC BY 4.0"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/spatial-exp/2.1.0/V1_Adult_Mouse_Brain/V1_Adult_Mouse_Brain_filtered_feature_bc_matrix.h5"
+known_hash = "sha256:8bdce669075cd7e80db4dc5e635ea7fcd2af2f2e639f554e77854037133a7bef"
+target = "filtered_feature_bc_matrix.h5"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/spatial-exp/2.1.0/V1_Adult_Mouse_Brain/V1_Adult_Mouse_Brain_spatial.tar.gz"
+known_hash = "sha256:0d92485e0b6993bd92cfacca77d3a118daac354540af8316eba54775d1286f84"
+target = "."
+extract = true
+
+# -------
 # the Visium HD dataset is licensed as CC BY 4.0, as shown here
 # https://www.10xgenomics.com/support/software/space-ranger/latest/resources/visium-hd-example-data
 
