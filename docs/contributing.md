@@ -390,7 +390,7 @@ We recommend studying existing readers and reusing code from them. A few technic
 
 - Large raster or points data is usually loaded from disk lazily (e.g. with `dask_image.imread()`), which allows returning a `SpatialData` object quickly and defers computation when saving the object to disk in the SpatialData Zarr format, with `sdata.write()`.
 - When the raw data has multiple samples, we recommend adding a coordinate system for each sample, and if the samples are aligned in space, one common coordinate system. A single table containing the annotation for all samples is preferred. See an example in the [`cosmx()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/cosmx.py) reader.
-- Small images should be represented as single-scale images (`xarray.DataArray`), large images as multiscale images (`xarray.DataTree`). The scale factors and chunk shape (`chunks`) should lead to chunks that fit in memory. See an example in [`visium()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/visium.py).
+- Small images should be represented as single-scale images (`xarray.DataArray`), large images as multiscale images (`xarray.DataTree`). The scale factors and chunk shape (`chunks`) should lead to chunks that fit in memory. See an example in [`visium()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/visium/_reader.py).
 
 ##### Experimental readers
 
@@ -481,14 +481,14 @@ pytest -m xenium
 pytest -m "xenium and data"
 pytest -m "xenium and not slow"
 pytest -m "xenium and cli"
-python scripts/test_data_downloader --group xenium
+uv run python scripts/test_data_downloader --group xenium
 SPATIALDATA_IO_TEST_DATA_DIR=/path/to/data pytest -m data
 ```
 
 To download the same optional datasets used by CI, run:
 
 ```bash
-python scripts/test_data_downloader
+uv run python scripts/test_data_downloader
 ```
 
 By default, the downloader skips datasets that already exist. Use `--force` to redownload selected datasets, `--dataset` for a single dataset key, and `--list` to show the available keys.
@@ -498,6 +498,10 @@ stores project-specific metadata such as dataset keys, groups, output directorie
 registry. Prefer a stable repository DOI when one is available. For DOI entries, Pooch loads the repository's per-file hashes
 at runtime and verifies every downloaded file. Otherwise, register the archive URL and its SHA-256 hash as
 `known_hash = "sha256:..."`.
+
+The [optional test-data downloader guide](https://github.com/scverse/spatialdata-io/blob/main/scripts/test_data_downloader/README.md)
+extends this section with the downloader's installation model, all selection and output options, the ZIP/DOI/multi-asset
+manifest forms, checksum generation, and the complete process for adding a dataset or adding files to an existing dataset.
 
 #### Testing multiple versions
 

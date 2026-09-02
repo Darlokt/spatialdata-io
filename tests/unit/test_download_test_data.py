@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -44,7 +45,7 @@ def _make_dataset(
     return download_test_data.TestDataset(
         key=key,
         group=group,
-        extracted_dir=extracted_dir or key,
+        extracted_dir=key if extracted_dir is None else extracted_dir,
         source=source,
         test_path=test_path,
         url="" if doi else url or f"https://example.com/{key}.zip",
@@ -145,6 +146,51 @@ class TestFetchDataset:
         with pytest.raises(ValueError, match="contains no files"):
             download_test_data._fetch_dataset(dataset, tmp_path, tmp_path / dataset.extracted_dir)
 
+    def test_fetches_and_installs_independently_hashed_assets(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        first = tmp_path / "downloaded-counts.h5"
+        first.write_bytes(b"counts")
+        second = tmp_path / "downloaded-spatial.tar.gz"
+        payload = tmp_path / "tissue_positions.csv"
+        payload.write_text("positions", encoding="utf-8")
+        with tarfile.open(second, "w:gz") as archive:
+            archive.add(payload, arcname="spatial/tissue_positions.csv")
+        assets = (
+            manifest.DatasetAsset("https://example.com/counts.h5", SHA256, "filtered_feature_bc_matrix.h5"),
+            manifest.DatasetAsset("https://example.com/spatial.tar.gz", SHA256, ".", extract=True),
+        )
+        dataset = manifest.TestDataset(
+            key="assets",
+            group="group",
+            extracted_dir="assets",
+            source="source",
+            assets=assets,
+        )
+        extracted = tmp_path / "staged"
+        extracted.mkdir()
+        seen_create: dict[str, Any] = {}
+
+        class Manager:
+            def fetch(self, file_name: str) -> str:
+                return str(first if file_name == "asset-0" else second)
+
+        def create(**kwargs: Any) -> Manager:
+            seen_create.update(kwargs)
+            return Manager()
+
+        monkeypatch.setattr(download_test_data.pooch, "create", create)
+
+        download_test_data._fetch_dataset(dataset, tmp_path, extracted)
+
+        assert seen_create["registry"] == {"asset-0": SHA256, "asset-1": SHA256}
+        assert seen_create["urls"] == {
+            "asset-0": "https://example.com/counts.h5",
+            "asset-1": "https://example.com/spatial.tar.gz",
+        }
+        assert (extracted / "filtered_feature_bc_matrix.h5").read_bytes() == b"counts"
+        assert (extracted / "spatial" / "tissue_positions.csv").read_text(encoding="utf-8") == "positions"
+
 
 class TestDatasetManifest:
     def test_manifest_is_valid(self) -> None:
@@ -216,6 +262,39 @@ doi = "10.5281/zenodo.123"
         assert dataset.known_hash == ""
         assert dataset.doi == "10.5281/zenodo.123"
 
+    def test_loads_multi_asset_dataset_from_toml(self, tmp_path: Path) -> None:
+        manifest_path = tmp_path / "datasets.toml"
+        manifest_path.write_text(
+            f"""
+[[datasets]]
+key = "example"
+group = "group"
+extracted_dir = "example"
+source = "example source"
+
+[[datasets.assets]]
+url = "https://example.com/counts.h5"
+known_hash = "{SHA256}"
+target = "filtered_feature_bc_matrix.h5"
+
+[[datasets.assets]]
+url = "https://example.com/spatial.tar.gz"
+known_hash = "{SHA256}"
+target = "."
+extract = true
+""",
+            encoding="utf-8",
+        )
+
+        (dataset,) = manifest.load_datasets(manifest_path)
+
+        assert dataset.url == ""
+        assert dataset.doi == ""
+        assert dataset.assets == (
+            manifest.DatasetAsset("https://example.com/counts.h5", SHA256, "filtered_feature_bc_matrix.h5"),
+            manifest.DatasetAsset("https://example.com/spatial.tar.gz", SHA256, ".", extract=True),
+        )
+
     def test_rejects_duplicate_dataset_keys(self) -> None:
         first = _make_dataset("duplicate", extracted_dir="first")
         second = _make_dataset("duplicate", extracted_dir="second")
@@ -240,6 +319,24 @@ doi = "10.5281/zenodo.123"
         dataset = _make_dataset("unsafe-test-path", test_path="../outside")
 
         with pytest.raises(ValueError, match="test_path must be a relative path"):
+            manifest.validate_datasets((dataset,))
+
+    @pytest.mark.parametrize(
+        "extracted_dir",
+        ["", ".", "/absolute", "../outside", "nested/directory", r"C:\outside"],
+    )
+    def test_rejects_unsafe_extracted_directory(self, extracted_dir: str) -> None:
+        dataset = _make_dataset("unsafe-directory", extracted_dir=extracted_dir)
+
+        with pytest.raises(ValueError, match="extracted_dir"):
+            manifest.validate_datasets((dataset,))
+
+    @pytest.mark.parametrize(("field", "value"), [("key", "Uppercase"), ("group", "has spaces")])
+    def test_rejects_invalid_identifiers(self, field: str, value: str) -> None:
+        values = {"key": "example", "group": "group", field: value}
+        dataset = _make_dataset(**values)
+
+        with pytest.raises(ValueError, match=field):
             manifest.validate_datasets((dataset,))
 
     def test_rejects_invalid_known_hash(self) -> None:
@@ -276,7 +373,45 @@ doi = "10.5281/zenodo.123"
             doi=doi,
         )
 
-        with pytest.raises(ValueError, match="either doi|both an archive"):
+        with pytest.raises(ValueError, match="exactly one source|requires both url and known_hash"):
+            manifest.validate_datasets((dataset,))
+
+    @pytest.mark.parametrize("target", ["", "/absolute", "../outside", r"C:\outside", r"nested\..\outside"])
+    def test_rejects_unsafe_asset_target(self, target: str) -> None:
+        dataset = manifest.TestDataset(
+            key="example",
+            group="group",
+            extracted_dir="example",
+            source="source",
+            assets=(manifest.DatasetAsset("https://example.com/file", SHA256, target),),
+        )
+
+        with pytest.raises(ValueError, match="target"):
+            manifest.validate_datasets((dataset,))
+
+    def test_rejects_duplicate_asset_targets(self) -> None:
+        asset = manifest.DatasetAsset("https://example.com/file", SHA256, "same")
+        dataset = manifest.TestDataset(
+            key="example",
+            group="group",
+            extracted_dir="example",
+            source="source",
+            assets=(asset, asset),
+        )
+
+        with pytest.raises(ValueError, match="duplicate asset target"):
+            manifest.validate_datasets((dataset,))
+
+    def test_rejects_non_boolean_asset_extract(self) -> None:
+        dataset = manifest.TestDataset(
+            key="example",
+            group="group",
+            extracted_dir="example",
+            source="source",
+            assets=(manifest.DatasetAsset("https://example.com/file", SHA256, ".", extract=1),),  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(ValueError, match="extract must be a boolean"):
             manifest.validate_datasets((dataset,))
 
     def test_rejects_manifest_without_datasets_array(self, tmp_path: Path) -> None:
@@ -337,6 +472,38 @@ checksum = "unexpected"
             manifest.load_datasets(manifest_path)
 
 
+class TestInstallAsset:
+    def test_extracts_tar_below_declared_target(self, tmp_path: Path) -> None:
+        payload = tmp_path / "payload.txt"
+        payload.write_text("contents", encoding="utf-8")
+        archive_path = tmp_path / "payload.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(payload, arcname="payload.txt")
+        extracted = tmp_path / "extracted"
+        extracted.mkdir()
+        asset = manifest.DatasetAsset("https://example.com/payload.tar.gz", SHA256, "nested", extract=True)
+
+        download_test_data._install_asset(archive_path, asset, extracted)
+
+        assert not (extracted / "payload.txt").exists()
+        assert (extracted / "nested" / "payload.txt").read_text(encoding="utf-8") == "contents"
+
+    def test_rejects_tar_member_outside_staging_directory(self, tmp_path: Path) -> None:
+        source = tmp_path / "payload.txt"
+        source.write_text("unsafe", encoding="utf-8")
+        archive_path = tmp_path / "unsafe.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            archive.add(source, arcname="../outside.txt")
+        extracted = tmp_path / "extracted"
+        extracted.mkdir()
+        asset = manifest.DatasetAsset("https://example.com/unsafe.tar.gz", SHA256, ".", extract=True)
+
+        with pytest.raises(tarfile.OutsideDestinationError):
+            download_test_data._install_asset(archive_path, asset, extracted)
+
+        assert not (tmp_path / "outside.txt").exists()
+
+
 class TestDownloadDataset:
     def test_skips_existing_dataset_without_force(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -379,6 +546,40 @@ class TestDownloadDataset:
 
         with pytest.raises(download_test_data.DatasetDownloadError, match="error: 403 Client Error"):
             download_test_data.download_dataset(dataset, tmp_path, force=False)
+
+    def test_failed_forced_download_preserves_existing_dataset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        dataset = _make_dataset("existing")
+        target = tmp_path / dataset.extracted_dir
+        target.mkdir()
+        existing = target / "existing.txt"
+        existing.write_text("keep", encoding="utf-8")
+
+        def fetch(*_args: object) -> None:
+            raise requests.HTTPError("download failed")
+
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
+
+        with pytest.raises(download_test_data.DatasetDownloadError, match="download failed"):
+            download_test_data.download_dataset(dataset, tmp_path, force=True)
+
+        assert existing.read_text(encoding="utf-8") == "keep"
+
+    def test_force_replaces_non_directory_destination(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        dataset = _make_dataset("file-target")
+        target = tmp_path / dataset.extracted_dir
+        target.write_text("old", encoding="utf-8")
+
+        def fetch(_dataset: object, _temporary_path: Path, extracted_path: Path) -> None:
+            (extracted_path / "payload.txt").write_text("new", encoding="utf-8")
+
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
+
+        download_test_data.download_dataset(dataset, tmp_path, force=True)
+
+        assert target.is_dir()
+        assert (target / "payload.txt").read_text(encoding="utf-8") == "new"
 
     def test_reports_download_without_expected_contents(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         dataset = _make_dataset("empty")
@@ -439,6 +640,7 @@ class TestMain:
 
         assert exc_info.value.code == 1
         assert attempted == ["first", "second"]
-        output = capsys.readouterr().out
-        assert "Failed to download 1 dataset(s)" in output
-        assert "first" in output
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Failed to download 1 dataset(s)" in captured.err
+        assert "first" in captured.err
