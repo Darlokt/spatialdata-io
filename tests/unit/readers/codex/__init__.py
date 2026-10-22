@@ -1,0 +1,1 @@
+"""CODEX reader module contracts."""

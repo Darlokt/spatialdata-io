@@ -1,3 +1,5 @@
+"""Inspect TIFF storage and semantic metadata without decoding pixels."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -24,6 +26,7 @@ _TIFF_SIGNATURES = frozenset({b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"})
 
 
 def _validate_tiff_signature(path: Path) -> None:
+    """Reject non-TIFF bytes before opening a metadata or pixel decoder."""
     with path.open("rb") as stream:
         signature = stream.read(4)
     if signature not in _TIFF_SIGNATURES:
@@ -37,7 +40,10 @@ def _native_chunks(
     series: int,
     level: int,
 ) -> tuple[int, ...]:
-    store = tiff.aszarr(series=series, level=level)
+    """Read native chunk sizes from a short-lived store without decoding pixels."""
+    # Match TiffPageSeries.shape/axes even for shaped TIFFs, whose store default
+    # retains nonspatial singleton axes. tifffile always preserves X and Y.
+    store = tiff.aszarr(series=series, level=level, squeeze=True)
     try:
         array = zarr.open_array(store=store, mode="r")
         return tuple(array.chunks)
@@ -52,6 +58,7 @@ def _level_metadata(
     series_index: int,
     level_index: int,
 ) -> TiffLevelMetadata:
+    """Describe one pyramid level with consistent shape, axes, and native chunks."""
     shape = tuple(level.shape)
     axes = tuple(level.axes)
     native_chunks = _native_chunks(tiff, series=series_index, level=level_index)
@@ -69,13 +76,16 @@ def _level_metadata(
         raise RasterFormatError(message)
     return TiffLevelMetadata(
         shape=shape,
-        dtype=np.dtype(level.dtype),
+        # Canonicalize equivalent NumPy aliases (notably longlong) for Zarr
+        # interoperability; dtype.str preserves kind, itemsize, and byte order.
+        dtype=np.dtype(level.dtype.str),
         axes=axes,
         native_chunks=native_chunks,
     )
 
 
 def _parse_ome_xml(path: Path, ome_xml: str | None) -> OME | None:
+    """Parse optional OME metadata and attach source context to malformed XML."""
     if ome_xml is None:
         return None
     try:
@@ -86,6 +96,7 @@ def _parse_ome_xml(path: Path, ome_xml: str | None) -> OME | None:
 
 
 def _validate_ome_series(ome: OME | None, series_count: int) -> None:
+    """Require every declared OME image to correspond to one discovered series."""
     if ome is None:
         return
     if len(ome.images) != series_count:
@@ -96,6 +107,7 @@ def _validate_ome_series(ome: OME | None, series_count: int) -> None:
 
 
 def _validate_ome_image_mappings(ome: OME | None, root: Path) -> None:
+    """Reject OME images that claim the same file and starting TIFF directory."""
     if ome is None:
         return
     mapped_by_previous_images: set[tuple[Path, int]] = set()
@@ -120,6 +132,7 @@ def _validate_ome_image_mappings(ome: OME | None, root: Path) -> None:
 
 
 def _resolve_linked_path(root: Path, file_name: str) -> Path:
+    """Resolve an OME file reference without escaping the source directory."""
     linked = (root.parent / file_name).resolve()
     if not linked.is_relative_to(root.parent):
         message = (
@@ -131,6 +144,7 @@ def _resolve_linked_path(root: Path, file_name: str) -> Path:
 
 
 def _validate_linked_paths(root: Path, ome: OME | None) -> None:
+    """Require metadata-linked TIFF sources to exist within the dataset boundary."""
     if ome is not None:
         for image in ome.images:
             for tiff_data in image.pixels.tiff_data_blocks:
@@ -170,6 +184,8 @@ def inspect_tiff(
     -----
     Inspection opens short-lived Zarr stores only to obtain native chunk
     geometry. It never requests a pixel selection or decodes a TIFF segment.
+    Shapes follow tifffile's series convention: nonspatial singleton axes are
+    omitted, while X and Y remain present even when their length is one.
     """
     normalized_path = normalize_file_path(path)
     _validate_tiff_signature(normalized_path)

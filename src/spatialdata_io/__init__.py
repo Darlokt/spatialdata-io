@@ -1,3 +1,7 @@
+"""Load public spatial-omics readers and converters on first access."""
+
+from __future__ import annotations
+
 from importlib import import_module
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
@@ -10,6 +14,7 @@ _LAZY_IMPORTS: dict[str, str] = {
     "cosmx": "spatialdata_io.readers.cosmx",
     "curio": "spatialdata_io.readers.curio",
     "dbit": "spatialdata_io.readers.dbit",
+    "iss": "spatialdata_io.readers.iss",
     "macsima": "spatialdata_io.readers.macsima",
     "mcmicro": "spatialdata_io.readers.mcmicro",
     "merscope": "spatialdata_io.readers.merscope",
@@ -35,6 +40,7 @@ __all__ = [
     "cosmx",
     "curio",
     "dbit",
+    "iss",
     "macsima",
     "mcmicro",
     "merscope",
@@ -56,6 +62,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    """Import and cache a public entry point without eagerly loading all readers."""
     if name in _LAZY_IMPORTS:
         module_path = _LAZY_IMPORTS[name]
         mod = import_module(module_path)
@@ -70,6 +77,7 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
+    """Expose lazy public entry points and package version to introspection."""
     return __all__ + ["__version__"]
 
 
@@ -85,6 +93,7 @@ if TYPE_CHECKING:
 
     # readers file types
     from spatialdata_io.readers.generic import generic, geojson, image
+    from spatialdata_io.readers.iss import iss
     from spatialdata_io.readers.macsima import macsima
     from spatialdata_io.readers.mcmicro import mcmicro
     from spatialdata_io.readers.merscope import merscope

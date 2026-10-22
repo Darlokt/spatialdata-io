@@ -1,0 +1,1 @@
+"""Synthetic CODEX workflow contracts."""

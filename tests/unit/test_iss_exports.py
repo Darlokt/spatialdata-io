@@ -1,4 +1,4 @@
-"""Test the intentionally experimental ISS public surface."""
+"""Test the supported ISS reader's root and package exports."""
 
 from __future__ import annotations
 
@@ -10,17 +10,18 @@ from spatialdata_io.readers.iss import iss
 
 
 class TestIssExports:
-    """Keep ISS experimental until its Stage B cohort passes."""
+    """Expose one supported ISS entry point through the lazy root API."""
 
-    def test_is_experimental_and_not_a_root_export(self) -> None:
-        assert "iss" not in spatialdata_io.__all__
-        assert "iss" not in dir(spatialdata_io)
-        assert not hasattr(spatialdata_io, "iss")
-        assert experimental.iss is iss
+    def test_is_a_root_export_without_an_experimental_alias(self) -> None:
+        assert "iss" in spatialdata_io.__all__
+        assert "iss" in dir(spatialdata_io)
+        assert spatialdata_io.iss is iss
+        assert "iss" not in experimental.__all__
+        assert not hasattr(experimental, "iss")
 
-    def test_api_documentation_lists_only_experimental_export(self) -> None:
+    def test_api_documentation_lists_root_export(self) -> None:
         api_page = Path(__file__).parents[2] / "docs" / "api.md"
         contents = api_page.read_text(encoding="utf-8")
 
-        assert "    experimental.iss\n" in contents
-        assert "\n    iss\n" not in contents
+        assert "    experimental.iss\n" not in contents
+        assert "\n    iss\n" in contents

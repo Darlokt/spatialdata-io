@@ -72,7 +72,15 @@ class TestCliPackage:
             for parameter in command.params:
                 assert isinstance(parameter, click.Option)
                 assert parameter.help, f"{name} --{parameter.name} has no help text"
-                if name != "generic" and parameter.default is not None and not parameter.required:
+                # Empty repeated options mean the caller supplied no values;
+                # the reader resolves that absence instead of receiving a default.
+                absent_sequence = parameter.multiple and parameter.default == ()
+                if (
+                    name != "generic"
+                    and parameter.default is not None
+                    and not parameter.required
+                    and not absent_sequence
+                ):
                     assert parameter.show_default, f"{name} --{parameter.name} hides its default"
                     visible_defaults += 1
 

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import tifffile
 from dask.callbacks import Callback
-from spatialdata import SpatialData
+from spatialdata import SpatialData, read_zarr
 from spatialdata.transformations import get_transformation
 from xarray import DataArray, DataTree
 
@@ -69,6 +69,43 @@ def _write_geojson(path: Path) -> None:
 
 class TestImage:
     """Exercise exact lazy image-model composition."""
+
+    @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+    def test_64bit_image_store_roundtrip(self, tmp_path: Path, dtype: type[np.int64 | np.uint64]) -> None:
+        path = tmp_path / "image.tif"
+        source = np.asarray([[0, 2**53 + 1], [3, np.iinfo(dtype).max]], dtype=dtype)
+        tifffile.imwrite(path, source, photometric="minisblack")
+        result = SpatialData(images={"image": image(path, "yx", "global")})
+
+        target = tmp_path / "image.zarr"
+        result.write(target)
+
+        restored = read_zarr(target)
+        np.testing.assert_array_equal(restored.images["image"].data.compute(), source[None])
+
+    @pytest.mark.parametrize("shape", [(1, 32, 40), (1, 1, 40), (1, 32, 1)])
+    def test_shaped_singleton_channel_preserves_spatial_dimensions(
+        self, tmp_path: Path, shape: tuple[int, int, int]
+    ) -> None:
+        path = tmp_path / "singleton.tif"
+        source = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
+        # Explicit planar storage keeps a singleton X axis from being written
+        # as a trailing sample dimension.
+        tifffile.imwrite(
+            path,
+            source,
+            photometric="minisblack",
+            planarconfig="separate",
+            metadata={"axes": "CYX"},
+            compression="deflate",
+            tile=(16, 16),
+        )
+
+        result = image(path, "yx", "global")
+
+        assert isinstance(result, DataArray)
+        assert result.dims == ("c", "y", "x")
+        np.testing.assert_array_equal(result.data.compute(), source)
 
     @pytest.mark.parametrize("compression", [None, "deflate"])
     @pytest.mark.parametrize(

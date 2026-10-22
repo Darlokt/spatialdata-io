@@ -4,38 +4,6 @@ from spatialdata_io._constants._enum import ModeEnum
 
 
 @unique
-class CodexKeys(ModeEnum):
-    """Keys for *CODEX* formatted dataset."""
-
-    # files and directories
-    FCS_FILE = ".fcs"
-    FCS_FILE_CSV = ".csv"
-    # metadata
-    REGION_KEY = "region"
-    INSTANCE_KEY = "cell_id"
-    SPATIAL_KEY = "spatial"
-    # images
-    IMAGE_TIF = ".tif"
-
-
-class CurioKeys(ModeEnum):
-    """Keys for *Curio* formatted dataset."""
-
-    # files and directories
-    ANNDATA_FILE = "anndata.h5ad"
-    CLUSTER_ASSIGNMENT = "cluster_assignment.txt"
-    METRICS_FILE = "Metrics.csv"
-    VAR_FEATURES_CLUSTERS = "variable_features_clusters.txt"
-    VAR_FEATURES_MORANSI = "variable_features_spatial_moransi.txt"
-    # metadata
-    CATEGORY = "Category"
-    REGION = "cells"
-    REGION_KEY = "region"
-    INSTANCE_KEY = "instance_id"
-    TOP_CLUSTER_DEFINING_FEATURES = "Top_cluster_defining_features"
-
-
-@unique
 class CosmxKeys(ModeEnum):
     """Keys for *Nanostring Cosmx* formatted dataset."""
 
@@ -161,21 +129,6 @@ class XeniumKeys(ModeEnum):
     EXPLORER_SELECTION_X = "X"
     EXPLORER_SELECTION_Y = "Y"
     EXPLORER_SELECTION_KEY = "Selection"
-
-
-@unique
-class SteinbockKeys(ModeEnum):
-    """Keys for *Steinbock* formatted dataset."""
-
-    # files and directories
-    CELLS_FILE = "cells.h5ad"
-    DEEPCELL_MASKS_DIR = "masks_deepcell"
-    ILASTIK_MASKS_DIR = "masks_ilastik"
-    IMAGES_DIR = "ome"
-
-    # suffixes for images and labels
-    IMAGE_SUFFIX = ".ome.tiff"
-    LABEL_SUFFIX = ".tiff"
 
 
 @unique

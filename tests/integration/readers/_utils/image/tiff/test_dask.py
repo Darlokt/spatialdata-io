@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING
 
 import cloudpickle  # type: ignore[import-untyped]  # third-party package has no type information
 import dask
+import dask.array as da
 import numpy as np
 import pytest
 import tifffile
+import zarr
 from tifffile.zarr import ZarrTiffStore
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
@@ -30,6 +32,55 @@ if TYPE_CHECKING:
 
 class TestReadTiff:
     """Read explicit series and levels through serializable native-chunk tasks."""
+
+    @pytest.mark.parametrize("dtype", ["int64", "uint64", ">i8", ">u8"])
+    def test_64bit_dtype_is_interoperable_without_pixel_conversion(self, tmp_path: Path, dtype: str) -> None:
+        path = tmp_path / "labels.tif"
+        source_dtype = np.dtype(dtype)
+        source = np.asarray([[0, 2**53 + 1], [3, np.iinfo(source_dtype).max]], dtype=source_dtype)
+        tifffile.imwrite(path, source, photometric="minisblack")
+
+        result = read_tiff(inspect_tiff(path), series=0, level=0)
+
+        # TIFF decoding already returns native byte order, including for files
+        # whose encoded pixels are big-endian.
+        assert result.data.dtype == source.dtype.newbyteorder("=")
+        target = tmp_path / "labels.zarr"
+        da.to_zarr(result.data, target)
+        np.testing.assert_array_equal(zarr.open_array(target, mode="r")[:], source)
+
+    @pytest.mark.parametrize("compression", [None, "deflate"])
+    @pytest.mark.parametrize("shape", [(1, 32, 40), (1, 1, 40), (1, 32, 1)])
+    def test_shaped_singleton_channels_preserve_spatial_dimensions(
+        self,
+        tmp_path: Path,
+        mocker: MockerFixture,
+        compression: str | None,
+        shape: tuple[int, int, int],
+    ) -> None:
+        path = tmp_path / "singleton.tif"
+        source = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
+        tifffile.imwrite(
+            path,
+            source,
+            photometric="minisblack",
+            planarconfig="separate",
+            metadata={"axes": "CYX"},
+            compression=compression,
+            tile=(16, 16),
+        )
+        selection_spy = mocker.spy(tiff_dask, "_read_tiff_selection")
+
+        result = read_tiff(inspect_tiff(path), series=0, level=0)
+
+        selection_spy.assert_not_called()
+        assert result.axes == ("Y", "X")
+        assert result.data.shape == shape[1:]
+        assert result.data.dtype == source.dtype
+        restored = cloudpickle.loads(cloudpickle.dumps(result.data))
+        np.testing.assert_array_equal(restored[:2, :3].compute(scheduler="synchronous"), source[0, :2, :3])
+        selection_spy.assert_called_once()
+        np.testing.assert_array_equal(result.data.compute(), source[0])
 
     @pytest.mark.parametrize(
         "storage",

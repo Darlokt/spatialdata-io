@@ -1,3 +1,5 @@
+"""Construct native TIFF chunk graphs with task-owned file and store lifetimes."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,9 +25,11 @@ type ChunkSelection = tuple[slice, ...]
 
 
 def _read_tiff_selection(spec: _TiffReadSpec, selection: ChunkSelection) -> NDArray[np.generic]:
+    """Decode one bounded selection and close its task-owned TIFF and Zarr store."""
     try:
         with tifffile.TiffFile(spec.path) as tiff:
-            store = tiff.aszarr(series=spec.series, level=spec.level)
+            # Use the same singleton-axis policy as metadata inspection.
+            store = tiff.aszarr(series=spec.series, level=spec.level, squeeze=True)
             try:
                 source = zarr.open_array(store=store, mode="r")
                 result = np.asarray(source[selection])
@@ -64,6 +68,7 @@ class _TiffArray:
         return len(self.shape)
 
     def __getitem__(self, selection: ChunkSelection) -> NDArray[np.generic]:
+        """Read a concrete slice, satisfying Dask's empty metadata probes without I/O."""
         selection_shape = tuple(
             (size if part.stop is None else part.stop) - (0 if part.start is None else part.start)
             for part, size in zip(selection, self.shape, strict=True)

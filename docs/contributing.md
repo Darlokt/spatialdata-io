@@ -394,7 +394,7 @@ We recommend studying existing readers and reusing code from them. A few technic
 
 ##### Experimental readers
 
-If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. We list these readers under the [`experimental`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/experimental/__init__.py) module. An example of this is the [`iss()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/iss.py) reader for In-Situ Sequencing data.
+If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. Experimental entry points belong under the [`experimental`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/experimental/__init__.py) module until their supported artifact contracts are documented and covered by executable workflows. The public [`iss()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/iss/_reader.py) reader, for example, supports explicitly selected TIFF images, integer segmentation labels, and a linked h5ad table.
 
 #### Separating the constants from the reader logic
 
