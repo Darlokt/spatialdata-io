@@ -61,17 +61,17 @@ def _validate_chunk_value(value: ChunkValue, *, axis: str) -> None:
         raise TypeError(message)
     if isinstance(value, int):
         if value <= 0:
-            message = f"chunks for axis {axis!r} must be positive; found {value}."
+            message = f"chunks for axis {axis!r} must be positive. Found {value}."
             raise ValueError(message)
         return
     if not isinstance(value, tuple):
-        message = f"chunks for axis {axis!r} must be an integer, tuple of integers, or None; found {value!r}."
+        message = f"chunks for axis {axis!r} must be an integer, tuple of integers, or None. Found {value!r}."
         raise TypeError(message)
     if not value or any(isinstance(size, bool) or not isinstance(size, int) for size in value):
-        message = f"chunks for axis {axis!r} must contain a nonempty tuple of integers; found {value!r}."
+        message = f"chunks for axis {axis!r} must contain a nonempty tuple of integers. Found {value!r}."
         raise TypeError(message)
     if any(size <= 0 for size in value):
-        message = f"chunks for axis {axis!r} must contain only positive sizes; found {value!r}."
+        message = f"chunks for axis {axis!r} must contain only positive sizes. Found {value!r}."
         raise ValueError(message)
 
 
@@ -85,19 +85,21 @@ def _normalize_chunks(chunks: Chunks | None) -> tuple[ChunkValue, ChunkValue, Ch
         normalized: tuple[ChunkValue, ChunkValue, ChunkValue] = (chunks, chunks, chunks)
     elif isinstance(chunks, Mapping):
         if set(chunks) != set(TARGET_AXES):
-            message = f"chunks keys must match canonical axes {TARGET_AXES}; found {tuple(chunks)}."
+            message = f"chunks keys must match canonical axes {TARGET_AXES}. Found {tuple(chunks)}."
             raise ValueError(message)
         normalized = (chunks["c"], chunks["y"], chunks["x"])
     elif isinstance(chunks, tuple):
         if len(chunks) != len(TARGET_AXES):
-            message = f"chunks length must match canonical axes {TARGET_AXES}; found {chunks!r}."
+            message = f"chunks length must match canonical axes {TARGET_AXES}. Found {chunks!r}."
             raise ValueError(message)
         normalized = (chunks[0], chunks[1], chunks[2])
     else:
-        message = f"chunks must be an integer, tuple, mapping, or None; found {type(chunks).__name__}."
+        message = f"chunks must be an integer, tuple, mapping, or None. Found {type(chunks).__name__}."
         raise TypeError(message)
+
     for axis, value in zip(TARGET_AXES, normalized, strict=True):
         _validate_chunk_value(value, axis=axis)
+
     return normalized
 
 
@@ -113,16 +115,18 @@ def make_image_options(
     else:
         normalized_axes = tuple(axis.lower() for axis in data_axes)
         if any(len(axis) != 1 or not axis.isalpha() for axis in normalized_axes):
-            message = f"data_axes must contain single alphabetic axis names; found {tuple(data_axes)!r}."
+            message = f"data_axes must contain single alphabetic axis names. Found {tuple(data_axes)!r}."
             raise ValueError(message)
         if len(set(normalized_axes)) != len(normalized_axes):
             message = f"data_axes contains duplicate axes: {tuple(data_axes)!r}."
             raise ValueError(message)
+
     if tiff_series is not None and (
         isinstance(tiff_series, bool) or not isinstance(tiff_series, int) or tiff_series < 0
     ):
-        message = f"tiff_series must be a non-negative integer or None; found {tiff_series!r}."
+        message = f"tiff_series must be a non-negative integer or None. Found {tiff_series!r}."
         raise ValueError(message)
+
     return ImageOptions(
         chunks=_normalize_chunks(chunks),
         data_axes=normalized_axes,
@@ -138,12 +142,13 @@ def _read_raster(path: ArtifactFile, *, options: ImageOptions) -> LazyRaster:
         if series is None:
             if len(metadata.series) != 1:
                 message = (
-                    f"Full-resolution TIFF contains {len(metadata.series)} series; "
-                    "select one explicitly with tiff_series."
+                    f"Full-resolution TIFF contains {len(metadata.series)} series. "
+                    "Select one explicitly with tiff_series."
                 )
                 raise ValueError(message)
             series = 0
         return read_tiff(metadata, series=series, level=0)
+
     if options.tiff_series is not None:
         message = "tiff_series can only select TIFF-family full-resolution images."
         raise ValueError(message)
@@ -154,32 +159,34 @@ def _read_raster(path: ArtifactFile, *, options: ImageOptions) -> LazyRaster:
         return read_png(path)
     if suffix in JPEG_SUFFIXES:
         return read_jpeg(path)
-    message = f"Unsupported image suffix {path.suffix!r}; expected one of {tuple(sorted(VALID_IMAGE_SUFFIXES))}."
+
+    message = f"Unsupported image suffix {path.suffix!r}. Expected one of {tuple(sorted(VALID_IMAGE_SUFFIXES))}."
     raise ValueError(message)
 
 
 def _source_axes(raster: LazyRaster, *, override: tuple[str, ...] | None = None) -> tuple[str, ...]:
     axes = tuple(axis.lower() for axis in (raster.axes if override is None else override))
     if len(axes) != raster.data.ndim:
-        message = f"Image axes rank {len(axes)} does not match raster shape {raster.data.shape}; found {axes!r}."
+        message = f"Image axes rank {len(axes)} does not match raster shape {raster.data.shape}. Found {axes!r}."
         raise ValueError(message)
     if len(set(axes)) != len(axes) or axes.count("x") != 1 or axes.count("y") != 1:
-        message = f"Visium tissue images require unique X and Y axes; found {axes!r}."
+        message = f"Visium tissue images require unique X and Y axes. Found {axes!r}."
         raise ValueError(message)
 
     channel_indices = [index for index, axis in enumerate(axes) if axis in CHANNEL_AXES]
     if len(channel_indices) > 1:
-        message = f"Visium tissue images permit at most one channel or sample axis; found {axes!r}."
+        message = f"Visium tissue images permit at most one channel or sample axis. Found {axes!r}."
         raise ValueError(message)
     channel_index = channel_indices[0] if channel_indices else None
     for index, (axis, size) in enumerate(zip(axes, raster.data.shape, strict=True)):
         if axis in {"x", "y"} or index == channel_index or size == 1:
             continue
         message = (
-            f"Visium tissue image axis {axis!r} has length {size} and no supported spatial or channel meaning; "
-            "provide explicit data_axes for an ambiguous TIFF or select a spatially 2D series."
+            f"Visium tissue image axis {axis!r} has length {size} and no supported spatial or channel meaning. "
+            "Provide explicit data_axes for an ambiguous TIFF or select a spatially 2D series."
         )
         raise ValueError(message)
+
     return tuple("c" if index == channel_index else axis for index, axis in enumerate(axes))
 
 
@@ -189,6 +196,7 @@ def _fullres_scale_factors(shape: tuple[int, ...]) -> tuple[int, ...] | None:
     while spatial_size >= FULLRES_DOWNSCALE_FACTOR and len(factors) < MAX_FULLRES_DOWNSCALING_STEPS:
         factors.append(FULLRES_DOWNSCALE_FACTOR)
         spatial_size //= FULLRES_DOWNSCALE_FACTOR
+
     return tuple(factors) or None
 
 
@@ -206,6 +214,7 @@ def _parse_image(
         target_axes=TARGET_AXES,
         add_missing=("c",) if "c" not in {axis.lower() for axis in source_axes} else (),
     )
+
     return Image2DModel.parse(
         normalized,
         dims=TARGET_AXES,
@@ -240,6 +249,8 @@ def read_images(
     elif options.data_axes is not None or options.tiff_series is not None:
         message = "data_axes and tiff_series require fullres_image_file."
         raise ValueError(message)
+
+    # Downsampled-image coordinates map back to full resolution by inverse scale.
     if layout.hires_image is not None:
         raster = read_png(layout.hires_image)
         images[f"{dataset_id}_hires_image"] = _parse_image(
@@ -251,6 +262,7 @@ def read_images(
             },
             chunks=options.chunks,
         )
+
     if layout.lowres_image is not None:
         raster = read_png(layout.lowres_image)
         images[f"{dataset_id}_lowres_image"] = _parse_image(
@@ -262,4 +274,5 @@ def read_images(
             },
             chunks=options.chunks,
         )
+
     return images

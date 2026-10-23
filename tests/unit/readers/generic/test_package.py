@@ -34,5 +34,6 @@ class TestGenericPackage:
         parameters = inspect.signature(generic_package.image).parameters
 
         assert "use_tiff_memmap" not in parameters
+
         for name in ("tiff_series", "tiff_level", "chunks", "scale_factors"):
             assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY

@@ -33,6 +33,7 @@ class TestGeojson:
 
         assert result is expected
         parse.assert_called_once()
+
         args, kwargs = parse.call_args
         assert args == (path,)
         assert isinstance(kwargs["transformations"]["cells"], Identity)

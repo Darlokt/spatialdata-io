@@ -45,14 +45,14 @@ _IMAGE_RANK = 3
     type=click.IntRange(min=2),
     multiple=True,
     default=(),
-    help="Repeat for each label-pyramid level; requires <=32-bit integer masks.",
+    help="Repeat for each label-pyramid level. Requires <=32-bit integer masks.",
 )
 @click.option(
     "--chunks",
     type=click.IntRange(min=1),
     multiple=True,
     default=(),
-    help="One size for all axes or three sizes in CYX order; labels use YX sizes.",
+    help="One size for all axes or three sizes in CYX order. Labels use YX sizes.",
 )
 def steinbock_command(input_path: Path, output_path: Path, **options: Unpack[_SteinbockOptions]) -> None:
     """Read matched Steinbock samples and write their linked SpatialData store."""

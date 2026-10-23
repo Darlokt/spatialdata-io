@@ -37,9 +37,12 @@ class TestCurio:
         write_curio(tmp_path)
         path = tmp_path / f"sample_{suffix}"
         path.write_text("", encoding="utf-8")
+
         with pytest.raises((pd.errors.EmptyDataError, ReaderFormatError)) as raised:
             curio(tmp_path)
+
         details = str(raised.value) + " ".join(getattr(raised.value, "__notes__", []))
+
         assert "curio" in details
         assert str(path) in details
 
@@ -49,7 +52,9 @@ class TestCurio:
         table = ad.read_h5ad(path)
         table.X = np.eye(3, dtype=np.float32)
         table.write_h5ad(path)
+
         result = curio(tmp_path).tables["table"]
+
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.dtype == np.dtype(np.float32)
         np.testing.assert_array_equal(result.X.data, [1, 1, 1])
@@ -57,6 +62,8 @@ class TestCurio:
     def test_final_linkage_once_uses_materialized_shape_ids(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_curio(tmp_path)
         parse = mocker.spy(curio_reader, "parse_linked_table")
+
         result = curio(tmp_path)
+
         parse.assert_called_once()
         assert parse.call_args.kwargs["expected_instance_ids"]["cells"] is result.shapes["cells"].index

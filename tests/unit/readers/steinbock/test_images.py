@@ -47,6 +47,7 @@ class TestImageOptions:
 
     def test_factor_ownership(self) -> None:
         image_factors, label_factors = [2, 3], [2]
+
         result = _image_options(
             image_scale_factors=image_factors, labels_scale_factors=label_factors, chunks=(1, 8, 16)
         )
@@ -61,12 +62,14 @@ class TestImageOptions:
     def test_invalid_factors(self, factors: list[float]) -> None:
         with pytest.raises(ValueError, match="image_scale_factors"):
             _image_options(image_scale_factors=factors, labels_scale_factors=None, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Invalid values from an untyped caller.
+
         with pytest.raises(ValueError, match="labels_scale_factors"):
             _image_options(image_scale_factors=None, labels_scale_factors=factors, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Invalid values from an untyped caller.
 
     @pytest.mark.parametrize("chunks", [None, 16, (1, 8, 16)])
     def test_valid_chunks(self, chunks: int | tuple[int, int, int] | None) -> None:
         result = _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=chunks)
+
         assert result.chunks == chunks
 
     @pytest.mark.parametrize("chunks", [0, -1, (1, 0, 2), (), (1, 2), True, 2.0, "auto", (1, 2.0, 3)])
@@ -81,8 +84,10 @@ class TestReadRaster:
     def test_malformed_tiff_context(self, tmp_path: Path) -> None:
         path = tmp_path / "broken.tiff"
         path.write_bytes(b"not TIFF")
+
         with pytest.raises(ValueError, match="TIFF") as caught:
             _read_raster(ArtifactFile(path), target_axes=("c", "y", "x"))
+
         assert any("steinbock" in note and str(path) in note for note in caught.value.__notes__)
 
     def test_multiple_series_rejected(self, tmp_path: Path) -> None:
@@ -90,6 +95,7 @@ class TestReadRaster:
         with tifffile.TiffWriter(path) as writer:
             writer.write(np.zeros((8, 10), dtype=np.uint16))
             writer.write(np.ones((6, 7), dtype=np.uint16))
+
         with pytest.raises(ReaderFormatError, match="2 series"):
             _read_raster(ArtifactFile(path), target_axes=("c", "y", "x"))
 
@@ -97,6 +103,7 @@ class TestReadRaster:
     def test_nonspatial_stack_axes_rejected(self, tmp_path: Path, axes: str) -> None:
         path = tmp_path / "stack.tiff"
         tifffile.imwrite(path, np.zeros((2, 8, 10), dtype=np.uint16), photometric="minisblack", metadata={"axes": axes})
+
         with pytest.raises(ReaderFormatError, match="length 2"):
             _read_raster(ArtifactFile(path), target_axes=("c", "y", "x"))
 
@@ -120,6 +127,7 @@ class TestReadRasters:
         tifffile.imwrite(sample.labels, np.zeros(shape, dtype=dtype), photometric="minisblack")
         if invalid == "no_ome":
             tifffile.imwrite(sample.image, image, ome=False, photometric="minisblack", metadata={"axes": "CYX"})
+
         options = _image_options(
             image_scale_factors=[128] if invalid == "image_factor" else None,
             labels_scale_factors=[128]
@@ -130,6 +138,7 @@ class TestReadRasters:
             chunks=None,
         )
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
+
         with pytest.raises(ValueError, match=r"extent|integer mask|32-bit|OME metadata"):
             _read_rasters(sample, options)
         pixels.assert_not_called()
@@ -139,7 +148,9 @@ class TestReadRasters:
         sample, image, _ = _write_sample(tmp_path)
         metadata = {"axes": "CYX"} if names is None else {"axes": "CYX", "Channel": {"Name": names}}
         tifffile.imwrite(sample.image, image, ome=True, photometric="minisblack", metadata=metadata)
+
         result = _read_rasters(sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None))
+
         assert isinstance(result.image, DataArray)
         expected = names if names and all(names) and len(set(names)) == len(names) else ["Channel:0:0", "Channel:0:1"]
         assert result.image.coords["c"].to_numpy().tolist() == expected
@@ -157,7 +168,9 @@ class TestReadRasters:
             photometric="minisblack",
             metadata={"axes": "CYX", "Channel": {"Name": names}},
         )
+
         result = _read_rasters(sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None))
+
         assert isinstance(result.image, DataArray)
         assert result.image.coords["c"].to_numpy().tolist() == names
         np.testing.assert_array_equal(result.image.data.compute(), image)
@@ -171,7 +184,9 @@ class TestReadRasters:
             sample.image, image, ome=True, photometric="minisblack", planarconfig="separate", metadata={"axes": "CYX"}
         )
         tifffile.imwrite(sample.labels, labels, photometric="minisblack")
+
         result = _read_rasters(sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None))
+
         assert isinstance(result.image, DataArray)
         assert isinstance(result.labels, DataArray)
         assert result.image.shape == shape
@@ -196,6 +211,7 @@ class TestReadRasters:
         tifffile.imwrite(sample.labels, labels, photometric="minisblack", tile=(16, 16), compression=compression)
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
+
         with Callback(posttask=tasks):
             result = _read_rasters(
                 sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None)
@@ -204,7 +220,9 @@ class TestReadRasters:
         pixels.assert_not_called()
         assert isinstance(result.image, DataArray)
         assert isinstance(result.labels, DataArray)
-        restored = pickle.loads(pickle.dumps(result.image.data))  # The test owns the serialized graph.
+
+        restored = pickle.loads(pickle.dumps(result.image.data))  # noqa: S301, RUF100 - Test-owned graph.
+
         assert restored.chunks == ((1, 1), (16, 16, 16), (16, 16, 16, 16))
         np.testing.assert_array_equal(restored[:1, :4, :6].compute(scheduler="synchronous"), image[:1, :4, :6])
         assert pixels.call_count == 1
@@ -219,9 +237,11 @@ class TestReadRasters:
         self, tmp_path: Path, chunks: int | tuple[int, int, int]
     ) -> None:
         sample, _, _ = _write_sample(tmp_path)
+
         result = _read_rasters(
             sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=chunks)
         )
+
         assert isinstance(result.image, DataArray)
         assert isinstance(result.labels, DataArray)
         assert result.image.data.chunksize == ((1, 8, 16) if isinstance(chunks, tuple) else (2, 8, 8))
@@ -244,9 +264,11 @@ class TestReadRasters:
             tile=(16, 16),
         )
         tifffile.imwrite(sample.labels, labels, photometric="minisblack", tile=(16, 16))
+
         result = _read_rasters(
             sample, _image_options(image_scale_factors=factors, labels_scale_factors=factors, chunks=None)
         )
+
         assert isinstance(result.image, DataTree)
         assert isinstance(result.labels, DataTree)
         assert len(result.labels.children) == len(factors) + 1

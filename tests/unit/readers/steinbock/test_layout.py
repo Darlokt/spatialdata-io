@@ -34,7 +34,9 @@ class TestDiscoverLayout:
         (tmp_path / "ome" / "unrelated.ome.tiff.backup").touch()
         (tmp_path / "ome" / "unrelated.tiff").touch()
         (tmp_path / f"masks_{kind}" / "unrelated.tiff.backup").touch()
+
         layout = _discover_layout(tmp_path, labels_kind=kind)
+
         assert layout.root == tmp_path.resolve()
         assert layout.table == tmp_path / "cells.h5ad"
         assert [sample.name for sample in layout.samples] == ["sample-a", "sample-b"]
@@ -49,7 +51,9 @@ class TestDiscoverLayout:
         name = "sample.tiff-in-tissue"
         (tmp_path / "ome" / "sample-a.ome.tiff").rename(tmp_path / "ome" / f"{name}.ome.tiff")
         (tmp_path / "masks_deepcell" / "sample-a.tiff").rename(tmp_path / "masks_deepcell" / f"{name}.tiff")
+
         layout = _discover_layout(tmp_path, labels_kind="deepcell")
+
         assert [sample.name for sample in layout.samples] == ["sample-b", name]
 
     @pytest.mark.parametrize("name", ["sample name", "sample:name", "sample?", "sample[1]", "__private", ".", ".."])
@@ -57,8 +61,10 @@ class TestDiscoverLayout:
         _write_paths(tmp_path)
         (tmp_path / "ome" / f"{name}.ome.tiff").touch()
         (tmp_path / "masks_deepcell" / f"{name}.tiff").touch()
+
         with pytest.raises(ReaderFormatError, match="sample names") as caught:
             _discover_layout(tmp_path, labels_kind="deepcell")
+
         assert caught.value.context.reader == "steinbock"
         assert caught.value.path == tmp_path
 
@@ -66,6 +72,7 @@ class TestDiscoverLayout:
         _write_paths(tmp_path)
         (tmp_path / "ome" / "SAMPLE-A.ome.tiff").touch()
         (tmp_path / "masks_deepcell" / "SAMPLE-A.tiff").touch()
+
         with pytest.raises(ReaderFormatError, match="case-insensitively conflicting"):
             _discover_layout(tmp_path, labels_kind="deepcell")
 
@@ -83,8 +90,10 @@ class TestDiscoverLayout:
             artifact.rmdir()
         else:
             artifact.unlink()
+
         with pytest.raises(FileNotFoundError) as raised:
             _discover_layout(tmp_path, labels_kind="deepcell")
+
         assert raised.value.filename == str(artifact)
 
     @pytest.mark.parametrize(
@@ -102,6 +111,7 @@ class TestDiscoverLayout:
         else:
             artifact.unlink()
             artifact.mkdir()
+
         with pytest.raises(NotADirectoryError if directory else IsADirectoryError):
             _discover_layout(tmp_path, labels_kind="deepcell")
 
@@ -115,6 +125,7 @@ class TestDiscoverLayout:
         if missing == "all":
             (tmp_path / "ome" / "sample-b.ome.tiff").unlink()
             (tmp_path / "masks_deepcell" / "sample-a.tiff").unlink()
+
         with pytest.raises(ReaderFormatError, match="at least one sample"):
             _discover_layout(tmp_path, labels_kind="deepcell")
 
@@ -122,6 +133,7 @@ class TestDiscoverLayout:
         _write_paths(tmp_path)
         (tmp_path / "ome" / ".ome.tiff").touch()
         (tmp_path / "masks_deepcell" / ".tiff").touch()
+
         with pytest.raises(ReaderFormatError, match="nonempty name"):
             _discover_layout(tmp_path, labels_kind="deepcell")
 
@@ -135,6 +147,7 @@ class TestDiscoverLayout:
         artifact = dataset / relative
         artifact.unlink()
         artifact.symlink_to(outside)
+
         with pytest.raises(ReaderFormatError, match="outside"):
             _discover_layout(dataset, labels_kind="deepcell")
 
@@ -147,11 +160,13 @@ class TestDiscoverLayout:
         artifact = dataset / directory
         artifact.rename(outside)
         artifact.symlink_to(outside, target_is_directory=True)
+
         with pytest.raises(ReaderFormatError, match="outside"):
             _discover_layout(dataset, labels_kind="deepcell")
 
     def test_root_not_directory(self, tmp_path: Path) -> None:
         root = tmp_path / "not-a-directory"
         root.touch()
+
         with pytest.raises(NotADirectoryError):
             _discover_layout(root, labels_kind="deepcell")

@@ -239,12 +239,14 @@ class TestImageArchitecture:
             imported: list[str] = []
             for node in ast.walk(tree):
                 imported.extend(self._imported_modules(node))
+
             imports = {module.split(".")[0] for module in imported}
             calls = {
                 node.func.attr
                 for node in ast.walk(tree)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
             }
+
             assert imports.isdisjoint(forbidden_imports), path
             assert calls.isdisjoint(forbidden_calls), path
 

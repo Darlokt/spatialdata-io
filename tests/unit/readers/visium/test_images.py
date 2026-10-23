@@ -121,6 +121,7 @@ class TestReadImages:
         pyramid = images["sample_full_image"]
         assert isinstance(pyramid, DataTree)
         assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
+
         image = pyramid["scale0"]["image"]
         assert image.dims == ("c", "y", "x")
         assert image.shape == expected.shape
@@ -158,6 +159,7 @@ class TestReadImages:
                 transforms=_transforms(),
                 options=make_image_options(chunks=None, data_axes=None, tiff_series=None),
             )
+
             pyramid = images["sample_full_image"]
             assert isinstance(pyramid, DataTree)
             assert pyramid["scale0"]["image"].shape == (1, 5, 7)
@@ -273,6 +275,7 @@ class TestReadImages:
             transforms=_transforms(),
             options=make_image_options(chunks=None, data_axes="cyx", tiff_series=None),
         )
+
         assert images["sample_full_image"]["scale0"]["image"].shape == (3, 5, 7)
 
     def test_drops_named_singleton_dimensions(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -312,6 +315,7 @@ class TestReadImages:
             transforms=_transforms(),
             options=make_image_options(chunks=None, data_axes=None, tiff_series=1),
         )
+
         selected = images["sample_full_image"]["scale0"]["image"]
         assert selected.dtype == second.dtype
         np.testing.assert_array_equal(selected.data.compute(), second[None])
@@ -346,8 +350,11 @@ class TestReadImages:
             )
 
         assert not executed
+
         base = images["sample_full_image"]["scale0"]["image"]
         pickle.dumps(base.data.__dask_graph__())
+
+        # Default 1024-pixel chunks span four native tiles along each spatial axis.
         np.testing.assert_array_equal(base.data[0, :8, :8].compute(scheduler="synchronous"), expected[:8, :8])
         assert selection_spy.call_count == 16
 

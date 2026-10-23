@@ -68,7 +68,7 @@ def visium(  # noqa: PLR0913, RUF100
 
     Full-resolution TIFF/BigTIFF/BTF, PNG, and JPEG inputs are optional.
     Space Ranger hires and lowres PNGs are discovered independently. Pixel
-    decoding remains lazy; TIFF construction retains native storage chunks and
+    decoding remains lazy. TIFF construction retains native storage chunks and
     requested chunks add lazy rechunking. Full-resolution images receive up to
     four lazy twofold pyramid reductions. PNG and JPEG computation necessarily
     decodes a complete frame. Tissue imagery is spatially two-dimensional and
@@ -85,7 +85,7 @@ def visium(  # noqa: PLR0913, RUF100
         HDF5 library ID or a legacy count filename prefix.
     counts_source
         Optional HDF5 file or MEX directory. Relative paths resolve below
-        ``path``; absolute paths are permitted. Selecting raw counts preserves
+        ``path``. Absolute paths are permitted. Selecting raw counts preserves
         count barcodes whose position rows have ``in_tissue=0``.
     fullres_image_file
         Optional full-resolution tissue image, resolved like ``counts_source``.
@@ -101,7 +101,7 @@ def visium(  # noqa: PLR0913, RUF100
         This option does not apply to PNG or JPEG inputs.
     tiff_series
         Optional zero-based full-resolution TIFF series. A sole series is
-        selected automatically; a multi-series TIFF requires this option.
+        selected automatically. A multi-series TIFF requires this option.
     chunks
         Requested canonical ``CYX`` model chunks. By default, spatial axes are
         rechunked to 1024 and source channel chunks are retained.
@@ -127,7 +127,7 @@ def visium(  # noqa: PLR0913, RUF100
     -----
     The reader never mutates caller-owned scientific containers. Counts,
     position metadata, circles, and the linked table are eager and owned by the
-    returned object. Raster metadata inspection is eager and bounded; raster
+    returned object. Raster metadata inspection is eager and bounded. Raster
     pixels remain path-backed and lazy. Coordinates are full-resolution pixels
     with ``x=pxl_col_in_fullres`` and ``y=pxl_row_in_fullres``. The scale-factor
     value ``spot_diameter_fullres`` is divided by two to construct circle radii.
@@ -136,6 +136,7 @@ def visium(  # noqa: PLR0913, RUF100
         message = "make_var_names_unique must be a boolean."
         raise TypeError(message)
     image_options = make_image_options(chunks=chunks, data_axes=data_axes, tiff_series=tiff_series)
+
     layout = discover_layout(
         path,
         counts_source=counts_source,
@@ -143,16 +144,19 @@ def visium(  # noqa: PLR0913, RUF100
         positions_file=positions_file,
         scale_factors_file=scale_factors_file,
     )
+
     count_metadata = read_count_metadata(layout.counts)
     resolved_id = resolve_dataset_id(dataset_id, layout.counts, count_metadata)
     scale_factors = read_scale_factors(layout.scale_factors)
     transforms = make_transforms(scale_factors)
+
     images = read_images(
         layout,
         dataset_id=resolved_id,
         transforms=transforms,
         options=image_options,
     )
+
     positions = read_positions(layout)
     prepared = prepare_table(
         layout,
@@ -164,6 +168,8 @@ def visium(  # noqa: PLR0913, RUF100
             make_var_names_unique=make_var_names_unique,
         ),
     )
+
+    # Space Ranger reports spot diameter, while ShapesModel stores circle radius.
     circles = make_circles(
         prepared.positions,
         dataset_id=resolved_id,
@@ -171,6 +177,7 @@ def visium(  # noqa: PLR0913, RUF100
         transforms=transforms,
     )
     table = link_table(prepared, dataset_id=resolved_id, shape_index=circles.index)
+
     result = SpatialData(images=images, shapes={resolved_id: circles}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="visium", format_version=count_metadata.software_version)
     return result

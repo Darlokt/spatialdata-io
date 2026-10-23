@@ -37,6 +37,7 @@ def _discover_layout(
     raw_image = require_caller_file(root, raw_image_file, context=ReaderErrorContext("iss", "raw image"))
     labels = require_caller_file(root, labels_file, context=ReaderErrorContext("iss", "labels"))
     table = require_caller_file(root, table_file, context=ReaderErrorContext("iss", "counts"))
+
     for artifact in (raw_image, labels):
         if artifact.suffix.lower() not in _TIFF_SUFFIXES:
             message = f"ISS raster {artifact} must be a TIFF, OME-TIFF, BigTIFF, or BTF file."
@@ -44,4 +45,5 @@ def _discover_layout(
     if table.suffix.lower() != ".h5ad":
         message = f"ISS table {table} must be an h5ad file."
         raise ValueError(message)
+
     return _IssLayout(root, raw_image, labels, table)

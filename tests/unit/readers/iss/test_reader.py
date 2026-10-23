@@ -58,6 +58,7 @@ class TestIss:
         parse = mocker.spy(iss_reader, "parse_linked_table")
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
+
         with Callback(posttask=tasks):
             result = iss(
                 tmp_path,
@@ -95,6 +96,7 @@ class TestIss:
             table.X = np.full((2, 3), np.nan)
         table.write_h5ad(table_file)
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
+
         with pytest.raises(ValueError, match=r"duplicate|regions|finite|absent") as caught:
             iss(
                 tmp_path,
@@ -117,6 +119,7 @@ class TestIss:
         tifffile.imwrite(tmp_path / "labels.tiff", labels.reshape(32, 40), photometric="minisblack")
         for storage in (sparse.csr_array, sparse.csr_matrix):
             mocker.patch.object(storage, "toarray", side_effect=AssertionError("expression densified"))
+
         result = iss(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
         counts = result.tables["table"].X
         assert isinstance(counts, sparse.csr_array)

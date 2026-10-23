@@ -133,6 +133,7 @@ class TestImage:
         expected = source if transpose is None else source.transpose(transpose)
         if "C" not in source_axes:
             expected = expected[None]
+
         assert isinstance(result, DataArray)
         assert result.dims == expected_dims
         assert result.dtype == source.dtype
@@ -172,6 +173,7 @@ class TestImage:
         computed = result.data[0, :8, :8].compute(scheduler="synchronous")
 
         np.testing.assert_array_equal(computed, source[:8, :8])
+        # The requested region belongs to one 1024-pixel chunk spanning 4x4 tiles.
         assert selection_spy.call_count == 16
 
     def test_selects_tiff_series(self, tmp_path: Path) -> None:
@@ -293,6 +295,7 @@ class TestGenericToZarr:
         generic_to_zarr(path, output, data_axes="yxc")
 
         assert capsys.readouterr().out == ""
+
         spatial_data = SpatialData.read(output)
         result = cast("DataArray", spatial_data["image"])
         np.testing.assert_array_equal(result.data.compute(), source.transpose(2, 0, 1))
@@ -318,6 +321,7 @@ class TestGenericToZarr:
         parse = mocker.patch("spatialdata_io.converters.generic_to_zarr.generic")
         with pytest.raises(ValueError, match="already exists"):
             generic_to_zarr(tmp_path / "missing.png", output, name="regions", data_axes="yx")
+
         parse.assert_not_called()
 
 
@@ -359,6 +363,7 @@ class TestReadGenericWrapper:
 
         assert result.exit_code == 0, result.output
         assert f"Data written to {output}" in result.output
+
         spatial_data = SpatialData.read(output)
         stored = cast("DataArray", spatial_data["series"])
         assert stored.chunksizes == {"c": (1,), "y": (4, 4, 1), "x": (5, 5, 1)}
@@ -384,6 +389,7 @@ class TestReadGenericWrapper:
         output = tmp_path / "output.zarr"
         image_path.write_bytes(imagecodecs.png_encode(np.zeros((5, 7), dtype=np.uint8)))
         _write_geojson(shapes_path)
+
         create = runner.invoke(
             generic_command,
             ["--input", str(image_path), "--output", str(output), "--data-axes", "yx"],
@@ -397,6 +403,7 @@ class TestReadGenericWrapper:
 
         assert append.exit_code == 0, append.output
         assert f"Element regions written to {output}" in append.output
+
         spatial_data = SpatialData.read(output)
         assert set(spatial_data.images) == {"image"}
         assert set(spatial_data.shapes) == {"regions"}

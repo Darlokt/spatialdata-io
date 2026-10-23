@@ -22,6 +22,7 @@ def _read_table(path: ArtifactFile, *, instance_key: str | None, label_dtype: np
     except (OSError, ValueError) as error:
         add_reader_context(error, context=context, path=path)
         raise
+
     if table.X is None:
         raise ReaderFormatError(
             context=context,
@@ -54,7 +55,8 @@ def _set_instance_ids(
 ) -> None:
     """Set exact positive integer IDs in an owned frame within the label dtype's range."""
     context = ReaderErrorContext("iss", "counts")
-    # Parse decimal index strings as Python integers; float64 loses IDs above 2**53.
+
+    # Parse decimal index strings as Python integers. Float64 loses IDs above 2**53.
     label_max = np.iinfo(label_dtype.str).max
     key = "instance_id" if instance_key is None else instance_key
     if instance_key is None:
@@ -72,8 +74,9 @@ def _set_instance_ids(
                 context=context,
                 path=path,
                 found="nonpositive or out-of-range index identifiers",
-                expected=f"positive label IDs representable by {label_dtype}; zero is background",
+                expected=f"positive label IDs representable by {label_dtype}. Zero is background",
             )
+
         index_dtype = np.uint64 if values and max(values) > np.iinfo(np.int64).max else np.int64
         obs[key] = np.asarray(values, dtype=index_dtype)
     else:
@@ -84,6 +87,7 @@ def _set_instance_ids(
                 found=f"missing observation column {key!r}",
                 expected="the requested integer instance column",
             )
+
         column = obs[key]
         if (
             column.isna().any()
@@ -101,9 +105,10 @@ def _set_instance_ids(
                 context=context,
                 path=path,
                 found="nonpositive or out-of-range instance identifiers",
-                expected=f"positive label IDs representable by {label_dtype}; zero is background",
+                expected=f"positive label IDs representable by {label_dtype}. Zero is background",
             )
-        # AnnData's parser needs >=16-bit integer columns; nullable integer masks
+
+        # AnnData's parser needs >=16-bit integer columns. Nullable integer masks
         # are removed only after rejecting nulls, without changing numeric values.
         dtype = np.dtype(str(column.dtype).lower())
         if dtype.itemsize == 1:

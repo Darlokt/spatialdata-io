@@ -34,6 +34,7 @@ class TestVisium:
             for name, parameter in signature.parameters.items()
             if name != "path"
         )
+
         assert signature.parameters["make_var_names_unique"].default is True
         assert signature.parameters["data_axes"].default is None
         assert signature.parameters["tiff_series"].default is None

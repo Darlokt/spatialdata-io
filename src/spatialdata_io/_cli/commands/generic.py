@@ -43,14 +43,14 @@ if TYPE_CHECKING:
     type=click.IntRange(min=0),
     default=0,
     show_default=True,
-    help="Zero-based TIFF series; only valid for TIFF-family inputs.",
+    help="Zero-based TIFF series. Only valid for TIFF-family inputs.",
 )
 @click.option(
     "--tiff-level",
     type=click.IntRange(min=0),
     default=0,
     show_default=True,
-    help="Zero-based TIFF pyramid level; only valid for TIFF-family inputs.",
+    help="Zero-based TIFF pyramid level. Only valid for TIFF-family inputs.",
 )
 @click.option(
     "--chunks",
@@ -92,6 +92,7 @@ def generic_command(
         tiff_level=options["tiff_level"],
         chunks=normalized_chunks,
     )
+
     element_name = options["element_name"]
     stored_name = input_path.stem if element_name is None else element_name
     if output_existed:

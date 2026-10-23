@@ -44,6 +44,7 @@ def _discover_layout(path: str | Path) -> _CurioLayout:
     context = ReaderErrorContext("curio", "dataset layout")
     root = normalize_dataset_root(path, context=context)
     candidates = sorted_paths(root.iterdir(), context=context, search_path=root)
+
     artifacts: list[ArtifactFile] = []
     prefixes: set[str] = set()
     for suffix in _SUFFIXES:
@@ -53,6 +54,7 @@ def _discover_layout(path: str | Path) -> _CurioLayout:
         )
         prefixes.add(candidate.name.removesuffix(f"_{suffix}"))
         artifacts.append(require_metadata_file(root, candidate, context=context))
+
     if len(prefixes) != 1 or "" in prefixes:
         raise ReaderFormatError(
             context=ReaderErrorContext("curio", "dataset layout"),
@@ -60,4 +62,5 @@ def _discover_layout(path: str | Path) -> _CurioLayout:
             found=f"sample prefixes {sorted(prefixes)!r}",
             expected="one nonempty sample prefix shared by all five artifacts",
         )
+
     return _CurioLayout(root, *artifacts)

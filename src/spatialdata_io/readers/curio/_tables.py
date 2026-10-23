@@ -32,6 +32,7 @@ def _read_table(layout: _CurioLayout) -> ad.AnnData:
     except (OSError, ValueError) as error:
         add_reader_context(error, context=ReaderErrorContext("curio", "counts"), path=layout.counts)
         raise
+
     if table.X is None:
         raise _format_error(
             layout.counts,
@@ -44,7 +45,8 @@ def _read_table(layout: _CurioLayout) -> ad.AnnData:
             found="empty observations or duplicate identifiers",
             expected="nonempty unique observations and unique features",
         )
-    # Cluster rows may be reordered; observation order belongs to the counts.
+
+    # Cluster rows may be reordered. Observation order belongs to the counts.
     try:
         clusters = pd.read_csv(layout.clusters, sep="\t", header=None, dtype={0: str}, keep_default_na=False)
     except (pd.errors.ParserError, pd.errors.EmptyDataError) as error:
@@ -70,7 +72,7 @@ def _read_table(layout: _CurioLayout) -> ad.AnnData:
         add_reader_context(error, context=ReaderErrorContext("curio", "cluster features"), path=layout.cluster_features)
         raise
 
-    # read_h5ad returns an eager DataFrame; AnnData also annotates backed Dataset2D.
+    # read_h5ad returns an eager DataFrame. AnnData also annotates backed Dataset2D.
     table.var = _enrich_features(cast("pd.DataFrame", table.var), layout.moran_features)
     return table
 
@@ -97,6 +99,7 @@ def _enrich_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
     except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
         add_reader_context(error, context=ReaderErrorContext("curio", "metrics"), path=path)
         raise
+
     if (
         not isinstance(metrics.index, pd.RangeIndex)
         or len(metrics.columns) < _METRIC_COLUMNS
@@ -107,6 +110,7 @@ def _enrich_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
             found=f"columns {metrics.columns.tolist()!r}, inferred row index {type(metrics.index).__name__}",
             expected="metric and value columns followed by Category, with matching row widths",
         )
+
     metric_key = metrics.columns[0]
     if (
         bool(metrics[[metric_key, "Category"]].isin([""]).any(axis=None))
@@ -117,13 +121,14 @@ def _enrich_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
             found="empty or duplicate metric identifiers",
             expected="nonempty categories and unique metric names within each category",
         )
+
     for category, group in metrics.groupby("Category", sort=False):
         table.uns[str(category)] = dict(zip(group.iloc[:, 0], group.iloc[:, 1], strict=True))
 
 
 def _enrich_features(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
     """Join finite statistics by feature ID without changing count-column order."""
-    # R exports may omit the row-name header; statistic names must remain unambiguous.
+    # R exports may omit the row-name header. Statistic names must remain unambiguous.
     try:
         with path.open(encoding="utf-8-sig", newline="") as source:
             header = source.readline(_MAX_ENRICHMENT_HEADER_CHARACTERS + 1)
@@ -145,12 +150,14 @@ def _enrich_features(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame
     except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
         add_reader_context(error, context=ReaderErrorContext("curio", "Moran features"), path=path)
         raise
+
     if moran.shape[1] == 0 or moran.columns.tolist() != columns[1:]:
         raise _format_error(
             path,
             found="missing statistics or inconsistent row width",
             expected="feature IDs in the first column followed by Moran statistics",
         )
+
     feature_ids = moran.index
     if not feature_ids.is_unique or bool(feature_ids.isin([""]).any()) or not feature_ids.isin(features.index).all():
         raise _format_error(
@@ -173,4 +180,5 @@ def _enrich_features(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame
             found="nonnumeric or nonfinite Moran statistics",
             expected="finite numeric or boolean statistics for each listed feature",
         )
+
     return features.join(moran, how="left", validate="one_to_one")

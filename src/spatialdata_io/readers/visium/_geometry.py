@@ -54,6 +54,7 @@ def make_circles(
         index=positions.index.copy(),
     )
     circles.index.name = "spot_id"
+
     return ShapesModel.parse(
         circles,
         transformations={

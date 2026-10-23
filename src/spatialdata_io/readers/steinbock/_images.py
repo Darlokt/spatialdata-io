@@ -55,6 +55,7 @@ def _image_options(
     chunks: int | tuple[int, int, int] | None,
 ) -> _ImageOptions:
     """Validate public options once and own borrowed downsampling sequences."""
+    # Lazy rasters retain these choices after caller-owned lists may change.
     factors: list[tuple[int, ...] | None] = []
     for name, supplied in (
         ("image_scale_factors", image_scale_factors),
@@ -63,6 +64,7 @@ def _image_options(
         if supplied is None:
             factors.append(None)
             continue
+
         values = tuple(supplied)
         if not values or any(
             isinstance(value, bool) or not isinstance(value, int) or value < _MIN_SCALE_FACTOR for value in values
@@ -70,6 +72,7 @@ def _image_options(
             message = f"{name} must be a nonempty sequence of integer downsampling factors greater than one."
             raise ValueError(message)
         factors.append(values)
+
     if chunks is not None:
         sizes = chunks if isinstance(chunks, tuple) else (chunks,)
         if isinstance(chunks, tuple) and len(chunks) != len(_IMAGE_AXES):
@@ -81,6 +84,7 @@ def _image_options(
         if any(size <= 0 for size in sizes):
             message = "chunks must contain only positive sizes."
             raise ValueError(message)
+
     return _ImageOptions(factors[0], factors[1], chunks)
 
 
@@ -92,10 +96,12 @@ def _read_raster(path: ArtifactFile, *, target_axes: tuple[str, ...]) -> tuple[A
     except (OSError, ValueError) as error:
         add_reader_context(error, context=context, path=path)
         raise
+
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=context, path=path, found=f"{len(metadata.series)} series", expected="exactly one TIFF series"
         )
+
     raster = read_tiff(metadata, series=0, level=0)
     try:
         array = normalize_raster_axes(
@@ -111,6 +117,7 @@ def _read_raster(path: ArtifactFile, *, target_axes: tuple[str, ...]) -> tuple[A
             found=str(error),
             expected=f"scientific 2D axes {target_axes}, with only singleton extra dimensions",
         ) from error
+
     return array, metadata
 
 
@@ -119,6 +126,7 @@ def _read_rasters(sample: _SampleLayout, options: _ImageOptions) -> _SampleRaste
     image, metadata = _read_raster(sample.image, target_axes=_IMAGE_AXES)
     labels, _ = _read_raster(sample.labels, target_axes=_LABEL_AXES)
     context = ReaderErrorContext("steinbock", sample.name)
+
     if image.shape[-2:] != labels.shape:
         raise ReaderFormatError(
             context=context,
@@ -132,7 +140,7 @@ def _read_rasters(sample: _SampleLayout, options: _ImageOptions) -> _SampleRaste
         )
     if options.labels_scale_factors is not None and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
         message = (
-            "Generated label pyramids require <=32-bit integer labels; upstream downsampling rounds 64-bit IDs. "
+            "Generated label pyramids require <=32-bit integer labels. Upstream downsampling rounds 64-bit IDs. "
             "Use labels_scale_factors=None for exact 64-bit masks."
         )
         raise ValueError(message)
@@ -155,6 +163,7 @@ def _read_rasters(sample: _SampleLayout, options: _ImageOptions) -> _SampleRaste
             found=f"{len(channels)} OME channels and {image.shape[0]} raster channels",
             expected="one OME channel record per scientific channel",
         )
+
     names = [channel.name for channel in channels]
     channel_names = (
         [str(name) for name in names]
@@ -175,6 +184,7 @@ def _read_rasters(sample: _SampleLayout, options: _ImageOptions) -> _SampleRaste
         if isinstance(options.chunks, tuple)
         else options.chunks
     )
+
     return _SampleRasters(
         image=Image2DModel.parse(
             image,

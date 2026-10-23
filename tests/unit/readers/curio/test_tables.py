@@ -33,6 +33,7 @@ class TestReadTable:
     def test_invalid_clusters(self, tmp_path: Path, rows: str) -> None:
         write_curio(tmp_path)
         (tmp_path / "sample_cluster_assignment.txt").write_text(rows, encoding="utf-8")
+
         with pytest.raises(ReaderFormatError, match="cluster"):
             _read_table(_discover_layout(tmp_path))
 
@@ -48,6 +49,7 @@ class TestReadTable:
         else:
             table.var_names = ["b", "b", "c"]
         table.write_h5ad(path)
+
         with pytest.raises(ReaderFormatError, match="identifiers"):
             _read_table(_discover_layout(tmp_path))
 
@@ -57,8 +59,10 @@ class TestReadTable:
         table = ad.read_h5ad(path)
         table.X = None
         table.write_h5ad(path)
+
         with pytest.raises(ReaderFormatError, match="missing expression") as raised:
             _read_table(_discover_layout(tmp_path))
+
         assert raised.value.path == path
         assert raised.value.context.reader == "curio"
 
@@ -66,14 +70,17 @@ class TestReadTable:
         write_curio(tmp_path)
         error = OSError("injected read failure")
         mocker.patch("spatialdata_io.readers.curio._tables.ad.read_h5ad", side_effect=error)
+
         with pytest.raises(OSError, match="injected") as raised:
             _read_table(_discover_layout(tmp_path))
+
         assert any("curio" in note and "counts" in note for note in raised.value.__notes__)
 
     def test_sparse_expression_does_not_densify(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_curio(tmp_path)
         mocker.patch.object(sparse.csr_array, "toarray", side_effect=AssertionError("densification"))
         mocker.patch.object(sparse.csr_matrix, "toarray", side_effect=AssertionError("densification"))
+
         assert isinstance(curio(tmp_path).tables["table"].X, sparse.csr_array)
 
     def test_nonfinite_expression(self, tmp_path: Path) -> None:
@@ -82,6 +89,7 @@ class TestReadTable:
         table = ad.read_h5ad(path)
         table.X = sparse.csr_array([[np.inf, 0, 0], [0, 1, 0], [0, 0, 2]])
         table.write_h5ad(path)
+
         with pytest.raises(ValueError, match="finite"):
             curio(tmp_path)
 
@@ -103,6 +111,7 @@ class TestEnrichMetrics:
     def test_invalid_metrics(self, tmp_path: Path, rows: str) -> None:
         write_curio(tmp_path)
         (tmp_path / "sample_Metrics.csv").write_text(rows, encoding="utf-8")
+
         with pytest.raises(ReaderFormatError, match=r"metric|columns"):
             _enrich_metrics(ad.AnnData(), _discover_layout(tmp_path).metrics)
 
@@ -110,8 +119,10 @@ class TestEnrichMetrics:
         write_curio(tmp_path)
         path = tmp_path / "sample_Metrics.csv"
         path.write_text('"Metric,Value,Category\n', encoding="utf-8")
+
         with pytest.raises(csv.Error) as raised:
             _enrich_metrics(ad.AnnData(), _discover_layout(tmp_path).metrics)
+
         assert any(str(path) in note for note in raised.value.__notes__)
 
 
@@ -138,6 +149,7 @@ class TestEnrichFeatures:
         write_curio(tmp_path)
         path = tmp_path / "sample_variable_features_spatial_moransi.txt"
         path.write_text(rows, encoding="utf-8")
+
         with pytest.raises(ReaderFormatError):
             _enrich_features(
                 pd.DataFrame({"symbol": ["B"]}, index=["gene-b"]), _discover_layout(tmp_path).moran_features
@@ -147,7 +159,9 @@ class TestEnrichFeatures:
         write_curio(tmp_path)
         path = tmp_path / "sample_variable_features_spatial_moransi.txt"
         path.write_text("gene\tI\n", encoding="utf-8")
+
         table = curio(tmp_path).tables["table"]
+
         assert table.var["I"].isna().all()
         assert table.var_names.tolist() == ["gene-b", "gene-a", "gene-c"]
 
@@ -155,12 +169,15 @@ class TestEnrichFeatures:
         write_curio(tmp_path)
         path = tmp_path / "sample_variable_features_spatial_moransi.txt"
         path.write_text("gene\tvariable\ngene-b\tTRUE\ngene-a\tFALSE\ngene-c\tTRUE\n", encoding="utf-8")
+
         assert curio(tmp_path).tables["table"].var["variable"].tolist() == [True, False, True]
 
     def test_invalid_quoted_header_context(self, tmp_path: Path) -> None:
         write_curio(tmp_path)
         path = tmp_path / "sample_variable_features_spatial_moransi.txt"
         path.write_text('"gene\tI\n', encoding="utf-8")
+
         with pytest.raises(csv.Error) as raised:
             _enrich_features(pd.DataFrame(index=["gene-b"]), _discover_layout(tmp_path).moran_features)
+
         assert any(str(path) in note for note in raised.value.__notes__)

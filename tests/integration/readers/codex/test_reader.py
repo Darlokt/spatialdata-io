@@ -58,6 +58,7 @@ class TestCodex:
             "spatialdata_io_reader": "codex",
             "spatialdata_io_software_version": __version__,
         }
+
         table = result.tables["table"]
         assert isinstance(table.X, sparse.csr_array)
         assert not isinstance(table.X, sparse.spmatrix)
@@ -88,11 +89,13 @@ class TestCodex:
         assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
         np.testing.assert_array_equal(table.obsm["spatial"], [[20, 1.5], [2.5, 30], [13, 8]])
         assert get_table_keys(table) == ("1", "region", "cell_id")
+
         circles = result.shapes["1"]
         assert circles.index.tolist() == [7, 2, 11]
         np.testing.assert_array_equal(circles.geometry.x, [20, 2.5, 13])
         np.testing.assert_array_equal(circles.geometry.y, [1.5, 30, 8])
         np.testing.assert_array_equal(circles["radius"], [1, 1, 1])
+
         transform = cast("BaseTransformation", get_transformation(circles, to_coordinate_system="global"))
         np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.eye(3))
 
@@ -100,8 +103,10 @@ class TestCodex:
     def test_image_dtype_chunks_and_values(self, tmp_path: Path, *, compressed: bool) -> None:
         write_csv(tmp_path / "cells.csv")
         image = write_image(tmp_path / "stitched.tif", compressed=compressed)
+
         result = codex(tmp_path)
         pyramid = result.images["images"]
+
         assert isinstance(pyramid, DataTree)
         assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
         raster = pyramid["scale0"]["image"]
@@ -110,15 +115,19 @@ class TestCodex:
         assert raster.dtype == np.dtype(np.uint16)
         assert raster.coords["c"].to_numpy().tolist() == [0, 1]
         assert raster.data.chunksize == (1, 16, 16)
-        restored = pickle.loads(pickle.dumps(raster.data))
+
+        restored = pickle.loads(pickle.dumps(raster.data))  # noqa: S301, RUF100 - Only deserialize this test's own graph.
         np.testing.assert_array_equal(restored[:, 1:3, 2:5].compute(), image[:, 1:3, 2:5])
+
         transform = cast("BaseTransformation", get_transformation(raster, to_coordinate_system="global"))
         np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.eye(3))
 
     def test_fcs_fixture_is_independently_decoded(self, tmp_path: Path) -> None:
         path = tmp_path / "reg001_compensated.fcs"
         write_fcs(path)
+
         source = readfcs.ReadFCS(path)
+
         assert source.header["version"] == "3.1"
         assert source.channels["PnN"].tolist() == cell_frame().columns.tolist()
         assert source.channels["PnS"].tolist()[9:11] == ["CD45", "DNA"]
@@ -128,9 +137,11 @@ class TestCodex:
         write_csv(tmp_path / "cells.csv")
         image = write_image(tmp_path / "stitched.tif", compressed=True)
         decode = mocker.spy(tiff_tasks, "_read_tiff_selection")
+
         # Native TIFF tasks are instrumented after construction to distinguish
         # actual source selection from model rechunking and pyramid graphs.
         result = codex(tmp_path)
+
         assert decode.call_count == 0
         raster = result.images["images"]["scale0"]["image"]
         np.testing.assert_array_equal(raster.data[0:1, 1:3, 2:5].compute(scheduler="synchronous"), image[0:1, 1:3, 2:5])
@@ -140,9 +151,12 @@ class TestCodex:
     def test_multiple_sources_require_explicit_selection(self, tmp_path: Path) -> None:
         write_csv(tmp_path / "cells.csv")
         write_fcs(tmp_path / "cells.fcs")
+
         with pytest.raises(ReaderFormatError, match="2 candidates"):
             codex(tmp_path)
+
         result = codex(tmp_path, cell_table_file="cells.fcs")
+
         assert result.tables["table"].var["marker"].tolist() == ["CD45", "DNA"]
 
     def test_absolute_overrides_and_source_axes(self, tmp_path: Path) -> None:
@@ -150,6 +164,7 @@ class TestCodex:
         root.mkdir()
         write_csv(tmp_path / "cells.csv")
         image = write_image(tmp_path / "stack.tif")
+
         result = codex(
             root,
             cell_table_file=tmp_path / "cells.csv",
@@ -158,6 +173,7 @@ class TestCodex:
             chunks=(1, 8, 10),
         )
         raster = result.images["images"]["scale0"]["image"]
+
         assert raster.data.chunksize == (1, 8, 10)
         np.testing.assert_array_equal(raster.data[:, :2, :3].compute(), image[:, :2, :3])
 
@@ -166,10 +182,13 @@ class TestCodex:
         with tifffile.TiffWriter(tmp_path / "images.tif") as writer:
             writer.write(np.ones((8, 10), dtype=np.uint8), metadata={"axes": "YX"})
             writer.write(np.full((6, 7), 17, dtype=np.uint16), metadata={"axes": "YX"})
+
         with pytest.raises(ReaderFormatError, match="tiff_series"):
             codex(tmp_path)
+
         result = codex(tmp_path, tiff_series=1, chunks=4)
         raster = result.images["images"]["scale0"]["image"]
+
         assert raster.shape == (1, 6, 7)
         np.testing.assert_array_equal(raster.data.compute(), np.full((1, 6, 7), 17, dtype=np.uint16))
 
@@ -182,8 +201,10 @@ class TestCodex:
             photometric="minisblack",
             metadata={"axes": "TZCYX", "Channel": {"Name": ["marker-z", "marker-a"]}},
         )
+
         result = codex(tmp_path)
         raster = result.images["images"]["scale0"]["image"]
+
         assert raster.coords["c"].to_numpy().tolist() == ["marker-z", "marker-a"]
         np.testing.assert_array_equal(raster.data.compute(), image[0, 0])
 
@@ -194,8 +215,10 @@ class TestCodex:
             for row in range(10_001):
                 expression = "1.25" if row == 10_000 else "1"
                 stream.write(f"{9007199254740993 + row},1,{row},0,{expression},0,{'fixture' * 20}\n")
+
         result = codex(tmp_path)
         table = result.tables["table"]
+
         assert isinstance(table.X, sparse.csr_array)
         assert table.X.shape == (10_001, 2)
         assert table.X.dtype == np.dtype(np.float64)
@@ -211,5 +234,7 @@ class TestCodex:
         (tmp_path / "cells.csv").write_text(
             "cell_id,region,x,y,cyc001_ch001\n9007199254740993,1,0,0,1\n2.0,1,1,1,2\n", encoding="utf-8"
         )
+
         result = codex(tmp_path)
+
         assert result.tables["table"].obs["cell_id"].tolist() == [9007199254740993, 2]

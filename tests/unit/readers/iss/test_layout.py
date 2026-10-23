@@ -19,9 +19,11 @@ class TestDiscoverLayout:
 
     def test_relative_files_and_immutable_layout(self, tmp_path: Path) -> None:
         write_iss_dataset(tmp_path)
+
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
+
         assert layout.root == tmp_path.resolve()
         assert layout.raw_image == (tmp_path / "raw.tiff").resolve()
         assert layout.labels == (tmp_path / "labels.tiff").resolve()
@@ -35,6 +37,7 @@ class TestDiscoverLayout:
         (tmp_path / filename).unlink()
         if wrong_kind:
             (tmp_path / filename).mkdir()
+
         with pytest.raises(IsADirectoryError if wrong_kind else FileNotFoundError):
             _discover_layout(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
 
@@ -44,8 +47,11 @@ class TestDiscoverLayout:
         write_iss_dataset(root)
         outside = tmp_path / "outside.tiff"
         (root / "raw.tiff").rename(outside)
+
         layout = _discover_layout(root, raw_image_file=outside, labels_file="labels.tiff", table_file="cells.h5ad")
+
         assert layout.raw_image == outside.resolve()
+
         with pytest.raises(ReaderFormatError, match="outside"):
             _discover_layout(root, raw_image_file="../outside.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
 
@@ -56,6 +62,7 @@ class TestDiscoverLayout:
         outside = tmp_path / "outside.tiff"
         (root / "raw.tiff").rename(outside)
         (root / "raw.tiff").symlink_to(outside)
+
         with pytest.raises(ReaderFormatError, match="outside"):
             _discover_layout(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
 
@@ -63,6 +70,7 @@ class TestDiscoverLayout:
     def test_unsupported_suffix(self, tmp_path: Path, target: str) -> None:
         write_iss_dataset(tmp_path)
         (tmp_path / "wrong.csv").touch()
+
         with pytest.raises(ValueError, match="ISS"):
             _discover_layout(
                 tmp_path,
@@ -76,5 +84,6 @@ class TestDiscoverLayout:
         root = tmp_path / "invalid"
         if exists:
             root.touch()
+
         with pytest.raises(NotADirectoryError if exists else FileNotFoundError):
             _discover_layout(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")

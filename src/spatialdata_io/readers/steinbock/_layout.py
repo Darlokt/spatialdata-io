@@ -45,6 +45,7 @@ def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilas
     if labels_kind not in {"deepcell", "ilastik"}:
         message = "labels_kind must be 'deepcell' or 'ilastik'."
         raise ValueError(message)
+
     context = ReaderErrorContext("steinbock", "dataset layout")
     root = normalize_dataset_root(path, context=context)
     table = require_metadata_file(root, "cells.h5ad", context=ReaderErrorContext("steinbock", "counts"))
@@ -69,12 +70,13 @@ def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilas
             context=context,
             path=root,
             found=(
-                f"{len(images)} images and {len(masks)} masks; "
-                f"unmasked images {sorted(images.keys() - masks.keys())!r}, "
+                f"{len(images)} images and {len(masks)} masks. "
+                f"Unmasked images {sorted(images.keys() - masks.keys())!r}, "
                 f"unmatched masks {sorted(masks.keys() - images.keys())!r}"
             ),
             expected="at least one sample with a nonempty name and exactly one image and selected-family mask",
         )
+
     # Sample identifiers also name SpatialData elements and coordinate systems.
     invalid_names = [
         name
@@ -93,6 +95,7 @@ def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilas
                 "excluding '.', '..', and names starting with '__'"
             ),
         )
+
     return _SteinbockLayout(
         root,
         table,

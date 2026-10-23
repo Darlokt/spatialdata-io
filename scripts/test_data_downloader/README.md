@@ -201,3 +201,50 @@ that uses the dataset key.
 
 Do not commit downloaded datasets, temporary output, credentials, or private
 data. The repository tracks only the manifest and downloader implementation.
+
+## DBiT-seq experimental mouse embryo dataset
+
+```bash
+uv run python scripts/test_data_downloader --dataset dbit_mouse_e10
+uv run pytest tests/integration/readers/dbit/test_dataset.py
+```
+
+`dbit_mouse_e10` downloads about 97.0 MB: the
+[E10 mouse embryo H5AD from versioned Zenodo record 12785822](https://zenodo.org/records/12785822/files/DBiT-seq_liu2020high_E10_whole_gene_best_data.h5ad)
+from the experiment of [Liu et al. (2020)](https://doi.org/10.1016/j.cell.2020.10.026)
+and the authors' [nucleotide-to-grid mapping](https://github.com/MingyuYang-Yale/DBiT-seq/blob/4487131b0ecfb1e490bf16829d7376ea5fbe1c9e/Datasets/barcode.xls)
+at a pinned commit. The experimental source collection is distributed under
+[CC BY 4.0 on Zenodo](https://zenodo.org/records/12785822). The nucleotide map
+records the factual barcode sequences and grid coordinates from the authors'
+repository. Both files are pinned by SHA-256 in the manifest.
+
+The published H5AD contains 936 observations and 22,802 features. It has
+coordinate observation names such as `41x14` and stores raw counts as a dense
+`float32` array in `X`. It is therefore prepared explicitly inside the
+integration test's temporary directory: the actual published map restores each nucleotide
+observation identifier, while expression and feature order remain unchanged.
+The published first coordinate corresponds to barcode B and the second to
+barcode A. The reader returns its documented A/B ordering. The test retains
+the source coordinate identifiers and coordinates as metadata and verifies every sparse expression
+value, feature order, coordinate conversion, and linked shape membership.
+
+The downloaded H5AD is not a native input layout accepted directly by
+`dbit()`. Preparation preserves all features in this archived H5AD. It does not
+claim to reproduce the full unfiltered experiment. The reader converts the source
+dense expression to a canonical CSR sparse array. No histology image is
+included, so this dataset validates the experimental count/barcode workflow.
+Synthetic fixtures separately cover raster behavior. Downloaded and prepared
+H5AD files remain outside Git.
+
+The later [DBiTplus study](https://doi.org/10.1038/s41592-025-02948-0) also
+deposits genuine DBiT spatial-transcriptomic data with paired imaging. For
+example, [GEO sample GSM9239729](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM9239729)
+provides an FFPE mouse-embryo expression matrix, brightfield image, ROI mask and
+spot-position list. Its processing metadata explicitly describes spatial
+barcodes A and B and microfluidic-channel coordinates. These processed files
+are not a supported `dbit()` input layout: the position file selects decoded
+coordinate IDs rather than mapping nucleotide barcodes, and the authors'
+image-grid spacing differs from this reader's square-grid convention. They
+cannot serve as an image-alignment test without explicit handling of those
+differences. They are from a different experiment and must not be paired with
+the E10 table above. They are not downloaded by this fixture.

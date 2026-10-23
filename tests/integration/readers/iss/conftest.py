@@ -35,6 +35,7 @@ def write_iss_dataset(path: Path, *, channels: int = 2, height: int = 32) -> Iss
     labels[:, 24:28] = 2
     tifffile.imwrite(path / "raw.tiff", raw, photometric="minisblack", metadata={"axes": "CYX"})
     tifffile.imwrite(path / "labels.tiff", labels, photometric="minisblack", metadata={"axes": "YX"})
+
     expression = csr_array(np.asarray([[0, 3, 1], [5, 0, 2]], dtype=np.float32))
     table = ad.AnnData(
         X=expression,

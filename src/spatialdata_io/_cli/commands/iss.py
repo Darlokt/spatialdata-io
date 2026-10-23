@@ -35,19 +35,19 @@ _IMAGE_RANK = 3
     "--raw-image-file",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
-    help="Raw TIFF-family image; relative paths resolve within the dataset root.",
+    help="Raw TIFF-family image. Relative paths resolve within the dataset root.",
 )
 @click.option(
     "--labels-file",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
-    help="Integer TIFF-family labels; relative paths resolve within the dataset root.",
+    help="Integer TIFF-family labels. Relative paths resolve within the dataset root.",
 )
 @click.option(
     "--table-file",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
-    help="Linked h5ad counts and metadata; relative paths resolve within the dataset root.",
+    help="Linked h5ad counts and metadata. Relative paths resolve within the dataset root.",
 )
 @click.option(
     "--instance-key", type=str, default=None, help="Observation column containing positive integer label IDs."
@@ -65,7 +65,7 @@ _IMAGE_RANK = 3
     type=click.IntRange(min=2),
     multiple=True,
     default=(),
-    help="Repeat for each label-pyramid level; requires <=32-bit integer masks.",
+    help="Repeat for each label-pyramid level. Requires <=32-bit integer masks.",
 )
 @click.option(
     "--data-axes", type=str, default=None, help="Source raw-image axes, for example CYX for an unlabeled stack."
@@ -75,7 +75,7 @@ _IMAGE_RANK = 3
     type=click.IntRange(min=1),
     multiple=True,
     default=(),
-    help="One size for all axes or three sizes in CYX order; labels use YX sizes.",
+    help="One size for all axes or three sizes in CYX order. Labels use YX sizes.",
 )
 def iss_command(input_path: Path, output_path: Path, **options: Unpack[_IssOptions]) -> None:
     """Read ISS image, labels and counts, then write a SpatialData store."""
@@ -92,6 +92,7 @@ def iss_command(input_path: Path, output_path: Path, **options: Unpack[_IssOptio
     else:
         message = "--chunks must be passed once for all axes or three times in CYX order."
         raise click.BadParameter(message, param_hint="--chunks")
+
     result = iss(
         input_path,
         raw_image_file=options["raw_image_file"],

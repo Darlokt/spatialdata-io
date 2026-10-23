@@ -55,6 +55,7 @@ def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile)
             expected=f"a finite positive numeric {key!r}",
             path=path,
         )
+
     result = float(value)
     if not np.isfinite(result) or result <= 0:
         raise ReaderFormatError(
@@ -63,6 +64,7 @@ def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile)
             expected=f"a finite positive numeric {key!r}",
             path=path,
         )
+
     return result
 
 
@@ -97,6 +99,7 @@ def _text(value: object, *, attribute: str, path: ArtifactFile) -> str:
             expected="bounded UTF-8 text",
             path=path,
         )
+
     if not result or len(result) > MAX_METADATA_TEXT_LENGTH:
         raise ReaderFormatError(
             context=_context("count metadata"),
@@ -104,6 +107,7 @@ def _text(value: object, *, attribute: str, path: ArtifactFile) -> str:
             expected=f"nonempty text of at most {MAX_METADATA_TEXT_LENGTH} characters",
             path=path,
         )
+
     return result
 
 
@@ -114,6 +118,7 @@ def _optional_text(attributes: h5py.AttributeManager, name: str, *, path: Artifa
 def _library_id(attributes: h5py.AttributeManager, *, path: ArtifactFile) -> str | None:
     if "library_ids" not in attributes:
         return None
+
     raw: object = attributes["library_ids"]
     values = raw.reshape(-1).tolist() if isinstance(raw, np.ndarray) else [raw]
     if len(values) != 1:
@@ -123,6 +128,7 @@ def _library_id(attributes: h5py.AttributeManager, *, path: ArtifactFile) -> str
             expected="exactly one library ID from single-library spaceranger count output",
             path=path,
         )
+
     return _text(values[0], attribute="library_ids", path=path)
 
 
@@ -130,6 +136,7 @@ def read_count_metadata(counts: CountsLayout) -> CountMetadata:
     """Copy bounded optional HDF5 metadata, or return empty MEX metadata."""
     if not isinstance(counts, H5Counts):
         return CountMetadata(library_id=None, chemistry_description=None, software_version=None)
+
     try:
         with h5py.File(counts.path, mode="r") as source:
             return CountMetadata(
@@ -150,9 +157,10 @@ def resolve_dataset_id(explicit: str | None, counts: CountsLayout, metadata: Cou
         message = "dataset_id is required when the selected count source contains no library identifier."
         raise ValueError(message)
     if not isinstance(value, str):
-        message = f"dataset_id must be a string or None; found {type(value).__name__}."
+        message = f"dataset_id must be a string or None. Found {type(value).__name__}."
         raise TypeError(message)
     if not value or value != value.strip() or any(character in value for character in ("/", "\\", "\x00")):
         message = "dataset_id must be nonempty, trimmed, and contain no path separators or NUL characters."
         raise ValueError(message)
+
     return value

@@ -101,6 +101,7 @@ def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | No
             expected="exactly one matrix/barcodes/features triplet, consistently compressed or uncompressed",
             path=path,
         )
+
     prefix, compressed = variants[0]
     return MtxCounts(
         path=path,
@@ -115,6 +116,7 @@ def _explicit_counts(root: DatasetRoot, source: str | Path) -> CountsLayout:
     if source_path.suffix.lower() in {".h5", ".hdf5"}:
         path = require_caller_file(root, source, context=_context("count matrix"))
         return H5Counts(path=path, filename_prefix=None)
+
     directory = require_caller_directory(root, source, context=_context("count matrix"))
     return _inspect_mtx_directory(directory, filename_prefix=None)
 
@@ -126,6 +128,7 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
     standard_h5 = optional_file(root / FILTERED_H5, context=_context("count matrix"))
     if standard_h5 is not None:
         return H5Counts(path=standard_h5, filename_prefix=None)
+
     standard_mtx = optional_directory(root / FILTERED_MTX, context=_context("count matrix"))
     if standard_mtx is not None:
         return _inspect_mtx_directory(standard_mtx, filename_prefix=None)
@@ -147,16 +150,19 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
             expected="one legacy prefixed count source",
             path=root,
         )
+
     if h5_candidate is not None:
         prefix = h5_candidate.name[: -len(f"_{FILTERED_H5}")]
         return H5Counts(
             path=require_file(h5_candidate, context=_context("count matrix")),
             filename_prefix=prefix,
         )
+
     if mtx_candidate is not None:
         prefix = mtx_candidate.name[: -len(f"_{FILTERED_MTX}")]
         directory = require_directory(mtx_candidate, context=_context("count matrix"))
         return _inspect_mtx_directory(directory, filename_prefix=prefix)
+
     # Preserve a precise path exception for the required default artifact.
     return H5Counts(
         path=require_file(root / FILTERED_H5, context=_context("count matrix")),
@@ -172,6 +178,7 @@ def _position_format(path: ArtifactFile) -> PositionFormat:
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise
+
     if len(first_line) > MAX_POSITION_HEADER_BYTES:
         raise ReaderFormatError(
             context=context,
@@ -179,6 +186,7 @@ def _position_format(path: ArtifactFile) -> PositionFormat:
             expected="a bounded six-column CSV header or data row",
             path=path,
         )
+
     return "headered" if first_line.removeprefix(b"\xef\xbb\xbf").startswith(b"barcode,") else "headerless"
 
 
@@ -188,6 +196,7 @@ def _discover_positions(root: DatasetRoot, override: str | Path | None) -> tuple
     else:
         current = optional_file(root / "spatial" / POSITIONS_V2, context=_context("tissue positions"))
         path = current or require_file(root / "spatial" / POSITIONS_V1, context=_context("tissue positions"))
+
     return path, _position_format(path)
 
 
@@ -208,6 +217,7 @@ def discover_layout(
         if scale_factors_file is not None
         else require_file(root / "spatial" / SCALE_FACTORS, context=_context("scale factors"))
     )
+
     fullres = (
         require_caller_file(root, fullres_image_file, context=_context("full-resolution image"))
         if fullres_image_file is not None
@@ -215,6 +225,7 @@ def discover_layout(
     )
     hires = None if spatial is None else optional_file(spatial / HIRES_IMAGE, context=_context("hires image"))
     lowres = None if spatial is None else optional_file(spatial / LOWRES_IMAGE, context=_context("lowres image"))
+
     return VisiumLayout(
         root=root,
         counts=_discover_counts(root, counts_source),

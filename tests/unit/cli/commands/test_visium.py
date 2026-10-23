@@ -91,10 +91,12 @@ class TestVisiumCommand:
             "tiff_series",
             "chunks",
         ]
+
         for name in ("counts_source", "fullres_image_file", "positions_file", "scale_factors_file"):
             option_type = options[name].type
             assert isinstance(option_type, click.Path)
             assert option_type.type is Path
+
         assert options["make_var_names_unique"].default is True
         assert options["data_axes"].default is None
         assert options["tiff_series"].default is None

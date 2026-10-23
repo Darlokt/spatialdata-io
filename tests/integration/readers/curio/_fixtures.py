@@ -25,6 +25,7 @@ def write_curio(path: Path) -> None:
     table.obsm["spatial"] = coordinates
     table.obsm["X_spatial"] = coordinates.copy()
     table.write_h5ad(path / "sample_anndata.h5ad")
+
     (path / "sample_cluster_assignment.txt").write_text("bead-b\t1\nbead-a\t0\nbead-c\t1\n", encoding="utf-8")
     (path / "sample_Metrics.csv").write_text(
         'Metric,Value,Category\n"Reads, total",100,Sequencing\nBeads,3,Mapping\n', encoding="utf-8"

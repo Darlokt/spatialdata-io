@@ -55,6 +55,7 @@ def steinbock_dataset(tmp_path: Path) -> SteinbockDataset:
         images[name] = image
         deepcell[name] = mask
         ilastik[name] = other_mask
+
     names = ["sample-b.tiff", "sample-a.tiff", "sample-b.tiff", "sample-a.tiff"]
     ids = [2, 7, 7, 2]
     table = ad.AnnData(
@@ -73,7 +74,8 @@ def steinbock_dataset(tmp_path: Path) -> SteinbockDataset:
             index=["DNA", "CD3"],
         ),
     )
-    # Historical exports used this key; enable only while writing that legacy artifact.
+
+    # Historical exports used this key. Enable only while writing that legacy artifact.
     with ad.settings.override(disallow_forward_slash_in_h5ad=False):
         table.write_h5ad(tmp_path / "cells.h5ad")
     return SteinbockDataset(tmp_path, images, deepcell, ilastik)

@@ -44,7 +44,7 @@ def write_csv(path: Path, frame: pd.DataFrame | None = None) -> None:
 def write_fcs(path: Path, *, empty: bool = False, marker_labels: bool = True) -> None:
     """Write actual FCS 3.1 list-mode little-endian float32 events.
 
-    Channel names use the vendor PnN keys; PnS carries human marker labels.
+    Channel names use the vendor PnN keys. PnS carries human marker labels.
     Fixed eight-character offsets keep TEXT and HEADER offsets identical.
     This writer requires no extra test dependency and is checked by readfcs.
     """
@@ -65,6 +65,7 @@ def write_fcs(path: Path, *, empty: bool = False, marker_labels: bool = True) ->
         "$PAR": str(len(frame.columns)),
         "$TOT": str(len(frame)),
     }
+
     labels = {"cyc002_ch001": "CD45", "cyc001_ch002": "DNA"}
     for number, column in enumerate(frame.columns, start=1):
         prefix = f"$P{number}"
@@ -78,12 +79,14 @@ def write_fcs(path: Path, *, empty: bool = False, marker_labels: bool = True) ->
                 **({f"{prefix}S": labels.get(column, column)} if marker_labels else {}),
             }
         )
+
     text = "/" + "/".join(part for pair in keywords.items() for part in pair) + "/"
     data_start = text_start + len(text)
     data_end = data_start + len(events) - 1
     keywords["$BEGINDATA"] = f"{data_start:08d}"
     keywords["$ENDDATA"] = f"{data_end:08d}"
     text = "/" + "/".join(part for pair in keywords.items() for part in pair) + "/"
+
     offsets = (text_start, data_start - 1, data_start, data_end, 0, 0)
     header = "FCS3.1    " + "".join(f"{offset:8d}" for offset in offsets)
     path.write_bytes(header.encode("ascii").ljust(text_start, b" ") + text.encode("ascii") + events)

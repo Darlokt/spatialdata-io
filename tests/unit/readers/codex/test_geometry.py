@@ -19,7 +19,9 @@ class TestMakeShapes:
         coordinates = np.asarray([[20.0, 1.5], [2.5, 30.0]])
         table = ad.AnnData(obs=pd.DataFrame({"cell_id": [7, 2]}, index=["a", "b"]))
         table.obsm["spatial"] = coordinates
+
         result = _make_shapes(table)
+
         assert result.index.tolist() == [7, 2]
         np.testing.assert_array_equal(result.geometry.x, [20, 2.5])
         np.testing.assert_array_equal(result.geometry.y, [1.5, 30])

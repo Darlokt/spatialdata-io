@@ -29,6 +29,7 @@ class TestImageOptions:
 
     def test_owns_factor_sequences_and_normalizes_axes(self) -> None:
         image_factors, label_factors = [2, 3], [2]
+
         options = _image_options(
             data_axes="CYX", image_scale_factors=image_factors, labels_scale_factors=label_factors, chunks=16
         )
@@ -51,6 +52,7 @@ class TestImageOptions:
     def test_invalid_scale_factors(self, factors: list[float]) -> None:
         with pytest.raises(ValueError, match="image_scale_factors"):
             _image_options(data_axes=None, image_scale_factors=factors, labels_scale_factors=None, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Exercise invalid values from an untyped caller.
+
         with pytest.raises(ValueError, match="labels_scale_factors"):
             _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=factors, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Exercise invalid values from an untyped caller.
 
@@ -74,8 +76,10 @@ class TestReadRaster:
     def test_malformed_tiff_has_context(self, tmp_path: Path) -> None:
         path = tmp_path / "bad.tiff"
         path.write_bytes(b"not TIFF")
+
         with pytest.raises(ValueError, match="TIFF") as caught:
             _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
+
         assert any("iss" in note and str(path) in note for note in caught.value.__notes__)
 
     def test_multiple_series_are_ambiguous(self, tmp_path: Path) -> None:
@@ -85,6 +89,7 @@ class TestReadRaster:
                 output.write(
                     np.full((2, 8, 12), value, dtype=np.uint16), photometric="minisblack", metadata={"axes": "CYX"}
                 )
+
         with pytest.raises(ReaderFormatError, match="2 series"):
             _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
 
@@ -92,8 +97,10 @@ class TestReadRaster:
         path = tmp_path / "stack.tiff"
         source = np.arange(2 * 8 * 12, dtype=np.uint16).reshape(2, 8, 12)
         tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "QYX"})
+
         with pytest.raises(ReaderFormatError, match="Axis 'q'"):
             _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
+
         image, _ = _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"), data_axes="CYX")
         np.testing.assert_array_equal(image.compute(), source)
 
@@ -101,8 +108,10 @@ class TestReadRaster:
         path = tmp_path / "samples.tiff"
         source = np.arange(8 * 12 * 3, dtype=np.uint8).reshape(8, 12, 3)
         tifffile.imwrite(path, source, photometric="rgb")
+
         with pytest.raises(ReaderFormatError, match="Axis 's'"):
             _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
+
         image, _ = _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"), data_axes="YXC")
         np.testing.assert_array_equal(image.compute(), source.transpose(2, 0, 1))
 
@@ -126,12 +135,14 @@ class TestReadRasters:
         )
         shape = (4, 5) if invalid == "shape" else (32, 40)
         tifffile.imwrite(tmp_path / "labels.tiff", np.zeros(shape, dtype=dtype), photometric="minisblack")
+
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         factors = [64] if invalid == "factor" else [2] if invalid in {"uint64", "int64"} else None
         options = _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=factors, chunks=None)
+
         with pytest.raises(ValueError, match=r"extent|integer label|32-bit"):
             _read_rasters(layout, options)
         pixels.assert_not_called()
@@ -141,10 +152,12 @@ class TestReadRasters:
         dataset = write_iss_dataset(tmp_path)
         metadata = {"axes": "CYX"} if names is None else {"axes": "CYX", "Channel": {"Name": names}}
         tifffile.imwrite(tmp_path / "raw.tiff", dataset.raw, ome=True, photometric="minisblack", metadata=metadata)
+
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         options = _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=None, chunks=None)
+
         result = _read_rasters(layout, options)
         expected = names if names is not None and len(set(names)) == 2 else ["Channel:0:0", "Channel:0:1"]
         assert result.image.coords["c"].to_numpy().tolist() == expected
@@ -169,17 +182,21 @@ class TestReadRasters:
         tifffile.imwrite(
             tmp_path / "labels.tiff", labels, photometric="minisblack", tile=(16, 16), compression=compression
         )
+
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         options = _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=None, chunks=None)
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
+
         with Callback(posttask=tasks):
             result = _read_rasters(layout, options)
         tasks.assert_not_called()
         pixels.assert_not_called()
-        image = pickle.loads(pickle.dumps(result.image.data))  # This test owns the serialized graph.
+
+        image = pickle.loads(pickle.dumps(result.image.data))  # noqa: S301, RUF100 - Test-owned graph.
+
         assert image.chunks == ((1, 1), (16, 16, 16), (16, 16, 16, 16))
         np.testing.assert_array_equal(image[:, :4, :6].compute(), source[:, :4, :6])
         assert pixels.call_count == 2
@@ -202,11 +219,14 @@ class TestReadRasters:
             tile=(16, 16),
         )
         tifffile.imwrite(tmp_path / "labels.tiff", source, photometric="minisblack", tile=(16, 16))
+
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         options = _image_options(data_axes=None, image_scale_factors=factors, labels_scale_factors=factors, chunks=None)
+
         result = _read_rasters(layout, options)
+
         assert isinstance(result.labels, DataTree)
         for level in result.labels.children.values():
             values = level["image"].data.compute()

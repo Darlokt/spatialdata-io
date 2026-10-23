@@ -30,13 +30,13 @@ if TYPE_CHECKING:
     "--cell-table-file",
     type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
     default=None,
-    help="CSV/FCS override; relative paths resolve within the dataset root.",
+    help="CSV/FCS override. Relative paths resolve within the dataset root.",
 )
 @click.option(
     "--image-file",
     type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
     default=None,
-    help="Stitched TIFF-family override; relative paths resolve within the dataset root.",
+    help="Stitched TIFF-family override. Relative paths resolve within the dataset root.",
 )
 @click.option("--data-axes", type=str, default=None, help="Source TIFF axes, for example CYX for an unlabeled stack.")
 @click.option("--tiff-series", type=click.IntRange(min=0), default=None, help="Zero-based TIFF series selection.")
@@ -62,6 +62,7 @@ def codex_command(input_path: Path, output_path: Path, **options: Unpack[_CodexO
     else:
         message = "--chunks must be passed once for all axes or three times in CYX order."
         raise click.BadParameter(message, param_hint="--chunks")
+
     result = codex(
         input_path,
         cell_table_file=options["cell_table_file"],

@@ -41,10 +41,10 @@ def steinbock(
         masks_ilastik/<sample>.tiff
 
     Every image needs exactly one mask and table region. Missing or extra
-    samples fail instead of being omitted. Images require OME metadata; each
+    samples fail instead of being omitted. Images require OME metadata. Each
     image/mask contains one series, read at full-resolution level zero.
     Image and mask extents must match. Sample names must use alphanumeric
-    characters, underscores, dots, or hyphens; they cannot be reserved names
+    characters, underscores, dots, or hyphens. They cannot be reserved names
     or differ only by case. No pipeline version is inferred.
 
     Parameters
@@ -68,21 +68,21 @@ def steinbock(
     SpatialData
         For each lexically ordered sample, ``images['<sample>_image']`` is lazy
         CYX and ``labels['<sample>_labels']`` is lazy YX. Source dtypes and pixel
-        values are retained. OME channel names are used when nonempty and unique;
-        otherwise OME IDs identify channels. Scientific three/four-channel
-        images are never guessed to be RGB. Singleton spatial axes are retained;
-        extra axes must be singleton. Each pair has an identity transformation
+        values are retained. OME channel names are used when nonempty and unique.
+        Otherwise OME IDs identify channels. Scientific three/four-channel
+        images are never guessed to be RGB. Singleton spatial axes are retained.
+        Extra axes must be singleton. Each pair has an identity transformation
         to its own sample coordinate system, measured in full-resolution pixels.
         There is no inferred alignment between samples or physical-unit scaling.
 
         ``tables['table']`` contains owned, eager, finite canonical CSR
         sparse-array expression in source row/feature order and dtype. The
-        optional ``counts`` layer is normalized likewise; other layers, pairwise
+        optional ``counts`` layer is normalized likewise. Other layers, pairwise
         arrays, and annotations are retained. ``obs['image']`` must contain
         source names including ``.tiff`` and observation names must follow
         ``Object <id> in <image>``. IDs are strictly positive exact integers
-        within each mask's dtype; zero is background. Final linkage uses
-        categorical ``region`` and integer ``cell_id``; IDs may repeat across
+        within each mask's dtype. Zero is background. Final linkage uses
+        categorical ``region`` and integer ``cell_id``. IDs may repeat across
         regions but not within a region. Lazy mask pixels are not scanned for
         membership. Region declaration order follows first table occurrence.
 
@@ -91,10 +91,10 @@ def steinbock(
         Centroids must be finite and within their sample's pixel frame. An
         optional duplicate ``Image`` column is removed only if equal to ``image``.
         Feature metadata spaces become underscores and the legacy
-        ``Final Concentration / Dilution`` key becomes ``Final_Concentration``;
-        conflicting destination names fail. Caller-owned state is not mutated.
+        ``Final Concentration / Dilution`` key becomes ``Final_Concentration``.
+        Conflicting destination names fail. Caller-owned state is not mutated.
 
-        Raster construction executes no pixel tasks; small selections retain
+        Raster construction executes no pixel tasks. Small selections retain
         native TIFF reads. Files/stores close after metadata inspection and
         within each lazy task. No points or shapes are returned. Provenance
         records the reader and package version.
@@ -110,6 +110,7 @@ def steinbock(
     options = _image_options(
         image_scale_factors=image_scale_factors, labels_scale_factors=labels_scale_factors, chunks=chunks
     )
+
     layout = _discover_layout(path, labels_kind=labels_kind)
     samples = {sample.name: _read_rasters(sample, options) for sample in layout.samples}
     table = _read_table(layout.table, samples)
@@ -121,6 +122,7 @@ def steinbock(
         context=ReaderErrorContext("steinbock", "linked cell table"),
         expression_layers=("counts",) if "counts" in table.layers else (),
     )
+
     result = SpatialData(
         images={f"{name}_image": sample.image for name, sample in samples.items()},
         labels={f"{name}_labels": sample.labels for name, sample in samples.items()},

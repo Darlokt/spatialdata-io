@@ -40,6 +40,7 @@ class TestIss:
             instance_key=instance_key,
             dataset_id="fov",
         )
+
         assert list(result.images) == ["fov_raw_image"]
         assert list(result.labels) == ["fov_labels_image"]
         assert list(result.tables) == ["table"]
@@ -87,6 +88,7 @@ class TestIss:
         label_factors: tuple[int, int] | None,
     ) -> None:
         dataset = write_iss_dataset(tmp_path, channels=channels)
+
         result = iss(
             dataset.root,
             raw_image_file="raw.tiff",
@@ -116,7 +118,9 @@ class TestIss:
     @pytest.mark.parametrize("height", [1, 32])
     def test_semantic_singleton_axes_survive(self, tmp_path: Path, height: int) -> None:
         dataset = write_iss_dataset(tmp_path, channels=1, height=height)
+
         result = iss(dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+
         assert result.images["region_raw_image"].shape == (1, height, 40)
         assert result.labels["region_labels_image"].shape == (height, 40)
         np.testing.assert_array_equal(result.labels["region_labels_image"].data.compute(), dataset.labels)
@@ -136,6 +140,7 @@ class TestIss:
         labels = np.zeros_like(iss_dataset.labels, dtype=np.uint64)
         labels[:, 1:4], labels[:, 24:28] = identifiers[0], identifiers[1]
         tifffile.imwrite(iss_dataset.root / "labels.tiff", labels, photometric="minisblack")
+
         result = iss(
             iss_dataset.root,
             raw_image_file="raw.tiff",
@@ -152,6 +157,7 @@ class TestIss:
         table = ad.read_h5ad(table_file)
         table.obs_names = ["cell-b", "cell-a"]
         table.write_h5ad(table_file)
+
         result = iss(
             iss_dataset.root,
             raw_image_file="raw.tiff",
@@ -159,6 +165,7 @@ class TestIss:
             table_file="cells.h5ad",
             instance_key="segmentation_id",
         )
+
         assert result.tables["table"].obs_names.tolist() == ["cell-b", "cell-a"]
         assert result.tables["table"].obs["segmentation_id"].tolist() == [7, 2]
 

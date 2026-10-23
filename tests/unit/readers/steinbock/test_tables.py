@@ -71,8 +71,10 @@ class TestReadTable:
         path = _write_table(tmp_path / "cells.h5ad")
         samples = {"sample-a": _sample(), "sample-b": _sample()}
         tasks: list[str] = []
+
         with Callback(pretask=lambda key, *_: tasks.append(str(key))):
             table = _read_table(path, samples)
+
         assert not tasks
         assert table.obs_names.tolist() == [
             "Object 2 in sample-b.tiff",
@@ -114,8 +116,10 @@ class TestReadTable:
         else:
             table.var_names = ["DNA", ""]
         table.write_h5ad(path)
+
         with pytest.raises(ReaderFormatError) as caught:
             _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+
         assert caught.value.path == path
         assert caught.value.context.reader == "steinbock"
 
@@ -126,19 +130,23 @@ class TestReadTable:
         assert isinstance(table.obs, pd.DataFrame)
         del table.obs[missing]
         table.write_h5ad(path)
+
         with pytest.raises(ReaderFormatError, match="columns"):
             _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
 
     def test_read_failure_has_artifact_context(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "cells.h5ad")
         path.write_bytes(b"not an HDF5 file")
+
         with pytest.raises(OSError, match="file signature") as caught:
             _read_table(path, {"sample-a": _sample()})
+
         assert any("steinbock" in note and str(path) in note for note in caught.value.__notes__)
 
     def test_third_party_non_dataframe_boundary(self, tmp_path: Path, mocker: MockerFixture) -> None:
         result = mocker.Mock(X=np.ones((1, 1)), obs=None, var=pd.DataFrame(index=["DNA"]))
         mocker.patch("spatialdata_io.readers.steinbock._tables.ad.read_h5ad", return_value=result)
+
         with pytest.raises(TypeError, match="eager DataFrames"):
             _read_table(ArtifactFile(tmp_path / "cells.h5ad"), {"sample-a": _sample()})
 
@@ -152,14 +160,18 @@ class TestSetInstanceIds:
         obs = pd.DataFrame(
             {"image": [filename, filename]}, index=[f"Object 2 in {filename}", f"Object 7 in {filename}"]
         )
+
         _set_instance_ids(obs, {name: _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
+
         assert obs["cell_id"].tolist() == [2, 7]
         assert obs["region"].tolist() == [f"{name}_labels"] * 2
 
     @pytest.mark.parametrize("identifier", [2**53 + 1, 2**63 + 1, 2**64 - 1])
     def test_large_uint64_ids_exact(self, tmp_path: Path, identifier: int) -> None:
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[f"Object {identifier} in sample.tiff"])
+
         _set_instance_ids(obs, {"sample": _sample(dtype="uint64")}, ArtifactFile(tmp_path / "cells.h5ad"))
+
         assert int(obs["cell_id"].iloc[0]) == identifier
         assert obs["cell_id"].dtype == np.dtype(np.uint64 if identifier >= 2**63 else np.int64)
 
@@ -176,6 +188,7 @@ class TestSetInstanceIds:
     )
     def test_malformed_or_out_of_range_ids(self, tmp_path: Path, observation: str) -> None:
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[observation])
+
         with pytest.raises(ReaderFormatError):
             _set_instance_ids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
 
@@ -183,6 +196,7 @@ class TestSetInstanceIds:
         obs = pd.DataFrame(
             {"image": ["small.tiff", "large.tiff"]}, index=["Object 256 in small.tiff", "Object 256 in large.tiff"]
         )
+
         with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
             _set_instance_ids(
                 obs,
@@ -195,11 +209,13 @@ class TestSetInstanceIds:
         obs = pd.DataFrame(
             {"image": images}, index=[f"Object {number} in sample.tiff" for number in range(1, len(images) + 1)]
         )
+
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
             _set_instance_ids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
 
     def test_missing_discovered_sample(self, tmp_path: Path) -> None:
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=["Object 1 in sample.tiff"])
+
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
             _set_instance_ids(obs, {"sample": _sample(), "other": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
 
@@ -209,23 +225,27 @@ class TestCentroids:
 
     def test_xy_order_and_frame_edges(self, tmp_path: Path) -> None:
         obs = pd.DataFrame({"image": ["sample.tiff"] * 3, "centroid-0": [1.5, 0, 7], "centroid-1": [8.5, 0, 11]})
+
         coordinates = _centroids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
         np.testing.assert_array_equal(coordinates, [[8.5, 1.5], [0, 0], [11, 7]])
 
     @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf, "nonnumeric"])
     def test_invalid_centroids(self, tmp_path: Path, value: float | str) -> None:
         obs = pd.DataFrame({"image": ["sample.tiff"], "centroid-0": [value], "centroid-1": [2.0]})
+
         with pytest.raises(ReaderFormatError, match="invalid centroids"):
             _centroids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
 
     @pytest.mark.parametrize(("y", "x"), [(-0.1, 1), (1, -0.1), (8, 1), (1, 12)])
     def test_outside_centroids(self, tmp_path: Path, y: float, x: float) -> None:
         obs = pd.DataFrame({"image": ["sample.tiff"], "centroid-0": [y], "centroid-1": [x]})
+
         with pytest.raises(ReaderFormatError, match="outside"):
             _centroids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
 
     def test_frame_bounds_are_sample_local(self, tmp_path: Path) -> None:
         obs = pd.DataFrame({"image": ["small.tiff", "large.tiff"], "centroid-0": [5, 5], "centroid-1": [2, 2]})
+
         with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
             _centroids(
                 obs,
@@ -243,7 +263,9 @@ class TestCleanMetadata:
         if duplicate:
             obs["Image"] = obs["image"]
         var = pd.DataFrame({"Channel Name": ["DNA"], "Final Concentration / Dilution": ["1:100"]})
+
         _clean_metadata(obs, var, ArtifactFile(tmp_path / "cells.h5ad"))
+
         assert obs.columns.tolist() == ["image"]
         assert var.columns.tolist() == ["Channel_Name", "Final_Concentration"]
         assert var["Final_Concentration"].tolist() == ["1:100"]
@@ -251,6 +273,7 @@ class TestCleanMetadata:
     @pytest.mark.parametrize("value", ["other.tiff", None])
     def test_conflicting_duplicate_image(self, tmp_path: Path, value: str | None) -> None:
         obs = pd.DataFrame({"image": ["sample.tiff"], "Image": [value]})
+
         with pytest.raises(ReaderFormatError, match="conflicting"):
             _clean_metadata(obs, pd.DataFrame(), ArtifactFile(tmp_path / "cells.h5ad"))
 
@@ -259,6 +282,7 @@ class TestCleanMetadata:
     )
     def test_invalid_or_colliding_feature_keys(self, tmp_path: Path, columns: list[str] | list[int]) -> None:
         var = pd.DataFrame([[1] * len(columns)], columns=columns)
+
         with pytest.raises(ReaderFormatError):
             _clean_metadata(pd.DataFrame({"image": ["sample.tiff"]}), var, ArtifactFile(tmp_path / "cells.h5ad"))
 
@@ -268,7 +292,9 @@ class TestFormatError:
 
     def test_source_context(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "cells.h5ad")
+
         error = _format_error(path, found="invalid rows", expected="linked cells")
+
         assert error.path == path
         assert error.context.reader == "steinbock"
         assert error.context.artifact == "cell table"

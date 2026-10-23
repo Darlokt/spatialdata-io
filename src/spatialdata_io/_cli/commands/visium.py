@@ -28,30 +28,30 @@ if TYPE_CHECKING:
 
 @click.command(name="visium")
 @dataset_io_options
-@click.option("--dataset-id", type=str, default=None, help="Dataset identifier; inferred when omitted.")
+@click.option("--dataset-id", type=str, default=None, help="Dataset identifier. Inferred when omitted.")
 @click.option(
     "--counts-source",
     type=click.Path(path_type=Path),
     default=None,
-    help="Optional HDF5 file or MEX directory; relative paths resolve below the dataset root.",
+    help="Optional HDF5 file or MEX directory. Relative paths resolve below the dataset root.",
 )
 @click.option(
     "--fullres-image-file",
     type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
     default=None,
-    help="Optional full-resolution TIFF/BTF, PNG, or JPEG; relative paths resolve below the dataset root.",
+    help="Optional full-resolution TIFF/BTF, PNG, or JPEG. Relative paths resolve below the dataset root.",
 )
 @click.option(
     "--positions-file",
     type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
     default=None,
-    help="Optional tissue-position CSV override; relative paths resolve below the dataset root.",
+    help="Optional tissue-position CSV override. Relative paths resolve below the dataset root.",
 )
 @click.option(
     "--scale-factors-file",
     type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
     default=None,
-    help="Optional scale-factor JSON override; relative paths resolve below the dataset root.",
+    help="Optional scale-factor JSON override. Relative paths resolve below the dataset root.",
 )
 @click.option(
     "--make-var-names-unique/--no-make-var-names-unique",
@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     "--tiff-series",
     type=click.IntRange(min=0),
     default=None,
-    help="Zero-based full-resolution TIFF series; required when the TIFF contains multiple series.",
+    help="Zero-based full-resolution TIFF series. Required when the TIFF contains multiple series.",
 )
 @click.option(
     "--chunks",
@@ -98,6 +98,7 @@ def visium_command(
     else:
         message = "--chunks must be passed once for all axes or three times in CYX order."
         raise click.BadParameter(message, param_hint="--chunks")
+
     result = visium(
         input_path,
         dataset_id=options["dataset_id"],
@@ -110,4 +111,5 @@ def visium_command(
         tiff_series=options["tiff_series"],
         chunks=normalized_chunks,
     )
+
     result.write(output_path)

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def iss(
+def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boundary typed.
     path: str | Path,
     *,
     raw_image_file: str | Path,
@@ -34,7 +34,7 @@ def iss(
 ) -> SpatialData:
     """Read an unversioned ISS image, segmentation, and linked h5ad table.
 
-    The caller selects three artifacts; there is no inferred pipeline version
+    The caller selects three artifacts. There is no inferred pipeline version
     or fixed vendor directory tree::
 
         raw.tiff  # TIFF-family scientific image
@@ -51,12 +51,12 @@ def iss(
         Dataset directory.
     raw_image_file, labels_file, table_file
         Required TIFF, OME-TIFF, BigTIFF/BTF and h5ad paths. Relative paths
-        resolve within the dataset root; absolute paths may be outside it.
+        resolve within the dataset root. Absolute paths may be outside it.
     instance_key
         Integer observation column containing strictly positive label IDs.
         Otherwise decimal observation names become ``instance_id``. Zero is
-        reserved for label background. IDs must fit the labels' integer dtype;
-        exact pixel membership is not checked by computing lazy labels.
+        reserved for label background. IDs must fit the labels' integer dtype.
+        Exact pixel membership is not checked by computing lazy labels.
     dataset_id
         Nonempty identifier used to name the two raster elements. Contains only
         alphanumeric characters, underscores, dots or hyphens, and cannot start
@@ -70,28 +70,28 @@ def iss(
         Optional source raw-image axes, such as ``CYX`` for an unlabeled
         stack. Otherwise TIFF axes are used. Scientific C channels never
         become RGB based on their number. Non-singleton sample axes require
-        an explicit interpretation as C; singleton nonspatial axes may be
+        an explicit interpretation as C. Singleton nonspatial axes may be
         removed, while singleton X/Y dimensions are retained. Labels require
         YX and only singleton extra axes.
     chunks
         Positive size for all image axes or three sizes in output CYX order.
         Labels use the corresponding YX sizes. Native source chunks are used
-        by default; generated pyramid levels use compatible per-axis sizes.
+        by default. Generated pyramid levels use compatible per-axis sizes.
 
     Returns
     -------
     SpatialData
         ``images['<dataset_id>_raw_image']`` is lazy CYX with source dtype,
-        channel order, and unique available OME channel names or IDs; channels
+        channel order, and unique available OME channel names or IDs. Channels
         without OME metadata use positions. ``labels['<dataset_id>_labels_image']`` is lazy YX with
         source integer dtype and instance values. Both have identity transforms
         to ``global`` in shared pixel coordinates. Construction executes zero
-        pixel tasks; partial computations retain native TIFF storage selection.
+        pixel tasks. Partial computations retain native TIFF storage selection.
         TIFF resources close after inspection and inside each lazy task.
         ``tables['table']`` is owned, eager, finite canonical CSR sparse-array
         expression with source dtype and row/feature order. Duplicate feature
         names become unique. The optional ``counts`` layer is normalized in the
-        same way; other layers and existing spatial metadata are retained.
+        same way. Other layers and existing spatial metadata are retained.
         Final linkage uses categorical ``region`` and the selected integer
         instance column. No shapes or points are returned. Caller-owned state
         is not mutated. Provenance records the reader and package version.
@@ -123,12 +123,14 @@ def iss(
     if instance_key is not None and (not isinstance(instance_key, str) or not instance_key or instance_key == "region"):
         message = "instance_key must be a nonempty observation name distinct from 'region'."
         raise ValueError(message)
+
     options = _image_options(
         data_axes=data_axes,
         image_scale_factors=image_scale_factors,
         labels_scale_factors=labels_scale_factors,
         chunks=chunks,
     )
+
     layout = _discover_layout(path, raw_image_file=raw_image_file, labels_file=labels_file, table_file=table_file)
     rasters = _read_rasters(layout, options)
     table = _read_table(layout.table, instance_key=instance_key, label_dtype=rasters.label_dtype)
@@ -147,6 +149,7 @@ def iss(
     except (ValueError, TypeError) as error:
         add_reader_context(error, context=context, path=layout.table)
         raise
+
     result = SpatialData(
         images={f"{dataset_id}_raw_image": rasters.image}, labels={region: rasters.labels}, tables={"table": table}
     )

@@ -51,7 +51,7 @@ def generic(  # noqa: PLR0913, RUF100
     chunks
         Requested image chunks in canonical output-axis order or by canonical
         axis name. Invalid for GeoJSON inputs. By default, only ``Y`` and ``X``
-        are rechunked to 1024; ``C`` and ``Z`` retain source chunking.
+        are rechunked to 1024. ``C`` and ``Z`` retain source chunking.
 
     Returns
     -------
@@ -95,5 +95,5 @@ def generic(  # noqa: PLR0913, RUF100
         )
 
     supported = VALID_IMAGE_TYPES + VALID_SHAPE_TYPES
-    message = f"Unsupported input suffix {normalized_path.suffix!r}; expected one of {supported}."
+    message = f"Unsupported input suffix {normalized_path.suffix!r}. Expected one of {supported}."
     raise ValueError(message)

@@ -262,17 +262,6 @@ class MerscopeKeys(ModeEnum):
 
 
 @unique
-class DbitKeys(ModeEnum):
-    """Keys for DBiT formatted dataset."""
-
-    # files and directories
-    COUNTS_FILE = ".h5ad"
-    # barcodes_file
-    BARCODE_POSITION = "barcode_list"
-    # image
-    IMAGE_LOWRES_FILE = "tissue_lowres_image.png"
-
-
 @unique
 class VisiumHDKeys(ModeEnum):
     """Keys for *10X Genomics Visium hd* formatted dataset."""

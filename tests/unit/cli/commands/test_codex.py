@@ -25,6 +25,7 @@ class TestCodexCommand:
     ) -> None:
         reader = mocker.patch("spatialdata_io.readers.codex.codex", return_value=reader_result)
         output = tmp_path / "output.zarr"
+
         result = runner.invoke(
             codex_command,
             [
@@ -48,6 +49,7 @@ class TestCodexCommand:
                 "32",
             ],
         )
+
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
@@ -64,7 +66,9 @@ class TestCodexCommand:
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, values: list[str], expected: int | None
     ) -> None:
         reader = mocker.patch("spatialdata_io.readers.codex.codex")
+
         result = runner.invoke(codex_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out"), *values])
+
         assert result.exit_code == 0, result.output
         assert reader.call_args.kwargs["chunks"] == expected
 
@@ -82,12 +86,15 @@ class TestCodexCommand:
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, values: list[str]
     ) -> None:
         reader = mocker.patch("spatialdata_io.readers.codex.codex")
+
         result = runner.invoke(codex_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out"), *values])
+
         assert result.exit_code == 2
         reader.assert_not_called()
 
     def test_option_types_and_defaults(self) -> None:
         options = {parameter.name: parameter for parameter in codex_command.params}
+
         assert list(options) == [
             "input_path",
             "output_path",

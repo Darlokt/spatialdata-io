@@ -57,6 +57,7 @@ class TestMakeCircles:
         np.testing.assert_array_equal(circles.geometry.x, np.asarray([20.0, 40.0]))
         np.testing.assert_array_equal(circles.geometry.y, np.asarray([10.0, 30.0]))
         np.testing.assert_array_equal(circles["radius"], np.asarray([3.0, 3.0]))
+
         np.testing.assert_array_equal(_matrix(circles, "sample"), np.eye(3))
         np.testing.assert_array_equal(_matrix(circles, "sample_downscaled_hires"), np.diag([0.5, 0.5, 1.0]))
         np.testing.assert_array_equal(_matrix(circles, "sample_downscaled_lowres"), np.diag([0.25, 0.25, 1.0]))

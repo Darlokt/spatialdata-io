@@ -39,6 +39,7 @@ def _discover_layout(
     """Resolve exactly one selected cell table and zero or one stitched image."""
     root = normalize_dataset_root(path, context=ReaderErrorContext("codex", "dataset layout"))
     candidates = sorted_paths(root.iterdir(), context=ReaderErrorContext("codex", "dataset layout"), search_path=root)
+
     cell_context = ReaderErrorContext("codex", "cell table")
     if cell_table_file is None:
         candidate = require_unique_path(
@@ -53,6 +54,7 @@ def _discover_layout(
         raise ReaderFormatError(
             context=cell_context, path=cell_table, found=cell_table.suffix, expected="a .csv or .fcs cell table"
         )
+
     image_context = ReaderErrorContext("codex", "stitched image")
     if image_file is None:
         image_candidate = optional_unique_path(
@@ -67,4 +69,5 @@ def _discover_layout(
         raise ReaderFormatError(
             context=image_context, path=image, found=image.suffix, expected="a TIFF, OME-TIFF, BigTIFF, or BTF image"
         )
+
     return _CodexLayout(root, cell_table, image)

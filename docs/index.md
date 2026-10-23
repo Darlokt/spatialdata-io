@@ -8,6 +8,7 @@
 
 api.md
 cli.md
+dbit.md
 changelog.md
 contributing.md
 references.md

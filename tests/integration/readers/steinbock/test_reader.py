@@ -107,14 +107,15 @@ class TestSteinbock:
         self, steinbock_dataset: SteinbockDataset, labels_kind: Literal["deepcell", "ilastik"]
     ) -> None:
         if labels_kind == "ilastik":
-            # This segmentation fixture shifts each object down by one pixel;
-            # its cell table must describe the same selected segmentation.
+            # This segmentation fixture shifts each object down by one pixel.
+            # Its cell table must describe the same selected segmentation.
             path = steinbock_dataset.root / "cells.h5ad"
             source = ad.read_h5ad(path)
             assert isinstance(source.obs, pd.DataFrame)
             source.obs["centroid-0"] += 1
             with ad.settings.override(disallow_forward_slash_in_h5ad=False):
                 source.write_h5ad(path)
+
         result = steinbock(steinbock_dataset.root, labels_kind=labels_kind)
 
         assert list(result.images) == ["sample-a_image", "sample-b_image"]
@@ -151,7 +152,8 @@ class TestSteinbock:
         assert isinstance(table.X, sparse.csr_array)
         assert not isinstance(table.X, sparse.spmatrix)
         np.testing.assert_array_equal(table.X.toarray(), [[1, 0], [0, 4], [5, 6], [7, 8]])
-        # Upstream measurements are (row, column); the linked table stores XY.
+
+        # Upstream measurements are (row, column). The linked table stores XY.
         expected_centroids = np.asarray([[3.0, 1.5], [8.5, 5.0], [8.5, 5.0], [3.0, 1.5]])
         if labels_kind == "ilastik":
             expected_centroids[:, 1] += 1
@@ -160,6 +162,7 @@ class TestSteinbock:
 
     def test_unmatched_image_fails(self, steinbock_dataset: SteinbockDataset) -> None:
         (steinbock_dataset.root / "masks_deepcell" / "sample-a.tiff").unlink()
+
         with pytest.raises(ReaderFormatError, match=r"paired|match|mask"):
             steinbock(steinbock_dataset.root)
 
@@ -176,6 +179,7 @@ class TestSteinbock:
             photometric="minisblack",
             metadata={"axes": "CYX", "Channel": {"Name": names}},
         )
+
         result = steinbock(steinbock_dataset.root)
         element = result.images["sample-a_image"]
         assert element.coords["c"].to_numpy().tolist() == names
@@ -186,6 +190,7 @@ class TestSteinbock:
             steinbock_dataset.root / "masks_deepcell" / "orphan.tiff",
             np.zeros((8, 12), dtype=np.uint16),
         )
+
         with pytest.raises(ReaderFormatError, match=r"paired|match|image"):
             steinbock(steinbock_dataset.root)
 
@@ -196,7 +201,9 @@ class TestSteinbock:
         del table.obs["Image"]
         with ad.settings.override(disallow_forward_slash_in_h5ad=False):
             table.write_h5ad(table_file)
+
         result = steinbock(steinbock_dataset.root)
+
         assert "Image" not in result.tables["table"].obs
 
     @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
@@ -214,6 +221,7 @@ class TestSteinbock:
         result = steinbock(tmp_path)
         np.testing.assert_array_equal(result.tables["table"].obs["cell_id"], np.asarray(identifiers, dtype=dtype))
         np.testing.assert_array_equal(result.labels["sample_labels"].data.compute(), mask)
+
         target = tmp_path / "result.zarr"
         result.write(target)
         restored = read_zarr(target)
@@ -270,6 +278,7 @@ class TestSteinbock:
         else:
             table.layers["counts"] = np.asarray([[1, np.inf], [2, 3]])
         table.write_h5ad(path)
+
         with pytest.raises(ValueError, match=r"duplicate|finite"):
             steinbock(tmp_path)
 
@@ -278,6 +287,7 @@ class TestSteinbock:
         self, tmp_path: Path, image_factors: list[int] | None, label_factors: list[int] | None
     ) -> None:
         image, labels = _write_layout(tmp_path)
+
         result = steinbock(
             tmp_path, image_scale_factors=image_factors, labels_scale_factors=label_factors, chunks=(1, 2, 3)
         )

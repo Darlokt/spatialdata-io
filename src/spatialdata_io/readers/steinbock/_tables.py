@@ -34,6 +34,7 @@ def _read_table(path: ArtifactFile, samples: Mapping[str, _SampleRasters]) -> ad
     except (OSError, ValueError) as error:
         add_reader_context(error, context=ReaderErrorContext("steinbock", "cell table"), path=path)
         raise
+
     if table.X is None:
         raise _format_error(path, found="missing expression X", expected="an observation-by-feature expression array")
     if not isinstance(table.obs, pd.DataFrame) or not isinstance(table.var, pd.DataFrame):
@@ -41,10 +42,12 @@ def _read_table(path: ArtifactFile, samples: Mapping[str, _SampleRasters]) -> ad
         raise TypeError(message)
     if not table.obs_names.is_unique or not table.var_names.is_unique or bool(table.var_names.isin([""]).any()):
         raise _format_error(path, found="duplicate or empty identifiers", expected="unique observation and feature IDs")
+
     obs = table.obs
     required = {"image", "centroid-0", "centroid-1"}
     if not required.issubset(obs.columns):
         raise _format_error(path, found=f"columns {obs.columns.tolist()}", expected=f"columns {sorted(required)}")
+
     _set_instance_ids(obs, samples, path)
     table.obsm["spatial"] = _centroids(obs, samples, path)
     _clean_metadata(table.obs, table.var, path)
@@ -77,6 +80,7 @@ def _set_instance_ids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], 
                 expected="a positive ID fitting its mask dtype",
             )
         identifiers.append(identifier)
+
     dtype = np.uint64 if max(identifiers) > np.iinfo(np.int64).max else np.int64
     obs["cell_id"] = np.asarray(identifiers, dtype=dtype)
     obs["region"] = pd.Categorical(
@@ -86,10 +90,11 @@ def _set_instance_ids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], 
 
 def _centroids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: ArtifactFile) -> np.ndarray:
     """Return finite XY pixel centers within each cell's independently inspected frame."""
-    # regionprops centroids are (row, column); SpatialData coordinates are (x, y).
+    # regionprops centroids are (row, column). SpatialData coordinates are (x, y).
     coordinates = obs[["centroid-1", "centroid-0"]].to_numpy()
     if coordinates.dtype.kind not in "iuf" or not np.isfinite(coordinates).all():
         raise _format_error(path, found="invalid centroids", expected="finite real centroid coordinates")
+
     # Group once rather than rescanning the entire cell population for each image.
     for filename, rows in obs.groupby("image", sort=False, observed=True).indices.items():
         positions = coordinates[rows]
@@ -100,6 +105,7 @@ def _centroids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: A
                 found=f"centroids outside {filename!r}",
                 expected=f"pixel centers within YX extent {(height, width)}",
             )
+
     return coordinates
 
 
@@ -111,6 +117,7 @@ def _clean_metadata(obs: pd.DataFrame, var: pd.DataFrame, path: ArtifactFile) ->
                 path, found="conflicting Image and image columns", expected="equal source-image metadata"
             )
         del obs["Image"]
+
     if any(not isinstance(name, str) or not name for name in var.columns):
         raise _format_error(path, found="empty or nonstring feature metadata keys", expected="nonempty string keys")
     columns = [

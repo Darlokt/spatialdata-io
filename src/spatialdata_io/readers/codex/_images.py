@@ -26,11 +26,13 @@ def _validate_image_options(
     if data_axes is not None and not isinstance(data_axes, str):
         message = "data_axes must be a string or None."
         raise TypeError(message)
+
     if tiff_series is not None and (
         isinstance(tiff_series, bool) or not isinstance(tiff_series, int) or tiff_series < 0
     ):
         message = "tiff_series must be a nonnegative integer or None."
         raise ValueError(message)
+
     if chunks is None:
         return
     sizes = chunks if isinstance(chunks, tuple) else (chunks,)
@@ -54,6 +56,7 @@ def _read_image(
     except (OSError, ValueError) as error:
         add_reader_context(error, context=ReaderErrorContext("codex", "stitched image"), path=path)
         raise
+
     if tiff_series is None:
         if len(metadata.series) != 1:
             raise ReaderFormatError(
@@ -63,16 +66,19 @@ def _read_image(
                 expected="an explicit tiff_series selection",
             )
         tiff_series = 0
+
     raster = read_tiff(metadata, series=tiff_series, level=0)
     axes = tuple(axis.lower() for axis in (raster.axes if data_axes is None else data_axes))
-    # TIFF samples represent RGB channels; unknown stack axes require an override.
+    # TIFF samples represent RGB channels. Unknown stack axes require an override.
     axes = tuple("c" if axis == "s" else axis for axis in axes)
     image = normalize_raster_axes(raster.data, axes, target_axes=_IMAGE_AXES, add_missing=("c",))
+
     channel_names = None
     if metadata.ome is not None:
         channels = metadata.ome.images[tiff_series].pixels.channels
         if len(channels) == image.shape[0]:
             channel_names = [channel.name or channel.id for channel in channels]
+
     return Image2DModel.parse(
         image,
         dims=_IMAGE_AXES,

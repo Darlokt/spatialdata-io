@@ -44,7 +44,7 @@ _IMAGE_3D_GRAYSCALE_AXES = frozenset(("x", "y", "z"))
 def _canonical_axes(data_axes: Sequence[str]) -> tuple[str, ...]:
     axes = tuple(axis.lower() for axis in data_axes)
     if any(len(axis) != 1 or not axis.isalpha() for axis in axes):
-        message = f"Invalid data_axes {tuple(data_axes)!r}; expected single alphabetic names."
+        message = f"Invalid data_axes {tuple(data_axes)!r}. Expected single alphabetic names."
         raise ValueError(message)
     if len(set(axes)) != len(axes):
         message = f"data_axes contains duplicate axes: {tuple(data_axes)!r}."
@@ -56,16 +56,16 @@ def _canonical_axes(data_axes: Sequence[str]) -> tuple[str, ...]:
     if axis_set in (_IMAGE_3D_AXES, _IMAGE_3D_GRAYSCALE_AXES):
         return ("c", "z", "y", "x")
 
-    message = f"data_axes must be a permutation of 'yx', 'cyx', 'zyx', or 'czyx'; found {axes!r}."
+    message = f"data_axes must be a permutation of 'yx', 'cyx', 'zyx', or 'czyx'. Found {axes!r}."
     raise ValueError(message)
 
 
 def _validate_tiff_selection(tiff_series: int, tiff_level: int) -> None:
     if isinstance(tiff_series, bool) or not isinstance(tiff_series, int) or tiff_series < 0:
-        message = f"tiff_series must be a non-negative integer; found {tiff_series!r}."
+        message = f"tiff_series must be a non-negative integer. Found {tiff_series!r}."
         raise ValueError(message)
     if isinstance(tiff_level, bool) or not isinstance(tiff_level, int) or tiff_level < 0:
-        message = f"tiff_level must be a non-negative integer; found {tiff_level!r}."
+        message = f"tiff_level must be a non-negative integer. Found {tiff_level!r}."
         raise ValueError(message)
 
 
@@ -77,20 +77,20 @@ def _validate_chunk_value(value: ChunkValue, *, axis: str) -> None:
         raise TypeError(message)
     if isinstance(value, int):
         if value <= 0:
-            message = f"chunks for axis {axis!r} must be positive; found {value}."
+            message = f"chunks for axis {axis!r} must be positive. Found {value}."
             raise ValueError(message)
         return
     if not isinstance(value, tuple):
-        message = f"chunks for axis {axis!r} must be an integer, tuple of integers, or None; found {value!r}."
+        message = f"chunks for axis {axis!r} must be an integer, tuple of integers, or None. Found {value!r}."
         raise TypeError(message)
     if not value:
         message = f"chunks for axis {axis!r} must not be empty."
         raise ValueError(message)
     if any(isinstance(size, bool) or not isinstance(size, int) for size in value):
-        message = f"chunks for axis {axis!r} must contain only integers; found {value!r}."
+        message = f"chunks for axis {axis!r} must contain only integers. Found {value!r}."
         raise TypeError(message)
     if any(size <= 0 for size in value):
-        message = f"chunks for axis {axis!r} must contain only positive sizes; found {value!r}."
+        message = f"chunks for axis {axis!r} must contain only positive sizes. Found {value!r}."
         raise ValueError(message)
 
 
@@ -104,12 +104,12 @@ def _normalize_chunks(chunks: Chunks | None, *, axes: tuple[str, ...]) -> dict[s
         normalized: dict[str, ChunkValue] = dict.fromkeys(axes, chunks)
     elif isinstance(chunks, Mapping):
         if set(chunks) != set(axes):
-            message = f"chunks keys must match canonical axes {axes}; found {tuple(chunks)}."
+            message = f"chunks keys must match canonical axes {axes}. Found {tuple(chunks)}."
             raise ValueError(message)
         normalized = {axis: chunks[axis] for axis in axes}
     elif isinstance(chunks, tuple):
         if len(chunks) != len(axes):
-            message = f"chunks length must match canonical axes {axes}; found {chunks!r}."
+            message = f"chunks length must match canonical axes {axes}. Found {chunks!r}."
             raise ValueError(message)
         if chunks and not (
             all(isinstance(value, int) for value in chunks) or all(isinstance(value, tuple) for value in chunks)
@@ -118,11 +118,12 @@ def _normalize_chunks(chunks: Chunks | None, *, axes: tuple[str, ...]) -> dict[s
             raise TypeError(message)
         normalized = dict(zip(axes, chunks, strict=True))
     else:
-        message = f"chunks must be an integer, tuple, mapping, or None; found {type(chunks).__name__}."
+        message = f"chunks must be an integer, tuple, mapping, or None. Found {type(chunks).__name__}."
         raise TypeError(message)
 
     for axis, value in normalized.items():
         _validate_chunk_value(value, axis=axis)
+
     return normalized
 
 
@@ -140,7 +141,7 @@ def _read_raster(path: Path, *, tiff_series: int, tiff_level: int) -> LazyRaster
     if suffix in JPEG_SUFFIXES:
         return read_jpeg(path)
 
-    message = f"Unsupported image suffix {path.suffix!r}; expected one of {VALID_IMAGE_TYPES}."
+    message = f"Unsupported image suffix {path.suffix!r}. Expected one of {VALID_IMAGE_TYPES}."
     raise ValueError(message)
 
 
@@ -163,8 +164,8 @@ def image(  # noqa: PLR0913, RUF100
     receive a singleton channel axis. Returned images use canonical ``CYX`` or
     ``CZYX`` dimensions without decoding pixels during construction.
 
-    TIFF-family sources retain their native storage-aligned source graph;
-    requested model chunks add only lazy rechunking. PNG and JPEG decoding is
+    TIFF-family sources retain their native storage-aligned source graph.
+    Requested model chunks add only lazy rechunking. PNG and JPEG decoding is
     delayed but necessarily whole-frame.
 
     Parameters
@@ -182,7 +183,7 @@ def image(  # noqa: PLR0913, RUF100
         zero for PNG and JPEG inputs.
     chunks
         Requested chunks in canonical output-axis order or by canonical axis
-        name. By default, only the spatial axes are rechunked to 1024; channel
+        name. By default, only the spatial axes are rechunked to 1024. Channel
         and depth axes retain the source chunking. An integer or positional
         tuple explicitly chunks every output axis. A mapping can use ``None``
         to retain the source chunks for selected axes.
@@ -205,7 +206,7 @@ def image(  # noqa: PLR0913, RUF100
     Notes
     -----
     This function does not mutate caller-owned mappings or arrays. TIFF
-    metadata inspection is eager and bounded; raster pixel decoding is lazy.
+    metadata inspection is eager and bounded. Raster pixel decoding is lazy.
     """
     _validate_tiff_selection(tiff_series, tiff_level)
     target_axes = _canonical_axes(data_axes)
@@ -218,6 +219,8 @@ def image(  # noqa: PLR0913, RUF100
         target_axes=target_axes,
         add_missing=("c",) if "c" not in {axis.lower() for axis in data_axes} else (),
     )
+
+    # Model chunking rechunks the lazy source graph without decoding pixels here.
     model = Image2DModel if target_axes == ("c", "y", "x") else Image3DModel
     return model.parse(
         normalized,

@@ -74,6 +74,7 @@ def _numeric_column(frame: pd.DataFrame, column: str, *, integer: bool, path: Pa
         raise _format_error(path, f"fractional values in {column!r}", "integer values")
     if integer and bool((converted < 0).any()):
         raise _format_error(path, f"negative values in {column!r}", "nonnegative integer values")
+
     return converted.astype(np.int64, copy=False) if integer else converted
 
 
@@ -90,8 +91,10 @@ def _convert_position_columns(frame: pd.DataFrame, *, path: Path) -> None:
     frame["in_tissue"] = _numeric_column(frame, "in_tissue", integer=True, path=path)
     if not set(frame["in_tissue"].unique()).issubset({0, 1}):
         raise _format_error(path, "in_tissue values outside {0, 1}", "binary in_tissue values")
+
     for column in ("array_row", "array_col"):
         frame[column] = _numeric_column(frame, column, integer=True, path=path)
+
     for column in ("pxl_row_in_fullres", "pxl_col_in_fullres"):
         values = _numeric_column(frame, column, integer=False, path=path)
         if bool((values < 0).any()):
@@ -110,6 +113,7 @@ def read_positions(layout: VisiumLayout) -> pd.DataFrame:
     except (OSError, UnicodeError, pd.errors.ParserError) as error:
         add_reader_context(error, context=_context("tissue positions"), path=layout.positions)
         raise
+
     if tuple(frame.columns) != POSITION_COLUMNS:
         raise _format_error(
             layout.positions,
@@ -118,6 +122,7 @@ def read_positions(layout: VisiumLayout) -> pd.DataFrame:
         )
     if frame.empty:
         raise _format_error(layout.positions, "zero rows", "at least one spot row")
+
     _validate_barcodes(frame, path=layout.positions)
     _convert_position_columns(frame, path=layout.positions)
     return frame.set_index("barcode")
@@ -130,6 +135,7 @@ def _read_counts(counts: CountsLayout, *, make_var_names_unique: bool) -> AnnDat
         if make_var_names_unique:
             adata.var_names_make_unique()
         return adata
+
     return read_10x_mtx(
         counts.path,
         context=context,
@@ -156,6 +162,7 @@ def prepare_table(
             expected="unique count-matrix barcodes",
             path=layout.counts.path,
         )
+
     missing = adata.obs_names.difference(positions.index, sort=False)
     if len(missing):
         raise ReaderFormatError(
@@ -164,6 +171,8 @@ def prepare_table(
             expected="every count barcode exactly once in the position table",
             path=layout.positions,
         )
+
+    # Count barcodes determine row order and membership, including non-tissue spots.
     aligned = positions.loc[adata.obs_names].copy()
     obs = cast("pd.DataFrame", adata.obs)
     for column in OBS_POSITION_COLUMNS:
@@ -173,12 +182,15 @@ def prepare_table(
         np.repeat(options.dataset_id, adata.n_obs),
         categories=[options.dataset_id],
     )
+
+    # Vendor CSV coordinates are row/column, while SpatialData uses x/y.
     adata.obsm["spatial"] = np.column_stack(
         (
             aligned["pxl_col_in_fullres"].to_numpy(dtype=np.float64, copy=False),
             aligned["pxl_row_in_fullres"].to_numpy(dtype=np.float64, copy=False),
         )
     )
+
     source_metadata = {
         key: value
         for key, value in (
@@ -193,6 +205,7 @@ def prepare_table(
             "scalefactors": dict(options.scale_factors.values),
         }
     }
+
     return PreparedTable(adata=adata, positions=aligned)
 
 

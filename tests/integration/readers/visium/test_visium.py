@@ -33,12 +33,14 @@ def _write_h5(path: Path, *, library_id: bytes | None = b"sample") -> None:
             source.attrs["library_ids"] = np.asarray([library_id])
         source.attrs["chemistry_description"] = b"Synthetic chemistry"
         source.attrs["software_version"] = b"spaceranger-9.9.9"
+
         matrix = source.create_group("matrix")
         matrix.create_dataset("barcodes", data=np.asarray([b"barcode-a", b"barcode-b", b"barcode-c"]))
         matrix.create_dataset("data", data=np.asarray([1, 5, 2, 3, 4, 6], dtype=np.int32))
         matrix.create_dataset("indices", data=np.asarray([0, 2, 1, 0, 1, 2], dtype=np.int32))
         matrix.create_dataset("indptr", data=np.asarray([0, 2, 3, 6], dtype=np.int32))
         matrix.create_dataset("shape", data=np.asarray([3, 3], dtype=np.int64))
+
         features = matrix.create_group("features")
         features.create_dataset("id", data=np.asarray([b"gene-id-a", b"gene-id-b", b"antibody-id"]))
         features.create_dataset("name", data=np.asarray([b"gene-a", b"gene-b", b"protein-a"]))
@@ -69,6 +71,7 @@ def _write_mex(path: Path, *, compressed: bool) -> None:
         ),
         encoding="utf-8",
     )
+
     if compressed:
         for artifact in path.iterdir():
             _gzip(artifact)
@@ -94,6 +97,7 @@ def _write_spatial(
         header = "barcode,in_tissue,array_row,array_col,pxl_row_in_fullres,pxl_col_in_fullres\n"
         filename = "tissue_positions_list.csv" if version == "v1_headered" else "tissue_positions.csv"
         (spatial / filename).write_text(header + rows, encoding="utf-8")
+
     (spatial / "scalefactors_json.json").write_text(
         json.dumps(
             {
@@ -105,6 +109,7 @@ def _write_spatial(
         ),
         encoding="utf-8",
     )
+
     hires = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
     lowres = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
     (spatial / "tissue_hires_image.png").write_bytes(imagecodecs.png_encode(hires))
@@ -128,6 +133,7 @@ def _assert_table_contract(result: SpatialData) -> None:
         table.X.toarray(),
         np.asarray([[1, 0, 5], [0, 2, 0], [3, 4, 6]], dtype=np.float32),
     )
+
     assert table.obs_names.tolist() == ["barcode-a", "barcode-b", "barcode-c"]
     assert table.var_names.tolist() == ["gene-a", "gene-b", "protein-a"]
     assert table.var["feature_types"].tolist() == ["Gene Expression", "Gene Expression", "Antibody Capture"]
@@ -135,6 +141,7 @@ def _assert_table_contract(result: SpatialData) -> None:
     assert table.obs["spot_id"].tolist() == ["barcode-a", "barcode-b", "barcode-c"]
     assert table.obs["region"].tolist() == ["sample", "sample", "sample"]
     np.testing.assert_array_equal(table.obsm["spatial"], np.asarray([[20, 10], [40, 30], [60, 50]]))
+
     assert table.uns["spatial"]["sample"]["scalefactors"]["fiducial_diameter_fullres"] == 8.0
     assert get_table_keys(table) == ("sample", "region", "spot_id")
 
@@ -158,6 +165,7 @@ class TestVisiumSyntheticWorkflow:
         else:
             _write_mex(tmp_path / "filtered_feature_bc_matrix", compressed=counts_kind == "mex_gz")
             dataset_id = "sample"
+
         _write_spatial(tmp_path, version=position_version)
         fullres = tmp_path / "fullres.tif"
         fullres_data = np.arange(3 * 6 * 8, dtype=np.uint16).reshape(3, 6, 8)
@@ -168,6 +176,7 @@ class TestVisiumSyntheticWorkflow:
         assert set(result.images) == {"sample_full_image", "sample_hires_image", "sample_lowres_image"}
         assert set(result.shapes) == {"sample"}
         assert set(result.tables) == {"table"}
+
         assert result.attrs["spatialdata_io_software_version"] == __version__
         assert result.attrs["spatialdata_io_reader"] == "visium"
         if counts_kind == "h5":
@@ -178,11 +187,13 @@ class TestVisiumSyntheticWorkflow:
         full_pyramid = result.images["sample_full_image"]
         assert isinstance(full_pyramid, DataTree)
         assert list(full_pyramid.children) == ["scale0", "scale1", "scale2"]
+
         full_image = full_pyramid["scale0"]["image"]
         assert full_image.dims == ("c", "y", "x")
         assert full_image.shape == (3, 6, 8)
         assert full_image.dtype == np.dtype(np.uint16)
         np.testing.assert_array_equal(full_image.data[:, :2, :3].compute(), fullres_data[:, :2, :3])
+
         hires = result.images["sample_hires_image"]
         assert isinstance(hires, DataArray)
         assert hires.shape == (3, 4, 5)

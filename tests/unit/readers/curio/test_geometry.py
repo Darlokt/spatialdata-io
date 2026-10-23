@@ -37,6 +37,7 @@ class TestReadShapes:
             table.obsm["spatial"] = np.full((3, 2), np.nan)
         else:
             table.obsm["X_spatial"] = np.ones((3, 2))
+
         with pytest.raises(ReaderFormatError, match="spatial"):
             _read_shapes(table, layout.counts)
 
@@ -49,6 +50,7 @@ class TestReadShapes:
         coordinates[0, 0] = value
         table.obsm["spatial"] = coordinates
         table.obsm["X_spatial"] = coordinates.copy()
+
         with pytest.raises(ReaderFormatError, match="lose precision"):
             _read_shapes(table, layout.counts)
 
@@ -60,7 +62,9 @@ class TestReadShapes:
         coordinates[0, 0] = 2**60
         table.obsm["spatial"] = coordinates
         table.obsm["X_spatial"] = coordinates.copy()
+
         shapes = _read_shapes(table, layout.counts)
+
         assert int(shapes.geometry.x.iloc[0]) == 2**60
 
     @pytest.mark.parametrize("exact", [True, False])
@@ -75,6 +79,7 @@ class TestReadShapes:
             coordinates[0, 0] += np.finfo(np.longdouble).eps
         table.obsm["spatial"] = coordinates
         table.obsm["X_spatial"] = coordinates.copy()
+
         if exact:
             assert _read_shapes(table, layout.counts).geometry.x.tolist() == [1.0] * 3
         else:

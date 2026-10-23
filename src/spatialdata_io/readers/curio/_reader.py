@@ -45,21 +45,21 @@ def curio(path: str | Path) -> SpatialData:
         array expression with source dtype, observation order, and feature order.
         Other layers retain their source representation. Cluster assignments are
         aligned by bead ID and stored as categorical ``obs['cluster']``.
-        Metric categories become dictionaries in ``uns``; the cluster-feature
+        Metric categories become dictionaries in ``uns``. The cluster-feature
         TSV is stored in ``uns['Top_cluster_defining_features']``. The first
-        Moran TSV column contains feature IDs; statistic columns join
+        Moran TSV column contains feature IDs. Statistic columns join
         onto ``var`` in feature order, with missing entries for unlisted genes.
-        Supplied statistics must be finite numeric or boolean values; undefined
+        Supplied statistics must be finite numeric or boolean values. Undefined
         source statistics are rejected.
         ``shapes['cells']`` contains points with radius 10 in source coordinate
         units, indexed by observation ID, and an identity transform to
         ``global``. Coordinates are ordered ``(x, y)`` and must be losslessly
-        representable as float64 geometry; no physical-unit conversion is inferred.
+        representable as float64 geometry. No physical-unit conversion is inferred.
         These circles represent beads, despite the historical region name.
         ``obsm['spatial']`` is retained and its identical ``X_spatial`` duplicate
         removed. Final linkage uses ``region`` and
         ``instance_id``. No images, labels, or transcript points are returned.
-        All I/O is eager; caller-owned state is not mutated.
+        All I/O is eager. Caller-owned state is not mutated.
 
     Raises
     ------
@@ -79,6 +79,8 @@ def curio(path: str | Path) -> SpatialData:
     layout = _discover_layout(path)
     table = _read_table(layout)
     shapes = _read_shapes(table, layout.counts)
+
+    # Bead IDs link to the completed geometry in the counts observation order.
     table.obs["region"] = pd.Categorical(["cells"] * table.n_obs)
     table.obs["instance_id"] = table.obs_names
     table = parse_linked_table(
@@ -87,6 +89,7 @@ def curio(path: str | Path) -> SpatialData:
         context=ReaderErrorContext("curio", "linked counts"),
         expected_instance_ids={"cells": shapes.index},
     )
+
     result = SpatialData(tables={"table": table}, shapes={"cells": shapes})
     set_reader_provenance(result.attrs, reader="curio")
     return result

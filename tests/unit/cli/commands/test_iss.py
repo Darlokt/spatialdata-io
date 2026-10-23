@@ -24,6 +24,7 @@ class TestIssCommand:
     ) -> None:
         reader = mocker.patch("spatialdata_io.readers.iss.iss", return_value=reader_result)
         output = tmp_path / "out.zarr"
+
         result = runner.invoke(
             iss_command,
             [
@@ -39,6 +40,7 @@ class TestIssCommand:
                 "cells.h5ad",
             ],
         )
+
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
@@ -91,7 +93,9 @@ class TestIssCommand:
         ]
         for value in chunk_args:
             args.extend(["--chunks", value])
+
         result = runner.invoke(iss_command, args)
+
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
@@ -116,7 +120,9 @@ class TestIssCommand:
         ):
             if option != omitted:
                 args.extend([option, value])
+
         result = runner.invoke(iss_command, args)
+
         assert result.exit_code == 2
         assert omitted in result.output
 
@@ -147,4 +153,5 @@ class TestIssCommand:
                 *extra,
             ],
         )
+
         assert result.exit_code == 2

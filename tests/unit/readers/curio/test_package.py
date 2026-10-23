@@ -14,6 +14,7 @@ class TestPackage:
 
     def test_public_exports(self) -> None:
         package = importlib.import_module("spatialdata_io.readers.curio")
+
         assert package.__all__ == ["curio"]
         assert package.curio is curio
         assert curio is reader_curio

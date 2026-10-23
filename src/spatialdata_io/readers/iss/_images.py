@@ -80,6 +80,7 @@ def _image_options(
         if supplied is None:
             factors.append(None)
             continue
+
         values = tuple(supplied)
         if not values or any(
             isinstance(value, bool) or not isinstance(value, int) or value < _MIN_SCALE_FACTOR for value in values
@@ -87,6 +88,7 @@ def _image_options(
             message = f"{name} must be a nonempty sequence of integer downsampling factors greater than one."
             raise ValueError(message)
         factors.append(values)
+
     _validate_chunks(chunks)
     return _ImageOptions(data_axes, factors[0], factors[1], chunks)
 
@@ -95,6 +97,7 @@ def _validate_chunks(chunks: int | tuple[int, int, int] | None) -> None:
     """Require positive model chunk sizes in canonical CYX order."""
     if chunks is None:
         return
+
     sizes = chunks if isinstance(chunks, tuple) else (chunks,)
     if isinstance(chunks, tuple) and len(chunks) != len(_IMAGE_AXES):
         message = "chunks must contain three values in CYX order."
@@ -117,14 +120,17 @@ def _read_raster(
     except (OSError, ValueError) as error:
         add_reader_context(error, context=context, path=path)
         raise
+
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=context, path=path, found=f"{len(metadata.series)} series", expected="exactly one TIFF series"
         )
+
     raster = read_tiff(metadata, series=0, level=0)
     axes = tuple(axis.lower() for axis in (raster.axes if data_axes is None else data_axes))
-    # C is scientific channels. S only loses its axis when it is singleton;
-    # interleaved samples need an explicit raw-image axis interpretation.
+
+    # C is scientific channels. S only loses its axis when it is singleton.
+    # Interleaved samples need an explicit raw-image axis interpretation.
     try:
         array = normalize_raster_axes(
             raster.data, axes, target_axes=target_axes, add_missing=("c",) if "c" in target_axes else ()
@@ -134,8 +140,9 @@ def _read_raster(
             context=context,
             path=path,
             found=str(error),
-            expected=f"unambiguous 2D axes {target_axes}; singleton nonspatial axes only",
+            expected=f"unambiguous 2D axes {target_axes}. Singleton nonspatial axes only",
         ) from error
+
     return array, metadata
 
 
@@ -145,6 +152,7 @@ def _read_rasters(layout: _IssLayout, options: _ImageOptions) -> _IssRasters:
         layout.raw_image, name="raw image", target_axes=_IMAGE_AXES, data_axes=options.data_axes
     )
     labels, _ = _read_raster(layout.labels, name="labels", target_axes=_LABEL_AXES)
+
     if image.shape[-2:] != labels.shape:
         raise ReaderFormatError(
             context=ReaderErrorContext("iss", "raster alignment"),
@@ -161,7 +169,7 @@ def _read_rasters(layout: _IssLayout, options: _ImageOptions) -> _IssRasters:
         )
     if options.labels_scale_factors is not None and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
         message = (
-            "Generated label pyramids require <=32-bit integer labels; the upstream model rounds 64-bit IDs. "
+            "Generated label pyramids require <=32-bit integer labels. The upstream model rounds 64-bit IDs. "
             "Use labels_scale_factors=None for exact 64-bit labels."
         )
         raise ValueError(message)
@@ -199,11 +207,12 @@ def _read_rasters(layout: _IssLayout, options: _ImageOptions) -> _IssRasters:
                 expected="unique channel names or OME IDs",
             )
 
-    # Integer chunk sizes work at every pyramid level; complete base partitions do not.
+    # Integer chunk sizes work at every pyramid level. Complete base partitions do not.
     image_chunks = options.chunks or tuple(max(parts) for parts in image.chunks)
     label_chunks = image_chunks[-2:] if isinstance(image_chunks, tuple) else image_chunks
     if options.chunks is None:
         label_chunks = tuple(max(parts) for parts in labels.chunks)
+
     return _IssRasters(
         Image2DModel.parse(
             image,

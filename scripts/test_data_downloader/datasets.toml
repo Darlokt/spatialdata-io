@@ -143,3 +143,25 @@ group = "macsima"
 doi = "10.5281/zenodo.18196366"
 extracted_dir = "OMAP10_small"
 source = "MACSima OMAP10, CC BY 4.0"
+
+# -------
+# Real DBiT-seq E10 mouse embryo data from Liu et al. (2020).
+# The versioned scientific source collection is CC BY 4.0: https://zenodo.org/records/12785822
+# Original factual nucleotide-to-grid mapping from the authors' pinned repository.
+# The integration test restores nucleotide observation IDs from these coordinates.
+# It preserves the source raw counts in X and does not infer or fabricate barcode sequences.
+[[datasets]]
+key = "dbit_mouse_e10"
+group = "dbit"
+extracted_dir = "dbit_mouse_e10"
+source = "Liu et al. (2020) DBiT-seq mouse E10. Zenodo 12785822, CC BY 4.0. Authors' barcode map"
+
+[[datasets.assets]]
+url = "https://zenodo.org/records/12785822/files/DBiT-seq_liu2020high_E10_whole_gene_best_data.h5ad"
+known_hash = "sha256:54520b0f724c05f788a487aa904ddd9acdca1efb164455b92536a12d45a94943"
+target = "source.h5ad"
+
+[[datasets.assets]]
+url = "https://raw.githubusercontent.com/MingyuYang-Yale/DBiT-seq/4487131b0ecfb1e490bf16829d7376ea5fbe1c9e/Datasets/barcode.xls"
+known_hash = "sha256:5e64f655b59f4f8ee47fdfb59c838a4976e4137ba6dcc34024e18ad54f43909d"
+target = "barcode_coordinates.tsv"
