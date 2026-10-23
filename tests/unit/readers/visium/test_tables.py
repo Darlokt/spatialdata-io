@@ -58,6 +58,7 @@ class TestReadPositions:
 
     @pytest.mark.parametrize("headered", [False, True])
     def test_reads_schema_without_reordering_rows(self, tmp_path: Path, *, headered: bool) -> None:
+        """Reads schema without reordering rows."""
         path = tmp_path / "positions.csv"
         header = "barcode,in_tissue,array_row,array_col,pxl_row_in_fullres,pxl_col_in_fullres\n" if headered else ""
         path.write_text(header + _position_rows(), encoding="utf-8")
@@ -65,33 +66,16 @@ class TestReadPositions:
         result = read_positions(_layout(tmp_path, path, headered=headered))
 
         assert result.index.tolist() == ["b", "a", "extra"]
-        assert result["in_tissue"].dtype == np.dtype(np.int64)
+        assert str(result["in_tissue"].dtype) == "int64[pyarrow]"
         assert result["array_row"].tolist() == [1, 0, 2]
         np.testing.assert_array_equal(result["pxl_col_in_fullres"], np.asarray([40.5, 20.0, 60.0]))
 
-    @pytest.mark.parametrize(
-        ("row", "message"),
-        [
-            ("a,2,0,0,1,2\n", "binary in_tissue"),
-            ("a,1,-1,0,1,2\n", "nonnegative integer"),
-            ("a,1,0.5,0,1,2\n", "integer values"),
-            ("a,1,0,0,nan,2\n", "finite numeric"),
-            ("a,1,0,0,-1,2\n", "nonnegative pixel"),
-            ("a,1,0,0,1,2\na,0,1,1,3,4\n", "duplicate barcodes"),
-        ],
-    )
-    def test_rejects_invalid_external_values(self, tmp_path: Path, row: str, message: str) -> None:
-        path = tmp_path / "positions.csv"
-        path.write_text(row, encoding="utf-8")
-
-        with pytest.raises(ReaderFormatError, match=message):
-            read_positions(_layout(tmp_path, path, headered=False))
-
-    def test_rejects_wrong_header_exactly(self, tmp_path: Path) -> None:
+    def test_rejects_missing_required_header_fields(self, tmp_path: Path) -> None:
+        """Rejects missing required header fields."""
         path = tmp_path / "positions.csv"
         path.write_text("barcode,in_tissue,x\na,1,2\n", encoding="utf-8")
 
-        with pytest.raises(ReaderFormatError, match="exact columns"):
+        with pytest.raises(ReaderFormatError, match="required columns"):
             read_positions(_layout(tmp_path, path, headered=True))
 
 

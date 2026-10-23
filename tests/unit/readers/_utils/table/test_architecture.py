@@ -57,6 +57,16 @@ class TestTableArchitecture:
         import_roots = {module.split(".")[0] for module in imported_modules}
         assert import_roots.isdisjoint(_FORBIDDEN_LINKAGE_IMPORTS)
 
+    def test_annotation_compatibility_has_no_models_or_storage_io(self) -> None:
+        """Keep annotation conversion independent of models and file storage."""
+        path = Path("src/spatialdata_io/readers/_utils/table/_compat.py")
+        tree = ast.parse(path.read_text())
+        imported_modules = {module for node in ast.walk(tree) for module in self._imported_modules(node)}
+        import_roots = {module.split(".")[0] for module in imported_modules}
+        assert import_roots.isdisjoint({"anndata", "spatialdata", "dask", "h5py", "zarr"})
+        internal_imports = {module for module in imported_modules if module.startswith("spatialdata_io.")}
+        assert internal_imports == {"spatialdata_io.readers._utils.errors"}
+
     @staticmethod
     def _imported_modules(node: ast.AST) -> tuple[str, ...]:
         if isinstance(node, ast.Import):

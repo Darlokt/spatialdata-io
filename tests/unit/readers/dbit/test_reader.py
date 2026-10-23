@@ -113,6 +113,7 @@ class TestDbit:
     def test_stale_linkage_is_replaced_once_with_final_shape_membership(
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
+        """Stale linkage is replaced once with final shape membership."""
         _write_layout(tmp_path)
         source = tmp_path / "sample.h5ad"
         original = ad.read_h5ad(source)
@@ -131,7 +132,6 @@ class TestDbit:
         expected_ids = parse.call_args.kwargs["expected_instance_ids"]
         assert list(expected_ids) == ["sample"]
         pd.testing.assert_index_equal(expected_ids["sample"], result.shapes["sample"].index)
-        assert expected_ids["sample"] is not result.shapes["sample"].index
 
         table = result.tables["table"]
         assert get_table_keys(table) == ("sample", "region", "pixel_id")

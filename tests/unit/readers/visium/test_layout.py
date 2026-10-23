@@ -42,6 +42,17 @@ def _write_mex(path: Path, *, prefix: str = "", compressed: bool = True) -> None
 class TestDiscoverLayout:
     """Exercise count, position, image, and override discovery as one transaction."""
 
+    def test_invalid_position_encoding_has_artifact_context(self, tmp_path: Path) -> None:
+        """Invalid position encoding has artifact context."""
+        _write_required_spatial(tmp_path)
+        (tmp_path / "filtered_feature_bc_matrix.h5").touch()
+        (tmp_path / "spatial" / "tissue_positions.csv").write_bytes(b"\xff,1,0,0,1,2\n")
+
+        with pytest.raises(ReaderFormatError, match=r"visium.*tissue positions.*invalid UTF-8") as caught:
+            _discover(tmp_path)
+
+        assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+
     def test_standard_h5_precedes_standard_mex_and_finds_optional_images(self, tmp_path: Path) -> None:
         _write_required_spatial(tmp_path)
         h5 = tmp_path / "filtered_feature_bc_matrix.h5"

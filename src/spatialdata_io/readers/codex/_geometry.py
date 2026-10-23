@@ -21,6 +21,6 @@ def _make_shapes(table: ad.AnnData) -> gpd.GeoDataFrame:
     coordinates = cast("npt.NDArray[np.number]", table.obsm["spatial"])
     shapes = gpd.GeoDataFrame(
         {"geometry": gpd.points_from_xy(coordinates[:, 0], coordinates[:, 1]), "radius": 1},
-        index=pd.Index(table.obs["cell_id"], name="cell_id"),
+        index=pd.Index(table.obs["cell_id"].to_numpy(), name="cell_id"),
     )
     return ShapesModel.parse(shapes, transformations={"global": Identity()})

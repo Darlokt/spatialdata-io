@@ -1,9 +1,11 @@
-# Sparse table boundary
+# Table representation boundary
 
-This package is the sparse expression-representation boundary for
+This package is the expression and annotation representation boundary for
 `spatialdata-io` readers. It turns reader-selected in-memory values,
 coordinate records, or explicitly reader-owned `AnnData` expression storage
 into canonical SciPy CSR sparse arrays.
+It also prepares explicitly owned annotation frames for AnnData storage and
+validates final SpatialData table linkage.
 
 ## Responsibilities
 
@@ -16,6 +18,7 @@ The package owns:
 - deterministic duplicate summation and sorted sparse indices;
 - input non-mutation and explicit storage-sharing behavior;
 - normalization of owned, in-memory `AnnData.X` and named expression layers;
+- supported Arrow annotation storage conversion in explicitly selected owned frames;
 - exact region, instance, and optional target linkage validation;
 - one isolated call to the public `TableModel.parse()` boundary;
 - rejection of implicit computation and densification.
@@ -37,7 +40,9 @@ A vendor reader owns:
 - `_arrays.py` constructs canonical CSR sparse arrays without vendor or model
   dependencies.
 - `_normalize.py` mutates explicitly reader-owned, in-memory `AnnData` objects
-  without copying the complete table.
+  to normalize expression without copying the complete table.
+- `_compat.py` prepares explicitly selected owned annotation frames for AnnData
+  storage without inspecting expression or recursively walking annotations.
 - `_linkage.py` validates reader-created linkage and optional exact target
   membership, normalizes expression storage, and calls the public
   `TableModel.parse()` API exactly once.
@@ -108,6 +113,71 @@ ordering are unchanged. `raw.X` has no writable public boundary; a future
 reader that intentionally exposes secondary expression should construct a
 normalized named layer where practical rather than forcing an expensive rebuild
 of `raw` here. `X=None` remains valid for metadata-only tables.
+
+## Owned annotation frames
+
+Reader schemas own column semantics, nullability, ordering, and validation.
+After final annotation mutations and semantic validation, call
+`prepare_anndata_dataframe()` once on each final owned AnnData-bound frame,
+before constructing or linking the table:
+
+```python
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.table import prepare_anndata_dataframe
+
+obs = prepare_anndata_dataframe(
+    obs,
+    context=ReaderErrorContext(reader="example", artifact="observation annotations"),
+)
+```
+
+This temporary compatibility boundary replaces general Arrow extension storage
+unsupported by AnnData writers or SpatialData integer linkage:
+
+| Arrow input | Final storage |
+| --- | --- |
+| Signed/unsigned integers without nulls | Same-width, same-signedness NumPy integers |
+| Signed/unsigned integers with nulls | Matching pandas nullable integer extension |
+| Boolean without/with nulls | NumPy bool / pandas nullable boolean |
+| Float32/64 without nulls | Matching NumPy floating dtype, preserving valid NaNs |
+| Float32/64 with nulls | Rejected unless the reader schema authorizes null-to-NaN conversion |
+| String / large string | pandas `StringDtype(storage="pyarrow")`, backed by `ArrowStringArray` |
+| Decimal, nested, binary, temporal, other Arrow storage | Contextual `ReaderFormatError` |
+
+The function mutates and returns the identical eager frame. Compatible columns,
+including existing pandas string extensions and categoricals, retain their
+arrays. Column labels/order, lexical identifiers, integer extrema including
+uint64, categorical order, index names/order, and MultiIndex codes are
+preserved. Arrow indexes and MultiIndex levels follow the column conversion
+rules. AnnData itself restricts supported observation/feature index types;
+this helper does not stringify numeric indexes or permit MultiIndex in AnnData.
+It accepts only an explicitly owned frame, never copies complete AnnData,
+touches expression, reads files, changes global settings, or traverses nested
+annotations. Readers explicitly select obs, var, and any schema-declared
+DataFrame in uns. Preserve imported non-Arrow annotations in their existing
+representations. Conversion is sequential: discard the owned destination after
+failure rather than attempting rollback.
+
+Arrow distinguishes a null from a valid NaN. By default any floating null is
+rejected, including an all-null column. A reader may pass
+`allow_float_nulls=True` only when its semantic schema equates both states with
+missing floating values. That explicit choice converts nulls to NaN while
+retaining existing valid NaNs, width, and finite values. Readers requiring the
+distinction must keep the default rejection until a supported lossless
+representation is established.
+
+Supported AnnData (>=0.13) and pandas (>=3.0) versions persist nullable pandas
+string extensions under their default settings. The helper does not override
+caller settings. Round-trip tests use public H5AD/Zarr writers and verify
+exact integer widths/values, missingness, strings, indexes, and linkage, with
+two concrete reader-shaped annotation fixtures. AnnData's independent
+automatic string-to-category option remains a writer choice.
+
+Keep this conversion isolated from `normalize_owned_anndata()`'s expression-only
+contract and `parse_linked_table()`'s linkage validation. Remove it and reader
+calls when supported upstream versions pass direct Arrow annotation persistence,
+exact integer linkage, and reader composition checks. An upstream support
+announcement alone does not establish those contracts.
 
 ## Linked tables
 

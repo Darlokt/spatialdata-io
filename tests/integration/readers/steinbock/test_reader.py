@@ -301,3 +301,86 @@ class TestSteinbock:
         np.testing.assert_array_equal(labels_base.data.compute(), labels)
         assert image_base.data.chunksize == (1, 2, 3)
         assert labels_base.data.chunksize == (2, 3)
+
+    def test_imported_annotation_types_and_missingness_are_preserved(self, tmp_path: Path) -> None:
+        """Retain imported extension metadata while enriching the owned table."""
+        _write_layout(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.obs["nullable_count"] = pd.array([2**53 + 1, None], dtype="Int64")
+        source.obs["nullable_flag"] = pd.array([True, None], dtype="boolean")
+        source.obs["classification"] = pd.Categorical(["T", "B"], categories=["B", "T"], ordered=True)
+        source.var["confidence"] = np.asarray([0.25] * source.n_vars, dtype=np.float32)
+        source.var["nullable_rank"] = pd.array([1] + [None] * (source.n_vars - 1), dtype="UInt16")
+        source.write_h5ad(path)
+        original = ad.read_h5ad(path)
+
+        result = steinbock(tmp_path)
+
+        table = result.tables["table"]
+        assert isinstance(table.obs, pd.DataFrame)
+        assert isinstance(table.var, pd.DataFrame)
+        assert isinstance(original.obs, pd.DataFrame)
+        assert isinstance(original.var, pd.DataFrame)
+        expected_obs = original.obs.iloc[[0, 1]]
+        for column in ("nullable_count", "nullable_flag", "classification"):
+            pd.testing.assert_series_equal(table.obs[column], expected_obs[column], check_exact=True)
+        for column in ("confidence", "nullable_rank"):
+            pd.testing.assert_series_equal(table.var[column], original.var[column], check_exact=True)
+        unchanged = ad.read_h5ad(path).obs
+        assert isinstance(unchanged, pd.DataFrame)
+        pd.testing.assert_frame_equal(unchanged, original.obs, check_exact=True)
+
+        table.write_h5ad(tmp_path / "roundtrip.h5ad")
+        restored = ad.read_h5ad(tmp_path / "roundtrip.h5ad")
+        assert isinstance(restored.obs, pd.DataFrame)
+        assert isinstance(restored.var, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.obs, table.obs, check_exact=True)
+        pd.testing.assert_frame_equal(restored.var, table.var, check_exact=True)
+
+        result.write(tmp_path / "metadata.zarr")
+        restored = read_zarr(tmp_path / "metadata.zarr").tables["table"]
+        assert isinstance(restored.obs, pd.DataFrame)
+        assert isinstance(restored.var, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.obs, table.obs, check_exact=True)
+        pd.testing.assert_frame_equal(restored.var, table.var, check_exact=True)
+
+    @pytest.mark.parametrize("field", ["region", "cell_id"])
+    @pytest.mark.parametrize("conflicting", [False, True])
+    def test_reserved_output_columns(self, tmp_path: Path, field: str, *, conflicting: bool) -> None:
+        """Reserved output columns."""
+        _write_layout(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        if field == "region":
+            source.obs[field] = ["other" if conflicting else "sample_labels"] * 2
+        else:
+            source.obs[field] = [1, 1 if conflicting else 2]
+        source.write_h5ad(path)
+
+        if conflicting:
+            with pytest.raises(ReaderFormatError, match="conflicting reserved"):
+                steinbock(tmp_path)
+        else:
+            result = steinbock(tmp_path)
+            assert result.tables["table"].obs[field].tolist() == source.obs[field].tolist()
+
+    @pytest.mark.parametrize("dtype", ["Int64", "UInt64"])
+    def test_nullable_numeric_centroid_annotations(self, tmp_path: Path, dtype: str) -> None:
+        """Normalize genuine nullable H5AD coordinates while retaining source fields."""
+        _write_layout(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.obs["centroid-0"] = pd.Series([1, 3], dtype=dtype).array
+        source.obs["centroid-1"] = pd.Series([2, 4], dtype=dtype).array
+        source.write_h5ad(path)
+        original = ad.read_h5ad(path)
+
+        table = steinbock(tmp_path).tables["table"]
+
+        assert isinstance(table.obs, pd.DataFrame)
+        assert isinstance(original.obs, pd.DataFrame)
+        np.testing.assert_array_equal(table.obsm["spatial"], [[2, 1], [4, 3]])
+        assert table.obsm["spatial"].dtype == np.dtype(dtype.lower())
+        for column in ("centroid-0", "centroid-1"):
+            pd.testing.assert_series_equal(table.obs[column], original.obs[column], check_exact=True)

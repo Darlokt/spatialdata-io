@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.curio._geometry import _read_shapes
 from spatialdata_io.readers.curio._layout import _discover_layout
+from spatialdata_io.readers.curio._schemas import DEFINING_FEATURES_KEY, STRING_DTYPE
 from spatialdata_io.readers.curio._tables import _read_table
 
 if TYPE_CHECKING:
@@ -45,12 +46,31 @@ def curio(path: str | Path) -> SpatialData:
         array expression with source dtype, observation order, and feature order.
         Other layers retain their source representation. Cluster assignments are
         aligned by bead ID and stored as categorical ``obs['cluster']``.
-        Metric categories become dictionaries in ``uns``. The cluster-feature
+        Metric categories become dictionaries in ``uns``. Metric and value
+        occupy the first two positional columns, whose names may vary;
+        ``Category`` is a named trailing column. Extra metric columns are ignored.
+        The cluster-feature
         TSV is stored in ``uns['Top_cluster_defining_features']``. The first
         Moran TSV column contains feature IDs. Statistic columns join
         onto ``var`` in feature order, with missing entries for unlisted genes.
         Supplied statistics must be finite numeric or boolean values. Undefined
         source statistics are rejected.
+        Headerless cluster files have exactly two fields: lexical bead ID and
+        cluster label. Defining-feature fields retain source column order and
+        additional annotations; optional ``gene`` values remain lexical strings.
+        Duplicate or empty named headers and NUL characters are rejected.
+        Imported H5AD annotations retain their source representations. Imported
+        ``cluster``, ``region``, ``instance_id``, or
+        ``Top_cluster_defining_features`` destinations and conflicting metric
+        categories are rejected instead of overwritten.
+        Newly read metadata uses Arrow storage during processing, followed by
+        one conversion per completed annotation frame for AnnData persistence.
+        Complete numeric outputs use NumPy storage; integer and boolean Moran
+        columns with unlisted genes use nullable pandas storage, preserving
+        exact large integers. Missing floating statistics become NaN. Newly
+        created string annotations use pandas nullable strings. Defining-feature
+        empty fields become missing values; literal identifier strings such as
+        ``NA`` remain strings.
         ``shapes['cells']`` contains points with radius 10 in source coordinate
         units, indexed by observation ID, and an identity transform to
         ``global``. Coordinates are ordered ``(x, y)`` and must be losslessly
@@ -82,7 +102,19 @@ def curio(path: str | Path) -> SpatialData:
 
     # Bead IDs link to the completed geometry in the counts observation order.
     table.obs["region"] = pd.Categorical(["cells"] * table.n_obs)
-    table.obs["instance_id"] = table.obs_names
+    table.obs["instance_id"] = pd.Series(table.obs_names, index=table.obs_names, dtype=STRING_DTYPE)
+    # Only completed, reader-owned frames cross the temporary storage boundary.
+    # Moran joins introduce intentional missing statistics for unlisted features.
+    # These frames are eager; AnnData also annotates the backed Dataset2D alternative.
+    prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=ReaderErrorContext("curio", "observations"))
+    prepare_anndata_dataframe(
+        cast("pd.DataFrame", table.var), context=ReaderErrorContext("curio", "features"), allow_float_nulls=True
+    )
+    prepare_anndata_dataframe(
+        table.uns[DEFINING_FEATURES_KEY],
+        context=ReaderErrorContext("curio", "cluster features"),
+        allow_float_nulls=True,
+    )
     table = parse_linked_table(
         table,
         TableLinkage(("cells",), "region", "instance_id"),

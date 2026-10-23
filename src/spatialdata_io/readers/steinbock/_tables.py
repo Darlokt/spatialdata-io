@@ -2,29 +2,29 @@
 
 from __future__ import annotations
 
-import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import anndata as ad
 import numpy as np
 import pandas as pd
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io.readers.steinbock._schemas import (
+    SIGNED_CELL_ID_DTYPE,
+    UNSIGNED_CELL_ID_DTYPE,
+    _centroid_columns,
+    _instance_identifiers,
+    _metadata_columns,
+    _validate_centroids,
+    _validate_output_column,
+    _validate_table,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.steinbock._images import _SampleRasters
-
-_OBJECT_NAME = re.compile(r"Object ([0-9]+) in (.+)")
-
-
-def _format_error(path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
-    """Describe a cell-table schema failure with the originating artifact."""
-    return ReaderFormatError(
-        context=ReaderErrorContext("steinbock", "cell table"), path=path, found=found, expected=expected
-    )
 
 
 def _read_table(path: ArtifactFile, samples: Mapping[str, _SampleRasters]) -> ad.AnnData:
@@ -35,95 +35,46 @@ def _read_table(path: ArtifactFile, samples: Mapping[str, _SampleRasters]) -> ad
         add_reader_context(error, context=ReaderErrorContext("steinbock", "cell table"), path=path)
         raise
 
-    if table.X is None:
-        raise _format_error(path, found="missing expression X", expected="an observation-by-feature expression array")
-    if not isinstance(table.obs, pd.DataFrame) or not isinstance(table.var, pd.DataFrame):
-        message = "Steinbock requires eager DataFrames from read_h5ad."
-        raise TypeError(message)
-    if not table.obs_names.is_unique or not table.var_names.is_unique or bool(table.var_names.isin([""]).any()):
-        raise _format_error(path, found="duplicate or empty identifiers", expected="unique observation and feature IDs")
+    _validate_table(table, path)
 
-    obs = table.obs
-    required = {"image", "centroid-0", "centroid-1"}
-    if not required.issubset(obs.columns):
-        raise _format_error(path, found=f"columns {obs.columns.tolist()}", expected=f"columns {sorted(required)}")
+    # The schema establishes eager frames; AnnData also types backed Dataset2D.
+    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
 
     _set_instance_ids(obs, samples, path)
     table.obsm["spatial"] = _centroids(obs, samples, path)
-    _clean_metadata(table.obs, table.var, path)
+    _clean_metadata(obs, var, path)
+
     return table
 
 
 def _set_instance_ids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: ArtifactFile) -> None:
-    """Parse exact compound identifiers and require every discovered sample in the table."""
-    source_names = {f"{name}.tiff": name for name in samples}
-    if obs["image"].isna().any() or set(obs["image"]) != set(source_names):
-        raise _format_error(
-            path, found="table/image/mask sample disagreement", expected="exactly the discovered sample set"
-        )
-
-    # The upstream compound name includes the complete filename, including spaces.
-    # Parse decimal IDs directly: a float intermediate cannot retain uint64 values.
-    maxima = {f"{name}.tiff": np.iinfo(sample.label_dtype.str).max for name, sample in samples.items()}
-    identifiers: list[int] = []
-    for observation, source_name in zip(obs.index, obs["image"], strict=True):
-        match = _OBJECT_NAME.fullmatch(observation)
-        if match is None or match[2] != source_name:
-            raise _format_error(
-                path, found=f"observation {observation!r}", expected="Object <positive integer> in <obs.image>"
-            )
-        identifier = int(match[1])
-        if identifier <= 0 or identifier > maxima[source_name]:
-            raise _format_error(
-                path,
-                found=f"label ID {identifier} for {source_name!r}",
-                expected="a positive ID fitting its mask dtype",
-            )
-        identifiers.append(identifier)
-
-    dtype = np.uint64 if max(identifiers) > np.iinfo(np.int64).max else np.int64
-    obs["cell_id"] = np.asarray(identifiers, dtype=dtype)
-    obs["region"] = pd.Categorical(
-        obs["image"].map({source: f"{name}_labels" for source, name in source_names.items()})
+    """Construct final exact IDs and sample-local region categories in the owned frame."""
+    identifiers = _instance_identifiers(obs, samples, path)
+    dtype = UNSIGNED_CELL_ID_DTYPE if max(identifiers) > np.iinfo(np.int64).max else SIGNED_CELL_ID_DTYPE
+    cell_ids = pd.Series(identifiers, index=obs.index, dtype=dtype)
+    regions = pd.Series(
+        pd.Categorical(obs["image"].map({f"{name}.tiff": f"{name}_labels" for name in samples})), index=obs.index
     )
+
+    _validate_output_column(obs, "cell_id", cell_ids, path=path)
+    _validate_output_column(obs, "region", regions, path=path)
+
+    obs["cell_id"] = cell_ids
+    obs["region"] = regions
 
 
 def _centroids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: ArtifactFile) -> np.ndarray:
-    """Return finite XY pixel centers within each cell's independently inspected frame."""
-    # regionprops centroids are (row, column). SpatialData coordinates are (x, y).
-    coordinates = obs[["centroid-1", "centroid-0"]].to_numpy()
-    if coordinates.dtype.kind not in "iuf" or not np.isfinite(coordinates).all():
-        raise _format_error(path, found="invalid centroids", expected="finite real centroid coordinates")
-
-    # Group once rather than rescanning the entire cell population for each image.
-    for filename, rows in obs.groupby("image", sort=False, observed=True).indices.items():
-        positions = coordinates[rows]
-        height, width = samples[str(filename).removesuffix(".tiff")].label_shape
-        if (positions < 0).any() or (positions[:, 0] > width - 1).any() or (positions[:, 1] > height - 1).any():
-            raise _format_error(
-                path,
-                found=f"centroids outside {filename!r}",
-                expected=f"pixel centers within YX extent {(height, width)}",
-            )
+    """Extract XY coordinates from regionprops row/column fields."""
+    coordinates = np.column_stack(_centroid_columns(obs, path))
+    _validate_centroids(coordinates, obs, samples, path)
 
     return coordinates
 
 
 def _clean_metadata(obs: pd.DataFrame, var: pd.DataFrame, path: ArtifactFile) -> None:
-    """Clean documented export metadata in place without losing conflicting fields."""
-    if "Image" in obs:
-        if not obs["Image"].eq(obs["image"]).all():
-            raise _format_error(
-                path, found="conflicting Image and image columns", expected="equal source-image metadata"
-            )
-        del obs["Image"]
+    """Apply validated export-name cleanup without recasting imported annotations."""
+    columns = _metadata_columns(obs, var, path)
 
-    if any(not isinstance(name, str) or not name for name in var.columns):
-        raise _format_error(path, found="empty or nonstring feature metadata keys", expected="nonempty string keys")
-    columns = [
-        ("Final Concentration" if name == "Final Concentration / Dilution" else name).replace(" ", "_")
-        for name in var.columns
-    ]
-    if len(set(columns)) != len(columns):
-        raise _format_error(path, found="feature metadata cleanup collision", expected="unique normalized column names")
+    if "Image" in obs:
+        del obs["Image"]
     var.columns = columns

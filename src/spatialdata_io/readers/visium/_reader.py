@@ -60,8 +60,10 @@ def visium(  # noqa: PLR0913, RUF100
             └── tissue_lowres_image.png          # optional
 
     Space Ranger pre-2.0 headerless ``tissue_positions_list.csv``, headered
-    legacy files, and 2.0+ ``tissue_positions.csv`` are supported. Position
-    rows are aligned to count barcodes without filtering ``in_tissue``. Count
+    legacy files, and 2.0+ ``tissue_positions.csv`` are supported. Named fields
+    may be reordered and additional columns are ignored. Headerless files
+    require exactly six positional fields. Ambiguous duplicate headers fail.
+    Position rows are aligned to count barcodes without filtering ``in_tissue``. Count
     and feature order are preserved, and expression is returned as a finite
     canonical CSR sparse array. All count feature types are retained in source
     order, including Antibody Capture features when present.
@@ -131,6 +133,11 @@ def visium(  # noqa: PLR0913, RUF100
     pixels remain path-backed and lazy. Coordinates are full-resolution pixels
     with ``x=pxl_col_in_fullres`` and ``y=pxl_row_in_fullres``. The scale-factor
     value ``spot_diameter_fullres`` is divided by two to construct circle radii.
+    Position processing uses explicit Arrow-backed columns. Final observation
+    fields ``in_tissue``, ``array_row``, and ``array_col`` are NumPy int64;
+    ``spot_id`` is a pandas string and ``region`` is categorical. Coordinates
+    in ``obsm['spatial']`` are float64. Integer grid values are normalized
+    exactly, without an intermediate floating-point representation.
     """
     if not isinstance(make_var_names_unique, bool):
         message = "make_var_names_unique must be a boolean."

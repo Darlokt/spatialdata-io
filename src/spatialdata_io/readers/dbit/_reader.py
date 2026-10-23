@@ -11,11 +11,12 @@ from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.dbit._barcodes import _read_barcodes
 from spatialdata_io.readers.dbit._geometry import _make_grid
 from spatialdata_io.readers.dbit._images import _read_image, _validate_image_options
 from spatialdata_io.readers.dbit._layout import _discover_layout
+from spatialdata_io.readers.dbit._schemas import GRID_DTYPE, SAMPLE_DTYPE, _validate_output_column
 from spatialdata_io.readers.dbit._tables import _read_table
 
 if TYPE_CHECKING:
@@ -135,7 +136,11 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         ``obsm['spatial']`` retains these two columns in A/B order. ``pixel_id``
         is the zero-based sorted row index. ``sample`` and categorical ``region``
         contain the grid name. Previous source linkage is replaced with exact
-        membership in the new grid.
+        membership in the new grid. Additional H5AD annotation fields accept
+        arbitrary order and retain source dtypes and missingness. Duplicate
+        annotation names and conflicting reserved output columns fail. Equal
+        reserved values are accepted. Region/pixel_id columns belonging to a
+        declared previous linkage are replaced together with that linkage.
 
         ``shapes[dataset_id]`` contains clockwise squares, with A mapped to x
         and B to y. Without an image a grid step is one unit. With an image,
@@ -197,19 +202,28 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     coordinates = cast("npt.NDArray[np.int64]", table.obsm["spatial"])
     grid = _make_grid(coordinates, scale=scale, include_border=include_border, border_scale=border_scale)
 
-    table.obs["region"] = pd.Categorical([dataset_id] * table.n_obs)
-    table.obs["sample"] = dataset_id
-    table.obs["pixel_id"] = np.arange(table.n_obs, dtype=np.int64)
+    # _read_table validates eager frames; AnnData also types backed Dataset2D.
+    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
+
+    regions = pd.Series(pd.Categorical([dataset_id] * table.n_obs), index=obs.index)
+    samples = pd.Series(dataset_id, index=obs.index, dtype=SAMPLE_DTYPE)
+    identifiers = pd.Series(np.arange(table.n_obs, dtype=np.int64), index=obs.index, dtype=GRID_DTYPE)
+    for key, values in (("region", regions), ("sample", samples), ("pixel_id", identifiers)):
+        _validate_output_column(obs, key, values, path=layout.table)
+        obs[key] = values
 
     # Link once, after sorting and constructing the independent geometry target.
     context = ReaderErrorContext("dbit", "linked table")
+    prepare_anndata_dataframe(obs, context=context)
+    prepare_anndata_dataframe(var, context=context)
+
     try:
         table = parse_linked_table(
             table,
             TableLinkage((dataset_id,), "region", "pixel_id"),
             context=context,
             expression_layers=("counts",) if "counts" in table.layers else (),
-            expected_instance_ids={dataset_id: grid.index.copy()},
+            expected_instance_ids={dataset_id: grid.index},
         )
     except (TypeError, ValueError) as error:
         add_reader_context(error, context=context, path=layout.table)

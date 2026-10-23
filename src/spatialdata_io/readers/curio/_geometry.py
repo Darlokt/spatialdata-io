@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import geopandas as gpd
 import numpy as np
@@ -12,7 +12,6 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 
 if TYPE_CHECKING:
     import anndata as ad
-    import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -54,11 +53,10 @@ def _read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
             expected="coordinates losslessly representable as float64",
         )
 
-    coordinates = cast("npt.NDArray[np.number]", xy)
     # The embeddings agree, so retain one coordinate representation in the owned table.
     del table.obsm["X_spatial"]
     shapes = gpd.GeoDataFrame(
-        {"geometry": gpd.points_from_xy(coordinates[:, 0], coordinates[:, 1]), "radius": 10.0},
+        {"geometry": gpd.points_from_xy(xy[:, 0], xy[:, 1]), "radius": 10.0},
         index=table.obs_names.copy(),
     )
     return ShapesModel.parse(shapes)

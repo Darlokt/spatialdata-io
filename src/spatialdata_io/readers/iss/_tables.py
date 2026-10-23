@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers.iss._schemas import (
+    DEFAULT_INSTANCE_KEY,
+    MIN_INSTANCE_BITS,
+    _validate_index_ids,
+    _validate_instance_ids,
+    _validate_output_column,
+    _validate_table,
+)
 
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
@@ -23,30 +32,12 @@ def _read_table(path: ArtifactFile, *, instance_key: str | None, label_dtype: np
         add_reader_context(error, context=context, path=path)
         raise
 
-    if table.X is None:
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="missing expression X",
-            expected="an observation-by-feature expression array",
-        )
-    if not isinstance(table.obs, pd.DataFrame):
-        message = "ISS requires an eager observation DataFrame from read_h5ad."
-        raise TypeError(message)
-    if (
-        not table.obs_names.is_unique
-        or bool(table.obs_names.isin([""]).any())
-        or bool(table.var_names.isin([""]).any())
-    ):
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="duplicate observations or empty observation/feature identifiers",
-            expected="unique nonempty observation names and nonempty feature names",
-        )
+    _validate_table(table, path=path, instance_key=instance_key)
 
-    _set_instance_ids(table.obs, instance_key=instance_key, label_dtype=label_dtype, path=path)
+    # AnnData cannot express the eager frame invariant established by the schema.
+    _set_instance_ids(cast("pd.DataFrame", table.obs), instance_key=instance_key, label_dtype=label_dtype, path=path)
     table.var_names_make_unique()
+
     return table
 
 
@@ -57,8 +48,7 @@ def _set_instance_ids(
     context = ReaderErrorContext("iss", "counts")
 
     # Parse decimal index strings as Python integers. Float64 loses IDs above 2**53.
-    label_max = np.iinfo(label_dtype.str).max
-    key = "instance_id" if instance_key is None else instance_key
+    key = DEFAULT_INSTANCE_KEY if instance_key is None else instance_key
     if instance_key is None:
         try:
             values = [int(value) for value in obs.index]
@@ -69,48 +59,23 @@ def _set_instance_ids(
                 found="nonnumeric observation names",
                 expected="integer label IDs in the index, or an explicit instance_key",
             ) from error
-        if any(value <= 0 or value > label_max for value in values):
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found="nonpositive or out-of-range index identifiers",
-                expected=f"positive label IDs representable by {label_dtype}. Zero is background",
-            )
+        _validate_index_ids(values, label_dtype=label_dtype, path=path)
 
         index_dtype = np.uint64 if values and max(values) > np.iinfo(np.int64).max else np.int64
-        obs[key] = np.asarray(values, dtype=index_dtype)
+        column = pd.Series(values, index=obs.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(index_dtype)))
+        _validate_output_column(obs, key, column, path=path)
     else:
-        if key not in obs:
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found=f"missing observation column {key!r}",
-                expected="the requested integer instance column",
-            )
-
         column = obs[key]
-        if (
-            column.isna().any()
-            or pd.api.types.is_bool_dtype(column.dtype)
-            or not pd.api.types.is_integer_dtype(column.dtype)
-        ):
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found=f"null or noninteger identifiers with dtype {column.dtype}",
-                expected="nonnull positive integer label IDs",
-            )
-        if len(column) and (int(column.min()) <= 0 or int(column.max()) > label_max):
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found="nonpositive or out-of-range instance identifiers",
-                expected=f"positive label IDs representable by {label_dtype}. Zero is background",
-            )
+        _validate_instance_ids(column, label_dtype=label_dtype, path=path)
 
-        # AnnData's parser needs >=16-bit integer columns. Nullable integer masks
-        # are removed only after rejecting nulls, without changing numeric values.
-        dtype = np.dtype(str(column.dtype).lower())
-        if dtype.itemsize == 1:
-            dtype = np.dtype(np.uint16 if dtype.kind == "u" else np.int16)
-        obs[key] = column.to_numpy(dtype=dtype, copy=False)
+        # Linkage requires at least 16-bit integers; wider IDs keep signedness.
+        arrow_type = (
+            column.dtype.pyarrow_dtype
+            if isinstance(column.dtype, pd.ArrowDtype)
+            else pa.from_numpy_dtype(np.dtype(str(column.dtype).lower()))
+        )
+        if arrow_type.bit_width < MIN_INSTANCE_BITS:
+            arrow_type = pa.uint16() if pa.types.is_unsigned_integer(arrow_type) else pa.int16()
+        column = column.astype(pd.ArrowDtype(arrow_type))
+
+    obs[key] = column

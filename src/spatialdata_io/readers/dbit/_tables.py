@@ -9,16 +9,23 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.table import as_csr_array
+from spatialdata_io.readers.dbit._schemas import (
+    BARCODE_LENGTH,
+    GRID_DTYPE,
+    _source_linkage_columns,
+    _validate_barcode_prefixes,
+    _validate_mapped_positions,
+    _validate_output_column,
+    _validate_table,
+)
 
 if TYPE_CHECKING:
     import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.dbit._barcodes import _Barcodes
-
-_BARCODE_LENGTH = 8
 
 
 def _expression_array(
@@ -56,46 +63,22 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
         add_reader_context(error, context=context, path=path)
         raise
 
-    if table.X is None or not table.n_obs or not table.n_vars:
-        raise ReaderFormatError(
-            context=context, path=path, found="empty or absent expression", expected="nonempty observation-by-feature X"
-        )
-    if (
-        not table.obs_names.is_unique
-        or not table.var_names.is_unique
-        or table.var_names.hasnans
-        or (table.var_names == "").any()
-    ):
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="invalid identifiers",
-            expected="unique observations and nonempty unique features",
-        )
+    _validate_table(table, path)
+    source_linkage_columns = _source_linkage_columns(table, path)
 
-    # Export IDs encode B then A, although output coordinates are A/x then B/y.
-    # Ignore suffixes for lookup and uniqueness, preserving the original IDs.
-    names = table.obs_names.str[: 2 * _BARCODE_LENGTH].str.upper()
-    if not names.str.fullmatch(r"[ACGT]{16}").all() or not names.is_unique:
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="malformed or duplicate barcode pairs",
-            expected="one observation per 16-base B-then-A barcode prefix. Optional suffixes are retained",
-        )
+    # Export IDs encode B then A; output coordinates are A/x then B/y.
+    names = table.obs_names.str.slice(0, 2 * BARCODE_LENGTH).str.upper()
+    _validate_barcode_prefixes(names, path)
 
-    a = pd.Series(names.str[_BARCODE_LENGTH:]).map(barcodes.a)
-    b = pd.Series(names.str[:_BARCODE_LENGTH]).map(barcodes.b)
-    if a.isna().any() or b.isna().any():
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="unknown observation barcodes",
-            expected="every B/A barcode in the position map",
-        )
+    a = pd.Series([barcodes.a.get(value) for value in names.str.slice(BARCODE_LENGTH)], dtype=GRID_DTYPE)
+    b = pd.Series([barcodes.b.get(value) for value in names.str.slice(0, BARCODE_LENGTH)], dtype=GRID_DTYPE)
+    _validate_mapped_positions(a, b, path)
 
-    table.obs["array_A"] = a.to_numpy(dtype=np.int64)
-    table.obs["array_B"] = b.to_numpy(dtype=np.int64)
+    # The schema validates eager H5AD frames; AnnData also types backed Dataset2D.
+    obs = cast("pd.DataFrame", table.obs)
+    _validate_output_column(obs, "array_A", a, path=path)
+    _validate_output_column(obs, "array_B", b, path=path)
+    obs["array_A"], obs["array_B"] = a.array, b.array
 
     # Convert before row selection: AnnData's copy must never duplicate a dense
     # expression matrix merely to establish the final observation order.
@@ -116,10 +99,14 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
     if not np.array_equal(order, np.arange(table.n_obs)):
         table = table[order].copy()
 
-    # The eager H5AD owner and eager row selection always produce pandas obs.
+    # Eager AnnData row selection preserves the schema-validated pandas frames.
     obs = cast("pd.DataFrame", table.obs)
     table.obsm["spatial"] = obs[["array_A", "array_B"]].to_numpy(dtype=np.int64)
 
-    # Any previous target belongs to the source container, not this new grid.
+    # A declared old linkage identifies metadata that the new grid replaces.
+    # Unlinked columns with these reserved names remain preserved annotations.
     table.uns.pop("spatialdata_attrs", None)
+    for key in source_linkage_columns:
+        del obs[key]
+
     return table

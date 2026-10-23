@@ -136,10 +136,7 @@ def as_csr_array(
         if isinstance(sparse_data, sparse.csr_array):
             result = _canonicalize_csr(sparse_data, owns_data=False)
         elif isinstance(sparse_data, sparse.csr_matrix):
-            result = cast(
-                "sparse.csr_array",
-                sparse.csr_array(sparse_data, copy=not sparse_data.has_canonical_format),
-            )
+            result = sparse.csr_array(sparse_data, copy=not sparse_data.has_canonical_format)
             result = _canonicalize_csr(result, owns_data=True)
         else:
             # scipy-stubs does not model the public sparse base classes as

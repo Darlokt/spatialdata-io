@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.iss._images import _image_options, _read_rasters
 from spatialdata_io.readers.iss._layout import _discover_layout
+from spatialdata_io.readers.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY, _validate_output_column
 from spatialdata_io.readers.iss._tables import _read_table
 
 if TYPE_CHECKING:
@@ -91,7 +92,10 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         ``tables['table']`` is owned, eager, finite canonical CSR sparse-array
         expression with source dtype and row/feature order. Duplicate feature
         names become unique. The optional ``counts`` layer is normalized in the
-        same way. Other layers and existing spatial metadata are retained.
+        same way. Other layers, additional H5AD annotation fields and their
+        dtypes/missingness, and existing spatial metadata are retained. Annotation
+        columns may be reordered; duplicate column names are rejected. Existing
+        reserved output columns must be semantically equal to generated values.
         Final linkage uses categorical ``region`` and the selected integer
         instance column. No shapes or points are returned. Caller-owned state
         is not mutated. Provenance records the reader and package version.
@@ -120,7 +124,9 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
             "and cannot start with '__'."
         )
         raise ValueError(message)
-    if instance_key is not None and (not isinstance(instance_key, str) or not instance_key or instance_key == "region"):
+    if instance_key is not None and (
+        not isinstance(instance_key, str) or not instance_key or instance_key == REGION_KEY
+    ):
         message = "instance_key must be a nonempty observation name distinct from 'region'."
         raise ValueError(message)
 
@@ -135,14 +141,23 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     rasters = _read_rasters(layout, options)
     table = _read_table(layout.table, instance_key=instance_key, label_dtype=rasters.label_dtype)
 
-    # Complete reader-owned mutations before one final sparse normalization/linkage.
+    # _read_table validates eager frames; AnnData also types backed Dataset2D.
+    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
+
     region = f"{dataset_id}_labels_image"
-    table.obs["region"] = pd.Categorical([region] * table.n_obs)
+    regions = pd.Series(pd.Categorical([region] * table.n_obs), index=table.obs_names)
+    _validate_output_column(obs, REGION_KEY, regions, path=layout.table)
+    obs[REGION_KEY] = regions
+
+    # Annotation storage is finalized after reader mutations and before linkage.
     context = ReaderErrorContext("iss", "linked counts")
+    prepare_anndata_dataframe(obs, context=context)
+    prepare_anndata_dataframe(var, context=context)
+
     try:
         table = parse_linked_table(
             table,
-            TableLinkage((region,), "region", instance_key or "instance_id"),
+            TableLinkage((region,), REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY),
             context=context,
             expression_layers=("counts",) if "counts" in table.layers else (),
         )

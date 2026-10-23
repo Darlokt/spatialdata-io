@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.paths import (
@@ -20,6 +19,7 @@ from spatialdata_io.readers._utils.paths import (
     require_directory,
     require_file,
 )
+from spatialdata_io.readers.visium._schemas import PositionFormat, classify_position_row
 
 FILTERED_H5 = "filtered_feature_bc_matrix.h5"
 FILTERED_MTX = "filtered_feature_bc_matrix"
@@ -29,8 +29,6 @@ SCALE_FACTORS = "scalefactors_json.json"
 HIRES_IMAGE = "tissue_hires_image.png"
 LOWRES_IMAGE = "tissue_lowres_image.png"
 MAX_POSITION_HEADER_BYTES = 1_024
-
-type PositionFormat = Literal["headered", "headerless"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,10 +67,12 @@ class VisiumLayout:
 
 
 def _context(artifact: str) -> ReaderErrorContext:
+    """Identify a Visium layout artifact for contextual errors."""
     return ReaderErrorContext(reader="visium", artifact=artifact)
 
 
 def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | None) -> MtxCounts:
+    """Resolve one complete consistently compressed MEX triplet."""
     context = _context("count matrix")
     try:
         names = frozenset(entry.name for entry in path.iterdir())
@@ -112,6 +112,7 @@ def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | No
 
 
 def _explicit_counts(root: DatasetRoot, source: str | Path) -> CountsLayout:
+    """Validate and interpret a caller-selected count source."""
     source_path = Path(source).expanduser()
     if source_path.suffix.lower() in {".h5", ".hdf5"}:
         path = require_caller_file(root, source, context=_context("count matrix"))
@@ -122,6 +123,7 @@ def _explicit_counts(root: DatasetRoot, source: str | Path) -> CountsLayout:
 
 
 def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayout:
+    """Resolve the preferred count source without ambiguous fallback."""
     if source is not None:
         return _explicit_counts(root, source)
 
@@ -171,6 +173,7 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
 
 
 def _position_format(path: ArtifactFile) -> PositionFormat:
+    """Read one bounded first row and classify its schema."""
     context = _context("tissue positions")
     try:
         with path.open("rb") as stream:
@@ -183,14 +186,22 @@ def _position_format(path: ArtifactFile) -> PositionFormat:
         raise ReaderFormatError(
             context=context,
             found=f"a first row longer than {MAX_POSITION_HEADER_BYTES} bytes",
-            expected="a bounded six-column CSV header or data row",
+            expected="a bounded CSV header or six-field data row",
             path=path,
         )
 
-    return "headered" if first_line.removeprefix(b"\xef\xbb\xbf").startswith(b"barcode,") else "headerless"
+    try:
+        row = first_line.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ReaderFormatError(
+            context=context, path=path, found="invalid UTF-8 header", expected="UTF-8 position CSV"
+        ) from error
+
+    return classify_position_row(row, path=path)
 
 
 def _discover_positions(root: DatasetRoot, override: str | Path | None) -> tuple[ArtifactFile, PositionFormat]:
+    """Resolve the position artifact and classify its named or positional layout."""
     if override is not None:
         path = require_caller_file(root, override, context=_context("tissue positions"))
     else:

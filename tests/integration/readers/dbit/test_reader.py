@@ -13,10 +13,12 @@ import shapely
 import tifffile
 from PIL import Image
 from scipy import sparse
+from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
 from spatialdata.transformations import Identity, get_transformation
 
 from spatialdata_io import __version__
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.dbit import dbit
 
 if TYPE_CHECKING:
@@ -284,3 +286,92 @@ class TestDbit:
         assert "region" not in source.obs
         assert "spatialdata_attrs" not in source.uns
         np.testing.assert_allclose(source.obs["quality"], [0.2, 0.7])
+
+    def test_imported_annotation_types_and_missingness_are_preserved(self, tmp_path: Path) -> None:
+        """Retain imported extension metadata while enriching the owned table."""
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        source.obs["nullable_count"] = pd.array([2**53 + 1, None], dtype="Int64")
+        source.obs["nullable_flag"] = pd.array([True, None], dtype="boolean")
+        source.obs["classification"] = pd.Categorical(["T", "B"], categories=["B", "T"], ordered=True)
+        source.var["confidence"] = np.asarray([0.25] * source.n_vars, dtype=np.float32)
+        source.var["nullable_rank"] = pd.array([1] + [None] * (source.n_vars - 1), dtype="UInt16")
+        source.write_h5ad(path)
+        original = ad.read_h5ad(path)
+
+        result = dbit(tmp_path)
+
+        table = result.tables["table"]
+        assert isinstance(table.obs, pd.DataFrame)
+        assert isinstance(table.var, pd.DataFrame)
+        assert isinstance(original.obs, pd.DataFrame)
+        assert isinstance(original.var, pd.DataFrame)
+        expected_obs = original.obs.iloc[[1, 0]]
+        for column in ("nullable_count", "nullable_flag", "classification"):
+            pd.testing.assert_series_equal(table.obs[column], expected_obs[column], check_exact=True)
+        for column in ("confidence", "nullable_rank"):
+            pd.testing.assert_series_equal(table.var[column], original.var[column], check_exact=True)
+        unchanged = ad.read_h5ad(path).obs
+        assert isinstance(unchanged, pd.DataFrame)
+        pd.testing.assert_frame_equal(unchanged, original.obs, check_exact=True)
+
+        table.write_h5ad(tmp_path / "roundtrip.h5ad", convert_strings_to_categoricals=False)
+        restored = ad.read_h5ad(tmp_path / "roundtrip.h5ad")
+        assert isinstance(restored.obs, pd.DataFrame)
+        assert isinstance(restored.var, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.obs, table.obs, check_exact=True)
+        pd.testing.assert_frame_equal(restored.var, table.var, check_exact=True)
+        table.write_zarr(tmp_path / "table.zarr", convert_strings_to_categoricals=False)
+        restored = ad.read_zarr(tmp_path / "table.zarr")
+        assert isinstance(restored.obs, pd.DataFrame)
+        assert isinstance(restored.var, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.obs, table.obs, check_exact=True)
+        pd.testing.assert_frame_equal(restored.var, table.var, check_exact=True)
+
+        result.write(tmp_path / "metadata.zarr")
+        restored = read_zarr(tmp_path / "metadata.zarr").tables["table"]
+        assert isinstance(restored.obs, pd.DataFrame)
+        assert isinstance(restored.var, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.obs, table.obs, check_exact=True)
+        pd.testing.assert_frame_equal(restored.var, table.var, check_exact=True)
+
+    @pytest.mark.parametrize("field", ["array_A", "array_B", "sample", "region", "pixel_id"])
+    @pytest.mark.parametrize("conflicting", [False, True])
+    def test_reserved_output_columns(self, tmp_path: Path, field: str, *, conflicting: bool) -> None:
+        """Reject conflicting preserved fields while allowing equal final values."""
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        if field in {"region", "sample"}:
+            source.obs[field] = ["other" if conflicting else "sample"] * 2
+        elif field == "pixel_id":
+            source.obs[field] = [1, 1 if conflicting else 0]
+        else:
+            source.obs[field] = [2, 2 if conflicting else 1]
+        source.write_h5ad(path)
+
+        if conflicting:
+            with pytest.raises(ReaderFormatError, match="conflicting reserved"):
+                dbit(tmp_path)
+        else:
+            result = dbit(tmp_path)
+            assert result.tables["table"].obs[field].tolist() == source.obs[field].tolist()[::-1]
+
+    def test_default_h5ad_writer_preserves_sample_categories(self, tmp_path: Path) -> None:
+        """Check the default writer's exact category normalization separately."""
+        _write_layout(tmp_path)
+        default_table = dbit(tmp_path).tables["table"]
+
+        default_table.write_h5ad(tmp_path / "default.h5ad")
+        default_restored = ad.read_h5ad(tmp_path / "default.h5ad")
+        assert isinstance(default_table.obs, pd.DataFrame)
+        assert isinstance(default_restored.obs, pd.DataFrame)
+        for column in (default_restored.obs["sample"], default_table.obs["sample"]):
+            assert isinstance(column.dtype, pd.CategoricalDtype)
+            assert column.cat.categories.tolist() == ["sample"]
+            assert not column.cat.ordered
+            np.testing.assert_array_equal(column.cat.codes.to_numpy(), [0, 0])
+        pd.testing.assert_frame_equal(
+            default_restored.obs.drop(columns="sample"), default_table.obs.drop(columns="sample"), check_exact=True
+        )

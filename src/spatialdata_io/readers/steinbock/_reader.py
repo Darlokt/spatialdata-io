@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.steinbock._images import _image_options, _read_rasters
 from spatialdata_io.readers.steinbock._layout import _discover_layout
 from spatialdata_io.readers.steinbock._tables import _read_table
@@ -16,6 +16,8 @@ from spatialdata_io.readers.steinbock._tables import _read_table
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    import pandas as pd
 
 
 def steinbock(
@@ -88,11 +90,18 @@ def steinbock(
 
         ``obsm['spatial']`` contains XY centroids from ``centroid-1`` and
         ``centroid-0`` respectively, correcting the export's row/column order.
-        Centroids must be finite and within their sample's pixel frame. An
+        Centroids must be finite and within their sample's pixel frame.
+        Nullable integer columns are supported when they contain no missing
+        values; source annotation dtypes are retained. Mixed XY numeric types
+        must combine without rounding integer coordinates. An
         optional duplicate ``Image`` column is removed only if equal to ``image``.
         Feature metadata spaces become underscores and the legacy
         ``Final Concentration / Dilution`` key becomes ``Final_Concentration``.
-        Conflicting destination names fail. Caller-owned state is not mutated.
+        Named columns accept arbitrary order and additional H5AD annotations
+        retain their source dtypes and missingness. Duplicate annotation names
+        and conflicting reserved region/cell_id values fail. Equal reserved
+        values are accepted and normalized to output storage. Conflicting
+        destination names fail. Caller-owned state is not mutated.
 
         Raster construction executes no pixel tasks. Small selections retain
         native TIFF reads. Files/stores close after metadata inspection and
@@ -115,11 +124,16 @@ def steinbock(
     samples = {sample.name: _read_rasters(sample, options) for sample in layout.samples}
     table = _read_table(layout.table, samples)
 
+    # _read_table validates eager frames; AnnData also types backed Dataset2D.
+    context = ReaderErrorContext("steinbock", "linked cell table")
+    prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=context)
+    prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
+
     # All identifier and coordinate mutations precede the one final linkage.
     table = parse_linked_table(
         table,
         TableLinkage(tuple(table.obs["region"].unique()), "region", "cell_id"),
-        context=ReaderErrorContext("steinbock", "linked cell table"),
+        context=context,
         expression_layers=("counts",) if "counts" in table.layers else (),
     )
 

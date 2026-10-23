@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING, Literal, cast
 import h5py
 import imagecodecs
 import numpy as np
+import pandas as pd
 import pytest
 import tifffile
+from anndata import read_h5ad
 from scipy import sparse
 from scipy.io import mmwrite
 from spatialdata import SpatialData
@@ -148,6 +150,57 @@ def _assert_table_contract(result: SpatialData) -> None:
 
 class TestVisiumSyntheticWorkflow:
     """Prove every supported count and position layout through the public API."""
+
+    def test_named_positions_accept_reordered_fields_and_project_extensions(self, tmp_path: Path) -> None:
+        """Named positions accept reordered fields and project extensions."""
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+        path = tmp_path / "spatial" / "tissue_positions.csv"
+        positions = pd.read_csv(path)
+        positions["quality"] = "good"
+        positions[list(reversed(positions.columns))].to_csv(path, index=False)
+
+        result = visium(tmp_path)
+
+        _assert_table_contract(result)
+        assert "quality" not in result.tables["table"].obs
+        for column in ("in_tissue", "array_row", "array_col"):
+            assert result.tables["table"].obs[column].dtype == np.dtype(np.int64)
+
+    def test_duplicate_raw_header_names_are_rejected_before_projection(self, tmp_path: Path) -> None:
+        """Duplicate raw header names are rejected before projection."""
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+        path = tmp_path / "spatial" / "tissue_positions.csv"
+        header, *rows = path.read_text().splitlines()
+        path.write_text(header + ",array_row\n" + "\n".join(row + ",0" for row in rows) + "\n")
+
+        with pytest.raises(ValueError, match="duplicate column"):
+            visium(tmp_path)
+
+    def test_table_h5ad_roundtrip_preserves_values_and_annotations(self, tmp_path: Path) -> None:
+        """Table h5ad roundtrip preserves values and annotations."""
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+        result = visium(tmp_path)
+        path = tmp_path / "table.h5ad"
+
+        result.tables["table"].write_h5ad(path, convert_strings_to_categoricals=False)
+        restored = read_h5ad(path)
+
+        assert isinstance(restored.obs, pd.DataFrame)
+        assert isinstance(restored.var, pd.DataFrame)
+        assert isinstance(result.tables["table"].obs, pd.DataFrame)
+        assert isinstance(result.tables["table"].var, pd.DataFrame)
+        pd.testing.assert_frame_equal(restored.obs, result.tables["table"].obs, check_exact=True)
+        pd.testing.assert_frame_equal(restored.var, result.tables["table"].var, check_exact=True)
+        expression = restored.X
+        expected = result.tables["table"].X
+        assert isinstance(expression, sparse.csr_array | sparse.csr_matrix)
+        assert isinstance(expected, sparse.csr_array)
+        np.testing.assert_array_equal(expression.data, expected.data)
+        np.testing.assert_array_equal(expression.indices, expected.indices)
+        np.testing.assert_array_equal(expression.indptr, expected.indptr)
 
     @pytest.mark.parametrize(
         ("counts_kind", "position_version"),

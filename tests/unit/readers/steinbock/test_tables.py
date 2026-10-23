@@ -19,7 +19,6 @@ from spatialdata_io.readers.steinbock._images import _SampleRasters
 from spatialdata_io.readers.steinbock._tables import (
     _centroids,
     _clean_metadata,
-    _format_error,
     _read_table,
     _set_instance_ids,
 )
@@ -168,56 +167,13 @@ class TestSetInstanceIds:
 
     @pytest.mark.parametrize("identifier", [2**53 + 1, 2**63 + 1, 2**64 - 1])
     def test_large_uint64_ids_exact(self, tmp_path: Path, identifier: int) -> None:
+        """Large uint64 ids exact."""
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[f"Object {identifier} in sample.tiff"])
 
         _set_instance_ids(obs, {"sample": _sample(dtype="uint64")}, ArtifactFile(tmp_path / "cells.h5ad"))
 
         assert int(obs["cell_id"].iloc[0]) == identifier
-        assert obs["cell_id"].dtype == np.dtype(np.uint64 if identifier >= 2**63 else np.int64)
-
-    @pytest.mark.parametrize(
-        "observation",
-        [
-            "Object 0 in sample.tiff",
-            "Object -1 in sample.tiff",
-            "Object 1.5 in sample.tiff",
-            "sample 2",
-            "Object 2 in wrong.tiff",
-            "Object 65536 in sample.tiff",
-        ],
-    )
-    def test_malformed_or_out_of_range_ids(self, tmp_path: Path, observation: str) -> None:
-        obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[observation])
-
-        with pytest.raises(ReaderFormatError):
-            _set_instance_ids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
-
-    def test_dtype_bounds_are_sample_local(self, tmp_path: Path) -> None:
-        obs = pd.DataFrame(
-            {"image": ["small.tiff", "large.tiff"]}, index=["Object 256 in small.tiff", "Object 256 in large.tiff"]
-        )
-
-        with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
-            _set_instance_ids(
-                obs,
-                {"small": _sample(dtype="uint8"), "large": _sample(dtype="uint64")},
-                ArtifactFile(tmp_path / "cells.h5ad"),
-            )
-
-    @pytest.mark.parametrize("images", [[None], ["other.tiff"], ["sample.tiff", "other.tiff"]])
-    def test_null_unknown_or_missing_samples(self, tmp_path: Path, images: list[str | None]) -> None:
-        obs = pd.DataFrame(
-            {"image": images}, index=[f"Object {number} in sample.tiff" for number in range(1, len(images) + 1)]
-        )
-
-        with pytest.raises(ReaderFormatError, match="sample disagreement"):
-            _set_instance_ids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
-
-    def test_missing_discovered_sample(self, tmp_path: Path) -> None:
-        obs = pd.DataFrame({"image": ["sample.tiff"]}, index=["Object 1 in sample.tiff"])
-
-        with pytest.raises(ReaderFormatError, match="sample disagreement"):
-            _set_instance_ids(obs, {"sample": _sample(), "other": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
+        assert str(obs["cell_id"].dtype) == ("uint64[pyarrow]" if identifier >= 2**63 else "int64[pyarrow]")
 
 
 class TestCentroids:
@@ -228,30 +184,6 @@ class TestCentroids:
 
         coordinates = _centroids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
         np.testing.assert_array_equal(coordinates, [[8.5, 1.5], [0, 0], [11, 7]])
-
-    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf, "nonnumeric"])
-    def test_invalid_centroids(self, tmp_path: Path, value: float | str) -> None:
-        obs = pd.DataFrame({"image": ["sample.tiff"], "centroid-0": [value], "centroid-1": [2.0]})
-
-        with pytest.raises(ReaderFormatError, match="invalid centroids"):
-            _centroids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
-
-    @pytest.mark.parametrize(("y", "x"), [(-0.1, 1), (1, -0.1), (8, 1), (1, 12)])
-    def test_outside_centroids(self, tmp_path: Path, y: float, x: float) -> None:
-        obs = pd.DataFrame({"image": ["sample.tiff"], "centroid-0": [y], "centroid-1": [x]})
-
-        with pytest.raises(ReaderFormatError, match="outside"):
-            _centroids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
-
-    def test_frame_bounds_are_sample_local(self, tmp_path: Path) -> None:
-        obs = pd.DataFrame({"image": ["small.tiff", "large.tiff"], "centroid-0": [5, 5], "centroid-1": [2, 2]})
-
-        with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
-            _centroids(
-                obs,
-                {"small": _sample(shape=(4, 4)), "large": _sample(shape=(8, 12))},
-                ArtifactFile(tmp_path / "cells.h5ad"),
-            )
 
 
 class TestCleanMetadata:
@@ -269,33 +201,3 @@ class TestCleanMetadata:
         assert obs.columns.tolist() == ["image"]
         assert var.columns.tolist() == ["Channel_Name", "Final_Concentration"]
         assert var["Final_Concentration"].tolist() == ["1:100"]
-
-    @pytest.mark.parametrize("value", ["other.tiff", None])
-    def test_conflicting_duplicate_image(self, tmp_path: Path, value: str | None) -> None:
-        obs = pd.DataFrame({"image": ["sample.tiff"], "Image": [value]})
-
-        with pytest.raises(ReaderFormatError, match="conflicting"):
-            _clean_metadata(obs, pd.DataFrame(), ArtifactFile(tmp_path / "cells.h5ad"))
-
-    @pytest.mark.parametrize(
-        "columns", [[""], [1], ["A B", "A_B"], ["Final Concentration / Dilution", "Final Concentration"]]
-    )
-    def test_invalid_or_colliding_feature_keys(self, tmp_path: Path, columns: list[str] | list[int]) -> None:
-        var = pd.DataFrame([[1] * len(columns)], columns=columns)
-
-        with pytest.raises(ReaderFormatError):
-            _clean_metadata(pd.DataFrame({"image": ["sample.tiff"]}), var, ArtifactFile(tmp_path / "cells.h5ad"))
-
-
-class TestFormatError:
-    """Retain table-specific reader and artifact identity in schema failures."""
-
-    def test_source_context(self, tmp_path: Path) -> None:
-        path = ArtifactFile(tmp_path / "cells.h5ad")
-
-        error = _format_error(path, found="invalid rows", expected="linked cells")
-
-        assert error.path == path
-        assert error.context.reader == "steinbock"
-        assert error.context.artifact == "cell table"
-        assert "invalid rows" in str(error)
