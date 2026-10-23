@@ -28,37 +28,6 @@ class CosmxKeys(ModeEnum):
 
 
 @unique
-class SeqfishKeys(ModeEnum):
-    """Keys for *Spatial Genomics SeqFISH* formatted dataset."""
-
-    # file extensions
-    CSV_FILE = ".csv"
-    TIFF_FILE = ".tiff"
-    GEOJSON_FILE = ".geojson"
-    # file identifiers
-    TRANSCRIPT_COORDINATES = "TranscriptList"
-    DAPI = "DAPI"
-    COUNTS_FILE = "CellxGene"
-    SEGMENTATION = "Segmentation"
-    CELL_COORDINATES = "CellCoordinates"
-    BOUNDARIES = "Boundaries"
-    # transcripts
-    TRANSCRIPTS_X = "x"
-    TRANSCRIPTS_Y = "y"
-    TRANSCRIPTS_Z = "z"
-    FEATURE_KEY = "name"
-    INSTANCE_KEY_POINTS = "cell"
-    # cells
-    AREA = "area"
-    CELL_X = "center_x"
-    CELL_Y = "center_y"
-    # metadata
-    SPATIAL_KEY = "spatial"
-    REGION_KEY = "region"
-    INSTANCE_KEY_TABLE = "instance_id"
-
-
-@unique
 class XeniumKeys(ModeEnum):
     """Keys for *10X Genomics Xenium* formatted dataset."""
 
@@ -227,38 +196,6 @@ class McmicroKeys(ModeEnum):
     INSTANCE_KEY = "CellID"
     ILLUMINATION_SUFFIX_DFP = "-dfp"
     ILLUMINATION_SUFFIX_FFP = "-ffp"
-
-
-@unique
-class MerscopeKeys(ModeEnum):
-    """Keys for *MERSCOPE* data (Vizgen plateform)."""
-
-    # files and directories
-    IMAGES_DIR = "images"
-    TRANSFORMATION_FILE = "micron_to_mosaic_pixel_transform.csv"
-    TRANSCRIPTS_FILE = "detected_transcripts.csv"
-    BOUNDARIES_FILE = "cell_boundaries.parquet"
-    COUNTS_FILE = "cell_by_gene.csv"
-    CELL_METADATA_FILE = "cell_metadata.csv"
-
-    # VPT default outputs
-    CELLPOSE_BOUNDARIES = "cellpose_micron_space.parquet"
-    WATERSHED_BOUNDARIES = "watershed_micron_space.parquet"
-    VPT_NAME_COUNTS = "cell_by_gene"
-    VPT_NAME_OBS = "cell_metadata"
-    VPT_NAME_BOUNDARIES = "cell_boundaries"
-
-    # metadata
-    METADATA_CELL_KEY = "EntityID"
-    COUNTS_CELL_KEY = "cell"
-    CELL_X = "center_x"
-    CELL_Y = "center_y"
-    GLOBAL_X = "global_x"
-    GLOBAL_Y = "global_y"
-    GLOBAL_Z = "global_z"
-    Z_INDEX = "ZIndex"
-    REGION_KEY = "cells_region"
-    GENE_KEY = "gene"
 
 
 @unique

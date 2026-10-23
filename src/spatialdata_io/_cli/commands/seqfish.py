@@ -1,4 +1,4 @@
-"""seqFISH command."""
+"""Convert selected seqFISH ROI products to a SpatialData store."""
 
 from __future__ import annotations
 
@@ -6,63 +6,87 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options, parse_json_object
+from spatialdata_io._cli._common import dataset_io_options
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import TypedDict, Unpack
+    from typing import Literal, TypedDict, Unpack
 
     class _SeqfishOptions(TypedDict):
-        load_images: bool
-        load_labels: bool
-        load_points: bool
-        load_shapes: bool
-        cells_as_circles: bool
+        """Describe the values normalized by the Click command."""
+
+        include_images: bool
+        include_labels: bool
+        include_transcripts: bool
+        include_shapes: bool
+        shape_geometry: Literal["polygons", "circles", "both"]
         rois: tuple[str, ...]
-        raster_models_scale_factors: tuple[int, ...]
-        imread_kwargs: str
+        scale_factors: tuple[int, ...]
+        chunks: tuple[int, ...]
+
+
+_IMAGE_RANK = 3
 
 
 @click.command(name="seqfish")
 @dataset_io_options
-@click.option("--load-images", type=bool, default=True, show_default=True, help="Whether to load images.")
-@click.option("--load-labels", type=bool, default=True, show_default=True, help="Whether to load labels.")
-@click.option("--load-points", type=bool, default=True, show_default=True, help="Whether to load transcripts.")
-@click.option("--load-shapes", type=bool, default=True, show_default=True, help="Whether to load cell shapes.")
+@click.option("--include-images/--no-include-images", default=True, show_default=True, help="Return DAPI images.")
 @click.option(
-    "--cells-as-circles", type=bool, default=False, show_default=True, help="Whether to represent cells as circles."
+    "--include-labels/--no-include-labels", default=True, show_default=True, help="Return linked segmentations."
 )
-@click.option("--rois", type=str, multiple=True, default=None, help="Repeated region-of-interest identifiers to load.")
 @click.option(
-    "--raster-models-scale-factors",
-    type=int,
+    "--include-transcripts/--no-include-transcripts", default=True, show_default=True, help="Return transcripts."
+)
+@click.option("--include-shapes/--no-include-shapes", default=True, show_default=True, help="Return cell shapes.")
+@click.option(
+    "--shape-geometry",
+    type=click.Choice(["polygons", "circles", "both"]),
+    default="polygons",
+    show_default=True,
+    help="Cell geometry representations.",
+)
+@click.option(
+    "--rois", type=str, multiple=True, default=(), help="Repeat ROI prefixes in desired order; omitted selects all."
+)
+@click.option(
+    "--scale-factors",
+    type=click.IntRange(min=2),
     multiple=True,
-    default=None,
-    help="Repeated raster-pyramid downsampling factors.",
+    default=(),
+    help="Repeat for generated pyramid levels; omitted returns a single scale.",
 )
 @click.option(
-    "--imread-kwargs", type=str, default="{}", show_default=True, help="JSON object of legacy image-reader options."
+    "--chunks",
+    type=click.IntRange(min=1),
+    multiple=True,
+    default=(),
+    help="One size for all axes or three CYX sizes. Labels use YX; omitted keeps native chunks.",
 )
-def seqfish_command(
-    input_path: Path,
-    output_path: Path,
-    **options: Unpack[_SeqfishOptions],
-) -> None:
-    """Convert seqFISH data to SpatialData."""
-    # Keep top-level CLI help independent of scientific reader imports.
-    from spatialdata_io.readers.seqfish import seqfish  # noqa: PLC0415, RUF100
+def seqfish_command(input_path: Path, output_path: Path, **options: Unpack[_SeqfishOptions]) -> None:
+    """Read seqFISH, then write the requested SpatialData store."""
+    from spatialdata_io.readers.seqfish import seqfish  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
 
-    rois = options["rois"]
-    scale_factors = options["raster_models_scale_factors"]
+    values = options["chunks"]
+    chunks: int | tuple[int, int, int] | None
+    if not values:
+        chunks = None
+    elif len(values) == 1:
+        chunks = values[0]
+    elif len(values) == _IMAGE_RANK:
+        chunks = (values[0], values[1], values[2])
+    else:
+        message = "Pass --chunks once or three times in CYX order."
+        raise click.BadParameter(message, param_hint="--chunks")
+
     result = seqfish(
         input_path,
-        load_images=options["load_images"],
-        load_labels=options["load_labels"],
-        load_points=options["load_points"],
-        load_shapes=options["load_shapes"],
-        cells_as_circles=options["cells_as_circles"],
-        rois=list(rois) if rois else None,
-        raster_models_scale_factors=list(scale_factors) if scale_factors else None,
-        imread_kwargs=parse_json_object(options["imread_kwargs"], parameter="imread_kwargs"),
+        include_images=options["include_images"],
+        include_labels=options["include_labels"],
+        include_transcripts=options["include_transcripts"],
+        include_shapes=options["include_shapes"],
+        shape_geometry=options["shape_geometry"],
+        rois=options["rois"] or None,
+        scale_factors=options["scale_factors"] or None,
+        chunks=chunks,
     )
     result.write(output_path)
