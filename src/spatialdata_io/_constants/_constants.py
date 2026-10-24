@@ -4,30 +4,6 @@ from spatialdata_io._constants._enum import ModeEnum
 
 
 @unique
-class CosmxKeys(ModeEnum):
-    """Keys for *Nanostring Cosmx* formatted dataset."""
-
-    # files and directories
-    COUNTS_SUFFIX = "exprMat_file.csv"
-    TRANSCRIPTS_SUFFIX = "tx_file.csv"
-    METADATA_SUFFIX = "metadata_file.csv"
-    FOV_SUFFIX = "fov_positions_file.csv"
-    IMAGES_DIR = "CellComposite"
-    LABELS_DIR = "CellLabels"
-    # metadata
-    FOV = "fov"
-    REGION_KEY = "fov_labels"
-    INSTANCE_KEY = "cell_ID"
-    X_GLOBAL_CELL = "CenterX_global_px"
-    Y_GLOBAL_CELL = "CenterY_global_px"
-    X_LOCAL_CELL = "CenterX_local_px"
-    Y_LOCAL_CELL = "CenterY_local_px"
-    X_LOCAL_TRANSCRIPT = "x_local_px"
-    Y_LOCAL_TRANSCRIPT = "y_local_px"
-    TARGET_OF_TRANSCRIPT = "target"
-
-
-@unique
 class XeniumKeys(ModeEnum):
     """Keys for *10X Genomics Xenium* formatted dataset."""
 
@@ -173,32 +149,6 @@ class StereoseqKeys(ModeEnum):
     RESOLUTION = "resolution"
 
 
-@unique
-class McmicroKeys(ModeEnum):
-    """Keys for *Mcmicro* formatted dataset."""
-
-    # files and directories
-    QUANTIFICATION_DIR = "quantification"
-    MARKERS_FILE = "markers.csv"
-    IMAGES_DIR_WSI = "registration"
-    IMAGES_DIR_TMA = "dearray"
-    IMAGE_SUFFIX = ".ome.tif"
-    LABELS_DIR = "segmentation"
-    ILLUMINATION_DIR = "illumination"
-    PARAMS_FILE = "qc/params.yml"
-    RAW_DIR = "raw"
-    COREOGRAPH_CENTROIDS = "qc/coreograph/centroidsY-X.txt"
-    COREOGRAPH_TMA_MAP = "qc/coreograph/TMA_MAP.tif"
-
-    # metadata
-    COORDS_X = "X_centroid"
-    COORDS_Y = "Y_centroid"
-    INSTANCE_KEY = "CellID"
-    ILLUMINATION_SUFFIX_DFP = "-dfp"
-    ILLUMINATION_SUFFIX_FFP = "-ffp"
-
-
-@unique
 @unique
 class VisiumHDKeys(ModeEnum):
     """Keys for *10X Genomics Visium hd* formatted dataset."""

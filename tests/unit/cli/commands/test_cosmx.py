@@ -1,8 +1,10 @@
-"""Test the CosMx command boundary."""
+"""Typed CosMx command options and exact reader forwarding."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+import pytest
 
 from spatialdata_io._cli.commands.cosmx import cosmx_command
 
@@ -15,38 +17,78 @@ if TYPE_CHECKING:
 
 
 class TestCosmxCommand:
-    """Verify Click conversion and the typed reader call."""
+    """Keep prefix, transcript and raster options aligned with the reader."""
 
-    def test_forwards_options_and_writes_output(
+    def test_default_options(
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, reader_result: MagicMock
     ) -> None:
         reader = mocker.patch("spatialdata_io.readers.cosmx.cosmx", return_value=reader_result)
         output = tmp_path / "output.zarr"
-
-        result = runner.invoke(
-            cosmx_command,
-            [
-                "--input",
-                str(tmp_path),
-                "--output",
-                str(output),
-                "--dataset-id",
-                "sample",
-                "--transcripts",
-                "false",
-                "--imread-kwargs",
-                '{"n": 2}',
-                "--image-models-kwargs",
-                '{"scale_factors": null}',
-            ],
-        )
-
+        result = runner.invoke(cosmx_command, ["--input", str(tmp_path), "--output", str(output)])
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
-            tmp_path,
-            dataset_id="sample",
-            transcripts=False,
-            imread_kwargs={"n": 2},
-            image_models_kwargs={"scale_factors": None},
+            tmp_path, dataset_id=None, include_transcripts=True, scale_factors=None, chunks=None
         )
         reader_result.write.assert_called_once_with(output)
+
+    def test_explicit_options(
+        self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, reader_result: MagicMock
+    ) -> None:
+        reader = mocker.patch("spatialdata_io.readers.cosmx.cosmx", return_value=reader_result)
+        arguments = [
+            "--dataset-id",
+            "Lung5_Rep2",
+            "--no-include-transcripts",
+            "--scale-factors",
+            "2",
+            "--chunks",
+            "3",
+            "--chunks",
+            "512",
+            "--chunks",
+            "512",
+        ]
+        result = runner.invoke(
+            cosmx_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out.zarr"), *arguments]
+        )
+        assert result.exit_code == 0, result.output
+        reader.assert_called_once_with(
+            tmp_path, dataset_id="Lung5_Rep2", include_transcripts=False, scale_factors=(2,), chunks=(3, 512, 512)
+        )
+
+    def test_scalar_chunks(
+        self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, reader_result: MagicMock
+    ) -> None:
+        reader = mocker.patch("spatialdata_io.readers.cosmx.cosmx", return_value=reader_result)
+        result = runner.invoke(
+            cosmx_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out.zarr"), "--chunks", "64"]
+        )
+        assert result.exit_code == 0, result.output
+        assert reader.call_args.kwargs["chunks"] == 64
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            ["--chunks", "1", "--chunks", "2"],
+            ["--chunks", "0"],
+            ["--scale-factors", "1"],
+            ["--transcripts", "true"],
+            ["--imread-kwargs", "{}"],
+            ["--image-models-kwargs", "{}"],
+        ],
+    )
+    def test_invalid_or_removed_options_fail_before_reader(
+        self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, arguments: list[str]
+    ) -> None:
+        reader = mocker.patch("spatialdata_io.readers.cosmx.cosmx")
+        result = runner.invoke(
+            cosmx_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out.zarr"), *arguments]
+        )
+        assert result.exit_code == 2, result.output
+        reader.assert_not_called()
+
+    def test_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cosmx_command, ["--help"])
+        assert result.exit_code == 0
+        for option in ("--dataset-id", "--include-transcripts", "--scale-factors", "--chunks"):
+            assert option in result.output

@@ -11,6 +11,8 @@ cli.md
 dbit.md
 seqfish.md
 merscope.md
+mcmicro.md
+cosmx.md
 table_contracts.md
 changelog.md
 contributing.md
