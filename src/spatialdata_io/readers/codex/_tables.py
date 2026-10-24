@@ -21,7 +21,7 @@ from spatialdata_io.readers.codex._schemas import (
     check_integer_promotion,
     expression_dtype,
     normalize_csv_numbers,
-    normalize_fcs_frame,
+    normalize_fcs_metadata,
     region_name,
     schema_error,
     validate_observations,
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _CSV_BATCH_ROWS = 10_000
+_CSV_MAX_DENSE_BYTES = 32 * 1024 * 1024
 _MAX_HEADER_CHARACTERS = 1_048_576
 
 
@@ -66,6 +67,11 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
 
         columns = next(csv.reader([header], strict=True), [])
         features, metadata = cell_columns(columns, path)
+        # Bound numerical materialization by width as well as row count. The
+        # lexical parser buffers and retained sparse/annotation outputs are separate.
+        batch_rows = min(
+            _CSV_BATCH_ROWS, max(1, _CSV_MAX_DENSE_BYTES // (len(features) * np.dtype(np.float64).itemsize))
+        )
 
         # pandas' Python reader mishandles header-only input with index_col=[].
         position = source.tell()
@@ -80,7 +86,7 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
             source,
             names=columns,
             header=None,
-            chunksize=_CSV_BATCH_ROWS,
+            chunksize=batch_rows,
             engine="python",
             index_col=[],
             dtype=STRING_DTYPE,
@@ -137,9 +143,10 @@ def _read_fcs(path: ArtifactFile) -> ad.AnnData:
         raise schema_error(path, found="inconsistent FCS parameters", expected="one PnN name per event channel")
 
     frame.columns = columns
-    normalize_fcs_frame(frame, path)
-
+    # FCS expression already has native numerical buffers. Only annotations
+    # need Arrow storage for subsequent identifier and relationship operations.
     expression, obs = _split_cells(frame, features, metadata, path)
+    normalize_fcs_metadata(obs, path)
     table = ad.AnnData(X=expression, obs=obs, var=pd.DataFrame(index=features))
 
     if "PnS" in source.channels:

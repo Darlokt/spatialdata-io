@@ -87,6 +87,25 @@ class TestReadTable:
         assert table.X.dtype == np.dtype(np.uint64)
         assert table.X.data.tolist() == [1, large]
 
+    @pytest.mark.parametrize("rows_per_batch", [1, 10_000])
+    def test_exact_integer_boundaries_and_spellings(
+        self, tmp_path: Path, mocker: MockerFixture, rows_per_batch: int
+    ) -> None:
+        mocker.patch("spatialdata_io.readers.merscope._tables._MAX_BATCH_ROWS", rows_per_batch)
+        table, _ = read_table(
+            *_sources(
+                tmp_path,
+                f"cell,A,Blank-1,B\na,{2**63 - 1},2.0,3e0\nb,{2**63},{2**64 - 1},0\n",
+            )
+        )
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.dtype == np.dtype(np.uint64)
+        np.testing.assert_array_equal(table.X.data, np.array([2**63 - 1, 3, 2**63], dtype=np.uint64))
+        blanks = table.obsm["blank"]
+        assert isinstance(blanks, sparse.csr_array)
+        assert blanks.dtype == np.dtype(np.uint64)
+        np.testing.assert_array_equal(blanks.data, np.array([2, 2**64 - 1], dtype=np.uint64))
+
     @pytest.mark.parametrize(
         "counts",
         [
@@ -96,6 +115,8 @@ class TestReadTable:
             "cell,A\na,-1\n",
             "cell,A\na,1e-400\n",
             "cell,A\na,18446744073709551616\n",
+            "cell,A\na,\n",
+            "cell,A\na,1\x00\n",
             "cell,A\na,1,2\n",
             "cell,A,B\na,1\n",
         ],

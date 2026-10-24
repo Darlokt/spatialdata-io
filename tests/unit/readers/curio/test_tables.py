@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 from scipy import sparse
 
@@ -140,9 +141,77 @@ class TestReadTable:
         with pytest.raises(ReaderFormatError, match="bead IDs"):
             curio(tmp_path)
 
+    @pytest.mark.parametrize("row", ['"bead-b"suffix\t1\n', 'bead-b\t"unterminated\n'])
+    def test_malformed_cluster_quoting_is_rejected(self, tmp_path: Path, row: str) -> None:
+        """Reject malformed quoted assignments before lexical IDs can change meaning."""
+        write_curio(tmp_path)
+        path = tmp_path / "sample_cluster_assignment.txt"
+        path.write_text(row, encoding="utf-8")
+
+        with pytest.raises(pd.errors.ParserError) as raised:
+            _read_table(_discover_layout(tmp_path))
+
+        assert any(str(path) in note and "cluster assignments" in note for note in raised.value.__notes__)
+
 
 class TestReadNamedTable:
     """Keep bounded headers, exact physical row widths, and explicit file ownership."""
+
+    @pytest.mark.parametrize("delimiter", [",", "\t"])
+    @pytest.mark.parametrize("ending", ["", "\n", "\r\n"])
+    def test_header_only_has_explicit_lexical_columns(self, tmp_path: Path, delimiter: str, ending: str) -> None:
+        """Retain named string columns even without a trailing header newline."""
+        path = tmp_path / "features.txt"
+        path.write_text(f"gene{delimiter}annotation{ending}", encoding="utf-8")
+
+        frame = _read_named_table(ArtifactFile(path), delimiter=delimiter)
+
+        pd.testing.assert_frame_equal(
+            frame,
+            pd.DataFrame(
+                {column: pd.Series([], dtype=pd.ArrowDtype(pa.string())) for column in ["gene", "annotation"]}
+            ),
+            check_exact=True,
+        )
+
+    @pytest.mark.parametrize("delimiter", [",", "\t"])
+    def test_quoted_lexemes_empty_fields_and_blank_records(self, tmp_path: Path, delimiter: str) -> None:
+        """Distinguish empty text from missing fields while preserving valid CSV quoting."""
+        path = tmp_path / "features.txt"
+        path.write_text(
+            f'\ufeffgene{delimiter}annotation\r\n"00{delimiter}1"{delimiter}"line 1\nline ""2"""\r\n'
+            f"\r\n \r\nNA{delimiter}\r\nNULL{delimiter}NaN\r\n",
+            encoding="utf-8",
+        )
+
+        frame = _read_named_table(ArtifactFile(path), delimiter=delimiter)
+
+        pd.testing.assert_frame_equal(
+            frame,
+            pd.DataFrame(
+                {"gene": [f"00{delimiter}1", "NA", "NULL"], "annotation": ['line 1\nline "2"', "", "NaN"]},
+                dtype=pd.ArrowDtype(pa.string()),
+            ),
+            check_exact=True,
+        )
+
+    @pytest.mark.parametrize("row", ['gene\t"unterminated\n', '"gene"suffix\tvalue\n', '"gene" \tvalue\n'])
+    def test_malformed_quoting_is_rejected(self, tmp_path: Path, row: str) -> None:
+        """Reject unclosed quoted fields and non-delimiter text after a closing quote."""
+        path = tmp_path / "features.tsv"
+        path.write_text(f"gene\tannotation\n{row}", encoding="utf-8")
+
+        with pytest.raises(ReaderFormatError, match="malformed enrichment rows"):
+            _read_named_table(ArtifactFile(path), delimiter="\t")
+
+    def test_nul_is_preserved_for_semantic_rejection(self, tmp_path: Path) -> None:
+        """Preserve embedded NUL instead of truncating a lexical feature annotation."""
+        path = tmp_path / "features.tsv"
+        path.write_text("gene\tannotation\n001\tbefore\x00after\n", encoding="utf-8")
+
+        frame = _read_named_table(ArtifactFile(path), delimiter="\t")
+
+        assert frame.iloc[0].tolist() == ["001", "before\x00after"]
 
     @pytest.mark.parametrize("content", ["gene\tI\ngene\n", "x" * 1_048_577])
     def test_malformed_artifact(self, tmp_path: Path, content: str) -> None:
@@ -161,6 +230,18 @@ class TestReadNamedTable:
         mocker.patch("pathlib.Path.open", return_value=stream)
 
         with pytest.raises(ReaderFormatError, match="header"):
+            _read_named_table(ArtifactFile(path), delimiter="\t")
+
+        assert stream.closed
+
+    def test_closes_after_row_failure(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        """Close the owned stream when strict parsing rejects a malformed quoted value."""
+        path = tmp_path / "features.tsv"
+        path.write_text('gene\tannotation\n001\t"unterminated\n', encoding="utf-8")
+        stream = path.open(encoding="utf-8")
+        mocker.patch("pathlib.Path.open", return_value=stream)
+
+        with pytest.raises(ReaderFormatError, match="malformed enrichment rows"):
             _read_named_table(ArtifactFile(path), delimiter="\t")
 
         assert stream.closed

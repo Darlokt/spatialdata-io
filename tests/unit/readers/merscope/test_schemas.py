@@ -92,6 +92,36 @@ class TestIntegerValues:
         assert result.dtype == np.dtype(np.uint64)
         assert integer_values(pd.Series([], dtype=STRING_DTYPE), path).dtype == np.dtype(np.int64)
 
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize(
+        ("tokens", "expected"),
+        [
+            ([], []),
+            (["0", str(2**63 - 1)], [0, 2**63 - 1]),
+            ([str(2**63), str(2**64 - 1)], [2**63, 2**64 - 1]),
+            (["+2.0", "3e0", "-0", str(2**64 - 1)], [2, 3, 0, 2**64 - 1]),
+        ],
+    )
+    def test_arrow_counts(self, tmp_path: Path, *, chunked: bool, tokens: list[str], expected: list[int]) -> None:
+        column = pa.array(tokens, type=pa.string())
+        source = pa.chunked_array([column.slice(0, 1), column.slice(1)]) if chunked else column
+        result = integer_values(source, ArtifactFile(tmp_path / "count.csv"))
+        np.testing.assert_array_equal(result, np.asarray(expected, dtype=result.dtype))
+        assert result.dtype == np.dtype(np.uint64 if expected and max(expected) >= 2**63 else np.int64)
+
+    @pytest.mark.parametrize("chunked", [False, True])
+    @pytest.mark.parametrize(
+        "value", [None, "", "1.00000000000000001", "1e-400", "-1", "nan", "inf", str(2**64), "x", "1" * 129]
+    )
+    def test_invalid_arrow_counts(self, tmp_path: Path, *, chunked: bool, value: str | None) -> None:
+        path = ArtifactFile(tmp_path / "count.csv")
+        column = pa.array([value], type=pa.string())
+        source = pa.chunked_array([column]) if chunked else column
+        with pytest.raises(ReaderFormatError, match=r"integral|integer") as caught:
+            integer_values(source, path)
+        assert caught.value.context == ReaderErrorContext("merscope", "count.csv")
+        assert caught.value.path == path
+
     @pytest.mark.parametrize(
         "value", [None, "", "1.00000000000000001", "1e-400", "-1", "nan", "inf", str(2**64), "x", "1" * 129]
     )

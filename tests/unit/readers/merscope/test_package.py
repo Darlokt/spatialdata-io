@@ -27,5 +27,7 @@ from spatialdata_io.readers.merscope import merscope as direct
 assert merscope is direct
 assert callable(merscope)
 """
-        result = subprocess.run([sys.executable, "-c", code], check=False, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(  # noqa: S603, RUF100 - Fixed test-owned code probes a fresh interpreter.
+            [sys.executable, "-c", code], check=False, capture_output=True, text=True, timeout=30
+        )
         assert result.returncode == 0, result.stderr

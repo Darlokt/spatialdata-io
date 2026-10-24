@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.codex import codex
+from spatialdata_io.readers.codex import _tables, codex
 from spatialdata_io.readers.codex._tables import _read_cell_table
 from tests.integration.readers.codex._fixtures import cell_frame, write_csv, write_fcs
 
@@ -22,6 +23,88 @@ if TYPE_CHECKING:
 
 class TestReadCellTable:
     """Exercise real source parser failures before geometry and linkage."""
+
+    @pytest.mark.parametrize("note", ["quoted, field", 'embedded "quote"', "two\nlines", "NA", "NULL"])
+    def test_quoted_and_literal_metadata(self, tmp_path: Path, note: str) -> None:
+        """Preserve quoted delimiters, embedded newlines, and literal null-like text."""
+        frame = cell_frame()
+        frame["note"] = note
+        path = tmp_path / "cells.csv"
+        write_csv(path, frame)
+
+        result = _read_cell_table(ArtifactFile(path))
+
+        assert result.obs["note"].tolist() == [note] * 3
+
+    @pytest.mark.parametrize("note", ['"a"suffix', '"unterminated'])
+    def test_malformed_quoting_is_rejected(self, tmp_path: Path, note: str) -> None:
+        """Reject malformed quoting even when a permissive decoder could recover field values."""
+        path = tmp_path / "cells.csv"
+        path.write_text(f"cell_id,region,x,y,cyc001_ch001,note\n1,1,0,0,1,{note}\n", encoding="utf-8")
+
+        with pytest.raises(ReaderFormatError, match="quoting"):
+            _read_cell_table(ArtifactFile(path))
+
+    @pytest.mark.parametrize("spelling", ["+1", " 1 ", "0001", "-0"])
+    def test_integral_expression_spellings(self, tmp_path: Path, spelling: str) -> None:
+        """Retain accepted signed, padded, and whitespace-surrounded integer tokens."""
+        path = tmp_path / "cells.csv"
+        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n1,1,0,0,{spelling}\n", encoding="utf-8")
+
+        result = _read_cell_table(ArtifactFile(path))
+
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.dtype == np.dtype(np.int64)
+        np.testing.assert_array_equal(result.X.data, [] if spelling == "-0" else [1])
+
+    @pytest.mark.parametrize("column", ["cell_id", "note", "cyc001_ch001"])
+    def test_nul_rejected_in_every_source_field(self, tmp_path: Path, column: str) -> None:
+        """Reject NULs rather than allowing the CSV decoder to truncate source values."""
+        frame = cell_frame()
+        frame[column] = ["1\x00suffix", "2", "3"]
+        path = tmp_path / "cells.csv"
+        write_csv(path, frame)
+
+        with pytest.raises(ReaderFormatError, match="NUL"):
+            _read_cell_table(ArtifactFile(path))
+
+    @pytest.mark.parametrize("dtype", [np.int16, np.uint32, np.float32, np.float64])
+    def test_fcs_native_numeric_widths(self, tmp_path: Path, mocker: MockerFixture, dtype: type[np.number]) -> None:
+        """Keep native FCS signal widths while normalizing observation annotations."""
+        path = tmp_path / "cells.fcs"
+        path.touch()
+        frame = cell_frame().abs().astype(dtype) if np.dtype(dtype).kind == "u" else cell_frame().astype(dtype)
+        source = mocker.Mock(data=frame, channels=pd.DataFrame({"PnN": frame.columns}))
+        mocker.patch("spatialdata_io.readers.codex._tables.readfcs.ReadFCS", return_value=source)
+
+        result = _read_cell_table(ArtifactFile(path))
+
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.dtype == np.dtype(dtype)
+        expected = frame[["cyc002_ch001", "cyc001_ch002"]].to_numpy().ravel()
+        np.testing.assert_array_equal(result.X.data, expected[expected != 0])
+
+    def test_dense_csv_batches_are_bounded_by_feature_width(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        """Cap each numerical materialization by bytes while preserving final sparse buffers."""
+        frame = cell_frame()
+        path = tmp_path / "cells.csv"
+        write_csv(path, frame)
+        whole = _read_cell_table(ArtifactFile(path))
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", 2 * 8)
+        split = mocker.spy(_tables, "_split_cells")
+
+        bounded = _read_cell_table(ArtifactFile(path))
+
+        assert split.call_count == len(frame)
+        assert all(call.args[0].shape[0] == 1 for call in split.call_args_list)
+        assert isinstance(whole.X, sparse.csr_array)
+        assert isinstance(bounded.X, sparse.csr_array)
+        np.testing.assert_array_equal(bounded.X.data, whole.X.data)
+        np.testing.assert_array_equal(bounded.X.indices, whole.X.indices)
+        np.testing.assert_array_equal(bounded.X.indptr, whole.X.indptr)
+        assert isinstance(whole.obs, pd.DataFrame)
+        assert isinstance(bounded.obs, pd.DataFrame)
+        pd.testing.assert_frame_equal(bounded.obs, whole.obs, check_exact=True)
 
     @pytest.mark.parametrize(
         ("column", "values"),

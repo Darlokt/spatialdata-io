@@ -39,6 +39,7 @@ def _read_partition(
     block: bytes, *, names: tuple[str, ...], columns: tuple[str, ...], first: bool, path: ArtifactFile
 ) -> pd.DataFrame:
     """Project lexical fields while checking the full source record width."""
+    # Arrow checks full record widths but can accept malformed CSV quoting.
     try:
         with pa.BufferReader(block) as source:
             table = pacsv.read_csv(
@@ -66,7 +67,7 @@ def read_transcripts(
 ) -> dd.DataFrame:
     """Return calibrated XY points without reading transcript rows eagerly.
 
-    Dask owns newline-delimited source blocks; Arrow strictly decodes projected
+    Dask owns newline-delimited source blocks; Arrow decodes projected
     lexical fields before reader-owned value normalization. CSV records must
     each occupy one physical line. Quoted commas and quotes remain supported.
     """

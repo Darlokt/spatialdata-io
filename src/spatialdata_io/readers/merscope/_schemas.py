@@ -88,20 +88,22 @@ def normalize_cell_ids(series: pd.Series, path: ArtifactFile, *, allow_unassigne
     return identifiers
 
 
-def integer_values(series: pd.Series, path: ArtifactFile) -> npt.NDArray[np.int64 | np.uint64]:
+def integer_values(
+    source: pd.Series | pa.Array | pa.ChunkedArray, path: ArtifactFile
+) -> npt.NDArray[np.int64 | np.uint64]:
     """Decode nonnegative integral values without any floating intermediate."""
-    lexical = series.astype(STRING_DTYPE)
-    column = pa.array(lexical)
+    column = pa.array(source.astype(STRING_DTYPE)) if isinstance(source, pd.Series) else pc.cast(source, pa.string())
     if column.null_count:
         raise schema_error(path, found="missing or oversized integer", expected="nonnegative 64-bit integral values")
     try:
         # Arrow's native integer parser is the common count and stack-index path.
         values = pc.cast(column, pa.uint64()).to_numpy()
     except pa.ArrowInvalid:
-        if lexical.str.len().gt(_MAX_NUMBER_CHARACTERS).any():
+        tokens = column.to_pylist()
+        if any(len(token) > _MAX_NUMBER_CHARACTERS for token in tokens):
             raise schema_error(path, found="oversized integer", expected="nonnegative 64-bit integral values") from None
         exact_values: list[int] = []
-        for token in lexical:
+        for token in tokens:
             try:
                 exact = Decimal(token)
             except InvalidOperation as error:
@@ -216,7 +218,7 @@ def normalize_boundary_ids(table: pa.Table, path: ArtifactFile) -> pd.Index:
     if not (pa.types.is_integer(ids.type) or pa.types.is_string(ids.type) or pa.types.is_large_string(ids.type)):
         raise schema_error(path, found=f"EntityID dtype {ids.type}", expected="exact integer or text identities")
     identifiers = normalize_cell_ids(pd.Series(ids, dtype=STRING_DTYPE), path)
-    planes = integer_values(pd.Series(table.column("ZIndex"), dtype=STRING_DTYPE), path)
+    planes = integer_values(table.column("ZIndex"), path)
     if planes.dtype.kind == "u":
         raise schema_error(path, found="ZIndex overflow", expected="nonnegative int64 plane indexes")
     if "Type" in table.column_names:

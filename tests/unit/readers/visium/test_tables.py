@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,6 +16,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, DatasetRoot
 from spatialdata_io.readers.visium._layout import H5Counts, VisiumLayout
 from spatialdata_io.readers.visium._metadata import CountMetadata, ScaleFactors
+from spatialdata_io.readers.visium._schemas import POSITION_COLUMNS
 from spatialdata_io.readers.visium._tables import TableOptions, link_table, prepare_table, read_positions
 
 if TYPE_CHECKING:
@@ -55,6 +57,33 @@ def _options() -> TableOptions:
 
 class TestReadPositions:
     """Validate both vendor CSV schemas and all coordinate columns."""
+
+    @pytest.mark.parametrize("headered", [False, True])
+    @pytest.mark.parametrize("barcode", ["a,b", 'a"b', "a\nb", "NA", "NULL"])
+    def test_preserves_quoted_and_literal_barcodes(self, tmp_path: Path, *, headered: bool, barcode: str) -> None:
+        """Keep source barcode text, escaped quotes, embedded newlines, and literal null-like words."""
+        path = tmp_path / "positions.csv"
+        with path.open("w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            if headered:
+                writer.writerow(POSITION_COLUMNS)
+            writer.writerow([barcode, "1", "9007199254740993.0", "2e0", "0.10000000000000002", "20"])
+
+        result = read_positions(_layout(tmp_path, path, headered=headered))
+
+        assert result.index.tolist() == [barcode]
+        assert result["array_row"].tolist() == [2**53 + 1]
+        assert result["array_col"].tolist() == [2]
+        assert result["pxl_row_in_fullres"].tolist() == [float("0.10000000000000002")]
+
+    @pytest.mark.parametrize("row", ["a,1,0,0,10,20", "a,1,0,0,10,20,extra,surplus"])
+    def test_rejects_inconsistent_record_widths(self, tmp_path: Path, row: str) -> None:
+        """Require complete source records before projecting supported position fields."""
+        path = tmp_path / "positions.csv"
+        path.write_text(",".join((*POSITION_COLUMNS, "quality")) + "\n" + row + "\n", encoding="utf-8")
+
+        with pytest.raises(ReaderFormatError, match="record widths"):
+            read_positions(_layout(tmp_path, path, headered=True))
 
     @pytest.mark.parametrize("headered", [False, True])
     def test_reads_schema_without_reordering_rows(self, tmp_path: Path, *, headered: bool) -> None:

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def write_seqfish_dataset(
+def write_seqfish_dataset(  # noqa: PLR0913, RUF100 - Fixture source variations are independent.
     root: Path,
     *,
     rois: tuple[str, ...] = ("Roi2", "Roi1"),

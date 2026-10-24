@@ -63,6 +63,9 @@ def visium(  # noqa: PLR0913, RUF100
     legacy files, and 2.0+ ``tissue_positions.csv`` are supported. Named fields
     may be reordered and additional columns are ignored. Headerless files
     require exactly six positional fields. Ambiguous duplicate headers fail.
+    Position files must contain valid CSV. The Arrow decoder checks complete
+    record widths but does not enforce strict quoting; malformed quotes may be
+    accepted and interpreted as different field values.
     Position rows are aligned to count barcodes without filtering ``in_tissue``. Count
     and feature order are preserved, and expression is returned as a finite
     canonical CSR sparse array. All count feature types are retained in source

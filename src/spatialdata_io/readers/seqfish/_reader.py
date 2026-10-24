@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from xarray import DataArray, DataTree
 
 
-def seqfish(
+def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explicit.
     path: str | Path,
     *,
     include_images: bool = True,
@@ -105,6 +105,10 @@ def seqfish(
     ``z_raw`` slice annotation; points are spatially two-dimensional. Optional
     ``cell`` assignments retain zero for unassigned events. Point indexes are
     partition-local storage indexes, not globally unique event IDs.
+
+    CSV inputs must be valid. Arrow checks record widths but does not enforce
+    strict quoting; some malformed quote forms may be accepted. Numerical
+    precision and exact integer-identifier checks apply to parsed values.
 
     Counts, cell metadata and shapes are eager and owned. CSV working batches
     are bounded; raster pixels and transcript partitions remain path-backed and

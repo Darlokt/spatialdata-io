@@ -185,9 +185,11 @@ class TestSeqfish:
         image = result.images["Roi1_DAPI"]
         assert image.data.chunks == ((1,), (2, 2, 2, 2), (4, 4, 4))
         assert result.labels["Roi1_Segmentation"].data.chunks == ((2, 2, 2, 2), (4, 4, 4))
-        restored_image = pickle.loads(pickle.dumps(image.data))
+        restored_image = pickle.loads(pickle.dumps(image.data))  # noqa: S301, RUF100 - Test-owned lazy graph.
         assert_array_equal(restored_image[:, :1, :1].compute(), [[[0]]])
-        restored_points = pickle.loads(pickle.dumps(result.points["Roi1_TranscriptList"]))
+        restored_points = pickle.loads(  # noqa: S301, RUF100 - Test-owned lazy graph.
+            pickle.dumps(result.points["Roi1_TranscriptList"])
+        )
         points = restored_points.compute()
         assert points["name"].tolist() == ["GeneA", "GeneB", "GeneA"]
         assert "z" not in points

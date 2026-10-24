@@ -71,7 +71,10 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     SpatialData
         ``tables['table']`` contains eager, finite canonical CSR sparse-array
         expression in source row and feature order. CSV blocks contain at most
-        10,000 rows. FCS decoding materializes the event population with readfcs.
+        10,000 rows and at most 32 MiB of dense numerical expression, with parser
+        text buffers and retained sparse/annotation outputs accounted separately.
+        FCS decoding materializes the event population with readfcs; expression
+        keeps native NumPy storage before sparse construction.
         Intensities retain real numeric dtype and negative compensated signals.
         FCS PnN supplies feature IDs. Available PnS labels become ``var['marker']``.
         All non-cycle columns remain observation metadata, and observation names

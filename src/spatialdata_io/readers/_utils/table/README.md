@@ -65,6 +65,19 @@ x = as_csr_array(expression)
 The helper does not accept a pandas object directly because doing so would hide
 column interpretation and conversion behavior.
 
+Pandas is one possible input container, not a required expression-processing
+stage. A reader may instead select validated Arrow columns or native numerical
+arrays and construct its NumPy block directly. Keep annotation alignment in
+pandas when needed; do not wrap expression columns in a DataFrame or convert
+native numerical buffers to Arrow solely for uniform intermediate storage.
+
+For dense-on-disk CSV expression, the reader owns the declared parsing contract
+and bounded numerical batches, followed by CSR assembly. Budget numerical
+blocks using feature count and dtype width, and account separately for parser
+and string buffers. Final CSR and observation annotations remain proportional
+to input size. Neither an Arrow backend nor `copy=False` proves that a conversion
+avoids allocation; validate that property for the actual path before claiming it.
+
 Readers should construct this CSR value before constructing `AnnData` whenever
 they already own dense columns or coordinate triplets. This avoids holding an
 avoidable second dense expression copy inside `AnnData` before normalization.

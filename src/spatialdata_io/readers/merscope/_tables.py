@@ -64,7 +64,7 @@ def read_feature_names(path: ArtifactFile) -> tuple[str, ...]:
 
 def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
     """Decode a bounded lexical count block without float promotion or dense accumulation."""
-    columns = [integer_values(pd.Series(column, dtype=STRING_DTYPE), path) for column in batch.columns[1:]]
+    columns = [integer_values(column, path) for column in batch.columns[1:]]
     dtype = np.uint64 if any(column.dtype.kind == "u" for column in columns) else np.int64
     dense = np.column_stack([column.astype(dtype, copy=False) for column in columns])
     return as_csr_array(dense)
@@ -77,6 +77,7 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
     rows_per_batch = max(1, min(_MAX_BATCH_ROWS, _BATCH_MEMORY_BYTES // (16 * len(features))))
     blocks: list[sparse.csr_array] = []
     identifiers: list[str] = []
+    # Arrow checks full record widths but can accept malformed CSV quoting.
     try:
         with (
             path.open("rb") as handle,
@@ -160,7 +161,7 @@ def read_table(counts: ArtifactFile, metadata: ArtifactFile) -> tuple[ad.AnnData
     return table, features
 
 
-def finalize_table(
+def finalize_table(  # noqa: PLR0913, RUF100 - Final reader-owned annotations and linkage have distinct meanings.
     table: ad.AnnData,
     *,
     region_name: str,

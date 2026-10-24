@@ -106,6 +106,19 @@ class TestReadTable:
         assert result.obs["area"].tolist() == [0]
         assert result.obsm["spatial"][0, 0] == 0.10000000000000002
 
+    def test_quoted_multiline_numeric_fields(self, tmp_path: Path) -> None:
+        """Retain accepted integral count and ID lexemes containing quoted newlines."""
+        counts = ',"Gene,A"\r\n"1\n","2\n"\r\n'
+        cells = 'label,area,center_x,center_y,ignored\r\n"1\n",0,1.5,2,"line\nbreak"\r\n'
+
+        result = read_table(*_sources(tmp_path, counts, cells))
+
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.data.tolist() == [2]
+        assert result.obs["instance_id"].tolist() == [1]
+        assert result.var_names.tolist() == ["Gene,A"]
+        np.testing.assert_array_equal(result.obsm["spatial"], [[1.5, 2]])
+
     def test_oversized_header(self, tmp_path: Path, mocker: MockerFixture) -> None:
         mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_HEADER_CHARACTERS", 2)
         with pytest.raises(ReaderFormatError, match="oversized header"):

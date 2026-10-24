@@ -17,7 +17,7 @@ from spatialdata_io.readers.codex._schemas import (
     cell_ids,
     expression_dtype,
     normalize_csv_numbers,
-    normalize_fcs_frame,
+    normalize_fcs_metadata,
     region_name,
 )
 
@@ -115,23 +115,23 @@ class TestNormalizeCsvNumbers:
             )
 
 
-class TestNormalizeFcsFrame:
-    """Preserve FCS primitive widths and reject nonnumeric event parameters."""
+class TestNormalizeFcsMetadata:
+    """Preserve FCS annotation widths and reject nonnumeric metadata parameters."""
 
     def test_float32_parameters(self, tmp_path: Path) -> None:
         """Retain the source FCS floating width and compensated values."""
         values = np.asarray([0.125, -1.5], dtype=np.float32)
-        frame = pd.DataFrame({"cyc001_ch001": values})
+        frame = pd.DataFrame({"x": values})
 
-        normalize_fcs_frame(frame, ArtifactFile(tmp_path / "cells.fcs"))
+        normalize_fcs_metadata(frame, ArtifactFile(tmp_path / "cells.fcs"))
 
-        assert frame["cyc001_ch001"].dtype == pd.ArrowDtype(pa.float32())
-        np.testing.assert_array_equal(frame["cyc001_ch001"].to_numpy(), values)
+        assert frame["x"].dtype == pd.ArrowDtype(pa.float32())
+        np.testing.assert_array_equal(frame["x"].to_numpy(), values)
 
     def test_nonnumeric_parameter(self, tmp_path: Path) -> None:
         """Reject nonnumeric FCS event parameters before numerical assembly."""
         with pytest.raises(ReaderFormatError, match="FCS parameter"):
-            normalize_fcs_frame(pd.DataFrame({"cell_id": ["invalid"]}), ArtifactFile(tmp_path / "cells.fcs"))
+            normalize_fcs_metadata(pd.DataFrame({"cell_id": ["invalid"]}), ArtifactFile(tmp_path / "cells.fcs"))
 
 
 class TestExpressionDtype:

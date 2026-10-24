@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from geopandas import GeoDataFrame
 
 
-def merscope(
+def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public boundary typed.
     path: str | Path,
     *,
     vpt_directory: str | Path | None = None,

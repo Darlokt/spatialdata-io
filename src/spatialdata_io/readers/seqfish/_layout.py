@@ -57,7 +57,7 @@ class SeqfishLayout:
     rois: tuple[RoiLayout, ...]
 
 
-def make_selection(
+def make_selection(  # noqa: PLR0913, RUF100 - Keep supported product choices explicit.
     *,
     include_images: bool,
     include_labels: bool,

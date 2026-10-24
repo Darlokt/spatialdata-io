@@ -169,8 +169,8 @@ def normalize_csv_numbers(frame: pd.DataFrame, columns: list[str], path: Artifac
         frame[column] = numeric
 
 
-def normalize_fcs_frame(frame: pd.DataFrame, path: ArtifactFile) -> None:
-    """Keep owned FCS event values and primitive widths in explicit Arrow columns."""
+def normalize_fcs_metadata(frame: pd.DataFrame, path: ArtifactFile) -> None:
+    """Keep owned FCS annotations and primitive widths in explicit Arrow columns."""
     for column, dtype in frame.dtypes.items():
         if dtype.kind not in "iuf":
             raise schema_error(path, found=f"FCS parameter dtype {dtype}", expected="real numeric event parameters")
@@ -179,15 +179,18 @@ def normalize_fcs_frame(frame: pd.DataFrame, path: ArtifactFile) -> None:
 
 
 def expression_dtype(frame: pd.DataFrame, features: list[str], path: ArtifactFile) -> np.dtype:
-    """Choose a numeric kernel dtype without converting Arrow features to object arrays."""
+    """Choose a real kernel dtype for lexical CSV results or native FCS buffers."""
     dtypes: list[np.dtype] = []
     for column in features:
         dtype = frame[column].dtype
-        if not isinstance(dtype, pd.ArrowDtype) or dtype.kind not in "iuf":
+        if isinstance(dtype, pd.ArrowDtype):
+            dtype = np.dtype(dtype.pyarrow_dtype.to_pandas_dtype())
+
+        if not isinstance(dtype, np.dtype) or dtype.kind not in "iuf":
             raise schema_error(
                 path, found="nonnumeric cycle values or x/y coordinates", expected="finite real numeric values"
             )
-        dtypes.append(np.dtype(dtype.pyarrow_dtype.to_pandas_dtype()))
+        dtypes.append(dtype)
 
     return np.result_type(*dtypes)
 
