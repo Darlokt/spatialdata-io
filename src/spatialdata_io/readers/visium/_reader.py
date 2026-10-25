@@ -73,7 +73,7 @@ def visium(  # noqa: PLR0913, RUF100
 
     Full-resolution TIFF/BigTIFF/BTF, PNG, and JPEG inputs are optional.
     Space Ranger hires and lowres PNGs are discovered independently. Pixel
-    decoding remains lazy. TIFF construction retains native storage chunks and
+    decoding remains lazy. TIFF construction retains storage-aligned chunks and
     requested chunks add lazy rechunking. Full-resolution images receive up to
     four lazy twofold pyramid reductions. PNG and JPEG computation necessarily
     decodes a complete frame. Tissue imagery is spatially two-dimensional and

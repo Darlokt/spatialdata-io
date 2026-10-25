@@ -73,9 +73,9 @@ class TestMakeRasterOptions:
 
 
 class TestReadImage:
-    """Images keep source dtype, panel channels, native chunks, and their frame."""
+    """Images keep source dtype, panel channels, storage-aligned chunks, and their frame."""
 
-    def test_cyx_panel_channels_lazy_and_native_chunks(self, tmp_path: Path) -> None:
+    def test_cyx_panel_channels_lazy_and_storage_aligned_chunks(self, tmp_path: Path) -> None:
         values = np.arange(2 * 20 * 12, dtype=np.uint16).reshape(2, 20, 12)
         path = _write(tmp_path / "image.ome.tif", values, "CYX", rowsperstrip=5, compression="deflate")
         tasks: list[object] = []
@@ -87,7 +87,8 @@ class TestReadImage:
         assert element.dims == ("c", "y", "x")
         assert element.coords["c"].to_numpy().tolist() == ["CD3", "DAPI"]
         assert element.dtype == np.dtype(np.uint16)
-        assert element.data.chunks == ((1, 1), (5, 5, 5, 5), (12,))
+        # Whole 5-row strips form one row band per channel.
+        assert element.data.chunks == ((1, 1), (20,), (12,))
         assert set(_frames(element)) == {"core_2"}
         assert isinstance(get_transformation(element, "core_2"), Identity)
         np.testing.assert_array_equal(element.data.compute(), values)

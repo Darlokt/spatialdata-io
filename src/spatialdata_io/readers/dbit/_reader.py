@@ -117,7 +117,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         to zero. Nonzero selections require a TIFF image.
     chunks
         Positive integer for all output image axes or three positive integers
-        in CYX order. Native source chunks are retained by default. Image
+        in CYX order. Storage-aligned source chunks (TIFF tiles, or whole
+        strips grouped into bands of at most 16 MiB) are retained by default. Image
         options require an image. Axis overrides require TIFF.
 
     Returns

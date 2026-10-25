@@ -1,4 +1,4 @@
-"""MACSima command."""
+"""Convert processed MACSima exports to a SpatialData store."""
 
 from __future__ import annotations
 
@@ -6,109 +6,119 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options, parse_json_object
+from spatialdata_io._cli._common import dataset_io_options
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import TypedDict, Unpack
+    from typing import Literal, TypedDict, Unpack
 
     class _MacsimaOptions(TypedDict):
-        parsing_style: str
-        filter_folder_names: tuple[str, ...]
-        subset: int | None
-        c_subset: int | None
-        max_chunk_size: int
-        c_chunks_size: int
-        multiscale: bool
-        transformations: bool
-        scale_factors: tuple[int, ...]
-        default_scale_factor: int
+        """Describe the values normalized by Click."""
+
+        parsing_style: Literal["processed_single_folder", "processed_multiple_folders"]
+        exclude_folder_names: tuple[str, ...]
+        exclude_cycles: tuple[int, ...]
+        include_cycle_in_channel_names: bool
         nuclei_channel_name: str
         split_threshold_nuclei_channel: int | None
-        skip_rounds: tuple[int, ...]
-        include_cycle_in_channel_name: bool
-        imread_kwargs: str
+        include_transformations: bool
+        scale_factors: tuple[int, ...]
+        chunks: tuple[int, ...]
+
+
+_IMAGE_RANK = 3
+
+
+def _split_threshold(_context: click.Context, _parameter: click.Parameter, value: str) -> int | None:
+    """Parse a non-negative nuclei-channel count, or ``none`` to never split."""
+    text = value.strip()
+    if text.lower() == "none":
+        return None
+    if not text.isdecimal():
+        message = f"{value!r} is neither a non-negative integer nor 'none'."
+        raise click.BadParameter(message)
+    return int(text)
 
 
 @click.command(name="macsima")
 @dataset_io_options
 @click.option(
     "--parsing-style",
-    type=click.Choice(["processed_single_folder", "processed_multiple_folders", "raw"]),
+    type=click.Choice(["processed_single_folder", "processed_multiple_folders"]),
     default="processed_single_folder",
     show_default=True,
-    help="MACSima directory layout to parse.",
+    help="One stack for the folder, or one stack per immediate subfolder.",
 )
 @click.option(
-    "--filter-folder-names", type=str, multiple=True, default=None, help="Folder names to exclude in multi-folder mode."
+    "--exclude-folder-names", type=str, multiple=True, default=(), help="Repeat exact subfolder names to omit."
 )
-@click.option("--subset", type=int, default=None, help="Limit image width and height to the first N pixels.")
-@click.option("--c-subset", type=int, default=None, help="Limit the image to the first N channels.")
-@click.option("--max-chunk-size", type=int, default=1024, show_default=True, help="Maximum spatial chunk size.")
-@click.option("--c-chunks-size", type=int, default=1, show_default=True, help="Channel-axis chunk size.")
-@click.option("--multiscale", type=bool, default=True, show_default=True, help="Whether to create image pyramids.")
 @click.option(
-    "--transformations",
-    type=bool,
-    default=True,
+    "--exclude-cycles", type=click.IntRange(min=0), multiple=True, default=(), help="Repeat acquisition cycles to omit."
+)
+@click.option(
+    "--include-cycle-in-channel-names/--no-include-cycle-in-channel-names",
+    default=False,
     show_default=True,
-    help="Whether to attach pixel-to-micron transforms.",
+    help="Prefix channel names with their cycle.",
 )
 @click.option(
-    "--scale-factors", type=int, multiple=True, default=None, help="Repeated image-pyramid downsampling factors."
-)
-@click.option(
-    "--default-scale-factor", type=int, default=2, show_default=True, help="Automatic pyramid downsampling factor."
-)
-@click.option(
-    "--nuclei-channel-name", type=str, default="DAPI", show_default=True, help="Substring identifying nuclei channels."
+    "--nuclei-channel-name", type=str, default="DAPI", show_default=True, help="Exact marker name of the nuclear stain."
 )
 @click.option(
     "--split-threshold-nuclei-channel",
-    type=int,
-    default=2,
+    type=str,
+    default="2",
+    metavar="COUNT|none",
+    callback=_split_threshold,
     show_default=True,
-    help="Minimum nuclei-channel count that triggers splitting.",
-)
-@click.option("--skip-rounds", type=int, multiple=True, default=None, help="Repeated round numbers to omit.")
-@click.option(
-    "--include-cycle-in-channel-name",
-    type=bool,
-    default=False,
-    show_default=True,
-    help="Whether channel names include their cycle number.",
+    help="Split nuclei channels into their own stack above this count; 'none' never splits.",
 )
 @click.option(
-    "--imread-kwargs", type=str, default="{}", show_default=True, help="JSON object of legacy image-reader options."
+    "--include-transformations/--no-include-transformations",
+    default=True,
+    show_default=True,
+    help="Scale pixels to micrometers.",
 )
-def macsima_command(
-    input_path: Path,
-    output_path: Path,
-    **options: Unpack[_MacsimaOptions],
-) -> None:
-    """Convert MACSima data to SpatialData."""
-    # Keep top-level CLI help independent of scientific reader imports.
-    from spatialdata_io.readers.macsima import macsima  # noqa: PLC0415, RUF100
+@click.option(
+    "--scale-factors",
+    type=click.IntRange(min=2),
+    multiple=True,
+    default=(),
+    help="Repeat factors for generated pyramid levels; omitted keeps a single scale.",
+)
+@click.option(
+    "--chunks",
+    type=click.IntRange(min=1),
+    multiple=True,
+    default=(),
+    help="One size for every axis or three CYX sizes; omitted uses 1, 1024, 1024.",
+)
+def macsima_command(input_path: Path, output_path: Path, **options: Unpack[_MacsimaOptions]) -> None:
+    """Read processed MACSima exports, then write the SpatialData store."""
+    from spatialdata_io.readers.macsima import macsima  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
 
-    filter_folder_names = options["filter_folder_names"]
-    scale_factors = options["scale_factors"]
-    skip_rounds = options["skip_rounds"]
+    sizes = options["chunks"]
+    chunks: int | tuple[int, int, int]
+    if not sizes:
+        chunks = (1, 1024, 1024)
+    elif len(sizes) == 1:
+        chunks = sizes[0]
+    elif len(sizes) == _IMAGE_RANK:
+        chunks = (sizes[0], sizes[1], sizes[2])
+    else:
+        message = "Pass --chunks once or three times in CYX order."
+        raise click.BadParameter(message, param_hint="--chunks")
+
     result = macsima(
-        path=input_path,
+        input_path,
         parsing_style=options["parsing_style"],
-        filter_folder_names=list(filter_folder_names) if filter_folder_names else None,
-        imread_kwargs=parse_json_object(options["imread_kwargs"], parameter="imread_kwargs"),
-        subset=options["subset"],
-        c_subset=options["c_subset"],
-        max_chunk_size=options["max_chunk_size"],
-        c_chunks_size=options["c_chunks_size"],
-        multiscale=options["multiscale"],
-        transformations=options["transformations"],
-        scale_factors=list(scale_factors) if scale_factors else None,
-        default_scale_factor=options["default_scale_factor"],
+        exclude_folder_names=options["exclude_folder_names"],
+        exclude_cycles=options["exclude_cycles"],
+        include_cycle_in_channel_names=options["include_cycle_in_channel_names"],
         nuclei_channel_name=options["nuclei_channel_name"],
         split_threshold_nuclei_channel=options["split_threshold_nuclei_channel"],
-        skip_rounds=list(skip_rounds) if skip_rounds else None,
-        include_cycle_in_channel_name=options["include_cycle_in_channel_name"],
+        include_transformations=options["include_transformations"],
+        scale_factors=options["scale_factors"] or None,
+        chunks=chunks,
     )
     result.write(output_path)

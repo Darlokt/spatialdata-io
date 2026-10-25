@@ -196,7 +196,7 @@ class TestSeqfish:
         assert_array_equal(points["z_raw"], [1, 2, 1])
         assert points["z_raw"].dtype.kind in "iu"
 
-    def test_partial_image_reads_one_native_strip(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_partial_image_reads_one_row_band(self, tmp_path: Path, mocker: MockerFixture) -> None:
         root = write_seqfish_dataset(tmp_path, rois=("Roi1",))
         source_read = mocker.spy(tiff_dask, "_read_tiff_selection")
         result = seqfish(root)
@@ -204,7 +204,8 @@ class TestSeqfish:
         selected = result.images["Roi1_DAPI"].isel(y=slice(0, 1), x=slice(0, 1)).data.compute()
         assert_array_equal(selected, [[[0]]])
         source_read.assert_called_once()
-        assert source_read.call_args.args[1] == (slice(0, 2), slice(0, 12))
+        # The 2-row strips of this small image form one row band.
+        assert source_read.call_args.args[1] == (slice(0, 8), slice(0, 12))
 
     def test_no_generated_pyramid_by_default_and_explicit_pyramid(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path, rois=("Roi1",))

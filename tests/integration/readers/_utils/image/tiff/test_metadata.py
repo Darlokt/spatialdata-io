@@ -10,7 +10,7 @@ import tifffile
 from tifffile.zarr import ZarrTiffStore
 
 from spatialdata_io.readers._utils.errors import RasterFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff
+from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
 from tests.integration.readers._utils.image.conftest import TiffOptions
 
 if TYPE_CHECKING:
@@ -166,6 +166,26 @@ class TestInspectTiff:
 
         with pytest.raises(RasterFormatError, match="non-file TIFF source"):
             inspect_tiff(path)
+
+    def test_resolves_renamed_single_file_ome_by_its_own_uuid(self, tmp_path: Path) -> None:
+        # Public releases rename exported files; FileName keeps the export name.
+        uuid = "urn:uuid:33333333-3333-4333-8333-333333333333"
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" UUID="{uuid}">
+  <Image ID="Image:0"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint16"
+    SizeX="5" SizeY="4" SizeZ="1" SizeC="1" SizeT="1">
+    <Channel ID="Channel:0:0" SamplesPerPixel="1"/>
+    <TiffData IFD="0" PlaneCount="1"><UUID FileName="export-name.tif">{uuid}</UUID></TiffData>
+  </Pixels></Image>
+</OME>"""
+        data = np.arange(20, dtype=np.uint16).reshape(4, 5)
+        path = tmp_path / "release-name.ome.tif"
+        tifffile.imwrite(path, data, description=xml, metadata=None)
+
+        metadata = inspect_tiff(path)
+
+        assert metadata.series[0].levels[0].shape == (4, 5)
+        np.testing.assert_array_equal(read_tiff(metadata, series=0, level=0).data.compute(), data)
 
     def test_preserves_missing_duplicate_channels_and_anisotropic_units(
         self,

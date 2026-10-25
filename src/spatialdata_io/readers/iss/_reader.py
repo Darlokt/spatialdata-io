@@ -76,8 +76,9 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         YX and only singleton extra axes.
     chunks
         Positive size for all image axes or three sizes in output CYX order.
-        Labels use the corresponding YX sizes. Native source chunks are used
-        by default. Generated pyramid levels use compatible per-axis sizes.
+        Labels use the corresponding YX sizes. Storage-aligned source chunks
+        (TIFF tiles, or whole strips grouped into bands of at most 16 MiB) are
+        used by default. Generated pyramid levels use compatible per-axis sizes.
 
     Returns
     -------

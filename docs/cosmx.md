@@ -46,7 +46,7 @@ Construction reads only the header. Plain CSV sources are split into newline-del
 
 ## Options and execution
 
-`scale_factors=None` keeps a single full-resolution scale; a sequence of integer factors greater than one adds pyramid levels to images and labels. Generated label pyramids require labels of at most 32 bits. `chunks` is one positive size or three CYX sizes, and labels use the final two; `None` keeps native chunks. JPEG and PNG composites decode their whole frame for any selection; TIFF sources read only the storage blocks a selection needs. Construction executes no raster or transcript tasks.
+`scale_factors=None` keeps a single full-resolution scale; a sequence of integer factors greater than one adds pyramid levels to images and labels. Generated label pyramids require labels of at most 32 bits. `chunks` is one positive size or three CYX sizes, and labels use the final two; `None` keeps storage-aligned chunks (TIFF tiles, or whole strips grouped into bands of at most 16 MiB). JPEG and PNG composites decode their whole frame for any selection; TIFF sources read only the storage blocks a selection needs. Construction executes no raster or transcript tasks.
 
 ## Python and command line
 

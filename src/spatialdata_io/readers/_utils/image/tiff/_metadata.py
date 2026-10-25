@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ome_types import OME
+    from ome_types.model import TiffData
 
 _TIFF_SIGNATURES = frozenset({b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"})
 
@@ -113,13 +114,7 @@ def _validate_ome_image_mappings(ome: OME | None, root: Path) -> None:
     mapped_by_previous_images: set[tuple[Path, int]] = set()
     for image_index, image in enumerate(ome.images):
         image_mappings = {
-            (
-                root
-                if block.uuid is None or block.uuid.file_name is None
-                else _resolve_linked_path(root, block.uuid.file_name),
-                block.ifd or 0,
-            )
-            for block in image.pixels.tiff_data_blocks
+            (_tiff_data_path(root, ome, block), block.ifd or 0) for block in image.pixels.tiff_data_blocks
         }
         duplicates = image_mappings.intersection(mapped_by_previous_images)
         if duplicates:
@@ -129,6 +124,19 @@ def _validate_ome_image_mappings(ome: OME | None, root: Path) -> None:
             )
             raise RasterFormatError(message)
         mapped_by_previous_images.update(image_mappings)
+
+
+def _tiff_data_path(root: Path, ome: OME, block: TiffData) -> Path:
+    """Return the TIFF file that stores one OME ``TiffData`` block.
+
+    A block without a file reference, or whose UUID is the document's own UUID,
+    is stored in the inspected file. Renamed single-file OME-TIFFs keep their
+    original ``FileName`` beside their own UUID, and tifffile resolves such
+    references by UUID, as the OME-TIFF specification intends.
+    """
+    if block.uuid is None or block.uuid.file_name is None or block.uuid.value == ome.uuid:
+        return root
+    return _resolve_linked_path(root, block.uuid.file_name)
 
 
 def _resolve_linked_path(root: Path, file_name: str) -> Path:
@@ -148,9 +156,9 @@ def _validate_linked_paths(root: Path, ome: OME | None) -> None:
     if ome is not None:
         for image in ome.images:
             for tiff_data in image.pixels.tiff_data_blocks:
-                if tiff_data.uuid is None or tiff_data.uuid.file_name is None:
+                linked = _tiff_data_path(root, ome, tiff_data)
+                if linked == root:
                     continue
-                linked = _resolve_linked_path(root, tiff_data.uuid.file_name)
                 if not linked.is_file():
                     message = f"OME metadata references a non-file TIFF source: {linked}"
                     raise RasterFormatError(message)

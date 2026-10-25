@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from math import prod
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import cloudpickle  # type: ignore[import-untyped]  # third-party package has no type information
 import dask
@@ -28,6 +29,15 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
     from tests.integration.readers._utils.image.conftest import TiffFactory
+
+
+class _FinalPage(NamedTuple):
+    """Storage of one uncompressed contiguous single-page TIFF."""
+
+    dtype: str
+    byteorder: Literal["<", ">"]
+    photometric: str
+    shape: tuple[int, ...]
 
 
 class TestReadTiff:
@@ -85,13 +95,15 @@ class TestReadTiff:
     @pytest.mark.parametrize(
         "storage",
         [
-            (None, None, 5, ((1, 1, 1), (5, 5, 5, 4), (23,))),
+            # Strips of whole rows are grouped into one bounded band per plane.
+            (None, None, 5, ((1, 1, 1), (19,), (23,))),
+            ("deflate", None, 1, ((1, 1, 1), (19,), (23,))),
             (None, (16, 16), None, ((1, 1, 1), (16, 3), (16, 7))),
             ("deflate", (16, 16), None, ((1, 1, 1), (16, 3), (16, 7))),
             ("lzw", (16, 16), None, ((1, 1, 1), (16, 3), (16, 7))),
         ],
     )
-    def test_reads_native_chunks_exactly(
+    def test_reads_storage_aligned_chunks_exactly(
         self,
         cyx_data: NDArray[np.uint16],
         write_tiff: TiffFactory,
@@ -136,20 +148,23 @@ class TestReadTiff:
         np.testing.assert_array_equal(result, cyx_data[1:2, 3:9, 4:11])
 
     @pytest.mark.parametrize(
-        "options",
+        ("options", "expected_payloads"),
         [
-            TiffOptions(compression="deflate", tile=(16, 16)),
-            TiffOptions(compression="deflate", rowsperstrip=5),
+            (TiffOptions(compression="deflate", tile=(16, 16)), {0}),
+            # Bands of two 5-row strips: the selection reads exactly its band.
+            (TiffOptions(compression="deflate", rowsperstrip=5), {0, 1}),
         ],
     )
-    def test_small_selection_reads_only_one_native_segment(
+    def test_small_selection_reads_only_its_tile_or_row_band(
         self,
         cyx_data: NDArray[np.uint16],
         write_tiff: TiffFactory,
         mocker: MockerFixture,
         options: TiffOptions,
+        expected_payloads: set[int],
     ) -> None:
         path = write_tiff(cyx_data, options)
+        mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 2 * 5 * 23 * cyx_data.itemsize)
         result = read_tiff(inspect_tiff(path), series=0, level=0)
         with tifffile.TiffFile(path) as tiff:
             payload_ranges = tuple(
@@ -193,10 +208,167 @@ class TestReadTiff:
             for index, (payload_start, payload_stop) in enumerate(payload_ranges)
             if any(max(payload_start, read_start) < min(payload_stop, read_stop) for read_start, read_stop in reads)
         }
-        assert read_payloads == {0}
+        assert read_payloads == expected_payloads
         assert len(closed_handles) == 1
         assert closed_handles[0].closed
         assert len(closed_stores) == 1
+
+    @pytest.mark.parametrize("compression", [None, "zlib"])
+    def test_one_row_strips_form_strip_aligned_bands(
+        self, tmp_path: Path, mocker: MockerFixture, compression: str | None
+    ) -> None:
+        path = tmp_path / "strips.tif"
+        source = np.arange(2 * 11 * 7, dtype=np.uint16).reshape(2, 11, 7)
+        tifffile.imwrite(
+            path, source, photometric="minisblack", metadata={"axes": "CYX"}, rowsperstrip=1, compression=compression
+        )
+        # Three one-row strips per band leave a final band of two rows.
+        mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 3 * 7 * source.itemsize + 1)
+
+        result = read_tiff(inspect_tiff(path), series=0, level=0)
+
+        assert result.data.chunks == ((1, 1), (3, 3, 3, 2), (7,))
+        np.testing.assert_array_equal(result.data.compute(), source)
+        np.testing.assert_array_equal(result.data[1, 4:8, 2:5].compute(), source[1, 4:8, 2:5])
+
+    @pytest.mark.parametrize(
+        "storage",
+        [
+            _FinalPage("uint16", "<", "minisblack", (11, 7)),
+            _FinalPage("uint16", ">", "minisblack", (11, 7)),
+            _FinalPage("float32", "<", "minisblack", (11, 7)),
+            _FinalPage("uint8", "<", "rgb", (11, 7, 3)),
+        ],
+        ids=lambda storage: f"{storage.dtype}-{storage.byteorder}-{storage.photometric}",
+    )
+    def test_final_pages_are_read_directly_in_bounded_bands(
+        self, tmp_path: Path, mocker: MockerFixture, storage: _FinalPage
+    ) -> None:
+        path = tmp_path / "final.tif"
+        source = (np.arange(np.prod(storage.shape)) * 3 + 1).astype(storage.dtype).reshape(storage.shape)
+        tifffile.imwrite(path, source, photometric=storage.photometric, rowsperstrip=1, byteorder=storage.byteorder)
+        row_items = int(np.prod(storage.shape[1:]))
+        mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 4 * row_items * source.itemsize)
+        metadata = inspect_tiff(path)
+        zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
+        read_array = mocker.spy(tifffile.FileHandle, "read_array")
+        file_close = mocker.spy(tifffile.FileHandle, "close")
+
+        result = read_tiff(metadata, series=0, level=0)
+
+        assert result.data.chunks[0] == (4, 4, 3)
+        np.testing.assert_array_equal(result.data[5:7].compute(scheduler="synchronous"), source[5:7])
+        # One read of exactly the second band, without the Zarr strip decoder.
+        assert [call.kwargs["count"] for call in read_array.call_args_list] == [4 * row_items]
+        assert file_close.call_count == 1
+        np.testing.assert_array_equal(result.data.compute(), source)
+        assert result.data.dtype == source.dtype.newbyteorder("=")
+        zarr_open.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("data", "encoding"),
+        [
+            pytest.param(np.arange(3 * 9 * 5, dtype=np.uint16).reshape(3, 9, 5), (None, False), id="multi-page"),
+            pytest.param(np.arange(9 * 5, dtype=np.uint16).reshape(9, 5), ("zlib", False), id="compressed"),
+            pytest.param(np.arange(9 * 5, dtype=np.uint16).reshape(9, 5), ("zlib", True), id="predictor"),
+        ],
+    )
+    def test_other_storage_uses_the_strip_decoder(
+        self, tmp_path: Path, mocker: MockerFixture, data: NDArray[np.uint16], encoding: tuple[str | None, bool]
+    ) -> None:
+        path = tmp_path / "general.tif"
+        compression, predictor = encoding
+        tifffile.imwrite(
+            path, data, photometric="minisblack", rowsperstrip=1, compression=compression, predictor=predictor
+        )
+        metadata = inspect_tiff(path)
+        zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
+
+        result = read_tiff(metadata, series=0, level=0)
+
+        np.testing.assert_array_equal(result.data.compute(scheduler="synchronous"), data)
+        assert zarr_open.call_count == prod(map(len, result.data.chunks))
+
+    def test_partial_width_selection_of_a_final_page_uses_the_strip_decoder(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        path = tmp_path / "final.tif"
+        source = np.arange(9 * 5, dtype=np.uint16).reshape(9, 5)
+        tifffile.imwrite(path, source, photometric="minisblack", rowsperstrip=1)
+        metadata = inspect_tiff(path)
+        spec = _TiffReadSpec(path=metadata.path, series=0, level=0, dtype=metadata.series[0].levels[0].dtype)
+        zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
+
+        result = _read_tiff_selection(spec, (slice(2, 6), slice(1, 4)))
+
+        np.testing.assert_array_equal(result, source[2:6, 1:4])
+        zarr_open.assert_called_once()
+
+    def test_single_page_series_in_a_linked_file_is_read_from_that_file(self, tmp_path: Path) -> None:
+        # Image 1 of the OME document in first.ome.tif is stored in second.ome.tif.
+        first_uuid = "urn:uuid:44444444-4444-4444-8444-444444444444"
+        second_uuid = "urn:uuid:55555555-5555-4555-8555-555555555555"
+
+        def image(index: int, uuid: str, file_name: str) -> str:
+            return (
+                f'<Image ID="Image:{index}"><Pixels ID="Pixels:{index}" DimensionOrder="XYZCT" Type="uint16" '
+                'SizeX="5" SizeY="4" SizeZ="1" SizeC="1" SizeT="1">'
+                f'<Channel ID="Channel:{index}:0" SamplesPerPixel="1"/><TiffData IFD="0" PlaneCount="1">'
+                f'<UUID FileName="{file_name}">{uuid}</UUID></TiffData></Pixels></Image>'
+            )
+
+        namespace = 'xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"'
+        first = np.arange(20, dtype=np.uint16).reshape(4, 5)
+        second = first + 100
+        xml = (
+            f'<OME {namespace} UUID="{first_uuid}">'
+            f"{image(0, first_uuid, 'first.ome.tif')}{image(1, second_uuid, 'second.ome.tif')}</OME>"
+        )
+        tifffile.imwrite(tmp_path / "first.ome.tif", first, description=xml, metadata=None, rowsperstrip=1)
+        binary_only = (
+            f'<OME {namespace} UUID="{second_uuid}">'
+            f'<BinaryOnly MetadataFile="first.ome.tif" UUID="{first_uuid}"/></OME>'
+        )
+        tifffile.imwrite(tmp_path / "second.ome.tif", second, description=binary_only, metadata=None, rowsperstrip=1)
+
+        result = read_tiff(inspect_tiff(tmp_path / "first.ome.tif"), series=1, level=0)
+
+        np.testing.assert_array_equal(result.data.compute(), second)
+
+    def test_empty_strip_is_not_read_as_pixels(self, tmp_path: Path) -> None:
+        # Offset and byte count zero mark a strip without data; the decoder fills it.
+        path = tmp_path / "sparse.tif"
+        tifffile.imwrite(path, np.full((16, 8), 7, dtype=np.uint16))
+        with tifffile.TiffFile(path, mode="r+") as tiff:
+            tiff.pages.first.tags["StripOffsets"].overwrite(0)
+            tiff.pages.first.tags["StripByteCounts"].overwrite(0)
+
+        result = read_tiff(inspect_tiff(path), series=0, level=0)
+
+        np.testing.assert_array_equal(result.data.compute(), np.zeros((16, 8), dtype=np.uint16))
+
+    def test_truncated_strip_fails_instead_of_reading_past_it(self, tmp_path: Path) -> None:
+        path = tmp_path / "truncated.tif"
+        tifffile.imwrite(path, np.full((16, 8), 7, dtype=np.uint16))
+        with tifffile.TiffFile(path, mode="r+") as tiff:
+            page = tiff.pages.first
+            page.tags["StripByteCounts"].overwrite(page.nbytes - 32)
+
+        result = read_tiff(inspect_tiff(path), series=0, level=0)
+
+        with pytest.raises(tifffile.TiffFileError, match="corrupted strip"):
+            result.data.compute()
+
+    def test_contiguous_rgb_strips_form_bands(self, tmp_path: Path) -> None:
+        path = tmp_path / "rgb.tif"
+        source = np.arange(9 * 5 * 3, dtype=np.uint8).reshape(9, 5, 3)
+        tifffile.imwrite(path, source, photometric="rgb", rowsperstrip=2)
+
+        result = read_tiff(inspect_tiff(path), series=0, level=0)
+
+        assert result.axes == ("Y", "X", "S")
+        assert result.data.chunks == ((9,), (5,), (3,))
+        np.testing.assert_array_equal(result.data.compute(), source)
 
     def test_reads_jpeg_compressed_tiles(self, tmp_path: Path) -> None:
         path = tmp_path / "jpeg-compressed.tif"

@@ -63,7 +63,9 @@ def steinbock(
         Base int64/uint64 masks remain exact and supported without a pyramid.
     chunks
         Positive chunk size for every axis, or three sizes in output CYX order.
-        Labels use the corresponding YX sizes. Native chunks are used by default.
+        Labels use the corresponding YX sizes. Storage-aligned TIFF chunks
+        (tiles, or whole strips grouped into bands of at most 16 MiB) are used
+        by default.
 
     Returns
     -------

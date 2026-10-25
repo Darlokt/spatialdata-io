@@ -235,9 +235,7 @@ class TestMerscope:
         with pytest.raises(ReaderFormatError, match="detected_transcripts"):
             result.points["slide_region_transcripts"].compute()
 
-    def test_partial_image_reads_one_native_strip_and_graphs_serialize(
-        self, tmp_path: Path, mocker: MockerFixture
-    ) -> None:
+    def test_partial_image_reads_one_row_band_and_graphs_serialize(self, tmp_path: Path, mocker: MockerFixture) -> None:
         fixture = write_merscope_dataset(tmp_path)
         source_read = mocker.spy(tiff_dask, "_read_tiff_selection")
         decoder = mocker.spy(tifffile.TiffPage, "asarray")
@@ -252,7 +250,8 @@ class TestMerscope:
         restored = pickle.loads(pickle.dumps(image.data))  # noqa: S301, RUF100 - Test-owned lazy graph.
         assert_array_equal(restored[1, :1, :1].compute(), [[0]])
         source_read.assert_called_once()
-        assert source_read.call_args.args[1] == (slice(0, 8), slice(0, 80))
+        # The 8-row strips of this small image form one row band.
+        assert source_read.call_args.args[1] == (slice(0, 64), slice(0, 80))
         points = pickle.loads(pickle.dumps(result.points["slide_region_transcripts"]))  # noqa: S301, RUF100 - Test-owned lazy graph.
         assert points.compute()["cell_id"].tolist() == ["1001", "2002", "3003", "-1"]
 

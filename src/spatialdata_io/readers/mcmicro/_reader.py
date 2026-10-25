@@ -66,7 +66,8 @@ def mcmicro(
         label pyramid levels. None keeps the full-resolution single scale.
     chunks
         Positive integer or three positive CYX sizes; labels use the final two.
-        None preserves native TIFF storage chunks. Rechunking remains lazy.
+        None keeps storage-aligned TIFF chunks (tiles, or whole strips grouped
+        into bands of at most 16 MiB). Rechunking remains lazy.
 
     Returns
     -------

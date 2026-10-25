@@ -75,7 +75,8 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         require at most 32-bit labels to avoid upstream integer rounding.
     chunks
         Positive integer or CYX tuple of positive integers. Labels use the YX
-        sizes. None preserves native TIFF chunks; rechunking stays lazy.
+        sizes. None keeps storage-aligned TIFF chunks (tiles, or whole strips
+        grouped into bands of at most 16 MiB); rechunking stays lazy.
 
     Returns
     -------

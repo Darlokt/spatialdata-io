@@ -148,7 +148,8 @@ class TestDbitImages:
     ) -> None:
         _write_layout(tmp_path)
         path = tmp_path / "histology.tif"
-        tifffile.imwrite(path, np.ones((16, 16), dtype=np.uint8), tile=(16, 16))
+        # Compression keeps the task on the Zarr store path whose closure is observed.
+        tifffile.imwrite(path, np.ones((16, 16), dtype=np.uint8), tile=(16, 16), compression="zlib")
         image = dbit(tmp_path, image_file=path).images["sample_image"]
 
         # Install trackers after metadata inspection to observe only task-owned resources.

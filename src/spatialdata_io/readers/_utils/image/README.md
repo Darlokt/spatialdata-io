@@ -114,7 +114,9 @@ through this model.
 Linked OME `UUID FileName` references are resolved relative to the inspected
 TIFF and must remain within that file's directory. Absolute references, parent
 traversal, and symlinks resolving outside that directory are rejected before
-linked pixels are opened.
+linked pixels are opened. A `TiffData` UUID equal to the document's own UUID
+refers to the inspected file, whatever its recorded `FileName`, so renamed
+single-file OME-TIFFs remain readable.
 
 Baseline TIFF resolution tags are not automatically interpreted as microscopy
 calibration. A supported non-OME format may use them only when its documented
@@ -122,11 +124,21 @@ contract establishes their scientific meaning.
 
 ## Laziness and resource ownership
 
-TIFF arrays use native tile or strip chunks. Dask stores one private path-backed
-source in a compact blockwise layer. Each computed selection opens the TIFF and
-its Zarr selection store, reads only intersecting segments, and closes both
-before returning. No `TiffFile`, Zarr store, file handle, or parsed OME model is
-stored in the graph.
+TIFF tiles are native chunks. Strips, and tiles as wide as the image, store
+whole rows; consecutive ones are grouped into row bands of at most
+`STRIP_BAND_BYTES` (16 MiB) decoded bytes, aligned to their boundaries, and a
+larger strip is one chunk. Every task opens the TIFF, so one task per small
+strip (vendor exports often store one row per strip) would dominate read time.
+
+Dask stores one private path-backed source in a compact blockwise layer. Each
+computed selection opens the TIFF, reads only the intersecting tiles or row
+bands, and closes every resource before returning. Most layouts are read
+through a short-lived tifffile Zarr store. A single page stored in the
+inspected file that tifffile marks final (uncompressed, contiguous, no
+predictor, default fill order, no subsampling) and whose segments hold exactly
+the page is read directly, one bounded row band per task, because Zarr's
+per-strip overhead exceeds the read itself. No `TiffFile`, Zarr store, file
+handle, or parsed OME model is stored in the graph.
 
 PNG and JPEG do not provide equivalent random tile access here. Their headers
 are inspected eagerly with a fixed byte bound, but pixels are decoded in one
