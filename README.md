@@ -28,7 +28,7 @@ This package contains reader functions to load common spatial omics formats into
 - NanoString CosMx®
 - Spatial Genomics GenePS® (seqFISH)
 - Steinbock (output data)
-- STOmics Stereo-seq®
+- STOmics Stereo-seq® (SAW 7.0/7.1 and 8.0/8.1/8.2 transcriptomic products)
 - Vizgen MERSCOPE® (MERFISH)
 - MACSima® (MACS® iQ View output)
 
@@ -40,7 +40,7 @@ Please refer to the list of [open Pull Requests](https://github.com/scverse/spat
 
 Contributions for addressing the below limitations are very welcomed.
 
-- Only Stereo-seq 7.x is supported, 8.x is not currently supported. https://github.com/scverse/spatialdata-io/issues/161
+- Stereo-seq protein, H5MU/OMNI and microorganism products are outside the supported contract. See the [Stereo-seq guide](https://spatialdata.scverse.org/projects/io/en/latest/stereoseq.html) for supported layouts and explicit product selection.
 
 ### How to Contribute
 

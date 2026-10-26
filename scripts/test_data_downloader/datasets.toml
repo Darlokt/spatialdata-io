@@ -165,3 +165,90 @@ target = "source.h5ad"
 url = "https://raw.githubusercontent.com/MingyuYang-Yale/DBiT-seq/4487131b0ecfb1e490bf16829d7376ea5fbe1c9e/Datasets/barcode.xls"
 known_hash = "sha256:5e64f655b59f4f8ee47fdfb59c838a4976e4137ba6dcc34024e18ad54f43909d"
 target = "barcode_coordinates.tsv"
+
+# -------
+# STOmics mouse-eyeball demo: the vendor identifies SAW 8.1, patch unknown.
+# https://en.stomics.tech/col1251/index.html
+# Public direct downloads are available; no open redistribution/repacking grant
+# has been established. Download original assets locally; do not commit copies.
+[[datasets]]
+key = "stereoseq_mouse_eyeball"
+group = "stereoseq"
+extracted_dir = "stereoseq_mouse_eyeball"
+source = "STOmics C04687E314 mouse eyeball, vendor SAW 8.1 (patch unknown); no established open redistribution grant"
+
+[[datasets.assets]]
+url = "https://demo.stomicsdb.tech/C04687E314_Mouse_Eyeball_Stereo-seq_FF_V1.3_HE/outs/C04687E314.cellbin.gef"
+known_hash = "sha256:1e0392d91ef6c9c901ba1419e7ac2fe82538bd0a9bd432baa1fb659d3b973a99"
+target = "C04687E314.cellbin.gef"
+
+[[datasets.assets]]
+url = "https://demo.stomicsdb.tech/C04687E314_Mouse_Eyeball_Stereo-seq_FF_V1.3_HE/outs/C04687E314_HE_regist.tif"
+known_hash = "sha256:45bfcf3b8852660c932df2a04cec0f9299e1c35e950d9a39b2db9274e6ab33f9"
+target = "C04687E314_HE_regist.tif"
+
+# Additional count products from the same C04687E314 sample.
+# Published MD5: 14816dd2346fe45a82c0b738825a6216.
+[[datasets.assets]]
+url = "https://demo.stomicsdb.tech/C04687E314_Mouse_Eyeball_Stereo-seq_FF_V1.3_HE/outs/C04687E314.adjusted.cellbin.gef"
+known_hash = "sha256:e49518f543d56453f1788c85eb650959f39b3788c6afa66d5e21067356a42aa2"
+target = "C04687E314.adjusted.cellbin.gef"
+
+# Published MD5: 40ecbb3d6703333ebb56ebf804459ada.
+[[datasets.assets]]
+url = "https://demo.stomicsdb.tech/C04687E314_Mouse_Eyeball_Stereo-seq_FF_V1.3_HE/outs/C04687E314.raw.gef"
+known_hash = "sha256:52b4a037ee8c73e2aaccc0b033ea79c9772383afff43e20959631bec21991fab"
+target = "C04687E314.raw.gef"
+
+# Human thymus transcriptomics source; Zenodo record is CC BY 4.0.
+# https://zenodo.org/records/12595241
+# Study methods distinguish ordinary transcriptomics (SAW 6) from Stereo-CITE
+# (SAW 7.1.2). This smaller transcriptomics GEF is NOT a SAW 7 fixture.
+# https://www.nature.com/articles/s41467-026-68596-w
+[[datasets]]
+key = "stereoseq_saw6_square"
+group = "stereoseq"
+extracted_dir = "stereoseq_saw6_square"
+source = "Human thymus A01785D6 transcriptomics, study SAW 6 (minor/patch unknown), Zenodo 12595241, CC BY 4.0"
+
+[[datasets.assets]]
+url = "https://zenodo.org/records/12595241/files/A01785D6.tissue.gef?download=1"
+known_hash = "sha256:b4cc11e7e4945dccd78f340459cb6139f42c54f6116c2057b22a3ecc3a18a361"
+target = "A01785D6.tissue.gef"
+
+# Official STOmics mouse-kidney demo, explicitly labeled SAW 7.0 (patch unknown).
+# https://en.stomics.tech/col1341/index
+# Public vendor assets; no open redistribution/repacking grant established.
+# Published MD5: cell e7a223662d0be1a3e6bcd0bde9cc129f;
+# tissue d86ce302cdc72e7f0b540f3a21a3df8c.
+[[datasets]]
+key = "stereoseq_mouse_kidney_saw7"
+group = "stereoseq"
+extracted_dir = "stereoseq_mouse_kidney_saw7"
+source = "STOmics C02533C1 mouse kidney, vendor SAW 7.0 (patch unknown); no established open redistribution grant"
+
+[[datasets.assets]]
+url = "https://demo.stomicsdb.tech/C02533C1_Mouse_Kidney_Stereo-seq_FF_V1.2_HE/outs/C02533C1.cellbin.gef"
+known_hash = "sha256:68b2329aca648274e29fbbd67951ab0543c526e0c111af8515874c867d885486"
+target = "C02533C1.cellbin.gef"
+
+[[datasets.assets]]
+url = "https://demo.stomicsdb.tech/C02533C1_Mouse_Kidney_Stereo-seq_FF_V1.2_HE/outs/C02533C1.tissue.gef"
+known_hash = "sha256:75999474322f40270965c8da84f7066538c35e73cb60838cd13e0c4f741635b5"
+target = "C02533C1.tissue.gef"
+
+# Human-thymus Stereo-CITE RNA partner, CC BY 4.0, study SAW 7.1.2.
+# https://zenodo.org/records/12595241
+# https://www.nature.com/articles/s41467-026-68596-w
+# Published MD5: 48ddcc916e26b4997e1c564869ba7147.
+# The protein partner and paired-modality support are deliberately not implied.
+[[datasets]]
+key = "stereoseq_saw7_1_square"
+group = "stereoseq"
+extracted_dir = "stereoseq_saw7_1_square"
+source = "Human thymus A03994E6 Stereo-CITE RNA only, study SAW 7.1.2, Zenodo 12595241, CC BY 4.0"
+
+[[datasets.assets]]
+url = "https://zenodo.org/records/12595241/files/A03994E6.tissue.gef?download=1"
+known_hash = "sha256:ad8fec06f396c1f5bca0e1f6b9a4c45eb6b27a77f63f2ff6ae44da875d7677f6"
+target = "A03994E6.tissue.gef"

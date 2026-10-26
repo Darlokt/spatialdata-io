@@ -248,3 +248,50 @@ image-grid spacing differs from this reader's square-grid convention. They
 cannot serve as an image-alignment test without explicit handling of those
 differences. They are from a different experiment and must not be paired with
 the E10 table above. They are not downloaded by this fixture.
+
+## Stereo-seq datasets
+
+The `stereoseq` group prioritizes original company examples and adds licensed
+study data for historical producer coverage:
+
+| Key | Assets and provenance | Source data terms |
+| --- | --- | --- |
+| `stereoseq_mouse_eyeball` | Original C04687E314 unadjusted-cell, adjusted-cell and whole-chip raw square GEFs, plus registered H&E TIFF; vendor identifies SAW 8.1, patch unknown. Approximately 646 MB combined. | Public vendor downloads; no open redistribution or repacking grant has been established. Assets stay in the ignored local data directory. |
+| `stereoseq_mouse_kidney_saw7` | Original C02533C1 cell and tissue GEFs; vendor identifies SAW 7.0, patch unknown. Approximately 1.28 GB combined. | Public vendor downloads; no open redistribution or repacking grant established. |
+| `stereoseq_saw7_1_square` | Complete A03994E6 RNA tissue GEF from Zenodo 12595241; study identifies SAW 7.1.2. Approximately 1.06 GB. Protein counts are not selected. | CC BY 4.0. |
+| `stereoseq_saw6_square` | Complete A01785D6 tissue bin1 GEF from Zenodo 12595241; study identifies ordinary transcriptomics as SAW 6. Approximately 192 MB. This covers the name-only feature schema and does not establish a SAW 7 run. | CC BY 4.0. |
+
+Each original asset has a SHA-256 checksum in the manifest. Download and run the
+reader workflows through the shared dataset fixture:
+
+```bash
+uv run python scripts/test_data_downloader --group stereoseq
+uv run pytest tests/integration/readers/stereoseq/test_data.py -m 'data and slow'
+```
+
+The cell workflows compare every native count and exon against the complete
+source for company SAW 7.0 unadjusted cells and SAW 8.1 unadjusted/adjusted cells.
+They preserve semantic cell IDs, source feature order, coordinates, summaries
+and target linkage, while sparse densification is forbidden. Registered-image
+construction executes no pixel tasks; a bounded pixel selection is checked
+independently. The vendor's nonsimple stored contours fail strict polygon mode.
+
+The SAW 6 square workflow checks its complete source: more than twelve million
+points and several GiB of memory. Larger SAW 7.0, 7.1.2 RNA and 8.1 raw square
+sources use deterministic temporary reductions from the verified originals.
+Each reduction contains complete leading feature spans, capped at 24 features
+and 50,000 expression records, and retains native field dtypes, aligned exons,
+origin, physical pitch and source extents. Values and first-occurrence coordinate
+order are checked against the original file, independently of the reduced file.
+This tests real source records and their storage profiles; it does not claim
+whole-file reader execution for those larger square sources. No reduced vendor
+artifact is committed or redistributed. All real-data tests are marked `data`
+and `slow`; ordinary offline tests use synthetic files.
+
+Stereo-CITE coverage concerns only the RNA partner. A separate offline test
+reproduces the observed protein metadata's one-element `omics=Proteomics`
+attribute and proves rejection before expression datasets are read. This is a
+metadata-derived synthetic rejection test, not validation of the complete
+3.2 GB protein file or support for paired RNA/protein output. When a historical
+GEF omits `omics`, its physical fields alone cannot identify every modality;
+select the known RNA file explicitly.
