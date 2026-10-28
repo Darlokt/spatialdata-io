@@ -49,6 +49,16 @@ class TestIss:
                 instance_key=instance_key,
             )
 
+    def test_invalid_chunks_precede_path_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="chunks"):
+            iss(
+                tmp_path / "absent",
+                raw_image_file="raw.tiff",
+                labels_file="labels.tiff",
+                table_file="cells.h5ad",
+                chunks=0,
+            )
+
     def test_pyramids_construct_without_tasks_and_link_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_iss_dataset(tmp_path)
         source_file = tmp_path / "cells.h5ad"
@@ -65,8 +75,7 @@ class TestIss:
                 raw_image_file="raw.tiff",
                 labels_file="labels.tiff",
                 table_file="cells.h5ad",
-                image_scale_factors=[2, 2],
-                labels_scale_factors=[2, 2],
+                scale_factors=[2, 2],
             )
         tasks.assert_not_called()
         pixels.assert_not_called()

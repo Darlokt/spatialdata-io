@@ -15,6 +15,8 @@ mcmicro.md
 cosmx.md
 macsima.md
 stereoseq.md
+xenium.md
+raster_options.md
 table_contracts.md
 changelog.md
 contributing.md

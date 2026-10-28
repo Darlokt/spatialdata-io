@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io._cli.commands.merscope import merscope_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -36,8 +37,8 @@ class TestMerscopeCommand:
             include_cell_boundaries=True,
             include_table=True,
             include_images=True,
-            scale_factors=None,
-            chunks=None,
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=DEFAULT_CHUNKS,
         )
         reader_result.write.assert_called_once_with(output)
 

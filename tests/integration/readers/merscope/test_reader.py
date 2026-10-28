@@ -40,6 +40,10 @@ class TestMerscope:
         assert result.images["slide_region_z0"].coords["c"].to_numpy().tolist() == ["Cyto", "DAPI"]
         assert result.attrs == {"spatialdata_io_reader": "merscope", "spatialdata_io_software_version": __version__}
 
+    def test_invalid_raster_option_fails_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="chunks"):
+            merscope(tmp_path / "missing", chunks=(1, 0, 16))
+
     @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
     def test_image_only_needs_no_counts_geometry_transcripts_or_affine(
         self, tmp_path: Path, profile: Literal["standard", "cellpose", "watershed"]

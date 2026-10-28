@@ -14,12 +14,12 @@ from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
 from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.merscope._images import _read_channel, make_raster_options, read_images
+from spatialdata_io.readers.merscope._images import _read_channel, read_images
 from spatialdata_io.readers.merscope._layout import MosaicChannel, MosaicLayer
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
     from numpy.typing import NDArray
@@ -37,34 +37,10 @@ def _write_layer(root: Path, z: int, *, compression: str | None = None) -> tuple
     return MosaicLayer(z, tuple(channels)), source
 
 
-class TestMakeRasterOptions:
-    """Own ordered factors and reject invalid chunk shapes before metadata I/O."""
-
-    def test_owned_sequences_and_valid_chunks(self) -> None:
-        factors = [3, 2]
-        options = make_raster_options(factors, (1, 16, 32))
-        factors.reverse()
-        assert options.scale_factors == (3, 2)
-        assert options.chunks == (1, 16, 32)
-        assert make_raster_options(None, None).scale_factors is None
-        assert make_raster_options((2, 3), 16).chunks == 16
-
-    @pytest.mark.parametrize("factors", ["2", pytest.param(b"2", id="bytes"), {2, 3}, {2: 3}, iter([2, 3])])
-    def test_unordered_or_scalar_factors(
-        self, factors: str | bytes | set[int] | dict[int, int] | Iterator[int]
-    ) -> None:
-        with pytest.raises(TypeError, match="ordered sequence"):
-            make_raster_options(factors, None)  # type: ignore[bad-argument-type, arg-type]  # Exercise untyped public values.
-
-    @pytest.mark.parametrize("factors", [[], [0], [1], [-1], [True], [2.0]])
-    def test_invalid_factor_values(self, factors: list[float]) -> None:
-        with pytest.raises(ValueError, match="scale_factors"):
-            make_raster_options(factors, None)  # type: ignore[bad-argument-type, arg-type]  # Require integral factors greater than one.
-
-    @pytest.mark.parametrize("chunks", [0, -1, (), (1, 2), (1, 0, 2), True, 2.0, "auto", (1, 2.0, 3)])
-    def test_invalid_chunks(self, chunks: float | str | tuple[int | float, ...]) -> None:
-        with pytest.raises((TypeError, ValueError), match="chunks"):
-            make_raster_options(None, chunks)  # type: ignore[bad-argument-type, arg-type]  # Public validation precedes TIFF discovery.
+DEFAULT_OPTIONS = make_raster_options()
+# The default 1024-pixel tiles merge the 16-pixel fixture tiles into one chunk;
+# tests of bounded reads and per-task resources request the stored tiles.
+NATIVE_CHUNKS = make_raster_options(chunks=(1, 16, 16))
 
 
 class TestReadChannel:
@@ -110,7 +86,7 @@ class TestReadImages:
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
-            result = read_images((first, second), dataset_id="slide_region", options=make_raster_options(None, None))
+            result = read_images((first, second), dataset_id="slide_region", options=NATIVE_CHUNKS)
         tasks.assert_not_called()
         pixels.assert_not_called()
         assert list(result) == ["slide_region_z2", "slide_region_z0"]
@@ -125,8 +101,15 @@ class TestReadImages:
         np.testing.assert_array_equal(restored[:, :4, :6].compute(), source[:, :4, :6])
         assert pixels.call_count == 2
 
+    def test_default_single_scale_and_tiles(self, tmp_path: Path) -> None:
+        layer, source = _write_layer(tmp_path, 0)
+        image = read_images((layer,), dataset_id="region", options=DEFAULT_OPTIONS)["region_z0"]
+        assert isinstance(image, DataArray)
+        assert image.data.chunks == ((1, 1), (48,), (64,))
+        np.testing.assert_array_equal(image.data.compute(), source)
+
     def test_no_requested_layers_is_empty(self) -> None:
-        assert read_images((), dataset_id="slide_region", options=make_raster_options(None, None)) == {}
+        assert read_images((), dataset_id="slide_region", options=DEFAULT_OPTIONS) == {}
 
     @pytest.mark.parametrize("invalid", ["shape", "dtype"])
     def test_selected_stains_and_planes_must_share_grid_and_dtype(self, tmp_path: Path, invalid: str) -> None:
@@ -141,11 +124,11 @@ class TestReadImages:
             photometric="minisblack",
         )
         with pytest.raises(ReaderFormatError, match="common shape"):
-            read_images((first, second), dataset_id="region", options=make_raster_options(None, None))
+            read_images((first, second), dataset_id="region", options=DEFAULT_OPTIONS)
 
     def test_pyramids_and_output_chunks_are_explicit(self, tmp_path: Path) -> None:
         layer, source = _write_layer(tmp_path, 0)
-        plain = read_images((layer,), dataset_id="region", options=make_raster_options(None, (2, 12, 16)))["region_z0"]
+        plain = read_images((layer,), dataset_id="region", options=make_raster_options(chunks=(2, 12, 16)))["region_z0"]
         assert isinstance(plain, DataArray)
         assert plain.data.chunks == ((2,), (12, 12, 12, 12), (16, 16, 16, 16))
         np.testing.assert_array_equal(plain.data.compute(), source)
@@ -153,14 +136,14 @@ class TestReadImages:
         assert isinstance(pyramid, DataTree)
         assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
         with pytest.raises(ValueError, match="spatial extent"):
-            read_images((layer,), dataset_id="region", options=make_raster_options([64], None))
+            read_images((layer,), dataset_id="region", options=make_raster_options([64]))
 
     @pytest.mark.parametrize("fail", [False, True])
     def test_task_resources_close_on_success_and_failure(
         self, tmp_path: Path, mocker: MockerFixture, *, fail: bool
     ) -> None:
         layer, _ = _write_layer(tmp_path, 0)
-        image = read_images((layer,), dataset_id="region", options=make_raster_options(None, None))["region_z0"]
+        image = read_images((layer,), dataset_id="region", options=NATIVE_CHUNKS)["region_z0"]
         assert isinstance(image, DataArray)
         with tifffile.TiffFile(layer.channels[0].path) as source:
             store = source.aszarr(series=0, level=0, squeeze=True)

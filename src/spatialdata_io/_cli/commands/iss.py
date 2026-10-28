@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
@@ -20,13 +20,9 @@ if TYPE_CHECKING:
         table_file: Path
         instance_key: str | None
         dataset_id: str
-        image_scale_factors: tuple[int, ...]
-        labels_scale_factors: tuple[int, ...]
+        scale_factors: tuple[int, ...]
         data_axes: str | None
-        chunks: tuple[int, ...]
-
-
-_IMAGE_RANK = 3
+        chunks: int | tuple[int, int, int]
 
 
 @click.command(name="iss")
@@ -54,44 +50,13 @@ _IMAGE_RANK = 3
 )
 @click.option("--dataset-id", type=str, default="region", show_default=True, help="Raster element-name prefix.")
 @click.option(
-    "--image-scale-factors",
-    type=click.IntRange(min=2),
-    multiple=True,
-    default=(),
-    help="Repeat for each generated image-pyramid level. No pyramid by default.",
-)
-@click.option(
-    "--labels-scale-factors",
-    type=click.IntRange(min=2),
-    multiple=True,
-    default=(),
-    help="Repeat for each label-pyramid level. Requires <=32-bit integer masks.",
-)
-@click.option(
     "--data-axes", type=str, default=None, help="Source raw-image axes, for example CYX for an unlabeled stack."
 )
-@click.option(
-    "--chunks",
-    type=click.IntRange(min=1),
-    multiple=True,
-    default=(),
-    help="One size for all axes or three sizes in CYX order. Labels use YX sizes.",
-)
+@scale_factors_option
+@chunks_option
 def iss_command(input_path: Path, output_path: Path, **options: Unpack[_IssOptions]) -> None:
     """Read ISS image, labels and counts, then write a SpatialData store."""
     from spatialdata_io.readers.iss import iss  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
-
-    values = options["chunks"]
-    chunks: int | tuple[int, int, int] | None
-    if not values:
-        chunks = None
-    elif len(values) == 1:
-        chunks = values[0]
-    elif len(values) == _IMAGE_RANK:
-        chunks = (values[0], values[1], values[2])
-    else:
-        message = "--chunks must be passed once for all axes or three times in CYX order."
-        raise click.BadParameter(message, param_hint="--chunks")
 
     result = iss(
         input_path,
@@ -100,9 +65,8 @@ def iss_command(input_path: Path, output_path: Path, **options: Unpack[_IssOptio
         table_file=options["table_file"],
         instance_key=options["instance_key"],
         dataset_id=options["dataset_id"],
-        image_scale_factors=options["image_scale_factors"] or None,
-        labels_scale_factors=options["labels_scale_factors"] or None,
+        scale_factors=options["scale_factors"],
         data_axes=options["data_axes"],
-        chunks=chunks,
+        chunks=options["chunks"],
     )
     result.write(output_path)

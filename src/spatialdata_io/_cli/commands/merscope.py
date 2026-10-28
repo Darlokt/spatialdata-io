@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
@@ -24,10 +24,7 @@ if TYPE_CHECKING:
         include_table: bool
         include_images: bool
         scale_factors: tuple[int, ...]
-        chunks: tuple[int, ...]
-
-
-_IMAGE_RANK = 3
+        chunks: int | tuple[int, int, int]
 
 
 @click.command(name="merscope")
@@ -60,35 +57,11 @@ _IMAGE_RANK = 3
     "--include-table/--no-include-table", default=True, show_default=True, help="Return sparse counts and controls."
 )
 @click.option("--include-images/--no-include-images", default=True, show_default=True, help="Return mosaic images.")
-@click.option(
-    "--scale-factors",
-    type=click.IntRange(min=2),
-    multiple=True,
-    default=(),
-    help="Repeat factors for generated pyramid levels; omitted keeps a single scale.",
-)
-@click.option(
-    "--chunks",
-    type=click.IntRange(min=1),
-    multiple=True,
-    default=(),
-    help="One size for every axis or three CYX sizes; omitted keeps native chunks.",
-)
+@scale_factors_option
+@chunks_option
 def merscope_command(input_path: Path, output_path: Path, **options: Unpack[_MerscopeOptions]) -> None:
     """Read MERSCOPE, then write the requested SpatialData store."""
     from spatialdata_io.readers.merscope import merscope  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
-
-    sizes = options["chunks"]
-    chunks: int | tuple[int, int, int] | None
-    if not sizes:
-        chunks = None
-    elif len(sizes) == 1:
-        chunks = sizes[0]
-    elif len(sizes) == _IMAGE_RANK:
-        chunks = (sizes[0], sizes[1], sizes[2])
-    else:
-        message = "Pass --chunks once or three times in CYX order."
-        raise click.BadParameter(message, param_hint="--chunks")
 
     result = merscope(
         input_path,
@@ -100,7 +73,7 @@ def merscope_command(input_path: Path, output_path: Path, **options: Unpack[_Mer
         include_cell_boundaries=options["include_cell_boundaries"],
         include_table=options["include_table"],
         include_images=options["include_images"],
-        scale_factors=options["scale_factors"] or None,
-        chunks=chunks,
+        scale_factors=options["scale_factors"],
+        chunks=options["chunks"],
     )
     result.write(output_path)

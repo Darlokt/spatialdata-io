@@ -7,9 +7,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options
-
-CANONICAL_IMAGE_RANK = 3
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
@@ -23,7 +21,8 @@ if TYPE_CHECKING:
         make_var_names_unique: bool
         data_axes: str | None
         tiff_series: int | None
-        chunks: tuple[int, ...] | None
+        scale_factors: tuple[int, ...]
+        chunks: int | tuple[int, int, int]
 
 
 @click.command(name="visium")
@@ -71,13 +70,8 @@ if TYPE_CHECKING:
     default=None,
     help="Zero-based full-resolution TIFF series. Required when the TIFF contains multiple series.",
 )
-@click.option(
-    "--chunks",
-    type=click.IntRange(min=1),
-    multiple=True,
-    default=None,
-    help="Requested chunks: one value for all axes or three values in CYX order.",
-)
+@scale_factors_option
+@chunks_option
 def visium_command(
     input_path: Path,
     output_path: Path,
@@ -86,18 +80,6 @@ def visium_command(
     """Read one Visium dataset and write it to a SpatialData store."""
     # Keep top-level CLI help independent of scientific reader imports.
     from spatialdata_io.readers.visium import visium  # noqa: PLC0415, RUF100
-
-    chunks = options["chunks"]
-    normalized_chunks: int | tuple[int, int, int] | None
-    if not chunks:
-        normalized_chunks = None
-    elif len(chunks) == 1:
-        normalized_chunks = chunks[0]
-    elif len(chunks) == CANONICAL_IMAGE_RANK:
-        normalized_chunks = (chunks[0], chunks[1], chunks[2])
-    else:
-        message = "--chunks must be passed once for all axes or three times in CYX order."
-        raise click.BadParameter(message, param_hint="--chunks")
 
     result = visium(
         input_path,
@@ -109,7 +91,8 @@ def visium_command(
         make_var_names_unique=options["make_var_names_unique"],
         data_axes=options["data_axes"],
         tiff_series=options["tiff_series"],
-        chunks=normalized_chunks,
+        scale_factors=options["scale_factors"],
+        chunks=options["chunks"],
     )
 
     result.write(output_path)

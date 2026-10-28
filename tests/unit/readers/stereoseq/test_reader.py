@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
 from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
@@ -12,7 +14,10 @@ import pytest
 from numpy.testing import assert_array_equal
 from scipy.sparse import csr_array
 
+import spatialdata_io
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.table import _linkage
 from spatialdata_io.readers.stereoseq import stereoseq
 from spatialdata_io.readers.stereoseq._reader import _bin_selection, _link, _sequence, _validate_options
 from tests.integration.readers.stereoseq._fixtures import write_analysis, write_dataset
@@ -61,56 +66,33 @@ class TestValidateOptions:
     @pytest.mark.parametrize("value", ["", ".", "..", "a/b", "a\\b", "a\0b", False])
     def test_sample(self, value: str) -> None:
         with pytest.raises(ValueError, match="sample_id"):
-            _validate_options(
-                sample_id=value, cell_bins="none", cell_geometry="centroids", roles=(), analyses=(), chunks=None
-            )
-
-    @pytest.mark.parametrize("value", [True, "4", (True, 2, 3), (1, 2), (), (1, 0, 2), 0])
-    def test_chunks(self, value: int | tuple[int, ...] | None) -> None:
-        with pytest.raises((TypeError, ValueError)):
-            _validate_options(
-                sample_id=None, cell_bins="none", cell_geometry="centroids", roles=(), analyses=(), chunks=value
-            )
-
-    @pytest.mark.parametrize("value", [1, (1, 16, 32)])
-    def test_valid_chunks(self, value: int | tuple[int, ...]) -> None:
-        _validate_options(
-            sample_id=None, cell_bins="none", cell_geometry="centroids", roles=(), analyses=(), chunks=value
-        )
+            _validate_options(sample_id=value, cell_bins="none", cell_geometry="centroids", roles=(), analyses=())
 
     @pytest.mark.parametrize("value", ["invalid", True])
     def test_invalid_cell_selection(self, value: Literal["none", "unadjusted", "adjusted", "both"]) -> None:
         with pytest.raises(ValueError, match="cell_bins"):
-            _validate_options(
-                sample_id=None, cell_bins=value, cell_geometry="centroids", roles=(), analyses=(), chunks=None
-            )
+            _validate_options(sample_id=None, cell_bins=value, cell_geometry="centroids", roles=(), analyses=())
 
     @pytest.mark.parametrize("value", ["centroids "])
     def test_invalid_geometry(self, value: Literal["centroids", "polygons"]) -> None:
         with pytest.raises(ValueError, match="cell_geometry"):
-            _validate_options(sample_id=None, cell_bins="none", cell_geometry=value, roles=(), analyses=(), chunks=None)
+            _validate_options(sample_id=None, cell_bins="none", cell_geometry=value, roles=(), analyses=())
 
     @pytest.mark.parametrize("roles", [("mask", "mask"), ("labels",)])
     def test_invalid_roles(self, roles: tuple[Literal["mask"], ...]) -> None:
         with pytest.raises(ValueError, match="image_roles"):
-            _validate_options(
-                sample_id=None, cell_bins="none", cell_geometry="centroids", roles=roles, analyses=(), chunks=None
-            )
+            _validate_options(sample_id=None, cell_bins="none", cell_geometry="centroids", roles=roles, analyses=())
 
     @pytest.mark.parametrize("value", [1])
     def test_invalid_analysis_path(self, value: str | Path) -> None:
         with pytest.raises(TypeError, match="filesystem paths"):
-            _validate_options(
-                sample_id=None, cell_bins="none", cell_geometry="centroids", roles=(), analyses=(value,), chunks=None
-            )
+            _validate_options(sample_id=None, cell_bins="none", cell_geometry="centroids", roles=(), analyses=(value,))
 
 
 class TestLink:
     """Final linkage preserves the owned table and validates independent targets."""
 
     def test_exact_membership_and_single_linkage(self, mocker: MockerFixture) -> None:
-        from spatialdata_io.readers._utils.table import _linkage
-
         table = ad.AnnData(csr_array([[1, 0], [0, 2]]), obs=pd.DataFrame(index=["a", "b"]))
         target = pd.Index([200, 100], dtype=np.uint64)
         parse = mocker.spy(_linkage.TableModel, "parse")
@@ -141,6 +123,17 @@ class TestStereoseq:
     def test_no_products_fails_before_io(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="Select products"):
             stereoseq(tmp_path / "missing")
+
+    def test_invalid_raster_option_fails_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="scale_factors"):
+            stereoseq(tmp_path / "missing", image_roles=("registered",), scale_factors=(1,))
+
+    def test_raster_option_defaults(self) -> None:
+        parameters = inspect.signature(stereoseq).parameters
+
+        assert list(parameters)[-2:] == ["scale_factors", "chunks"]
+        assert parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert parameters["chunks"].default == DEFAULT_CHUNKS
 
     @pytest.mark.parametrize("selection", ["square", "cells", "adjusted"])
     def test_override_does_not_select_product(self, tmp_path: Path, selection: str) -> None:
@@ -212,8 +205,7 @@ class TestStereoseq:
             stereoseq(tmp_path, analysis_files=files)
 
     def test_package_and_root_export(self) -> None:
-        import spatialdata_io
-        from spatialdata_io.readers import stereoseq as package
+        package = importlib.import_module("spatialdata_io.readers.stereoseq")
 
         assert spatialdata_io.stereoseq is stereoseq
         assert package.__all__ == ["stereoseq"]

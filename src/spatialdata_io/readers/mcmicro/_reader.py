@@ -6,10 +6,11 @@ from typing import TYPE_CHECKING
 
 from spatialdata import SpatialData
 
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.mcmicro._layout import TABLE_KEY, WsiLayout, discover_layout
 from spatialdata_io.readers.mcmicro._metadata import read_markers
-from spatialdata_io.readers.mcmicro._rasters import make_raster_options, read_image, read_labels
+from spatialdata_io.readers.mcmicro._rasters import read_image, read_labels
 from spatialdata_io.readers.mcmicro._tables import read_table
 
 if TYPE_CHECKING:
@@ -23,8 +24,8 @@ if TYPE_CHECKING:
 def mcmicro(
     path: str | Path,
     *,
-    scale_factors: Sequence[int] | None = None,
-    chunks: int | tuple[int, int, int] | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read the outputs of one MCMICRO whole-slide or tissue-microarray run.
 
@@ -62,12 +63,12 @@ def mcmicro(
     path
         MCMICRO project directory.
     scale_factors
-        Optional integer factors greater than one for generated image and
-        label pyramid levels. None keeps the full-resolution single scale.
+        Integer factors of at least two, one per generated pyramid level of the
+        images and labels; empty for a single scale.
     chunks
-        Positive integer or three positive CYX sizes; labels use the final two.
-        None keeps storage-aligned TIFF chunks (tiles, or whole strips grouped
-        into bands of at most 16 MiB). Rechunking remains lazy.
+        One positive size for every axis or three ``c, y, x`` sizes of the
+        images; labels use the ``y`` and ``x`` sizes. By default one channel per
+        chunk and square 1024-pixel tiles.
 
     Returns
     -------

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import click
 
 from spatialdata_io._cli.commands.visium import visium_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -51,6 +52,8 @@ class TestVisiumCommand:
                 "ZCYX",
                 "--tiff-series",
                 "2",
+                "--scale-factors",
+                "2",
                 "--chunks",
                 "1",
                 "--chunks",
@@ -71,6 +74,7 @@ class TestVisiumCommand:
             make_var_names_unique=False,
             data_axes="ZCYX",
             tiff_series=2,
+            scale_factors=(2,),
             chunks=(1, 256, 256),
         )
         reader_result.write.assert_called_once_with(output)
@@ -89,6 +93,7 @@ class TestVisiumCommand:
             "make_var_names_unique",
             "data_axes",
             "tiff_series",
+            "scale_factors",
             "chunks",
         ]
 
@@ -100,37 +105,16 @@ class TestVisiumCommand:
         assert options["make_var_names_unique"].default is True
         assert options["data_axes"].default is None
         assert options["tiff_series"].default is None
+        assert options["scale_factors"].multiple
+        assert options["scale_factors"].default == DEFAULT_SCALE_FACTORS
         assert options["chunks"].multiple
-        assert options["chunks"].default is None
+        assert options["chunks"].default == DEFAULT_CHUNKS
 
-    def test_normalizes_one_chunk_value(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
+    def test_forwards_shared_raster_defaults(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
         reader = mocker.patch("spatialdata_io.readers.visium.visium")
 
-        result = runner.invoke(
-            visium_command,
-            ["--input", str(tmp_path), "--output", str(tmp_path / "out"), "--chunks", "256"],
-        )
+        result = runner.invoke(visium_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out")])
 
         assert result.exit_code == 0, result.output
-        assert reader.call_args.kwargs["chunks"] == 256
-
-    def test_rejects_two_chunk_values(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
-        reader = mocker.patch("spatialdata_io.readers.visium.visium")
-
-        result = runner.invoke(
-            visium_command,
-            [
-                "--input",
-                str(tmp_path),
-                "--output",
-                str(tmp_path / "out"),
-                "--chunks",
-                "1",
-                "--chunks",
-                "256",
-            ],
-        )
-
-        assert result.exit_code == 2
-        assert "passed once for all axes or three times" in result.output
-        reader.assert_not_called()
+        assert reader.call_args.kwargs["scale_factors"] == DEFAULT_SCALE_FACTORS
+        assert reader.call_args.kwargs["chunks"] == DEFAULT_CHUNKS

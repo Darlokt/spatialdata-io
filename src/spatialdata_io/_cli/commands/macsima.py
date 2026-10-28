@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,10 +23,7 @@ if TYPE_CHECKING:
         split_threshold_nuclei_channel: int | None
         include_transformations: bool
         scale_factors: tuple[int, ...]
-        chunks: tuple[int, ...]
-
-
-_IMAGE_RANK = 3
+        chunks: int | tuple[int, int, int]
 
 
 def _split_threshold(_context: click.Context, _parameter: click.Parameter, value: str) -> int | None:
@@ -79,35 +76,11 @@ def _split_threshold(_context: click.Context, _parameter: click.Parameter, value
     show_default=True,
     help="Scale pixels to micrometers.",
 )
-@click.option(
-    "--scale-factors",
-    type=click.IntRange(min=2),
-    multiple=True,
-    default=(),
-    help="Repeat factors for generated pyramid levels; omitted keeps a single scale.",
-)
-@click.option(
-    "--chunks",
-    type=click.IntRange(min=1),
-    multiple=True,
-    default=(),
-    help="One size for every axis or three CYX sizes; omitted uses 1, 1024, 1024.",
-)
+@scale_factors_option
+@chunks_option
 def macsima_command(input_path: Path, output_path: Path, **options: Unpack[_MacsimaOptions]) -> None:
     """Read processed MACSima exports, then write the SpatialData store."""
     from spatialdata_io.readers.macsima import macsima  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
-
-    sizes = options["chunks"]
-    chunks: int | tuple[int, int, int]
-    if not sizes:
-        chunks = (1, 1024, 1024)
-    elif len(sizes) == 1:
-        chunks = sizes[0]
-    elif len(sizes) == _IMAGE_RANK:
-        chunks = (sizes[0], sizes[1], sizes[2])
-    else:
-        message = "Pass --chunks once or three times in CYX order."
-        raise click.BadParameter(message, param_hint="--chunks")
 
     result = macsima(
         input_path,
@@ -118,7 +91,7 @@ def macsima_command(input_path: Path, output_path: Path, **options: Unpack[_Macs
         nuclei_channel_name=options["nuclei_channel_name"],
         split_threshold_nuclei_channel=options["split_threshold_nuclei_channel"],
         include_transformations=options["include_transformations"],
-        scale_factors=options["scale_factors"] or None,
-        chunks=chunks,
+        scale_factors=options["scale_factors"],
+        chunks=options["chunks"],
     )
     result.write(output_path)

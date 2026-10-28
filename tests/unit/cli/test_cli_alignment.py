@@ -12,6 +12,7 @@ import pytest
 
 from spatialdata_io._cli import cli
 from spatialdata_io._cli.commands.generic import generic_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +38,9 @@ _READER_CASES = (
     _ReaderCase("spatialdata_io.readers.visium_hd", "visium_hd", "visium-hd"),
     _ReaderCase("spatialdata_io.readers.xenium", "xenium", "xenium"),
 )
-
-_READER_EXCEPTIONS = {"xenium": frozenset(("n_jobs",))}
+# Readers without images or labels; Visium HD adopts the raster options in its own cohort.
+_WITHOUT_RASTER_OPTIONS = frozenset({"curio", "visium_hd"})
+_RASTER_DEFAULTS = {"scale_factors": DEFAULT_SCALE_FACTORS, "chunks": DEFAULT_CHUNKS}
 
 
 def _reader_parameters(case: _ReaderCase) -> set[str]:
@@ -61,8 +63,20 @@ class TestCliAlignment:
 
     @pytest.mark.parametrize("case", _READER_CASES, ids=lambda case: case.reader)
     def test_vendor_command_and_reader_parameter_names_agree(self, case: _ReaderCase) -> None:
-        exceptions = _READER_EXCEPTIONS.get(case.reader, frozenset())
-        assert _reader_parameters(case) - exceptions == _command_parameters(case)
+        assert _reader_parameters(case) == _command_parameters(case)
+
+    @pytest.mark.parametrize("case", _READER_CASES, ids=lambda case: case.reader)
+    def test_raster_options_use_the_central_defaults(self, case: _ReaderCase) -> None:
+        reader = getattr(importlib.import_module(case.module), case.reader)
+        parameters = inspect.signature(reader).parameters
+        command = {parameter.name: parameter for parameter in cli.commands[case.command].params}
+
+        if case.reader in _WITHOUT_RASTER_OPTIONS:
+            assert not _RASTER_DEFAULTS.keys() & parameters.keys()
+            return
+        for name, default in _RASTER_DEFAULTS.items():
+            assert parameters[name].default == default
+            assert command[name].default == default
 
 
 class TestGenericCommandContract:
@@ -79,5 +93,7 @@ class TestGenericCommandContract:
         assert options["output_path"].required
         assert options["chunks"].multiple
         assert options["chunks"].default == ()
+        assert options["scale_factors"].multiple
+        assert options["scale_factors"].default == ()
         assert options["tiff_series"].default == 0
         assert options["tiff_level"].default == 0

@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.image import (
     LazyRaster,
+    RasterOptions,
     inspect_tiff,
+    make_raster_options,
     normalize_raster_axes,
     read_jpeg,
     read_png,
@@ -26,86 +28,36 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.visium._geometry import VisiumTransforms
     from spatialdata_io.readers.visium._layout import VisiumLayout
 
-# sphinx-autodoc-typehints currently renders PEP 695 aliases as ``TypeAliasType``.
-ChunkValue: TypeAlias = int | tuple[int, ...] | None  # noqa: UP040
-Chunks: TypeAlias = (  # noqa: UP040
-    int | tuple[ChunkValue, ChunkValue, ChunkValue] | Mapping[str, ChunkValue]
-)
-
-DEFAULT_SPATIAL_CHUNK_SIZE = 1_024
 TIFF_SUFFIXES = frozenset({".btf", ".tif", ".tiff"})
 PNG_SUFFIXES = frozenset({".png"})
 JPEG_SUFFIXES = frozenset({".jpeg", ".jpg"})
 VALID_IMAGE_SUFFIXES = TIFF_SUFFIXES | PNG_SUFFIXES | JPEG_SUFFIXES
 TARGET_AXES = ("c", "y", "x")
-SPATIAL_RANK = 2
 CHANNEL_AXES = frozenset({"c", "s"})
-MAX_FULLRES_DOWNSCALING_STEPS = 4
-FULLRES_DOWNSCALE_FACTOR = 2
 
 
 @dataclass(frozen=True, slots=True)
 class ImageOptions:
-    """Validated immutable full-resolution selection and chunk options."""
+    """Validated immutable full-resolution selection, pyramid, and chunk options."""
 
-    chunks: tuple[ChunkValue, ChunkValue, ChunkValue]
+    raster: RasterOptions
     data_axes: tuple[str, ...] | None
     tiff_series: int | None
 
 
-def _validate_chunk_value(value: ChunkValue, *, axis: str) -> None:
-    if value is None:
-        return
-    if isinstance(value, bool):
-        message = f"chunks for axis {axis!r} must not be a boolean."
-        raise TypeError(message)
-    if isinstance(value, int):
-        if value <= 0:
-            message = f"chunks for axis {axis!r} must be positive. Found {value}."
-            raise ValueError(message)
-        return
-    if not isinstance(value, tuple):
-        message = f"chunks for axis {axis!r} must be an integer, tuple of integers, or None. Found {value!r}."
-        raise TypeError(message)
-    if not value or any(isinstance(size, bool) or not isinstance(size, int) for size in value):
-        message = f"chunks for axis {axis!r} must contain a nonempty tuple of integers. Found {value!r}."
-        raise TypeError(message)
-    if any(size <= 0 for size in value):
-        message = f"chunks for axis {axis!r} must contain only positive sizes. Found {value!r}."
+def _chunk_sizes(chunks: int | tuple[int, int, int] | Mapping[str, int]) -> int | tuple[int, int, int]:
+    if not isinstance(chunks, Mapping):
+        return chunks
+    if set(chunks) != set(TARGET_AXES):
+        message = f"chunks keys must match canonical axes {TARGET_AXES}. Found {tuple(chunks)}."
         raise ValueError(message)
-
-
-def _normalize_chunks(chunks: Chunks | None) -> tuple[ChunkValue, ChunkValue, ChunkValue]:
-    if chunks is None:
-        return (None, DEFAULT_SPATIAL_CHUNK_SIZE, DEFAULT_SPATIAL_CHUNK_SIZE)
-    if isinstance(chunks, bool):
-        message = "chunks must be a chunk specification, not a boolean."
-        raise TypeError(message)
-    if isinstance(chunks, int):
-        normalized: tuple[ChunkValue, ChunkValue, ChunkValue] = (chunks, chunks, chunks)
-    elif isinstance(chunks, Mapping):
-        if set(chunks) != set(TARGET_AXES):
-            message = f"chunks keys must match canonical axes {TARGET_AXES}. Found {tuple(chunks)}."
-            raise ValueError(message)
-        normalized = (chunks["c"], chunks["y"], chunks["x"])
-    elif isinstance(chunks, tuple):
-        if len(chunks) != len(TARGET_AXES):
-            message = f"chunks length must match canonical axes {TARGET_AXES}. Found {chunks!r}."
-            raise ValueError(message)
-        normalized = (chunks[0], chunks[1], chunks[2])
-    else:
-        message = f"chunks must be an integer, tuple, mapping, or None. Found {type(chunks).__name__}."
-        raise TypeError(message)
-
-    for axis, value in zip(TARGET_AXES, normalized, strict=True):
-        _validate_chunk_value(value, axis=axis)
-
-    return normalized
+    return (chunks["c"], chunks["y"], chunks["x"])
 
 
 def make_image_options(
     *,
-    chunks: Chunks | None,
+    scale_factors: Sequence[int],
+    chunks: int | tuple[int, int, int] | Mapping[str, int],
     data_axes: Sequence[str] | None,
     tiff_series: int | None,
 ) -> ImageOptions:
@@ -127,8 +79,9 @@ def make_image_options(
         message = f"tiff_series must be a non-negative integer or None. Found {tiff_series!r}."
         raise ValueError(message)
 
+    # Mapping values reach the shared validation, which rejects None and irregular partitions.
     return ImageOptions(
-        chunks=_normalize_chunks(chunks),
+        raster=make_raster_options(scale_factors, _chunk_sizes(chunks)),
         data_axes=normalized_axes,
         tiff_series=tiff_series,
     )
@@ -190,23 +143,13 @@ def _source_axes(raster: LazyRaster, *, override: tuple[str, ...] | None = None)
     return tuple("c" if index == channel_index else axis for index, axis in enumerate(axes))
 
 
-def _fullres_scale_factors(shape: tuple[int, ...]) -> tuple[int, ...] | None:
-    spatial_size = min(shape[-SPATIAL_RANK:])
-    factors: list[int] = []
-    while spatial_size >= FULLRES_DOWNSCALE_FACTOR and len(factors) < MAX_FULLRES_DOWNSCALING_STEPS:
-        factors.append(FULLRES_DOWNSCALE_FACTOR)
-        spatial_size //= FULLRES_DOWNSCALE_FACTOR
-
-    return tuple(factors) or None
-
-
 def _parse_image(
     raster: LazyRaster,
     *,
     source_axes: Sequence[str],
     transformations: dict[str, BaseTransformation],
-    chunks: tuple[ChunkValue, ChunkValue, ChunkValue],
-    scale_factors: tuple[int, ...] | None = None,
+    chunks: dict[str, int],
+    scale_factors: list[int] | None = None,
 ) -> DataArray | DataTree:
     normalized = normalize_raster_axes(
         raster.data,
@@ -220,7 +163,7 @@ def _parse_image(
         dims=TARGET_AXES,
         transformations=transformations,
         scale_factors=scale_factors,
-        chunks=dict(zip(TARGET_AXES, chunks, strict=True)),
+        chunks=chunks,
         rgb=None,
     )
 
@@ -232,22 +175,24 @@ def read_images(
     transforms: VisiumTransforms,
     options: ImageOptions,
 ) -> dict[str, DataArray | DataTree]:
-    """Construct all selected image models without executing pixel tasks."""
+    """Construct all selected image models without executing pixel tasks.
+
+    Only the full-resolution image receives generated pyramid levels; the hires
+    and lowres PNGs are vendor-downsampled images and stay single-scale.
+    """
     images: dict[str, DataArray | DataTree] = {}
+    chunks = options.raster.image_chunks()
     if layout.fullres_image is not None:
         raster = _read_raster(layout.fullres_image, options=options)
-        source_axes = _source_axes(raster, override=options.data_axes)
-        source_sizes = dict(zip(source_axes, raster.data.shape, strict=True))
-        normalized_shape = tuple(int(source_sizes.get(axis, 1)) for axis in TARGET_AXES)
         images[f"{dataset_id}_full_image"] = _parse_image(
             raster,
-            source_axes=source_axes,
+            source_axes=_source_axes(raster, override=options.data_axes),
             transformations={dataset_id: transforms.fullres},
-            chunks=options.chunks,
-            scale_factors=_fullres_scale_factors(normalized_shape),
+            chunks=chunks,
+            scale_factors=options.raster.model_scale_factors,
         )
-    elif options.data_axes is not None or options.tiff_series is not None:
-        message = "data_axes and tiff_series require fullres_image_file."
+    elif options.data_axes is not None or options.tiff_series is not None or options.raster.scale_factors:
+        message = "data_axes, tiff_series and scale_factors require fullres_image_file."
         raise ValueError(message)
 
     # Downsampled-image coordinates map back to full resolution by inverse scale.
@@ -260,7 +205,7 @@ def read_images(
                 f"{dataset_id}_downscaled_hires": Identity(),
                 dataset_id: transforms.hires.inverse(),
             },
-            chunks=options.chunks,
+            chunks=chunks,
         )
 
     if layout.lowres_image is not None:
@@ -272,7 +217,7 @@ def read_images(
                 f"{dataset_id}_downscaled_lowres": Identity(),
                 dataset_id: transforms.lowres.inverse(),
             },
-            chunks=options.chunks,
+            chunks=chunks,
         )
 
     return images

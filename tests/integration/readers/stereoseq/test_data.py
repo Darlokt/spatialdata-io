@@ -82,7 +82,7 @@ def _assert_native_cells(table: AnnData, source: Path) -> None:
     assert exon_total == int(exons.sum())
 
 
-def _assert_square_column(
+def _assert_square_column(  # noqa: PLR0913, RUF100 - one assertion over paired source columns.
     counts: csc_array,
     exons: csc_array,
     coordinates: npt.NDArray[np.int64],
@@ -289,8 +289,14 @@ class TestStereoseqData:
         root = require_test_dataset("stereoseq_mouse_eyeball")
         _forbid_densification(mocker)
         reads = mocker.spy(tiff_dask, "_read_tiff_selection")
+        # Chunks equal to the 475-row full-width strip bands of the stored image;
+        # a default 1024-row tile spans three bands.
         result = stereoseq(
-            root, cell_bins="unadjusted", cell_counts_file="C04687E314.cellbin.gef", image_roles=("registered",)
+            root,
+            cell_bins="unadjusted",
+            cell_counts_file="C04687E314.cellbin.gef",
+            image_roles=("registered",),
+            chunks=(1, 475, 11760),
         )
         reads.assert_not_called()
         assert set(result.tables) == {"cells_table"}
@@ -507,10 +513,18 @@ class TestStereoseqData:
         image, reference = actual.images["HE_registered"], expected.images["HE_registered"]
         assert isinstance(image, DataArray)
         assert isinstance(reference, DataArray)
+        assert image.data.chunks == reference.data.chunks
+        assert image.data.chunksize == (1, 1024, 1024)
         selection = image.data[:, 5000:5004, 4000:4006].compute(scheduler="synchronous")
         expected_selection = reference.data[:, 5000:5004, 4000:4006].compute(scheduler="synchronous")
         np.testing.assert_array_equal(selection, expected_selection)
-        assert reads.call_count == 2
+        # Each reader decodes only the three 475-row strip bands of one default tile.
+        assert reads.call_count == 6
+        assert {call.args[1][0] for call in reads.call_args_list} == {
+            slice(3800, 4275),
+            slice(4275, 4750),
+            slice(4750, 5225),
+        }
 
     def test_study_saw6_complete_square_counts_and_exons(
         self, require_test_dataset: Callable[[str], Path], mocker: MockerFixture

@@ -282,19 +282,19 @@ class TestSteinbock:
         with pytest.raises(ValueError, match=r"duplicate|finite"):
             steinbock(tmp_path)
 
-    @pytest.mark.parametrize(("image_factors", "label_factors"), [(None, None), ([2], None), (None, [2]), ([2], [2])])
-    def test_pyramids_and_chunks_are_independent(
-        self, tmp_path: Path, image_factors: list[int] | None, label_factors: list[int] | None
-    ) -> None:
+    @pytest.mark.parametrize("factors", [[], [2]])
+    def test_image_and_mask_share_pyramids_and_chunks(self, tmp_path: Path, factors: list[int]) -> None:
         image, labels = _write_layout(tmp_path)
 
-        result = steinbock(
-            tmp_path, image_scale_factors=image_factors, labels_scale_factors=label_factors, chunks=(1, 2, 3)
-        )
+        result = steinbock(tmp_path, scale_factors=factors, chunks=(1, 2, 3))
         image_element = result.images["sample_image"]
         label_element = result.labels["sample_labels"]
-        assert isinstance(image_element, DataTree) == (image_factors is not None)
-        assert isinstance(label_element, DataTree) == (label_factors is not None)
+        assert isinstance(image_element, DataTree) == bool(factors)
+        assert isinstance(label_element, DataTree) == bool(factors)
+        if isinstance(image_element, DataTree) and isinstance(label_element, DataTree):
+            assert list(image_element.children) == list(label_element.children)
+            for level in image_element.children:
+                assert image_element[level]["image"].shape[1:] == label_element[level]["image"].shape
         image_base = image_element["scale0"]["image"] if isinstance(image_element, DataTree) else image_element
         labels_base = label_element["scale0"]["image"] if isinstance(label_element, DataTree) else label_element
         np.testing.assert_array_equal(image_base.data.compute(), image)

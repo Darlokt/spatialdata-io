@@ -15,7 +15,7 @@ from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata.models import get_table_keys
 from spatialdata.transformations import BaseTransformation, get_transformation
-from xarray import DataTree
+from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_tasks
 from spatialdata_io import __version__
@@ -179,21 +179,20 @@ class TestCodex:
 
     @pytest.mark.parametrize("compressed", [False, True])
     def test_image_dtype_chunks_and_values(self, tmp_path: Path, *, compressed: bool) -> None:
-        """Retain native image dtype, chunks, channels, transformations, and serialized graph values."""
+        """Retain source dtype, channels, transformations, and serialized graph values in default chunks."""
         write_csv(tmp_path / "cells.csv")
         image = write_image(tmp_path / "stitched.tif", compressed=compressed)
 
         result = codex(tmp_path)
-        pyramid = result.images["images"]
+        raster = result.images["images"]
 
-        assert isinstance(pyramid, DataTree)
-        assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
-        raster = pyramid["scale0"]["image"]
+        # A single scale by default; 1024-pixel tiles hold one whole channel each.
+        assert isinstance(raster, DataArray)
         assert raster.dims == ("c", "y", "x")
         assert raster.shape == (2, 32, 40)
         assert raster.dtype == np.dtype(np.uint16)
         assert raster.coords["c"].to_numpy().tolist() == [0, 1]
-        assert raster.data.chunksize == (1, 16, 16)
+        assert raster.data.chunks == ((1, 1), (32,), (40,))
 
         restored = pickle.loads(pickle.dumps(raster.data))  # noqa: S301, RUF100 - Only deserialize this test's own graph.
         np.testing.assert_array_equal(restored[:, 1:3, 2:5].compute(), image[:, 1:3, 2:5])
@@ -201,6 +200,20 @@ class TestCodex:
         transform = get_transformation(raster, to_coordinate_system="global")
         assert isinstance(transform, BaseTransformation)
         np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.eye(3))
+
+    def test_scale_factors_build_a_pyramid(self, tmp_path: Path) -> None:
+        """Forward public pyramid factors and chunks to the stitched image."""
+        write_csv(tmp_path / "cells.csv")
+        image = write_image(tmp_path / "stitched.tif")
+
+        result = codex(tmp_path, scale_factors=(2,), chunks=(1, 16, 16))
+        pyramid = result.images["images"]
+
+        assert isinstance(pyramid, DataTree)
+        assert list(pyramid.children) == ["scale0", "scale1"]
+        assert pyramid["scale0"]["image"].data.chunksize == (1, 16, 16)
+        np.testing.assert_array_equal(pyramid["scale0"]["image"].data.compute(), image)
+        assert pyramid["scale1"]["image"].shape == (2, 16, 20)
 
     def test_fcs_fixture_is_independently_decoded(self, tmp_path: Path) -> None:
         """Verify that the fixture is actual FCS with the expected parameter and marker metadata."""
@@ -215,17 +228,17 @@ class TestCodex:
         np.testing.assert_array_equal(source.data, cell_frame().to_numpy(dtype=np.float32))
 
     def test_bounded_partial_tiff_decode(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        """Decode only the native tile needed by a small lazy image selection."""
+        """Decode only the stored tile needed by a small lazy image selection."""
         write_csv(tmp_path / "cells.csv")
         image = write_image(tmp_path / "stitched.tif", compressed=True)
         decode = mocker.spy(tiff_tasks, "_read_tiff_selection")
 
-        # Native TIFF tasks are instrumented after construction to distinguish
-        # actual source selection from model rechunking and pyramid graphs.
-        result = codex(tmp_path)
+        # Chunks equal to the 16-pixel stored tiles; default tiles would merge
+        # every tile of a channel into one chunk.
+        result = codex(tmp_path, chunks=(1, 16, 16))
 
         assert decode.call_count == 0
-        raster = result.images["images"]["scale0"]["image"]
+        raster = result.images["images"]
         np.testing.assert_array_equal(raster.data[0:1, 1:3, 2:5].compute(scheduler="synchronous"), image[0:1, 1:3, 2:5])
         assert decode.call_count == 1
         assert decode.call_args.args[1] == (slice(0, 1), slice(0, 16), slice(0, 16))
@@ -256,7 +269,7 @@ class TestCodex:
             data_axes="CYX",
             chunks=(1, 8, 10),
         )
-        raster = result.images["images"]["scale0"]["image"]
+        raster = result.images["images"]
 
         assert raster.data.chunksize == (1, 8, 10)
         np.testing.assert_array_equal(raster.data[:, :2, :3].compute(), image[:, :2, :3])
@@ -272,7 +285,7 @@ class TestCodex:
             codex(tmp_path)
 
         result = codex(tmp_path, tiff_series=1, chunks=4)
-        raster = result.images["images"]["scale0"]["image"]
+        raster = result.images["images"]
 
         assert raster.shape == (1, 6, 7)
         np.testing.assert_array_equal(raster.data.compute(), np.full((1, 6, 7), 17, dtype=np.uint16))
@@ -289,7 +302,7 @@ class TestCodex:
         )
 
         result = codex(tmp_path)
-        raster = result.images["images"]["scale0"]["image"]
+        raster = result.images["images"]
 
         assert raster.coords["c"].to_numpy().tolist() == ["marker-z", "marker-a"]
         np.testing.assert_array_equal(raster.data.compute(), image[0, 0])

@@ -10,8 +10,11 @@ from spatialdata.models import Image2DModel, Image3DModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.image import (
+    DEFAULT_CHUNKS,
+    DEFAULT_SCALE_FACTORS,
     LazyRaster,
     inspect_tiff,
+    make_raster_options,
     normalize_raster_axes,
     read_jpeg,
     read_png,
@@ -24,12 +27,8 @@ if TYPE_CHECKING:
     from xarray import DataArray, DataTree
 
 # sphinx-autodoc-typehints currently renders PEP 695 aliases as ``TypeAliasType``.
-ChunkValue: TypeAlias = int | tuple[int, ...] | None  # noqa: UP040
-Chunks: TypeAlias = (  # noqa: UP040
-    int | tuple[int, ...] | tuple[tuple[int, ...], ...] | Mapping[str, ChunkValue]
-)
+Chunks: TypeAlias = int | tuple[int, ...] | Mapping[str, int]  # noqa: UP040
 
-DEFAULT_SPATIAL_CHUNK_SIZE = 1024
 TIFF_SUFFIXES = (".btf", ".tif", ".tiff")
 PNG_SUFFIXES = (".png",)
 JPEG_SUFFIXES = (".jpeg", ".jpg")
@@ -69,62 +68,41 @@ def _validate_tiff_selection(tiff_series: int, tiff_level: int) -> None:
         raise ValueError(message)
 
 
-def _validate_chunk_value(value: ChunkValue, *, axis: str) -> None:
-    if value is None:
-        return
-    if isinstance(value, bool):
-        message = f"chunks for axis {axis!r} must not be a boolean."
-        raise TypeError(message)
-    if isinstance(value, int):
-        if value <= 0:
-            message = f"chunks for axis {axis!r} must be positive. Found {value}."
-            raise ValueError(message)
-        return
-    if not isinstance(value, tuple):
-        message = f"chunks for axis {axis!r} must be an integer, tuple of integers, or None. Found {value!r}."
-        raise TypeError(message)
-    if not value:
-        message = f"chunks for axis {axis!r} must not be empty."
-        raise ValueError(message)
-    if any(isinstance(size, bool) or not isinstance(size, int) for size in value):
-        message = f"chunks for axis {axis!r} must contain only integers. Found {value!r}."
-        raise TypeError(message)
-    if any(size <= 0 for size in value):
-        message = f"chunks for axis {axis!r} must contain only positive sizes. Found {value!r}."
-        raise ValueError(message)
+def _default_chunks(axes: tuple[str, ...]) -> dict[str, int]:
+    # One channel and, for volumes, one plane per chunk with the shared y/x tiles.
+    channel, tile_y, tile_x = DEFAULT_CHUNKS
+    sizes = {"c": channel, "z": 1, "y": tile_y, "x": tile_x}
+    return {axis: sizes[axis] for axis in axes}
 
 
-def _normalize_chunks(chunks: Chunks | None, *, axes: tuple[str, ...]) -> dict[str, ChunkValue]:
+def _normalize_chunks(chunks: Chunks | None, *, axes: tuple[str, ...]) -> dict[str, int]:
     if chunks is None:
-        return {axis: DEFAULT_SPATIAL_CHUNK_SIZE if axis in {"x", "y"} else None for axis in axes}
-    if isinstance(chunks, bool):
-        message = "chunks must be a chunk specification, not a boolean."
-        raise TypeError(message)
-    if isinstance(chunks, int):
-        normalized: dict[str, ChunkValue] = dict.fromkeys(axes, chunks)
-    elif isinstance(chunks, Mapping):
+        return _default_chunks(axes)
+
+    sizes: tuple[object, ...]
+    if isinstance(chunks, Mapping):
         if set(chunks) != set(axes):
             message = f"chunks keys must match canonical axes {axes}. Found {tuple(chunks)}."
             raise ValueError(message)
-        normalized = {axis: chunks[axis] for axis in axes}
+        sizes = tuple(chunks[axis] for axis in axes)
     elif isinstance(chunks, tuple):
         if len(chunks) != len(axes):
             message = f"chunks length must match canonical axes {axes}. Found {chunks!r}."
             raise ValueError(message)
-        if chunks and not (
-            all(isinstance(value, int) for value in chunks) or all(isinstance(value, tuple) for value in chunks)
-        ):
-            message = "chunks must contain either one integer or one tuple of integers per canonical axis."
-            raise TypeError(message)
-        normalized = dict(zip(axes, chunks, strict=True))
+        sizes = chunks
     else:
-        message = f"chunks must be an integer, tuple, mapping, or None. Found {type(chunks).__name__}."
+        sizes = (chunks,) * len(axes)
+
+    # Irregular per-axis partitions are rejected: the SpatialData writer would
+    # silently regularize them to the largest chunk of each axis.
+    integers = tuple(size for size in sizes if isinstance(size, int) and not isinstance(size, bool))
+    if len(integers) != len(sizes):
+        message = f"chunks must give one positive integer per canonical axis {axes}. Found {chunks!r}."
         raise TypeError(message)
-
-    for axis, value in normalized.items():
-        _validate_chunk_value(value, axis=axis)
-
-    return normalized
+    if min(integers) <= 0:
+        message = f"chunks must be positive. Found {chunks!r}."
+        raise ValueError(message)
+    return dict(zip(axes, integers, strict=True))
 
 
 def _read_raster(path: Path, *, tiff_series: int, tiff_level: int) -> LazyRaster:
@@ -153,8 +131,8 @@ def image(  # noqa: PLR0913, RUF100
     *,
     tiff_series: int = 0,
     tiff_level: int = 0,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
-    scale_factors: Sequence[int] | None = None,
 ) -> DataArray | DataTree:
     """Read a generic raster as a lazy SpatialData image.
 
@@ -164,9 +142,10 @@ def image(  # noqa: PLR0913, RUF100
     receive a singleton channel axis. Returned images use canonical ``CYX`` or
     ``CZYX`` dimensions without decoding pixels during construction.
 
-    TIFF-family sources retain their native storage-aligned source graph.
-    Requested model chunks add only lazy rechunking. PNG and JPEG decoding is
-    delayed but necessarily whole-frame.
+    Rechunking and pyramid construction are lazy. Source decoding follows the
+    TIFF storage layout, so computing a region decodes the tiles or strips of
+    the output chunks it intersects; PNG and JPEG decoding is delayed but
+    necessarily whole-frame.
 
     Parameters
     ----------
@@ -181,27 +160,31 @@ def image(  # noqa: PLR0913, RUF100
     tiff_level
         Zero-based pyramid level within the selected TIFF series. Must remain
         zero for PNG and JPEG inputs.
-    chunks
-        Requested chunks in canonical output-axis order or by canonical axis
-        name. By default, only the spatial axes are rechunked to 1024. Channel
-        and depth axes retain the source chunking. An integer or positional
-        tuple explicitly chunks every output axis. A mapping can use ``None``
-        to retain the source chunks for selected axes.
     scale_factors
-        Relative factors used to construct a model pyramid from the selected
-        source level.
+        Integer factors of at least two, one per pyramid level generated from
+        the selected source level; empty for a single scale.
+    chunks
+        One positive size per canonical axis, applied at every pyramid level:
+        an integer for every axis, a tuple in canonical ``CYX``/``CZYX`` order,
+        or a mapping keyed by exactly the canonical axes. ``None`` selects
+        ``(1, 1024, 1024)`` for ``CYX`` and ``(1, 1, 1024, 1024)`` for
+        ``CZYX``: one channel and one plane per chunk with square 1024-pixel
+        tiles.
 
     Returns
     -------
     xarray.DataArray or xarray.DataTree
-        A single-scale or multiscale 2D/3D SpatialData image.
+        A single-scale 2D/3D SpatialData image, or a multiscale image when
+        ``scale_factors`` is not empty.
 
     Raises
     ------
     TypeError
-        If a chunk specification contains unsupported value types.
+        If scale factors or chunk sizes are not integers, including irregular
+        per-axis partitions and ``None`` sizes.
     ValueError
-        If axes, TIFF selection, chunks, or the suffix are invalid.
+        If axes, TIFF selection, scale factors, chunks, or the suffix are
+        invalid.
 
     Notes
     -----
@@ -211,6 +194,8 @@ def image(  # noqa: PLR0913, RUF100
     _validate_tiff_selection(tiff_series, tiff_level)
     target_axes = _canonical_axes(data_axes)
     chunks_by_axis = _normalize_chunks(chunks, axes=target_axes)
+    # Generic chunks are axis-aware and validated above; the shared options own the factors.
+    model_scale_factors = make_raster_options(scale_factors).model_scale_factors
 
     raster = _read_raster(Path(path), tiff_series=tiff_series, tiff_level=tiff_level)
     normalized = normalize_raster_axes(
@@ -226,6 +211,6 @@ def image(  # noqa: PLR0913, RUF100
         normalized,
         dims=target_axes,
         transformations={coordinate_system: Identity()},
-        scale_factors=scale_factors,
+        scale_factors=model_scale_factors,
         chunks=chunks_by_axis,
     )

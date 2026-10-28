@@ -246,6 +246,8 @@ class TestMacsimaRejects:
     def test_options_are_validated_before_discovery(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="scale_factors"):
             macsima(tmp_path / "missing", scale_factors=(1,))
+        with pytest.raises(TypeError, match="include_transformations must be a boolean"):
+            macsima(tmp_path / "missing", include_transformations=1)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
     def test_removed_raw_style(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="parsing_style must be one of"):

@@ -156,7 +156,7 @@ def write_cell_gef(path: Path, *, profile: Profile = "name_only", adjusted: bool
     return path
 
 
-def write_analysis(
+def write_analysis(  # noqa: PLR0913, RUF100 - explicit fixture variants.
     path: Path,
     *,
     profile: Profile = "name_only",
@@ -207,7 +207,7 @@ def write_analysis(
     return path
 
 
-def write_dataset(
+def write_dataset(  # noqa: PLR0913, RUF100 - explicit fixture variants.
     root: Path,
     *,
     family: Family = "compact_numbered",

@@ -13,16 +13,14 @@ from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_a
 if TYPE_CHECKING:
     from xarray import DataArray, DataTree
 
+    from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _IMAGE_AXES = ("c", "y", "x")
-_MIN_PYRAMID_SIZE = 4
 
 
-def _validate_image_options(
-    data_axes: str | None, tiff_series: int | None, chunks: int | tuple[int, int, int] | None
-) -> None:
-    """Validate caller types, series selection, and positive CYX chunk cardinality."""
+def _validate_image_options(data_axes: str | None, tiff_series: int | None) -> None:
+    """Validate the caller's source axes type and series selection."""
     if data_axes is not None and not isinstance(data_axes, str):
         message = "data_axes must be a string or None."
         raise TypeError(message)
@@ -33,22 +31,9 @@ def _validate_image_options(
         message = "tiff_series must be a nonnegative integer or None."
         raise ValueError(message)
 
-    if chunks is None:
-        return
-    sizes = chunks if isinstance(chunks, tuple) else (chunks,)
-    if isinstance(chunks, tuple) and len(chunks) != len(_IMAGE_AXES):
-        message = "chunks must contain three values in CYX order."
-        raise ValueError(message)
-    if any(isinstance(size, bool) or not isinstance(size, int) for size in sizes):
-        message = "chunks must be an integer or a tuple of three integers."
-        raise TypeError(message)
-    if any(size <= 0 for size in sizes):
-        message = "chunks must contain only positive sizes."
-        raise ValueError(message)
-
 
 def _read_image(
-    path: ArtifactFile, *, data_axes: str | None, tiff_series: int | None, chunks: int | tuple[int, int, int] | None
+    path: ArtifactFile, *, data_axes: str | None, tiff_series: int | None, raster: RasterOptions
 ) -> DataArray | DataTree:
     """Build a level-zero image with declared axes and task-local TIFF ownership."""
     try:
@@ -67,11 +52,11 @@ def _read_image(
             )
         tiff_series = 0
 
-    raster = read_tiff(metadata, series=tiff_series, level=0)
-    axes = tuple(axis.lower() for axis in (raster.axes if data_axes is None else data_axes))
+    lazy = read_tiff(metadata, series=tiff_series, level=0)
+    axes = tuple(axis.lower() for axis in (lazy.axes if data_axes is None else data_axes))
     # TIFF samples represent RGB channels. Unknown stack axes require an override.
     axes = tuple("c" if axis == "s" else axis for axis in axes)
-    image = normalize_raster_axes(raster.data, axes, target_axes=_IMAGE_AXES, add_missing=("c",))
+    image = normalize_raster_axes(lazy.data, axes, target_axes=_IMAGE_AXES, add_missing=("c",))
 
     channel_names = None
     if metadata.ome is not None:
@@ -83,8 +68,8 @@ def _read_image(
         image,
         dims=_IMAGE_AXES,
         c_coords=channel_names,
-        scale_factors=[2, 2] if min(image.shape[-2:]) >= _MIN_PYRAMID_SIZE else None,
-        chunks=tuple(max(axis_chunks) for axis_chunks in image.chunks) if chunks is None else chunks,
+        scale_factors=raster.model_scale_factors,
+        chunks=raster.image_chunks(),
         rgb=False,
         transformations={"global": Identity()},
     )

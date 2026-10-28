@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io._cli.commands.mcmicro import mcmicro_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,7 +27,7 @@ class TestMcmicroCommand:
         output = tmp_path / "output.zarr"
         result = runner.invoke(mcmicro_command, ["--input", str(tmp_path), "--output", str(output)])
         assert result.exit_code == 0, result.output
-        reader.assert_called_once_with(tmp_path, scale_factors=None, chunks=None)
+        reader.assert_called_once_with(tmp_path, scale_factors=DEFAULT_SCALE_FACTORS, chunks=DEFAULT_CHUNKS)
         reader_result.write.assert_called_once_with(output)
 
     def test_explicit_options_keep_order(

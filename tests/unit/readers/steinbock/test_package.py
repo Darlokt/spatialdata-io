@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib
 import inspect
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+
 
 class TestPackage:
     """Preserve the established public reader path while exporting only its entry point."""
@@ -21,11 +23,10 @@ class TestPackage:
         package = importlib.import_module("spatialdata_io.readers.steinbock")
         parameters = inspect.signature(package.steinbock).parameters
 
-        assert list(parameters) == ["path", "labels_kind", "image_scale_factors", "labels_scale_factors", "chunks"]
+        assert list(parameters) == ["path", "labels_kind", "scale_factors", "chunks"]
         assert parameters["labels_kind"].default == "deepcell"
         assert all(
             parameter.kind == inspect.Parameter.KEYWORD_ONLY for name, parameter in parameters.items() if name != "path"
         )
-        assert all(
-            parameters[name].default is None for name in ("image_scale_factors", "labels_scale_factors", "chunks")
-        )
+        assert parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert parameters["chunks"].default == DEFAULT_CHUNKS

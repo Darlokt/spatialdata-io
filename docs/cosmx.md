@@ -46,7 +46,7 @@ Construction reads only the header. Plain CSV sources are split into newline-del
 
 ## Options and execution
 
-`scale_factors=None` keeps a single full-resolution scale; a sequence of integer factors greater than one adds pyramid levels to images and labels. Generated label pyramids require labels of at most 32 bits. `chunks` is one positive size or three CYX sizes, and labels use the final two; `None` keeps storage-aligned chunks (TIFF tiles, or whole strips grouped into bands of at most 16 MiB). JPEG and PNG composites decode their whole frame for any selection; TIFF sources read only the storage blocks a selection needs. Construction executes no raster or transcript tasks.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale. JPEG and PNG composites decode their whole frame for any selection; TIFF sources read only the tiles, or strips grouped into bands of at most 16 MiB, that intersect the selected chunks. Construction executes no raster or transcript tasks.
 
 ## Python and command line
 
@@ -63,6 +63,7 @@ spatialdata_io cosmx --input Lung5_Rep2 --output Lung5_Rep2.zarr --no-include-tr
 
 The former `transcripts`, `imread_kwargs` and `image_models_kwargs` arguments have been removed; use `include_transcripts`, `scale_factors` and `chunks`. Compared with earlier releases, the reader:
 
+- defaults to `(1, 1024, 1024)` image and `(1024, 1024)` label chunks instead of storage-aligned chunks, and takes `scale_factors=()` instead of `None` for a single scale;
 - places each FOV by an exact translation instead of an affine fitted to filtered cells;
 - keeps raster pixels unflipped and applies the measured half-pixel-exact pixel convention;
 - returns one global transcript element instead of one element per FOV, without writing temporary files or printing progress;

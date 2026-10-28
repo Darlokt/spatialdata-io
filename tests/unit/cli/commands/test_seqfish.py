@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io._cli.commands.seqfish import seqfish_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,8 +35,8 @@ class TestSeqfishCommand:
             include_shapes=True,
             shape_geometry="polygons",
             rois=None,
-            scale_factors=None,
-            chunks=None,
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=DEFAULT_CHUNKS,
         )
         reader_result.write.assert_called_once_with(output)
 

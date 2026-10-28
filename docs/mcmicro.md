@@ -57,23 +57,23 @@ Rows follow label order and then source row order. Observation names are row pos
 
 ## Options and execution
 
-`scale_factors=None` keeps a single full-resolution scale; a sequence of integer factors greater than one adds pyramid levels to images and labels. Generated label pyramids require labels of at most 32 bits. `chunks` is one positive size or three CYX sizes, and labels use the final two; `None` keeps native TIFF tiles, or whole strips grouped into bands of at most 16 MiB.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale.
 
-Construction reads TIFF metadata only and executes no pixel tasks. Computing a small region reads only the TIFF storage blocks that intersect it. Quantification tables are parsed in bounded batches of at most 10,000 rows and 8 MiB of dense marker values, and only CSR blocks are retained. The source files must remain available for later raster computation.
+Construction reads TIFF metadata only and executes no pixel tasks. Computing a region reads only the TIFF tiles, or strips grouped into bands of at most 16 MiB, that intersect its chunks. Quantification tables are parsed in bounded batches of at most 10,000 rows and 8 MiB of dense marker values, and only CSR blocks are retained. The source files must remain available for later raster computation.
 
 ## Python and command line
 
 ```python
 from spatialdata_io import mcmicro
 
-sdata = mcmicro("run", chunks=(1, 1024, 1024))
+sdata = mcmicro("run", scale_factors=(2, 2))
 sdata.write("run.zarr")
 ```
 
 The CLI mirrors the reader with repeatable pyramid and chunk options:
 
 ```bash
-spatialdata_io mcmicro --input run --output run.zarr --chunks 1 --chunks 1024 --chunks 1024
+spatialdata_io mcmicro --input run --output run.zarr --scale-factors 2 --scale-factors 2
 ```
 
-The former `imread_kwargs`, `image_models_kwargs` and `labels_models_kwargs` mappings have been removed; use `scale_factors` and `chunks`. Compared with earlier releases, the reader no longer returns raw or illumination images, includes the method in label names, keeps every core and mask in its exact local frame instead of placing it by centroids, names masks `core_<n>_mask`, returns one table named `table` with positional observation names, and stores expression as sparse arrays.
+The former `imread_kwargs`, `image_models_kwargs` and `labels_models_kwargs` mappings have been removed; use `scale_factors` and `chunks`. The default chunks are `(1, 1024, 1024)` for images and `(1024, 1024)` for labels instead of storage-aligned chunks, and `scale_factors=()` replaces `None` for a single scale. Compared with earlier releases, the reader no longer returns raw or illumination images, includes the method in label names, keeps every core and mask in its exact local frame instead of placing it by centroids, names masks `core_<n>_mask`, returns one table named `table` with positional observation names, and stores expression as sparse arrays.

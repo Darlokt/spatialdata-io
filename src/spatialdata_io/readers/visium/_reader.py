@@ -6,9 +6,10 @@ from typing import TYPE_CHECKING
 
 from spatialdata import SpatialData
 
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.visium._geometry import make_circles, make_transforms
-from spatialdata_io.readers.visium._images import Chunks, make_image_options, read_images
+from spatialdata_io.readers.visium._images import make_image_options, read_images
 from spatialdata_io.readers.visium._layout import discover_layout
 from spatialdata_io.readers.visium._metadata import (
     read_count_metadata,
@@ -18,7 +19,7 @@ from spatialdata_io.readers.visium._metadata import (
 from spatialdata_io.readers.visium._tables import TableOptions, link_table, prepare_table, read_positions
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 
@@ -33,7 +34,8 @@ def visium(  # noqa: PLR0913, RUF100
     make_var_names_unique: bool = True,
     data_axes: Sequence[str] | None = None,
     tiff_series: int | None = None,
-    chunks: Chunks | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] | Mapping[str, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read one single-library Space Ranger Visium output directory.
 
@@ -73,13 +75,14 @@ def visium(  # noqa: PLR0913, RUF100
 
     Full-resolution TIFF/BigTIFF/BTF, PNG, and JPEG inputs are optional.
     Space Ranger hires and lowres PNGs are discovered independently. Pixel
-    decoding remains lazy. TIFF construction retains storage-aligned chunks and
-    requested chunks add lazy rechunking. Full-resolution images receive up to
-    four lazy twofold pyramid reductions. PNG and JPEG computation necessarily
-    decodes a complete frame. Tissue imagery is spatially two-dimensional and
-    normalized to ``CYX``. Declared channel/sample axes are retained, named
-    singleton dimensions are dropped, and ambiguous axes or TIFF series require
-    an explicit selection.
+    decoding, rechunking, and pyramid construction remain lazy. Computing a
+    region decodes the TIFF tiles or strips of the output chunks it
+    intersects; PNG and JPEG computation necessarily decodes a complete
+    frame. Tissue imagery is
+    spatially two-dimensional and normalized to ``CYX``. Declared
+    channel/sample axes are retained, named singleton dimensions are dropped,
+    and ambiguous axes or TIFF series require an explicit selection. Pyramid
+    and chunk options follow the shared raster options.
 
     Parameters
     ----------
@@ -107,26 +110,36 @@ def visium(  # noqa: PLR0913, RUF100
     tiff_series
         Optional zero-based full-resolution TIFF series. A sole series is
         selected automatically. A multi-series TIFF requires this option.
+    scale_factors
+        Integer factors of at least two, one per pyramid level generated from
+        the full-resolution tissue image; empty for a single scale. The hires
+        and lowres PNGs are vendor-downsampled images and stay single-scale.
+        Requires ``fullres_image_file`` when not empty. Unrelated to the Space
+        Ranger ``scale_factors_file``.
     chunks
-        Requested canonical ``CYX`` model chunks. By default, spatial axes are
-        rechunked to 1024 and source channel chunks are retained.
+        Image chunk sizes of every image and pyramid level: one positive size
+        for every axis, three ``c, y, x`` sizes, or a mapping keyed by exactly
+        ``c``, ``y`` and ``x``. By default one channel per chunk and square
+        1024-pixel tiles.
 
     Returns
     -------
     spatialdata.SpatialData
         Images named ``<dataset_id>_{full,hires,lowres}_image`` when present,
         barcode-indexed spot circles named ``<dataset_id>``, and one linked
-        sparse table named ``table``.
+        sparse table named ``table``. The full-resolution image is a multiscale
+        ``DataTree`` only when ``scale_factors`` is not empty.
 
     Raises
     ------
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         If required paths are absent or have the wrong filesystem kind.
     ValueError
-        If layout, schema, numerical metadata, axes, selections, chunks, or
-        cross-element membership violate the Visium contract.
+        If layout, schema, numerical metadata, axes, selections, scale factors,
+        chunks, or cross-element membership violate the Visium contract.
     TypeError
-        If public option or expression storage types are unsupported.
+        If public option or expression storage types are unsupported, including
+        chunk sizes that are not one integer per axis.
 
     Notes
     -----
@@ -145,7 +158,9 @@ def visium(  # noqa: PLR0913, RUF100
     if not isinstance(make_var_names_unique, bool):
         message = "make_var_names_unique must be a boolean."
         raise TypeError(message)
-    image_options = make_image_options(chunks=chunks, data_axes=data_axes, tiff_series=tiff_series)
+    image_options = make_image_options(
+        scale_factors=scale_factors, chunks=chunks, data_axes=data_axes, tiff_series=tiff_series
+    )
 
     layout = discover_layout(
         path,
@@ -157,8 +172,8 @@ def visium(  # noqa: PLR0913, RUF100
 
     count_metadata = read_count_metadata(layout.counts)
     resolved_id = resolve_dataset_id(dataset_id, layout.counts, count_metadata)
-    scale_factors = read_scale_factors(layout.scale_factors)
-    transforms = make_transforms(scale_factors)
+    vendor_scales = read_scale_factors(layout.scale_factors)
+    transforms = make_transforms(vendor_scales)
 
     images = read_images(
         layout,
@@ -174,7 +189,7 @@ def visium(  # noqa: PLR0913, RUF100
         options=TableOptions(
             dataset_id=resolved_id,
             metadata=count_metadata,
-            scale_factors=scale_factors,
+            scale_factors=vendor_scales,
             make_var_names_unique=make_var_names_unique,
         ),
     )
@@ -183,7 +198,7 @@ def visium(  # noqa: PLR0913, RUF100
     circles = make_circles(
         prepared.positions,
         dataset_id=resolved_id,
-        radius=scale_factors.spot_diameter / 2.0,
+        radius=vendor_scales.spot_diameter / 2.0,
         transforms=transforms,
     )
     table = link_table(prepared, dataset_id=resolved_id, shape_index=circles.index)

@@ -16,12 +16,11 @@ from xarray import DataArray, DataTree
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
 import spatialdata_io.readers.seqfish._rasters as raster_module
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff
+from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.seqfish._rasters import make_raster_options, read_dapi, read_image, read_labels
+from spatialdata_io.readers.seqfish._rasters import read_dapi, read_image, read_labels
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
     from numpy.typing import NDArray
@@ -49,37 +48,10 @@ def _write_dapi(path: Path, *, names: list[str] | None = None, compression: str 
     return data
 
 
-class TestMakeRasterOptions:
-    """Normalize and own public options before artifact I/O."""
-
-    def test_owns_factors_and_accepts_no_pyramid(self) -> None:
-        factors = [2, 3]
-        options = make_raster_options(factors, (1, 16, 32))
-        factors.append(5)
-        assert options.scale_factors == (2, 3)
-        assert options.chunks == (1, 16, 32)
-        assert make_raster_options(None, None).scale_factors is None
-        assert make_raster_options(None, 16).chunks == 16
-
-    @pytest.mark.parametrize("factors", [[], [1], [0], [-1], [True], [2.5]])
-    def test_invalid_factors(self, factors: list[float]) -> None:
-        with pytest.raises(ValueError, match="scale_factors"):
-            make_raster_options(factors, None)  # type: ignore[bad-argument-type, arg-type]  # Exercise untyped callers.
-
-    @pytest.mark.parametrize("factors", ["2", pytest.param(b"2", id="bytes"), {2, 3}, {2: 3}, iter([2, 3])])
-    def test_factors_require_an_ordered_sequence(
-        self, factors: str | bytes | set[int] | dict[int, int] | Iterator[int]
-    ) -> None:
-        with pytest.raises(TypeError, match="ordered sequence"):
-            make_raster_options(factors, None)  # type: ignore[bad-argument-type, arg-type]  # Reject unstable or scalar caller input.
-
-    def test_tuple_factors_preserve_order(self) -> None:
-        assert make_raster_options((3, 2), None).scale_factors == (3, 2)
-
-    @pytest.mark.parametrize("chunks", [0, -1, (1, 0, 3), (), (1, 2), True, 2.0, "auto", (1, 2.0, 3)])
-    def test_invalid_chunks(self, chunks: float | str | tuple[int | float, ...]) -> None:
-        with pytest.raises((TypeError, ValueError), match="chunks"):
-            make_raster_options(None, chunks)  # type: ignore[bad-argument-type, arg-type]  # Exercise untyped callers.
+DEFAULT_OPTIONS = make_raster_options()
+# The default 1024-pixel tiles merge the 16-pixel fixture tiles into one chunk;
+# tests of bounded reads and per-task resources request the stored tiles.
+NATIVE_CHUNKS = make_raster_options(chunks=(1, 16, 16))
 
 
 class TestReadDapi:
@@ -118,7 +90,7 @@ class TestReadDapi:
             metadata={"axes": "ZCYX", "PhysicalSizeX": 0.2, "PhysicalSizeY": 0.5},
         )
         dapi = read_dapi(ArtifactFile(path))
-        image = read_image(dapi, roi="Roi1", options=make_raster_options(None, None))
+        image = read_image(dapi, roi="Roi1", options=DEFAULT_OPTIONS)
         assert isinstance(image, DataArray)
         assert image.shape == (1, 1, 16)
         np.testing.assert_array_equal(image.data.compute(), data.reshape(1, 1, 16))
@@ -151,7 +123,7 @@ class TestReadImage:
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
             dapi = read_dapi(ArtifactFile(path))
-            image = read_image(dapi, roi="Roi1", options=make_raster_options(None, None))
+            image = read_image(dapi, roi="Roi1", options=NATIVE_CHUNKS)
         assert isinstance(image, DataArray)
         tasks.assert_not_called()
         pixels.assert_not_called()
@@ -172,7 +144,7 @@ class TestReadImage:
         path = tmp_path / "DAPI.tiff"
         _write_dapi(path, names=names)
         dapi = read_dapi(ArtifactFile(path))
-        image = read_image(dapi, roi="Roi1", options=make_raster_options(None, (2, 12, 16)))
+        image = read_image(dapi, roi="Roi1", options=make_raster_options(chunks=(2, 12, 16)))
         assert isinstance(image, DataArray)
         assert image.coords["c"].values.tolist() == ["Channel:0:0", "Channel:0:1"]
         assert image.data.chunks[0] == (2,)
@@ -185,7 +157,7 @@ class TestReadImage:
         assert isinstance(pyramid, DataTree)
         assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
         with pytest.raises(ValueError, match="extent"):
-            read_image(dapi, roi="Roi1", options=make_raster_options([64], None))
+            read_image(dapi, roi="Roi1", options=make_raster_options([64]))
 
 
 class TestReadLabels:
@@ -208,14 +180,15 @@ class TestReadLabels:
             ArtifactFile(path),
             reference=reference,
             roi="Roi1",
-            options=make_raster_options(None, None),
+            options=DEFAULT_OPTIONS,
         )
         assert isinstance(result, DataArray)
+        assert result.data.chunks == ((48,), (64,))
         assert get_transformation(result, to_coordinate_system="Roi1") == reference.scale
 
-    @pytest.mark.parametrize("chunks", [None, 16, (1, 12, 16)])
+    @pytest.mark.parametrize("chunks", [16, (1, 12, 16)])
     def test_labels_keep_values_dtype_and_requested_spatial_chunks(
-        self, tmp_path: Path, mocker: MockerFixture, chunks: int | tuple[int, int, int] | None
+        self, tmp_path: Path, mocker: MockerFixture, chunks: int | tuple[int, int, int]
     ) -> None:
         dapi, path = tmp_path / "DAPI.tiff", tmp_path / "Segmentation.tiff"
         _write_dapi(dapi)
@@ -228,7 +201,7 @@ class TestReadLabels:
             ArtifactFile(path),
             reference=reference,
             roi="Roi1",
-            options=make_raster_options(None, chunks),
+            options=make_raster_options(chunks=chunks),
         )
         assert isinstance(result, DataArray)
         assert dtype == np.dtype(np.uint64)
@@ -257,7 +230,7 @@ class TestReadLabels:
                 ArtifactFile(path),
                 reference=reference,
                 roi="Roi1",
-                options=make_raster_options([2] if invalid == "uint64" else None, None),
+                options=make_raster_options((2,) if invalid == "uint64" else ()),
             )
 
     def test_label_pyramid_preserves_large_uint32_ids(self, tmp_path: Path) -> None:
@@ -270,7 +243,7 @@ class TestReadLabels:
             ArtifactFile(path),
             reference=reference,
             roi="Roi1",
-            options=make_raster_options([2, 2], None),
+            options=make_raster_options([2, 2]),
         )
         assert isinstance(result, DataTree)
         for level in result.children.values():
@@ -285,7 +258,7 @@ class TestReadLabels:
         path = tmp_path / "DAPI.tiff"
         _write_dapi(path)
         reference = read_dapi(ArtifactFile(path))
-        image = read_image(reference, roi="Roi1", options=make_raster_options(None, None))
+        image = read_image(reference, roi="Roi1", options=NATIVE_CHUNKS)
         assert isinstance(image, DataArray)
         with tifffile.TiffFile(path) as tiff:
             store = tiff.aszarr(series=0, level=0, squeeze=True)

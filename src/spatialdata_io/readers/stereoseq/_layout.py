@@ -90,6 +90,11 @@ class StainedImage:
         """Return the output name, independent of the sample selector."""
         return f"{self.stain}_{self.role}"
 
+    @property
+    def is_mask(self) -> bool:
+        """Return whether the product is a mask, read as labels."""
+        return self.role != "registered"
+
 
 @dataclass(frozen=True, slots=True)
 class GridImage:
@@ -102,6 +107,11 @@ class GridImage:
     def name(self) -> str:
         """Return the distinct unstained product name."""
         return "expression_tissue_cut" if self.file.name == "bin1_img_tissue_cut.tif" else self.role
+
+    @property
+    def is_mask(self) -> bool:
+        """Return whether the product is a mask, read as labels."""
+        return self.role in ("mask", "tissue_cut")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +126,11 @@ class DistanceMask:
     def name(self) -> str:
         """Return a name retaining the expansion distance."""
         return f"{self.stain}_distance_mask_{self.distance}"
+
+    @property
+    def is_mask(self) -> bool:
+        """Return ``True``: expanded masks are always read as labels."""
+        return True
 
 
 type ImageSource = StainedImage | GridImage | DistanceMask
@@ -286,7 +301,7 @@ def _select_sample(
     return next(iter(samples), None)
 
 
-def _count_file(
+def _count_file(  # noqa: PLR0913, RUF100 - one resolver for every count role keeps selection explicit.
     root: DatasetRoot,
     files: tuple[Path, ...],
     sample: str | None,
@@ -396,7 +411,7 @@ def _validate_override_samples(
                 )
 
 
-def discover_layout(
+def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selections.
     path: str | Path,
     *,
     sample_id: str | None,

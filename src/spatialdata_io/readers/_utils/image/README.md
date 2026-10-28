@@ -26,6 +26,25 @@ A vendor reader owns:
 - transformations, coordinate systems, and SpatialData model construction;
 - requested/model rechunking after the native read layer.
 
+## Shared raster options
+
+Every reader that returns images or labels exposes `scale_factors` and `chunks`
+with one meaning, validated by `make_raster_options()`:
+
+- `scale_factors`: integer downsampling factors of at least two, one per
+  generated pyramid level, applied equally to images and labels;
+  `DEFAULT_SCALE_FACTORS = ()` returns a single scale.
+- `chunks`: one positive size for every axis or three `c, y, x` sizes; labels
+  use the `y, x` sizes. `DEFAULT_CHUNKS = (1, DEFAULT_TILE_SIZE,
+  DEFAULT_TILE_SIZE)` gives one channel per chunk and square 1024-pixel tiles.
+
+Readers use the constants as signature defaults, so a default changes in one
+place. `RasterOptions.image_chunks()` and `label_chunks()` return explicit
+per-axis sizes for the SpatialData model: without them the multiscale image
+builder rechunks to 256-pixel tiles and merges all channels. Square is only
+the default; any regular chunk grid is valid Zarr. Pyramid-extent and
+label-dtype limits stay with the reader.
+
 ## Public workflow
 
 TIFF inspection and reading are separate because readers may need metadata to

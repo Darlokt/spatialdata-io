@@ -15,6 +15,7 @@ from numpy.testing import assert_array_equal
 from scipy.sparse import csr_array, csr_matrix, sparray, spmatrix
 from spatialdata import SpatialData
 from spatialdata.transformations import Identity, get_transformation
+from xarray import DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.stereoseq import stereoseq
@@ -44,10 +45,10 @@ class TestStereoseq:
 
         result = stereoseq(tmp_path, image_roles=("distance_mask",))
 
-        assert set(result.images) == {"HE_distance_mask_10"}
-        assert result.images["HE_distance_mask_10"].dims == ("c", "y", "x")
-        assert_array_equal(result.images["HE_distance_mask_10"].data.compute(), pixels[None])
-        assert result.tables == result.points == result.shapes == {}
+        assert set(result.labels) == {"HE_distance_mask_10"}
+        assert result.labels["HE_distance_mask_10"].dims == ("y", "x")
+        assert_array_equal(result.labels["HE_distance_mask_10"].data.compute(), pixels)
+        assert result.images == result.tables == result.points == result.shapes == {}
 
     @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs", "flat"])
     @pytest.mark.parametrize("profile", ["name_only", "id_and_name"])
@@ -270,26 +271,63 @@ class TestStereoseq:
         with Callback(posttask=record):
             result = stereoseq(fixture.root, image_roles=("registered", "mask", "tissue_cut", "expression"))
         assert executed == []
-        expected_names = (
-            {"registered", "mask", "expression", "tissue_cut", "expression_tissue_cut"}
-            if family == "compact_numbered"
-            else {"HE_registered", "HE_mask", "HE_tissue_cut", "expression", "expression_tissue_cut"}
-        )
-        assert set(result.images) == expected_names
+        stain = "" if family == "compact_numbered" else "HE_"
+        assert set(result.images) == {f"{stain}registered", "expression"}
+        assert set(result.labels) == {f"{stain}mask", f"{stain}tissue_cut", "expression_tissue_cut"}
         assert not result.tables
         assert not result.points
         assert not result.shapes
-        for name, element in result.images.items():
-            assert element.dims == ("c", "y", "x")
-            assert element.shape == (1, 16, 24)
-            assert isinstance(get_transformation(element), Identity)
-            expected = np.arange(16 * 24, dtype=np.uint16).reshape(16, 24)
-            if name in ("mask", "HE_mask", "expression_tissue_cut"):
-                expected = (expected % 3 == 0).astype(np.uint8)
+        source = np.arange(16 * 24, dtype=np.uint16).reshape(16, 24)
+        binary = (source % 3 == 0).astype(np.uint8)
+        for image in result.images.values():
+            assert image.dims == ("c", "y", "x")
+            assert image.shape == (1, 16, 24)
+            assert isinstance(get_transformation(image), Identity)
             with Callback(posttask=record):
-                computed = element.data[:, 2:4, 5:8].compute()
-            assert_array_equal(computed, expected[None, 2:4, 5:8])
+                computed = image.data[:, 2:4, 5:8].compute()
+            assert_array_equal(computed, source[None, 2:4, 5:8])
+        for name, labels in result.labels.items():
+            assert labels.dims == ("y", "x")
+            assert labels.shape == (16, 24)
+            assert isinstance(get_transformation(labels), Identity)
+            expected = source if name == f"{stain}tissue_cut" else binary
+            assert labels.dtype == expected.dtype
+            with Callback(posttask=record):
+                computed = labels.data[2:4, 5:8].compute()
+            assert_array_equal(computed, expected[2:4, 5:8])
         assert executed
+
+    def test_scale_factors_apply_to_images_and_masks(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path, family="outs", profile="name_only", products=("registered", "mask"))
+
+        result = stereoseq(fixture.root, image_roles=("registered", "mask"), scale_factors=(2,), chunks=(1, 8, 8))
+
+        assert set(result.images) == {"HE_registered"}
+        assert set(result.labels) == {"HE_mask"}
+        source = np.arange(16 * 24, dtype=np.uint16).reshape(16, 24)
+        image = result.images["HE_registered"]
+        assert isinstance(image, DataTree)
+        assert list(image.children) == ["scale0", "scale1"]
+        assert image["scale0"]["image"].data.chunksize == (1, 8, 8)
+        assert_array_equal(image["scale0"]["image"].data.compute(), source[None])
+        assert image["scale1"]["image"].shape == (1, 8, 12)
+
+        mask = result.labels["HE_mask"]
+        assert isinstance(mask, DataTree)
+        assert list(mask.children) == ["scale0", "scale1"]
+        assert mask["scale0"]["image"].data.chunksize == (8, 8)
+        assert_array_equal(mask["scale0"]["image"].data.compute(), (source % 3 == 0).astype(np.uint8))
+        downsampled = mask["scale1"]["image"].data.compute()
+        assert downsampled.shape == (8, 12)
+        assert downsampled.dtype == np.uint8
+        assert set(np.unique(downsampled).tolist()) == {0, 1}
+
+        destination = tmp_path / "result.zarr"
+        result.write(destination)
+        restored = SpatialData.read(destination).labels["HE_mask"]
+        assert isinstance(restored, DataTree)
+        assert list(restored.children) == ["scale0", "scale1"]
+        assert_array_equal(restored["scale1"]["image"].data.compute(), downsampled)
 
 
 class TestWriteDataset:

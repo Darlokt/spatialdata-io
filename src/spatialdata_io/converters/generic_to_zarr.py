@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from spatialdata import SpatialData
 from spatialdata._docs import docstring_parameter
 
+from spatialdata_io.readers._utils.image import DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.generic import (
     VALID_IMAGE_TYPES,
     VALID_SHAPE_TYPES,
@@ -15,6 +16,8 @@ from spatialdata_io.readers.generic import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from spatialdata_io.readers.generic._images import Chunks
 
 __all__ = ["generic_to_zarr"]
@@ -34,6 +37,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     *,
     tiff_series: int = 0,
     tiff_level: int = 0,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
 ) -> None:
     """Read a generic element and persist it in a SpatialData Zarr store.
@@ -56,15 +60,20 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         Zero-based TIFF series. Must remain zero for non-TIFF inputs.
     tiff_level
         Zero-based TIFF pyramid level. Must remain zero for non-TIFF inputs.
+    scale_factors
+        Integer factors of at least two, one per generated image pyramid
+        level; empty for a single scale. Invalid for GeoJSON inputs.
     chunks
-        Requested image chunks in canonical output-axis order or by canonical
-        axis name. Invalid for GeoJSON inputs. By default, only ``Y`` and ``X``
-        are rechunked to 1024; ``C`` and ``Z`` retain source chunking.
+        One positive image chunk size per canonical axis, applied at every
+        pyramid level: an integer, a tuple in canonical ``CYX``/``CZYX`` order,
+        or a mapping keyed by exactly the canonical axes. ``None`` selects
+        ``(1, 1024, 1024)`` for ``CYX`` and ``(1, 1, 1024, 1024)`` for
+        ``CZYX``. Invalid for GeoJSON inputs.
 
     Raises
     ------
     TypeError
-        If an image chunk specification contains unsupported value types.
+        If image scale factors or chunk sizes are not integers.
     ValueError
         If the input options are invalid or ``name`` already exists.
 
@@ -93,6 +102,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         coordinate_system=coordinate_system,
         tiff_series=tiff_series,
         tiff_level=tiff_level,
+        scale_factors=scale_factors,
         chunks=chunks,
     )
 

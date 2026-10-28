@@ -1,8 +1,8 @@
-"""Normalize declared DBiT histology axes into lazy single-scale CYX images."""
+"""Normalize declared DBiT histology axes into lazy CYX images."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity
@@ -11,18 +11,17 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_jpeg, read_png, read_tiff
 
 if TYPE_CHECKING:
-    from xarray import DataArray
+    from xarray import DataArray, DataTree
 
+    from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _IMAGE_AXES = ("c", "y", "x")
 _TIFF_SUFFIXES = frozenset({".tif", ".tiff", ".btf"})
 
 
-def _validate_image_options(
-    data_axes: str | None, tiff_series: int, tiff_level: int, chunks: int | tuple[int, int, int] | None
-) -> None:
-    """Validate axes, nonnegative TIFF selections, and positive CYX chunks."""
+def _validate_image_options(data_axes: str | None, tiff_series: int, tiff_level: int) -> None:
+    """Validate declared source axes and nonnegative TIFF selections."""
     if data_axes is not None:
         if not isinstance(data_axes, str):
             message = "data_axes must be a string or None."
@@ -38,20 +37,6 @@ def _validate_image_options(
             message = f"{name} must be a nonnegative integer."
             raise ValueError(message)
 
-    if chunks is None:
-        return
-
-    sizes = chunks if isinstance(chunks, tuple) else (chunks,)
-    if isinstance(chunks, tuple) and len(chunks) != len(_IMAGE_AXES):
-        message = "chunks must contain three values in CYX order."
-        raise ValueError(message)
-    if any(isinstance(size, bool) or not isinstance(size, int) for size in sizes):
-        message = "chunks must be an integer or a tuple of three integers."
-        raise TypeError(message)
-    if any(size <= 0 for size in sizes):
-        message = "chunks must contain only positive sizes."
-        raise ValueError(message)
-
 
 def _read_image(
     path: ArtifactFile,
@@ -59,8 +44,8 @@ def _read_image(
     data_axes: str | None,
     tiff_series: int,
     tiff_level: int,
-    chunks: int | tuple[int, int, int] | None,
-) -> DataArray:
+    raster: RasterOptions,
+) -> DataArray | DataTree:
     """Read bounded metadata and construct an image without executing pixel tasks."""
     context = ReaderErrorContext("dbit", "histology image")
     if path.suffix.lower() not in _TIFF_SUFFIXES and (data_axes is not None or tiff_series != 0 or tiff_level != 0):
@@ -73,19 +58,19 @@ def _read_image(
     try:
         if path.suffix.lower() in _TIFF_SUFFIXES:
             metadata = inspect_tiff(path)
-            raster = read_tiff(metadata, series=tiff_series, level=tiff_level)
+            lazy = read_tiff(metadata, series=tiff_series, level=tiff_level)
         else:
-            raster = read_png(path) if path.suffix.lower() == ".png" else read_jpeg(path)
+            lazy = read_png(path) if path.suffix.lower() == ".png" else read_jpeg(path)
     except (OSError, ValueError, IndexError) as error:
         add_reader_context(error, context=context, path=path)
         raise
 
     # TIFF S represents interleaved color samples, while C denotes scientific channels.
-    axes = tuple(axis.lower() for axis in (raster.axes if data_axes is None else data_axes))
+    axes = tuple(axis.lower() for axis in (lazy.axes if data_axes is None else data_axes))
     samples = "s" in axes
     axes = tuple("c" if axis == "s" else axis for axis in axes)
     try:
-        image = normalize_raster_axes(raster.data, axes, target_axes=_IMAGE_AXES, add_missing=("c",))
+        image = normalize_raster_axes(lazy.data, axes, target_axes=_IMAGE_AXES, add_missing=("c",))
     except ValueError as error:
         add_reader_context(error, context=context, path=path)
         raise
@@ -109,15 +94,12 @@ def _read_image(
             else [channel.id for channel in channels]
         )
 
-    # The parser annotates a union even though scale_factors=None always returns a DataArray.
-    return cast(
-        "DataArray",
-        Image2DModel.parse(
-            image,
-            dims=_IMAGE_AXES,
-            c_coords=channel_names,
-            rgb=False,
-            chunks=tuple(max(parts) for parts in image.chunks) if chunks is None else chunks,
-            transformations={"global": Identity()},
-        ),
+    return Image2DModel.parse(
+        image,
+        dims=_IMAGE_AXES,
+        c_coords=channel_names,
+        rgb=False,
+        scale_factors=raster.model_scale_factors,
+        chunks=raster.image_chunks(),
+        transformations={"global": Identity()},
     )

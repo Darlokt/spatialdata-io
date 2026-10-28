@@ -20,9 +20,16 @@ known_hash = "sha256:acc353069871eeda9977fc80f0d11e81eef8b7a683212819cd892d983c4
 extracted_dir = "Xenium_V1_human_Lung_2fov_outs"
 source = "10x Genomics Xenium 2.0.0, CC BY 4.0"
 
-# 10x Genomics Xenium 3.0.0 (5K) Mouse ileum, multimodal cell segmentation
-# this file seems to be corrupted; skipping it for now
-# https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_MultiCellSeg_Mouse_Ileum_tiny/Xenium_Prime_MultiCellSeg_Mouse_Ileum_tiny.zip
+# 10x Genomics Xenium 3.0.0 (5K) Mouse ileum, multimodal cell segmentation. The archive matches the
+# published MD5 be9d917eaac2ade708c111132f0f379d; earlier read failures came from the pyarrow 22.0.0
+# regression (apache/arrow#47992), not from the data.
+[[datasets]]
+key = "xenium_prime_multicell_mouse_ileum"
+group = "xenium"
+url = "https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_MultiCellSeg_Mouse_Ileum_tiny/Xenium_Prime_MultiCellSeg_Mouse_Ileum_tiny_outs.zip"
+known_hash = "sha256:c4d028676e8b74d0241f77306685d12c237acb9d7ded7d41333ca9398ddc56bf"
+extracted_dir = "Xenium_Prime_MultiCellSeg_Mouse_Ileum_tiny_outs"
+source = "10x Genomics Xenium 3.0.0, CC BY 4.0"
 
 # 10x Genomics Xenium 3.0.0 (5K) Mouse ileum, nuclear expansion
 [[datasets]]
@@ -59,6 +66,267 @@ url = "https://cf.10xgenomics.com/samples/xenium/4.0.0/Xenium_V1_Protein_Human_K
 known_hash = "sha256:abd7e8f7fd047dcc6afdb1e9eece90d4533d3ead053c6f05c482be050bdf79d2"
 extracted_dir = "Xenium_V1_Protein_Human_Kidney_tiny_outs"
 source = "10x Genomics Xenium 4.0.0, CC BY 4.0"
+
+# 10x Genomics XOA 1.0.2 fresh-frozen mouse brain subset: integer cell IDs, binary feature names.
+# Individually published outs members; the 3.5 GB outs.zip, the 3D stack and Explorer files are omitted.
+# https://www.10xgenomics.com/datasets/fresh-frozen-mouse-brain-for-xenium-explorer-demo-1-standard
+[[datasets]]
+key = "xenium_mouse_brain_subset"
+group = "xenium"
+extracted_dir = "Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_members"
+source = "10x Genomics XOA 1.0.2 (integer cell IDs), selected outs members and CSV/MTX twins, CC BY 4.0"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_experiment.xenium"
+known_hash = "sha256:5606fbe1a4009df52ef1326ee6adf05dcf849fb3e981ab0bf7e0c81d42ebe15c"
+target = "experiment.xenium"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_cells.parquet"
+known_hash = "sha256:67786587610b25546d9a8612f1881f2cc001a8ab06f9f35416909bd18010403e"
+target = "cells.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_cell_boundaries.parquet"
+known_hash = "sha256:8ab6ba5cfe1ff1c322b179976a3b5f00ce8959a9a7d1b8f29a0a0473e3c2d315"
+target = "cell_boundaries.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_nucleus_boundaries.parquet"
+known_hash = "sha256:e8a320b77b59c4a8c1f671558a88894a05587cf38b5c85ffcd2f3609b507f9e0"
+target = "nucleus_boundaries.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_cell_feature_matrix.h5"
+known_hash = "sha256:c46affded533ee3802a8136ab61b51868831a9cd07226121f5426c81bccde12d"
+target = "cell_feature_matrix.h5"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_cells.zarr.zip"
+known_hash = "sha256:3ced8a235353896ee9dc42d031294e91c22944792a711481c65e596dee684774"
+target = "cells.zarr.zip"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_transcripts.parquet"
+known_hash = "sha256:813ad465223b840b71a7a85588c0a78dbcb3f05e5dc754cf04504fcbac0c2bde"
+target = "transcripts.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_analysis.tar.gz"
+known_hash = "sha256:950d17445f1b774d074ddf5c78077d341486f5c80ccb95c36cf8c1a329cc1d2e"
+target = "analysis.tar.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_gene_panel.json"
+known_hash = "sha256:ae8305e929f0b7820ae904a63e762ad71267519e0155869d5612b80c08ba36ef"
+target = "gene_panel.json"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_metrics_summary.csv"
+known_hash = "sha256:dbfb23ccb10923d29ab1de28311949e956545cac2d402735b049d37e30e19b9b"
+target = "metrics_summary.csv"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_morphology_focus.ome.tif"
+known_hash = "sha256:f469ff9e9b152d30788d74fd861f0414b07dcc46191ab13b3d196628b632cab6"
+target = "morphology_focus.ome.tif"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_morphology_mip.ome.tif"
+known_hash = "sha256:6594330846559f82587f25b64519254e8338b7193439117cac7b65957073e389"
+target = "morphology_mip.ome.tif"
+
+# CSV and MatrixMarket twins of the same bundle: the stripped-deposit contract.
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_cells.csv.gz"
+known_hash = "sha256:9fbeb446c201e12802808ae58d027daaeb7b90051a09c3d4c74bcf46aec253f2"
+target = "cells.csv.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_cell_boundaries.csv.gz"
+known_hash = "sha256:a50563a840b3c827b7ddac2e4029286033ddb1d6eb9382158062041a6bb092ea"
+target = "cell_boundaries.csv.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_nucleus_boundaries.csv.gz"
+known_hash = "sha256:c44b5e7f5698165a0e3f077f4a4ce8c2e3752b1de392e1d6b41ec36581c47458"
+target = "nucleus_boundaries.csv.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.0.2/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP/Xenium_V1_FF_Mouse_Brain_Coronal_Subset_CTX_HP_cell_feature_matrix.tar.gz"
+known_hash = "sha256:19187b109b1510cb6680fbf7ac54818a191638bee31702eb8b29a8996f0b58fe"
+target = "cell_feature_matrix.tar.gz"
+
+# 10x Genomics XOA 1.3.0.5 human brain with add-on panel: first hexadecimal-ID build, binary parquet
+# cell IDs, format version 2.0 without patch_version. Individually published outs members.
+# https://www.10xgenomics.com/datasets/xenium-human-brain-preview-data-1-standard
+[[datasets]]
+key = "xenium_brain_addon"
+group = "xenium"
+extracted_dir = "Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_members"
+source = "10x Genomics XOA 1.3.0.5 (first hexadecimal cell IDs), selected outs members, CC BY 4.0"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_experiment.xenium"
+known_hash = "sha256:ad0c75ef5a7d77882b88a66851b034622c3abe7c913d893dded1e0a00ac9541e"
+target = "experiment.xenium"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_cells.parquet"
+known_hash = "sha256:f2df68ac7f6474e3adf96d8cc0e09a1d85d76a2e26903ef2f3362b38dc76eae4"
+target = "cells.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_cell_boundaries.parquet"
+known_hash = "sha256:75e87898ada0cf78df55aefdc94e6c35d740724d89a89ad9c7c3af5ec08aa4e8"
+target = "cell_boundaries.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_nucleus_boundaries.parquet"
+known_hash = "sha256:6a906a120547d83b6a82c594386b22037207f7755b79bcf390f7f964d9d46897"
+target = "nucleus_boundaries.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_cell_feature_matrix.h5"
+known_hash = "sha256:89f2986c1a41d133b0400b76e3ae7df31b1a9bbd5a6e8e4c572d02698c139aa7"
+target = "cell_feature_matrix.h5"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_cells.zarr.zip"
+known_hash = "sha256:4faa6e45e702247ed464f9dfadedbfbe545bb22ff9d47d01ba75c442119890e2"
+target = "cells.zarr.zip"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_transcripts.parquet"
+known_hash = "sha256:da10b46b7520c7f0dd1a55d2518880bfff4ede75717839000652d9e17dededac"
+target = "transcripts.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_analysis.tar.gz"
+known_hash = "sha256:ef48b949fd899772a3cb7e1822871a2e69eef90b050fa4441d2859081ac740ae"
+target = "analysis.tar.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_gene_panel.json"
+known_hash = "sha256:d6d9932153da21ee4b67423bed6bf120779b8f70f490b2227b0af3f44d9c0c1a"
+target = "gene_panel.json"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_metrics_summary.csv"
+known_hash = "sha256:076d4daadebd0afbc3ca6752559b0e09d319b3e95df4f571c0e912a60c24ca48"
+target = "metrics_summary.csv"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_morphology_focus.ome.tif"
+known_hash = "sha256:f1c63f9346c8eeab5a4456c576e9748d9a8e962b02ab898708c5f5a327eb4780"
+target = "morphology_focus.ome.tif"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.3.0/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon/Xenium_V1_FFPE_Human_Brain_Healthy_With_Addon_morphology_mip.ome.tif"
+known_hash = "sha256:82e7c624a24a0929b21747ae7d9b8f778a34aecacfaebaee4a3b7b37bafe80a7"
+target = "morphology_mip.ome.tif"
+
+# 10x Genomics XOA 1.9.0.1 human heart: hexadecimal cell IDs with seg_mask_value, plus the
+# Explorer-aligned H&E image and its alignment matrix. Individually published files.
+# https://www.10xgenomics.com/datasets/human-heart-data-xenium-human-multi-tissue-and-cancer-panel-1-standard
+[[datasets]]
+key = "xenium_heart"
+group = "xenium"
+extracted_dir = "Xenium_V1_hHeart_nondiseased_section_FFPE_members"
+source = "10x Genomics XOA 1.9.0.1 (hexadecimal cell IDs), selected outs members, CSV/MTX twins and an aligned H&E, CC BY 4.0"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_experiment.xenium"
+known_hash = "sha256:16b0d151eec208122f8d729dd50f5ff077aa9ff9999d2cdec8cddd72752562d9"
+target = "experiment.xenium"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_cells.parquet"
+known_hash = "sha256:c437f302a0bab98976dc3ac62105ee79a16e2e4bb0dbeff52d2c33346ab346df"
+target = "cells.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_cell_boundaries.parquet"
+known_hash = "sha256:cc8cf0f032d1c8e190e83368071daca9099e51a3a4316a97eec5fd276624c7e1"
+target = "cell_boundaries.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_nucleus_boundaries.parquet"
+known_hash = "sha256:17c8637ea65ee0c1ee23bd2aae3185671efa98bc2e89fcba8df29e5e2f5b7ddd"
+target = "nucleus_boundaries.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_cell_feature_matrix.h5"
+known_hash = "sha256:7da82352c37c610203f210403f89df2f2906cecb63155a211ed2867962416001"
+target = "cell_feature_matrix.h5"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_cells.zarr.zip"
+known_hash = "sha256:e15c889dcc083cafead0e8713c3fdd9a956a93be7a2f07fded08be0a07796ca7"
+target = "cells.zarr.zip"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_transcripts.parquet"
+known_hash = "sha256:b4f105e1c91abe57c8d53f10f4e48d20ede94db589a1af779603c7db5a4e11d5"
+target = "transcripts.parquet"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_analysis.tar.gz"
+known_hash = "sha256:9d76d390eda0d8c8d1d7b0dd2fd5b711da03a3a38e0a0d5100644b010df3e392"
+target = "analysis.tar.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_gene_panel.json"
+known_hash = "sha256:1fc806282753d0ffdb04b8ad6176085088703b3ee4f45c7b64e6bf96e40f6203"
+target = "gene_panel.json"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_metrics_summary.csv"
+known_hash = "sha256:656fecf640e4a9591beb314b2ae0a09678601c6e8ee2348a089c79a2fc52f19a"
+target = "metrics_summary.csv"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_morphology_focus.ome.tif"
+known_hash = "sha256:241cd8532ff2800ca73cc2b41eb1323bdcc8caae39794e281d08bf912cdf1501"
+target = "morphology_focus.ome.tif"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_morphology_mip.ome.tif"
+known_hash = "sha256:b901a9e3bb7c969faf49a5cd159925cf23abe1f9f1ca4366c9c2b3b58a653052"
+target = "morphology_mip.ome.tif"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_he_image.ome.tif"
+known_hash = "sha256:e52d6bfc3af8bd3e89038c7e476a4b881a982505e6078cef6cac3f13b4770b2b"
+target = "he_image.ome.tif"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_he_imagealignment.csv"
+known_hash = "sha256:771376801a670ed9b20bc9e2af8b7d35119f1786887bdfc233901b11ab5f80c6"
+target = "he_imagealignment.csv"
+
+# CSV and MatrixMarket twins of the same bundle: the stripped-deposit contract.
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_cells.csv.gz"
+known_hash = "sha256:4e5d8711ac27b210402007c10d16c40ad7b9d83d77c24af781a2d042dc6df491"
+target = "cells.csv.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_cell_boundaries.csv.gz"
+known_hash = "sha256:dbb908375261aee348fd2d9da89308bbaa398f81ec487af959f7781ee178ed0c"
+target = "cell_boundaries.csv.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_nucleus_boundaries.csv.gz"
+known_hash = "sha256:6f59354a05d3170f429224a69464ef47b30e8e047e5a71e841bb84dbd9868f95"
+target = "nucleus_boundaries.csv.gz"
+
+[[datasets.assets]]
+url = "https://cf.10xgenomics.com/samples/xenium/1.9.0/Xenium_V1_hHeart_nondiseased_section_FFPE/Xenium_V1_hHeart_nondiseased_section_FFPE_cell_feature_matrix.tar.gz"
+known_hash = "sha256:df2ad3a669f217c1f412e856da4d2612955fe0eb727b0e7b968d3e8fcac590c0"
+target = "cell_feature_matrix.tar.gz"
 
 # -------
 # Classic Visium source datasets are licensed as CC BY 4.0:

@@ -9,6 +9,7 @@ import click
 import pytest
 
 from spatialdata_io._cli.commands.stereoseq import stereoseq_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -56,6 +57,8 @@ class TestStereoseqCommand:
                 "registered",
                 "--image-roles",
                 "mask",
+                "--scale-factors",
+                "2",
                 "--chunks",
                 "1",
                 "--chunks",
@@ -76,6 +79,7 @@ class TestStereoseqCommand:
             adjusted_cell_counts_file=Path("sample.1.adjusted.cellbin.gef"),
             analysis_files=(Path("sample.1.cellbin_0.5.h5ad"), Path("sample.1.cellbin_1.h5ad")),
             image_roles=("registered", "mask"),
+            scale_factors=(2,),
             chunks=(1, 64, 32),
         )
         reader_result.write.assert_called_once_with(output)
@@ -101,7 +105,8 @@ class TestStereoseqCommand:
             adjusted_cell_counts_file=None,
             analysis_files=(),
             image_roles=(),
-            chunks=128 if sizes else None,
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=128 if sizes else DEFAULT_CHUNKS,
         )
 
     @pytest.mark.parametrize(
@@ -115,7 +120,6 @@ class TestStereoseqCommand:
             ["--cell-bins", "cells"],
             ["--cell-geometry", "circles"],
             ["--image-roles", "labels"],
-            ["--chunks", "0"],
             ["--chunks", "4", "--chunks", "8"],
             ["--imread-kwargs", "{}"],
             ["--dataset-id", "sample"],
@@ -135,8 +139,10 @@ class TestStereoseqCommand:
             option_type = options[name].type
             assert isinstance(option_type, click.Path)
             assert option_type.type is Path
-        for name in ("bin_sizes", "image_roles", "analysis_files", "chunks"):
+        for name in ("bin_sizes", "image_roles", "analysis_files"):
             assert options[name].multiple
             assert options[name].default == ()
+        assert options["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert options["chunks"].default == DEFAULT_CHUNKS
         assert options["cell_bins"].default == "none"
         assert options["cell_geometry"].default == "centroids"

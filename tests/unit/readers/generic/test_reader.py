@@ -39,6 +39,7 @@ class TestGeneric:
             coordinate_system="global",
             tiff_series=0,
             tiff_level=0,
+            scale_factors=(),
             chunks=None,
         )
 
@@ -81,26 +82,33 @@ class TestGeneric:
             generic(path, data_axes=data_axes, tiff_series=tiff_series)
 
     @pytest.mark.parametrize(
-        ("data_axes", "tiff_level", "chunks", "match"),
-        [
-            ("yx", 0, None, "cannot be used with GeoJSON"),
-            (None, 1, None, "cannot be used with GeoJSON"),
-            (None, 0, 256, "cannot be used with GeoJSON"),
-        ],
+        ("data_axes", "tiff_level"),
+        [("yx", 0), (None, 1)],
     )
-    def test_rejects_image_options_for_geojson(
+    def test_rejects_image_selection_for_geojson(
         self,
         tmp_path: Path,
         data_axes: str | None,
         tiff_level: int,
-        chunks: int | None,
-        match: str,
     ) -> None:
         path = tmp_path / "shapes.geojson"
         path.touch()
 
-        with pytest.raises(ValueError, match=match):
-            generic(path, data_axes=data_axes, tiff_level=tiff_level, chunks=chunks)
+        with pytest.raises(ValueError, match="cannot be used with GeoJSON"):
+            generic(path, data_axes=data_axes, tiff_level=tiff_level)
+
+    @pytest.mark.parametrize(("scale_factors", "chunks"), [((2,), None), ((), 256)])
+    def test_rejects_raster_options_for_geojson(
+        self,
+        tmp_path: Path,
+        scale_factors: tuple[int, ...],
+        chunks: int | None,
+    ) -> None:
+        path = tmp_path / "shapes.geojson"
+        path.touch()
+
+        with pytest.raises(ValueError, match="scale_factors and chunks cannot be used with GeoJSON"):
+            generic(path, scale_factors=scale_factors, chunks=chunks)
 
     def test_rejects_unknown_suffix(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="Unsupported input suffix"):

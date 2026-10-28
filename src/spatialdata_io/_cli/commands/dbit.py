@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
@@ -25,10 +25,8 @@ if TYPE_CHECKING:
         data_axes: str | None
         tiff_series: int
         tiff_level: int
-        chunks: tuple[int, ...]
-
-
-_IMAGE_RANK = 3
+        scale_factors: tuple[int, ...]
+        chunks: int | tuple[int, int, int]
 
 
 @click.command(name="dbit")
@@ -85,31 +83,14 @@ _IMAGE_RANK = 3
     show_default=True,
     help="Zero-based pyramid level within the selected TIFF series.",
 )
-@click.option(
-    "--chunks",
-    type=click.IntRange(min=1),
-    multiple=True,
-    default=(),
-    help="One size for all axes or three sizes in CYX order. Defaults to native image chunks.",
-)
+@scale_factors_option
+@chunks_option
 def dbit_command(input_path: Path, output_path: Path, **options: Unpack[_DbitOptions]) -> None:
     """Read one DBiT dataset and write its linked SpatialData store."""
     # Click's range comparison accepts NaN, so check finiteness explicitly.
     if not math.isfinite(options["border_scale"]):
         message = "--border-scale must be finite and in [0, 4)."
         raise click.BadParameter(message, param_hint="--border-scale")
-
-    values = options["chunks"]
-    chunks: int | tuple[int, int, int] | None
-    if not values:
-        chunks = None
-    elif len(values) == 1:
-        chunks = values[0]
-    elif len(values) == _IMAGE_RANK:
-        chunks = (values[0], values[1], values[2])
-    else:
-        message = "--chunks must be passed once for all axes or three times in CYX order."
-        raise click.BadParameter(message, param_hint="--chunks")
 
     from spatialdata_io.readers.dbit import dbit  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
 
@@ -124,7 +105,8 @@ def dbit_command(input_path: Path, output_path: Path, **options: Unpack[_DbitOpt
         data_axes=options["data_axes"],
         tiff_series=options["tiff_series"],
         tiff_level=options["tiff_level"],
-        chunks=chunks,
+        scale_factors=options["scale_factors"],
+        chunks=options["chunks"],
     )
 
     result.write(output_path)

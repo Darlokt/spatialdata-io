@@ -9,6 +9,7 @@ import click
 import pytest
 
 from spatialdata_io._cli.commands.codex import codex_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 
 
 class TestCodexCommand:
-    """Keep option names, types, defaults, and chunk cardinality aligned."""
+    """Keep option names, types, defaults, and raster options aligned."""
 
     def test_forwards_options_and_writes_output(
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, reader_result: MagicMock
@@ -41,6 +42,10 @@ class TestCodexCommand:
                 "CYX",
                 "--tiff-series",
                 "1",
+                "--scale-factors",
+                "2",
+                "--scale-factors",
+                "4",
                 "--chunks",
                 "1",
                 "--chunks",
@@ -57,26 +62,43 @@ class TestCodexCommand:
             image_file=Path("stitched.tif"),
             data_axes="CYX",
             tiff_series=1,
+            scale_factors=(2, 4),
             chunks=(1, 16, 32),
         )
         reader_result.write.assert_called_once_with(output)
 
-    @pytest.mark.parametrize(("values", "expected"), [([], None), (["--chunks", "16"], 16)])
-    def test_chunk_default_and_scalar(
-        self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, values: list[str], expected: int | None
-    ) -> None:
+    def test_defaults_match_the_reader(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
         reader = mocker.patch("spatialdata_io.readers.codex.codex")
 
-        result = runner.invoke(codex_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out"), *values])
+        result = runner.invoke(codex_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out")])
 
         assert result.exit_code == 0, result.output
-        assert reader.call_args.kwargs["chunks"] == expected
+        reader.assert_called_once_with(
+            tmp_path,
+            cell_table_file=None,
+            image_file=None,
+            data_axes=None,
+            tiff_series=None,
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=DEFAULT_CHUNKS,
+        )
+
+    def test_scalar_chunks(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
+        reader = mocker.patch("spatialdata_io.readers.codex.codex")
+
+        result = runner.invoke(
+            codex_command, ["--input", str(tmp_path), "--output", str(tmp_path / "out"), "--chunks", "16"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert reader.call_args.kwargs["chunks"] == 16
 
     @pytest.mark.parametrize(
         "values",
         [
             ["--chunks", "1", "--chunks", "2"],
             ["--chunks", "0"],
+            ["--scale-factors", "1"],
             ["--tiff-series", "-1"],
             ["--fcs", "false"],
             ["--imread-kwargs", "{}"],
@@ -102,6 +124,7 @@ class TestCodexCommand:
             "image_file",
             "data_axes",
             "tiff_series",
+            "scale_factors",
             "chunks",
         ]
         for name in ("cell_table_file", "image_file"):
@@ -111,5 +134,5 @@ class TestCodexCommand:
             assert options[name].default is None
         assert options["data_axes"].default is None
         assert options["tiff_series"].default is None
-        assert options["chunks"].multiple
-        assert options["chunks"].default == ()
+        assert options["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert options["chunks"].default == DEFAULT_CHUNKS

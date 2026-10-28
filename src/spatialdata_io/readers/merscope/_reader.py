@@ -6,9 +6,10 @@ from typing import TYPE_CHECKING, cast
 
 from spatialdata import SpatialData
 
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.merscope._geometry import read_boundaries
-from spatialdata_io.readers.merscope._images import make_raster_options, read_images
+from spatialdata_io.readers.merscope._images import read_images
 from spatialdata_io.readers.merscope._layout import discover_layout, make_selection
 from spatialdata_io.readers.merscope._tables import finalize_table, read_feature_names, read_table
 from spatialdata_io.readers.merscope._transcripts import read_transcripts
@@ -34,8 +35,8 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     include_cell_boundaries: bool = True,
     include_table: bool = True,
     include_images: bool = True,
-    scale_factors: Sequence[int] | None = None,
-    chunks: int | tuple[int, int, int] | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read the MERSCOPE instrument and Cellpose/Watershed VPT export layouts.
 
@@ -73,11 +74,11 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     include_images
         Return one lazy CYX image per selected z index, preserving source dtype.
     scale_factors
-        Optional integer factors greater than one for generated image pyramid
-        levels. None keeps the full-resolution single scale.
+        Integer factors of at least two, one per generated pyramid level of the
+        images; empty for a single scale.
     chunks
-        Positive integer or three positive CYX sizes. None preserves source
-        chunks. Requested rechunking and pyramid generation remain lazy.
+        One positive size for every axis or three ``c, y, x`` sizes of the
+        images. By default one channel per chunk and square 1024-pixel tiles.
 
     Returns
     -------

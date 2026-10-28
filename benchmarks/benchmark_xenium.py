@@ -33,7 +33,6 @@ Results:
     - Generate HTML report: asv publish && asv preview
 """
 
-import inspect
 import shutil
 from pathlib import Path
 
@@ -77,21 +76,8 @@ class IOBenchmarkXenium:
             shutil.rmtree(self.path_write)
 
     def _read_xenium(self) -> SpatialData:
-        """Read xenium data with version-compatible kwargs."""
-        signature = inspect.signature(xenium)
-        kwargs = {}
-        if "cleanup_labels_zarr_tmpdir" in signature.parameters:
-            kwargs["cleanup_labels_zarr_tmpdir"] = False
-
-        return xenium(
-            path=str(self.path_read),
-            n_jobs=8,
-            cell_boundaries=True,
-            nucleus_boundaries=True,
-            morphology_focus=True,
-            cells_as_circles=True,
-            **kwargs,
-        )
+        """Read every default product plus cell circles."""
+        return xenium(self.path_read, cell_geometry="both")
 
     def time_io(self) -> None:
         """Walltime for data parsing."""

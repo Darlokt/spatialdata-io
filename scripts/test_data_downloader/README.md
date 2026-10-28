@@ -295,3 +295,36 @@ metadata-derived synthetic rejection test, not validation of the complete
 3.2 GB protein file or support for paired RNA/protein output. When a historical
 GEF omits `omics`, its physical fields alone cannot identify every modality;
 select the known RNA file explicitly.
+
+## Xenium datasets
+
+The `xenium` group covers every bundle family with original 10x Genomics
+downloads (CC BY 4.0). Sizes are the extracted local directories.
+
+| Key | Assets and provenance | Covers |
+| --- | --- | --- |
+| `xenium_mouse_brain_subset` | Selected members of the FF mouse brain subset, XOA 1.0.2, with CSV and MatrixMarket twins. About 700 MB. | integer IDs, unversioned format, stripped deposits |
+| `xenium_brain_addon` | Selected members of the FFPE human brain with add-on panel, XOA 1.3.0.5. About 970 MB. | first hexadecimal IDs, binary text columns |
+| `xenium_heart` | Selected members of the FFPE human heart, XOA 1.9.0.1, with CSV/MatrixMarket twins, the aligned H&E image and its alignment matrix. About 1.1 GB. | hexadecimal IDs, aligned images |
+| `xenium_breast`, `xenium_lung` | Complete two-FOV `outs.zip` bundles, XOA 2.0.0.10. About 370 and 270 MB. | first polygon sets, per-channel focus files |
+| `xenium_prime_mouse_ileum`, `xenium_prime_multicell_mouse_ileum` | Complete tiny `outs.zip` bundles, XOA 3.0.0.15. About 18 MB each. | Xenium Prime, multimodal segmentation |
+| `xenium_ovary`, `xenium_multicell_ovary` | Complete tiny `outs.zip` bundles, XOA 4.0.0.19. About 32 MB each. | `ch<NNNN>_<marker>` focus files |
+| `xenium_protein_kidney` | Complete tiny `outs.zip` bundle, XOA 4.0.0.19. About 25 MB. | Protein Expression and the twelve-channel protein kit |
+
+Member datasets are assembled from individually hashed files of the 10x
+release (`<dataset>_<file>`) instead of multi-gigabyte archives. Download and
+run the real-data workflows with:
+
+```bash
+uv run python scripts/test_data_downloader --group xenium
+uv run pytest tests/integration/readers/xenium/test_data.py -m data
+```
+
+Every expected value comes from the raw files read independently of the
+reader: counts through h5py, identifiers and polygons through Arrow, image
+windows through tifffile, and the alignment matrix as text. The workflows check
+exact counts and identifiers, the reconciliation of `qv >= 20` transcripts with
+the count matrix, mask labels against `cell_area` and the registered
+boundaries, OME channel names and pixel windows, protein scaling, the aligned
+H&E frame, secondary analysis, and that reads assembled from the CSV and
+MatrixMarket twins equal the full bundle.

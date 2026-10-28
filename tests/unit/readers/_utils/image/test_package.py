@@ -10,9 +10,14 @@ class TestImagePackage:
 
     def test_exports_only_the_supported_internal_surface(self) -> None:
         assert image.__all__ == [
+            "DEFAULT_CHUNKS",
+            "DEFAULT_SCALE_FACTORS",
+            "DEFAULT_TILE_SIZE",
             "LazyRaster",
+            "RasterOptions",
             "TiffMetadata",
             "inspect_tiff",
+            "make_raster_options",
             "normalize_raster_axes",
             "read_jpeg",
             "read_png",

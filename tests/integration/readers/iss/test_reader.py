@@ -59,6 +59,9 @@ class TestIss:
         assert labels.dims == ("y", "x")
         assert labels.shape == (32, 40)
         assert labels.dtype == np.dtype(np.uint16)
+        # Default chunks hold one channel and up to 1024 x 1024 pixels.
+        assert image.chunks == ((1, 1), (32,), (40,))
+        assert labels.chunks == ((32,), (40,))
         np.testing.assert_array_equal(image.data.compute(), iss_dataset.raw)
         np.testing.assert_array_equal(labels.data.compute(), iss_dataset.labels)
         assert get_transformation(image, get_all=True) == {"global": Identity()}
@@ -80,13 +83,9 @@ class TestIss:
         np.testing.assert_array_equal(table.obsm["spatial"], [[2.0, 4.0], [26.0, 9.0]])
 
     @pytest.mark.parametrize("channels", [1, 2, 3, 4])
-    @pytest.mark.parametrize(("image_factors", "label_factors"), [(None, (2, 2)), ((2, 2), None), ((2, 2), (2, 2))])
-    def test_independent_pyramid_modes_preserve_scientific_channels(
-        self,
-        tmp_path: Path,
-        channels: int,
-        image_factors: tuple[int, int] | None,
-        label_factors: tuple[int, int] | None,
+    @pytest.mark.parametrize("factors", [(), (2, 2)])
+    def test_pyramid_modes_preserve_scientific_channels(
+        self, tmp_path: Path, channels: int, factors: tuple[int, ...]
     ) -> None:
         dataset = write_iss_dataset(tmp_path, channels=channels)
 
@@ -95,23 +94,21 @@ class TestIss:
             raw_image_file="raw.tiff",
             labels_file="labels.tiff",
             table_file="cells.h5ad",
-            image_scale_factors=image_factors,
-            labels_scale_factors=label_factors,
+            scale_factors=factors,
             chunks=(1, 16, 16),
         )
         image, labels = result.images["region_raw_image"], result.labels["region_labels_image"]
-        assert isinstance(image, DataTree if image_factors else DataArray)
-        assert isinstance(labels, DataTree if label_factors else DataArray)
-        if isinstance(image, DataTree):
-            assert list(image.children) == ["scale0", "scale1", "scale2"]
+        assert isinstance(image, DataTree if factors else DataArray)
+        assert isinstance(labels, DataTree if factors else DataArray)
+        if isinstance(image, DataTree) and isinstance(labels, DataTree):
+            # The image and its labels share every pyramid level.
+            assert list(image.children) == list(labels.children) == ["scale0", "scale1", "scale2"]
+            for level in image.children:
+                assert image[level]["image"].shape[1:] == labels[level]["image"].shape
             assert image["scale2"]["image"].shape == (channels, 8, 10)
-            image = image["scale0"]["image"]
-        if isinstance(labels, DataTree):
-            assert list(labels.children) == ["scale0", "scale1", "scale2"]
-            assert labels["scale2"]["image"].shape == (8, 10)
             for child in labels.children.values():
                 assert set(np.unique(child["image"].data.compute())) <= {0, 2, 7}
-            labels = labels["scale0"]["image"]
+            image, labels = image["scale0"]["image"], labels["scale0"]["image"]
         assert image.coords["c"].to_numpy().tolist() == list(range(channels))
         np.testing.assert_array_equal(image.data.compute(), dataset.raw)
         np.testing.assert_array_equal(labels.data.compute(), dataset.labels)
@@ -148,7 +145,6 @@ class TestIss:
             labels_file="labels.tiff",
             table_file="cells.h5ad",
             instance_key=instance_key,
-            image_scale_factors=[2],
         )
         np.testing.assert_array_equal(result.tables["table"].obs[instance_key or "instance_id"], identifiers)
         np.testing.assert_array_equal(result.labels["region_labels_image"].data.compute(), labels)

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
@@ -24,10 +24,8 @@ if TYPE_CHECKING:
         adjusted_cell_counts_file: Path | None
         analysis_files: tuple[Path, ...]
         image_roles: tuple[Literal["registered", "mask", "tissue_cut", "distance_mask", "expression"], ...]
-        chunks: tuple[int, ...]
-
-
-_IMAGE_RANK = 3
+        scale_factors: tuple[int, ...]
+        chunks: int | tuple[int, int, int]
 
 
 def _bin_sizes(
@@ -104,29 +102,11 @@ def _bin_sizes(
     default=(),
     help="Repeat roles; all matching stains are loaded lazily.",
 )
-@click.option(
-    "--chunks",
-    type=click.IntRange(min=1),
-    multiple=True,
-    default=(),
-    help="One size for all axes or three CYX sizes. Omitted retains native TIFF chunks.",
-)
+@scale_factors_option
+@chunks_option
 def stereoseq_command(input_path: Path, output_path: Path, **options: Unpack[_StereoseqOptions]) -> None:
     """Select products explicitly, read them, and write the resulting SpatialData."""
     from spatialdata_io.readers.stereoseq import stereoseq  # noqa: PLC0415, RUF100 - Keep command help lightweight.
-
-    sizes = options["chunks"]
-    if len(sizes) not in (0, 1, _IMAGE_RANK):
-        message = "Pass --chunks once or three times in CYX order."
-        raise click.BadParameter(message, param_hint="--chunks")
-
-    chunks: int | tuple[int, ...] | None
-    if not sizes:
-        chunks = None
-    elif len(sizes) == 1:
-        chunks = sizes[0]
-    else:
-        chunks = sizes
 
     result = stereoseq(
         input_path,
@@ -139,6 +119,7 @@ def stereoseq_command(input_path: Path, output_path: Path, **options: Unpack[_St
         adjusted_cell_counts_file=options["adjusted_cell_counts_file"],
         analysis_files=options["analysis_files"],
         image_roles=options["image_roles"],
-        chunks=chunks,
+        scale_factors=options["scale_factors"],
+        chunks=options["chunks"],
     )
     result.write(output_path)

@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.macsima._channels import make_channel_options, plan_stack
-from spatialdata_io.readers.macsima._images import make_image, make_raster_options
+from spatialdata_io.readers.macsima._images import make_image
 from spatialdata_io.readers.macsima._layout import discover_layout, validate_layout_options
 from spatialdata_io.readers.macsima._metadata import ChannelSource, read_channel
 from spatialdata_io.readers.macsima._tables import make_channel_table
@@ -79,8 +80,8 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     nuclei_channel_name: str = "DAPI",
     split_threshold_nuclei_channel: int | None = 2,
     include_transformations: bool = True,
-    scale_factors: Sequence[int] | None = None,
-    chunks: int | tuple[int, int, int] = (1, 1024, 1024),
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read processed MACSima (MACSiQView) single-channel OME-TIFF exports.
 
@@ -129,10 +130,11 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
         Scale pixels to micrometers in the stack's coordinate system. False
         uses the identity, so the coordinate system is the pixel grid.
     scale_factors
-        Integer factors greater than one for generated pyramid levels. None
-        returns a single scale.
+        Integer factors of at least two, one per generated pyramid level of the
+        images; empty for a single scale.
     chunks
-        One size for every axis or three CYX sizes for the returned image.
+        One positive size for every axis or three ``c, y, x`` sizes of the
+        images. By default one channel per chunk and square 1024-pixel tiles.
 
     Returns
     -------
@@ -189,7 +191,10 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     region decodes only the intersecting bands. Source files must remain
     available. Vendor-written pyramid levels are not used.
     """
-    raster_options = make_raster_options(scale_factors, chunks, include_transformations=include_transformations)
+    if not isinstance(include_transformations, bool):
+        message = "include_transformations must be a boolean."
+        raise TypeError(message)
+    raster = make_raster_options(scale_factors, chunks)
     channel_options = make_channel_options(
         exclude_cycles=exclude_cycles,
         include_cycle_in_channel_names=include_cycle_in_channel_names,
@@ -211,7 +216,13 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
             selections["_nuclei"] = plan.nuclei
 
         for suffix, channels in selections.items():
-            image = make_image(channels, frame=plan.name, pixel_size_um=plan.pixel_size_um, options=raster_options)
+            image = make_image(
+                channels,
+                frame=plan.name,
+                pixel_size_um=plan.pixel_size_um,
+                include_transformations=include_transformations,
+                raster=raster,
+            )
             _insert_unique(images, f"{plan.name}{suffix}_image", image, stack=stack)
             _insert_unique(tables, f"{plan.name}{suffix}_table", make_channel_table(channels), stack=stack)
             versions.update(channel.source.software_version for channel in channels)

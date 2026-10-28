@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
 from math import prod
 from typing import TYPE_CHECKING, cast
 
@@ -18,51 +16,12 @@ if TYPE_CHECKING:
     from dask.array import Array
     from xarray import DataArray, DataTree
 
+    from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
-_MIN_SCALE_FACTOR = 2
 _MAX_EXACT_LABEL_BYTES = 4
-
-
-@dataclass(frozen=True, slots=True)
-class RasterOptions:
-    """Own validated pyramid factors and canonical CYX chunk sizes."""
-
-    scale_factors: tuple[int, ...] | None
-    chunks: int | tuple[int, int, int] | None
-
-
-def make_raster_options(
-    scale_factors: Sequence[int] | None, chunks: int | tuple[int, int, int] | None
-) -> RasterOptions:
-    """Validate caller options once and own the borrowed factor sequence."""
-    if scale_factors is not None and (
-        isinstance(scale_factors, str | bytes) or not isinstance(scale_factors, Sequence)
-    ):
-        message = "scale_factors must be an ordered sequence of integer factors."
-        raise TypeError(message)
-    factors = None if scale_factors is None else tuple(scale_factors)
-    if factors is not None and (
-        not factors
-        or any(isinstance(value, bool) or not isinstance(value, int) or value < _MIN_SCALE_FACTOR for value in factors)
-    ):
-        message = "scale_factors must be a nonempty sequence of integer downsampling factors greater than one."
-        raise ValueError(message)
-
-    if chunks is not None:
-        sizes = chunks if isinstance(chunks, tuple) else (chunks,)
-        if isinstance(chunks, tuple) and len(chunks) != len(_IMAGE_AXES):
-            message = "chunks must contain three values in CYX order."
-            raise ValueError(message)
-        if any(isinstance(value, bool) or not isinstance(value, int) for value in sizes):
-            message = "chunks must be a positive integer or a tuple of three integers."
-            raise TypeError(message)
-        if any(value <= 0 for value in sizes):
-            message = "chunks must contain only positive sizes."
-            raise ValueError(message)
-    return RasterOptions(factors, chunks)
 
 
 def _read(path: ArtifactFile, artifact: str, target_axes: tuple[str, ...]) -> Array:
@@ -100,7 +59,7 @@ def _read(path: ArtifactFile, artifact: str, target_axes: tuple[str, ...]) -> Ar
 
 def _check_pyramid(array: Array, options: RasterOptions) -> None:
     """Reject pyramid factors that would eliminate a spatial dimension."""
-    if options.scale_factors is not None and min(array.shape[-2:]) < prod(options.scale_factors):
+    if options.scale_factors and min(array.shape[-2:]) < prod(options.scale_factors):
         message = f"Requested scale factors {options.scale_factors} exceed the spatial extent of an MCMICRO raster."
         raise ValueError(message)
 
@@ -127,8 +86,8 @@ def read_image(
         dims=_IMAGE_AXES,
         c_coords=list(channels),
         rgb=False,
-        chunks=options.chunks or tuple(max(parts) for parts in image.chunks),
-        scale_factors=options.scale_factors,
+        scale_factors=options.model_scale_factors,
+        chunks=options.image_chunks(),
         transformations={frame: Identity()},
     )
     return element, grid
@@ -151,18 +110,16 @@ def read_labels(
         raise ReaderFormatError(
             context=context, path=path, found=str(labels.dtype), expected="integer labels with background zero"
         )
-    if options.scale_factors is not None and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
-        message = "Generated label pyramids require <=32-bit labels; use scale_factors=None for exact 64-bit IDs."
+    if options.scale_factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
+        message = "Generated label pyramids require <=32-bit labels; use scale_factors=() for exact 64-bit IDs."
         raise ValueError(message)
     _check_pyramid(labels, options)
 
-    chunks = options.chunks
-    label_chunks = chunks[-2:] if isinstance(chunks, tuple) else chunks
     element = Labels2DModel.parse(
         labels,
         dims=_LABEL_AXES,
-        chunks=label_chunks or tuple(max(parts) for parts in labels.chunks),
-        scale_factors=options.scale_factors,
+        scale_factors=options.model_scale_factors,
+        chunks=options.label_chunks(),
         transformations={frame: Identity()},
     )
     return element, labels.dtype

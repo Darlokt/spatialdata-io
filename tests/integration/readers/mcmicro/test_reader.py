@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import pytest
 import tifffile
 from click.testing import CliRunner
 from dask.callbacks import Callback
@@ -90,6 +91,10 @@ class TestMcmicro:
         assert list(result.images) == ["sample_image"]
         assert not result.labels
         assert not result.tables
+
+    def test_invalid_raster_option_fails_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="scale_factors"):
+            mcmicro(tmp_path / "missing", scale_factors=(1,))
 
     def test_construction_reads_no_pixels_and_partial_reads_open_one_source(
         self, tmp_path: Path, mocker: MockerFixture

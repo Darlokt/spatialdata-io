@@ -380,7 +380,7 @@ def technology(path: str | Path, ...) -> SpatialData:
     return sdata
 ```
 
-For example, the reader for Xenium data is called `xenium()` and is located under [`src/spatialdata_io/readers/xenium.py`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/xenium.py).
+For example, the reader for Xenium data is called `xenium()` and is located under [`src/spatialdata_io/readers/xenium/`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/xenium).
 
 **Technical notes**
 
@@ -388,9 +388,9 @@ For example, the reader for Xenium data is called `xenium()` and is located unde
 
 We recommend studying existing readers and reusing code from them. A few technical notes below.
 
-- Large raster or points data is usually loaded from disk lazily (e.g. with `dask_image.imread()`), which allows returning a `SpatialData` object quickly and defers computation when saving the object to disk in the SpatialData Zarr format, with `sdata.write()`.
-- When the raw data has multiple samples, we recommend adding a coordinate system for each sample, and if the samples are aligned in space, one common coordinate system. A single table containing the annotation for all samples is preferred. See an example in the [`cosmx()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/cosmx.py) reader.
-- Small images should be represented as single-scale images (`xarray.DataArray`), large images as multiscale images (`xarray.DataTree`). The scale factors and chunk shape (`chunks`) should lead to chunks that fit in memory. See an example in [`visium()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/visium/_reader.py).
+- Large raster or points data is loaded from disk lazily (rasters through the shared `readers._utils.image` boundary), which allows returning a `SpatialData` object quickly and defers computation when saving the object to disk in the SpatialData Zarr format, with `sdata.write()`.
+- When the raw data has multiple samples, we recommend adding a coordinate system for each sample, and if the samples are aligned in space, one common coordinate system. A single table containing the annotation for all samples is preferred. See an example in the [`cosmx()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/cosmx/_reader.py) reader.
+- Readers that return images or labels expose `scale_factors` and `chunks` with the shared defaults and validation of `readers._utils.image` (`DEFAULT_SCALE_FACTORS`, `DEFAULT_CHUNKS`, `make_raster_options()`) and pass explicit chunks to the SpatialData models; the CLI uses the shared `scale_factors_option` and `chunks_option` decorators. See [Raster options](raster_options.md) and the [`xenium()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/xenium/_reader.py) reader.
 
 ##### Experimental readers
 

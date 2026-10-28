@@ -83,7 +83,7 @@ The reader name and, when all returned channels agree, the MACSiQView software v
 
 ## Options and execution
 
-`scale_factors=None` keeps a single full-resolution scale; a sequence of integer factors greater than one adds pyramid levels. `chunks` is one positive size or three CYX sizes and defaults to `(1, 1024, 1024)`. Vendor-written pyramid levels are not used.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. Vendor-written pyramid levels are not used.
 
 Each TIFF is inspected once; construction reads metadata only and executes no pixel tasks. MACSima exports store one row per TIFF strip, so whole strips are read in bands of at most 16 MiB, and computing a small region decodes only the bands it intersects. The source files must remain available for later raster computation.
 
@@ -112,6 +112,7 @@ Renamed and removed options:
 - `transformations` is now `include_transformations`. Without transformations, the stack keeps its own coordinate system instead of `global`.
 - `max_chunk_size` and `c_chunks_size` are replaced by `chunks`.
 - `multiscale` and `default_scale_factor` are replaced by `scale_factors`, which no longer defaults to an automatic pyramid.
+- `scale_factors` defaults to `()` instead of `None` for a single scale; `None` is no longer accepted.
 - `subset`, `c_subset`, `imread_kwargs`, the unimplemented `raw` style and `MACSimaParsingStyle` have been removed; slice the returned lazy images instead.
 
 Corrections and contract changes that change results:

@@ -50,9 +50,9 @@ With an image, both grid axes and the border inset are multiplied by `max(image_
 
 TIFF metadata supplies source axes when they are unambiguous. Use `data_axes`, such as `"CYX"` or `"YXC"`, when an explicit interpretation is required. `tiff_series=0` and `tiff_level=0` select the first TIFF series and its first resolution level; other nonnegative indices select an existing series or pyramid level. PNG and JPEG use their encoded image layout and do not accept TIFF-specific selection or axis overrides.
 
-Images preserve numeric channel coordinates for ordinary RGB input. Reliable scientific channel names from OME metadata are retained in source order. No image pyramid is generated automatically.
+Images preserve numeric channel coordinates for ordinary RGB input. Reliable scientific channel names from OME metadata are retained in source order.
 
-The default `chunks=None` retains the shared image reader's storage-aligned chunks: native TIFF tiles, or whole strips grouped into bands of at most 16 MiB. A positive integer sets a chunk size for all `(c, y, x)` axes; a three-integer tuple specifies their sizes individually. Nondefault image options require an image. Metadata inspection is eager, while pixel decoding stays lazy until the returned image is computed or written. TIFF tasks use tiles or strips where the codec permits bounded reads. PNG and JPEG can require decoding the entire encoded frame even for a small selection; rechunking does not change that codec limitation.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A pyramid is generated only when `scale_factors` requests one; the grid scale always uses the full-resolution extent of the selected TIFF level. Image options other than their defaults require an image. Metadata inspection is eager, while pixel decoding stays lazy until the returned image is computed or written. TIFF tasks decode the tiles or strips that overlap the computed chunks. PNG and JPEG can require decoding the entire encoded frame even for a small selection; rechunking does not change that codec limitation.
 
 Missing or wrong-kind paths raise the corresponding filesystem exception. Malformed or ambiguous layouts, barcode schemas, and identifier relationships raise `ReaderFormatError`, a `ValueError` subclass, with reader and artifact context. Invalid option values raise `ValueError`, and unsupported option types raise `TypeError`. The reader does not return partial results after a validation failure.
 
@@ -70,21 +70,24 @@ sdata = dbit(
     border_scale=1.0,
     tiff_series=0,
     tiff_level=0,
+    scale_factors=(2, 2),
     chunks=(1, 512, 512),
 )
 sdata.write("sample.zarr")
 ```
 
-The CLI uses the same option names in kebab case. Repeat `--chunks` once for a single size or three times in CYX order:
+The CLI uses the same option names in kebab case. Repeat `--scale-factors` once per generated level, and `--chunks` once for a single size or three times in CYX order:
 
 ```bash
 spatialdata_io dbit --input dataset --output sample.zarr \
   --table-file sample.h5ad --barcode-positions-file barcode_list.txt \
   --image-file registered.tif --no-include-border \
-  --chunks 1 --chunks 512 --chunks 512
+  --scale-factors 2 --scale-factors 2 --chunks 1 --chunks 512 --chunks 512
 ```
 
 `--include-border/--no-include-border` is a boolean flag pair. The previous `anndata_path`, `barcode_position`, `image_path`, and `border` arguments and their CLI options have been removed.
+
+Images are now chunked `(1, 1024, 1024)` by default instead of keeping the storage-aligned chunks of the source, and `chunks=None` is no longer accepted. Pass `chunks` explicitly to choose another layout. The new `scale_factors` option builds pyramid levels.
 
 ## Complete synthetic example
 

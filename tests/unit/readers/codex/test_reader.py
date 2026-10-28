@@ -6,6 +6,7 @@ import importlib
 import inspect
 
 from spatialdata_io import codex as root_codex
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.codex import codex
 
 
@@ -23,7 +24,17 @@ class TestCodex:
     def test_signature_is_explicit(self) -> None:
         parameters = inspect.signature(codex).parameters
 
-        assert list(parameters) == ["path", "cell_table_file", "image_file", "data_axes", "tiff_series", "chunks"]
+        assert list(parameters) == [
+            "path",
+            "cell_table_file",
+            "image_file",
+            "data_axes",
+            "tiff_series",
+            "scale_factors",
+            "chunks",
+        ]
+        assert parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert parameters["chunks"].default == DEFAULT_CHUNKS
         assert all(
             parameter.kind == inspect.Parameter.KEYWORD_ONLY for name, parameter in parameters.items() if name != "path"
         )

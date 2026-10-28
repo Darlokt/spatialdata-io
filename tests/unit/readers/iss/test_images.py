@@ -13,8 +13,9 @@ from xarray import DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
 from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.iss._images import _image_options, _read_raster, _read_rasters, _validate_chunks
+from spatialdata_io.readers.iss._images import _read_raster, _read_rasters, _validate_data_axes
 from spatialdata_io.readers.iss._layout import _discover_layout
 from tests.integration.readers.iss.conftest import write_iss_dataset
 
@@ -24,50 +25,21 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
-class TestImageOptions:
-    """Validate and own user configuration without opening artifacts."""
+class TestValidateDataAxes:
+    """Validate and normalize the explicit raw-image axes without opening artifacts."""
 
-    def test_owns_factor_sequences_and_normalizes_axes(self) -> None:
-        image_factors, label_factors = [2, 3], [2]
-
-        options = _image_options(
-            data_axes="CYX", image_scale_factors=image_factors, labels_scale_factors=label_factors, chunks=16
-        )
-        image_factors.append(5)
-        label_factors.append(7)
-        assert options.data_axes == "cyx"
-        assert options.image_scale_factors == (2, 3)
-        assert options.labels_scale_factors == (2,)
+    @pytest.mark.parametrize(("axes", "expected"), [(None, None), ("CYX", "cyx"), ("YXS", "yxs")])
+    def test_valid_axes(self, axes: str | None, expected: str | None) -> None:
+        assert _validate_data_axes(axes) == expected
 
     @pytest.mark.parametrize("axes", ["", "CCYX", "QX", "C1YX", "C YX", "CÝX"])
     def test_invalid_axis_names(self, axes: str) -> None:
         with pytest.raises(ValueError, match="data_axes"):
-            _image_options(data_axes=axes, image_scale_factors=None, labels_scale_factors=None, chunks=None)
+            _validate_data_axes(axes)
 
     def test_invalid_axes_type(self) -> None:
         with pytest.raises(TypeError, match="data_axes"):
-            _image_options(data_axes=["c", "y", "x"], image_scale_factors=None, labels_scale_factors=None, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Exercise an untyped caller boundary.
-
-    @pytest.mark.parametrize("factors", [[], [1], [0], [-1], [True], [2.0]])
-    def test_invalid_scale_factors(self, factors: list[float]) -> None:
-        with pytest.raises(ValueError, match="image_scale_factors"):
-            _image_options(data_axes=None, image_scale_factors=factors, labels_scale_factors=None, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Exercise invalid values from an untyped caller.
-
-        with pytest.raises(ValueError, match="labels_scale_factors"):
-            _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=factors, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Exercise invalid values from an untyped caller.
-
-
-class TestValidateChunks:
-    """Reject invalid requested chunk sizes before source metadata inspection."""
-
-    @pytest.mark.parametrize("chunks", [None, 1, (1, 16, 32)])
-    def test_valid_chunks(self, chunks: int | tuple[int, int, int] | None) -> None:
-        _validate_chunks(chunks)
-
-    @pytest.mark.parametrize("chunks", [0, -1, (1, 0, 2), (), (1, 2), True, 2.0, "auto", (1, 2.0, 3)])
-    def test_invalid_chunks(self, chunks: float | str | tuple[int | float, ...]) -> None:
-        with pytest.raises((ValueError, TypeError), match="chunks"):
-            _validate_chunks(chunks)  # type: ignore[bad-argument-type, arg-type]  # Validate runtime public input rather than private producer state.
+            _validate_data_axes(["c", "y", "x"])  # type: ignore[bad-argument-type, arg-type]  # Exercise an untyped caller boundary.
 
 
 class TestReadRaster:
@@ -140,11 +112,10 @@ class TestReadRasters:
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
-        factors = [64] if invalid == "factor" else [2] if invalid in {"uint64", "int64"} else None
-        options = _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=factors, chunks=None)
+        factors = (64,) if invalid == "factor" else (2,) if invalid in {"uint64", "int64"} else ()
 
         with pytest.raises(ValueError, match=r"extent|integer label|32-bit"):
-            _read_rasters(layout, options)
+            _read_rasters(layout, data_axes=None, raster=make_raster_options(factors))
         pixels.assert_not_called()
 
     @pytest.mark.parametrize("names", [["DAPI", "CD3"], ["DAPI", "DAPI"], None])
@@ -156,9 +127,7 @@ class TestReadRasters:
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
-        options = _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=None, chunks=None)
-
-        result = _read_rasters(layout, options)
+        result = _read_rasters(layout, data_axes=None, raster=make_raster_options())
         expected = names if names is not None and len(set(names)) == 2 else ["Channel:0:0", "Channel:0:1"]
         assert result.image.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(result.image.data.compute(), dataset.raw)
@@ -186,12 +155,13 @@ class TestReadRasters:
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
-        options = _image_options(data_axes=None, image_scale_factors=None, labels_scale_factors=None, chunks=None)
+        # Chunks equal to the 16-pixel tiles keep one task per stored tile.
+        raster = make_raster_options(chunks=(1, 16, 16))
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
 
         with Callback(posttask=tasks):
-            result = _read_rasters(layout, options)
+            result = _read_rasters(layout, data_axes=None, raster=raster)
         tasks.assert_not_called()
         pixels.assert_not_called()
 
@@ -223,9 +193,7 @@ class TestReadRasters:
         layout = _discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
-        options = _image_options(data_axes=None, image_scale_factors=factors, labels_scale_factors=factors, chunks=None)
-
-        result = _read_rasters(layout, options)
+        result = _read_rasters(layout, data_axes=None, raster=make_raster_options(factors))
 
         assert isinstance(result.labels, DataTree)
         for level in result.labels.children.values():

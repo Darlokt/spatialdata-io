@@ -12,7 +12,7 @@ import tifffile
 from dask.callbacks import Callback
 from spatialdata.transformations import Identity, get_transformation
 from tifffile.zarr import ZarrTiffStore
-from xarray import DataArray
+from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image._encoded as encoded
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_tasks
@@ -29,7 +29,7 @@ class TestDbitImages:
     """Keep image semantics and grid coordinates correct without eager pixel I/O."""
 
     @pytest.mark.parametrize("compressed", [False, True])
-    def test_native_chunks_partial_reads_serialization_and_closure(
+    def test_stored_tile_chunks_partial_reads_serialization_and_closure(
         self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
     ) -> None:
         _write_layout(tmp_path)
@@ -46,8 +46,10 @@ class TestDbitImages:
         decode = mocker.spy(tiff_tasks, "_read_tiff_selection")
         tasks: list[str] = []
 
+        # Chunks equal to the 16-pixel stored tiles; default tiles would merge
+        # every tile of a channel into one chunk.
         with Callback(pretask=lambda key, *_: tasks.append(str(key))):
-            result = dbit(tmp_path, image_file="histology.tif")
+            result = dbit(tmp_path, image_file="histology.tif", chunks=(1, 16, 16))
 
         assert not tasks
         assert decode.call_count == 0
@@ -127,6 +129,35 @@ class TestDbitImages:
         assert image.shape == (4, 6, 8)
         np.testing.assert_array_equal(image.data.compute(), np.full((4, 6, 8), 17, dtype=np.uint16))
         np.testing.assert_array_equal(result.shapes["sample"].total_bounds, [0, 0, 8, 8])
+
+    def test_default_chunks_hold_one_channel(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        source = np.arange(2 * 32 * 48, dtype=np.uint16).reshape(2, 32, 48)
+        path = tmp_path / "histology.tif"
+        tifffile.imwrite(path, source, tile=(16, 16), photometric="minisblack", metadata={"axes": "CYX"})
+
+        image = dbit(tmp_path, image_file=path).images["sample_image"]
+
+        assert isinstance(image, DataArray)
+        assert image.data.chunks == ((1, 1), (32,), (48,))
+        np.testing.assert_array_equal(image.data.compute(), source)
+
+    def test_pyramid_keeps_full_resolution_grid_scale(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        source = np.arange(2 * 12 * 16, dtype=np.uint16).reshape(2, 12, 16)
+        path = tmp_path / "histology.tif"
+        tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "CYX"})
+
+        result = dbit(tmp_path, image_file=path, include_border=False, scale_factors=(2,), chunks=(1, 4, 8))
+        pyramid = result.images["sample_image"]
+
+        assert isinstance(pyramid, DataTree)
+        assert list(pyramid.children) == ["scale0", "scale1"]
+        assert pyramid["scale0"]["image"].data.chunksize == (1, 4, 8)
+        np.testing.assert_array_equal(pyramid["scale0"]["image"].data.compute(), source)
+        assert pyramid["scale1"]["image"].shape == (2, 6, 8)
+        # Two grid positions per axis over the 16-pixel full-resolution width.
+        np.testing.assert_array_equal(result.shapes["sample"].total_bounds, [0, 0, 16, 16])
 
     def test_channel_count_never_sets_grid_scale(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)

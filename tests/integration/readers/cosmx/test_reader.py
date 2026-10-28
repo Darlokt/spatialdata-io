@@ -141,6 +141,10 @@ class TestCosmx:
         with pytest.raises(TypeError, match="boolean"):
             cosmx(tmp_path, include_transcripts="yes")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
+    def test_invalid_raster_option_fails_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="chunks"):
+            cosmx(tmp_path / "missing", chunks=0)
+
     def test_graphs_serialize_and_pyramids_stay_lazy(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path)
         result = cosmx(fixture.root, scale_factors=(2,), chunks=(3, 4, 4))

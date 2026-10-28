@@ -204,20 +204,37 @@ class TestImage:
         }
         np.testing.assert_array_equal(result.data.compute(), source)
 
-    def test_default_3d_chunks_preserve_channel_and_depth_storage(self, tmp_path: Path) -> None:
+    def test_default_3d_chunks_hold_one_channel_and_plane(self, tmp_path: Path) -> None:
         path = tmp_path / "volume.tif"
-        source = np.arange(2 * 3 * 19 * 23, dtype=np.uint16).reshape(2, 3, 19, 23)
-        _write_tiff(path, source, "CZYX", compression="deflate")
+        source = np.arange(2 * 19 * 23 * 3, dtype=np.uint16).reshape(2, 19, 23, 3)
+        # Interleaved samples store all channels of a plane in each storage chunk.
+        _write_tiff(path, source, "ZYXC", compression="deflate")
 
-        result = image(path, "czyx", "global")
+        result = image(path, "zyxc", "global")
 
         assert isinstance(result, DataArray)
         assert result.chunksizes == {
-            "c": (1, 1),
-            "z": (1, 1, 1),
+            "c": (1, 1, 1),
+            "z": (1, 1),
             "y": (19,),
             "x": (23,),
         }
+        np.testing.assert_array_equal(result.data.compute(), source.transpose(3, 0, 1, 2))
+
+    def test_scale_factors_build_pyramid_with_exact_scale0_and_chunks_at_every_level(self, tmp_path: Path) -> None:
+        path = tmp_path / "pyramid.tif"
+        source = np.arange(3 * 40 * 48, dtype=np.uint16).reshape(3, 40, 48)
+        _write_tiff(path, source, "CYX")
+
+        result = generic(path, data_axes="cyx", scale_factors=(2, 2), chunks=(1, 8, 8))
+
+        assert isinstance(result, DataTree)
+        assert list(result.children) == ["scale0", "scale1", "scale2"]
+        levels = [cast("DataArray", result[f"scale{index}"]["image"]) for index in range(3)]
+        assert [level.shape for level in levels] == [(3, 40, 48), (3, 20, 24), (3, 10, 12)]
+        assert [level.chunksizes["c"] for level in levels] == [(1, 1, 1)] * 3
+        assert [max(level.chunksizes["y"] + level.chunksizes["x"]) for level in levels] == [8, 8, 8]
+        np.testing.assert_array_equal(levels[0].data.compute(), source)
 
     def test_selects_tiff_pyramid_level_before_model_pyramid(self, tmp_path: Path) -> None:
         path = tmp_path / "pyramid.btf"
@@ -256,6 +273,8 @@ class TestImage:
             result = image(path, "yxc", "global")
 
         assert not executed
+        # The encoded frame is one source chunk; the default splits its channels.
+        assert result.chunksizes == {"c": (1, 1, 1), "y": (9,), "x": (11,)}
         np.testing.assert_array_equal(result.data.compute(), expected.transpose(2, 0, 1))
 
     def test_rejects_suffix_signature_mismatch(self, tmp_path: Path) -> None:

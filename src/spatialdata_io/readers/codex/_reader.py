@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.codex._geometry import _make_shapes
@@ -15,6 +16,7 @@ from spatialdata_io.readers.codex._layout import _discover_layout
 from spatialdata_io.readers.codex._tables import _read_cell_table
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     import pandas as pd
@@ -27,7 +29,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     image_file: str | Path | None = None,
     data_axes: str | None = None,
     tiff_series: int | None = None,
-    chunks: int | tuple[int, int, int] | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read an unversioned processor-style CODEX region export.
 
@@ -61,10 +64,15 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     tiff_series
         Zero-based series. Required for images containing multiple series.
         Only full-resolution level zero is read, in the table's pixel frame.
+    scale_factors
+        Integer factors of at least two, one per generated pyramid level of the
+        images; empty for a single scale.
     chunks
-        Positive size for all image axes, or three sizes in output CYX order.
-        By default source storage chunks are retained. Requires an image, as do
-        the other image options.
+        One positive size for every axis or three ``c, y, x`` sizes; by default
+        one channel per chunk and square 1024-pixel tiles.
+
+        Like ``data_axes`` and ``tiff_series``, nondefault ``scale_factors`` and
+        ``chunks`` require an image.
 
     Returns
     -------
@@ -99,12 +107,14 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         identity transforms to ``global``. No physical-unit conversion is inferred.
 
         Optional ``images['images']`` is lazy CYX and retains source dtype and
-        channel order. Two factor-two pyramid levels are added when both spatial
-        dimensions permit them. Raster channels use OME names or IDs when
+        channel order. It is a single scale unless ``scale_factors`` requests
+        pyramid levels; no pyramid is added automatically. Raster channels use
+        OME names or IDs when
         available and positional labels otherwise. They are not matched to table
         markers. Scientific three- and four-channel stacks are not guessed to be
         RGB. Raster metadata is eager, construction executes zero pixel tasks,
-        and partial computations retain native TIFF storage selection.
+        and partial computations decode only the TIFF tiles or strips of the
+        output chunks they overlap.
 
         All resources close before return or inside lazy tasks. Caller-owned
         state is not mutated.
@@ -118,15 +128,16 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         invalid, sources are ambiguous, or a region is missing or mixed.
     """
     # Resolve all choices before loading the eager cell population.
-    _validate_image_options(data_axes, tiff_series, chunks)
+    _validate_image_options(data_axes, tiff_series)
+    raster = make_raster_options(scale_factors, chunks)
     layout = _discover_layout(path, cell_table_file=cell_table_file, image_file=image_file)
-    if layout.image is None and any(option is not None for option in (data_axes, tiff_series, chunks)):
-        message = "data_axes, tiff_series, and chunks require an image."
+    if layout.image is None and (data_axes is not None or tiff_series is not None or raster != make_raster_options()):
+        message = "data_axes, tiff_series, and nondefault scale_factors or chunks require an image."
         raise ValueError(message)
 
     images = {}
     if layout.image is not None:
-        images["images"] = _read_image(layout.image, data_axes=data_axes, tiff_series=tiff_series, chunks=chunks)
+        images["images"] = _read_image(layout.image, data_axes=data_axes, tiff_series=tiff_series, raster=raster)
 
     table = _read_cell_table(layout.cell_table)
     shapes = _make_shapes(table)

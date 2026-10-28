@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 
 import click
 
+from spatialdata_io._cli._common import scale_factors_option
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS
+
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
 
@@ -15,6 +18,7 @@ if TYPE_CHECKING:
         data_axes: str | None
         tiff_series: int
         tiff_level: int
+        scale_factors: tuple[int, ...]
         chunks: tuple[int, ...]
         coordinate_system: str | None
 
@@ -52,14 +56,16 @@ if TYPE_CHECKING:
     show_default=True,
     help="Zero-based TIFF pyramid level. Only valid for TIFF-family inputs.",
 )
+@scale_factors_option
 @click.option(
     "--chunks",
     type=click.IntRange(min=1),
     multiple=True,
     default=(),
     help=(
-        "Requested image chunks. Pass once to chunk every axis, or repeat in canonical "
-        "CYX/CZYX order. If omitted, only Y/X are rechunked to 1024."
+        "Image chunks: pass once for every axis, or once per axis in canonical CYX/CZYX order. "
+        f"Omitted: {DEFAULT_CHUNKS} for CYX and {(DEFAULT_CHUNKS[0], 1, *DEFAULT_CHUNKS[1:])} for CZYX images, "
+        "one channel and one plane per chunk."
     ),
 )
 @click.option("--coordinate-system", "-c", type=str, help="Target coordinate system.")
@@ -90,6 +96,7 @@ def generic_command(
         coordinate_system=options["coordinate_system"],
         tiff_series=options["tiff_series"],
         tiff_level=options["tiff_level"],
+        scale_factors=options["scale_factors"],
         chunks=normalized_chunks,
     )
 

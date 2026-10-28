@@ -50,7 +50,7 @@ class TestImage:
         assert result.dims == expected_dims
         assert result.shape == expected_shape
 
-    def test_uses_default_chunks_in_canonical_order(self, mocker: MockerFixture) -> None:
+    def test_default_2d_chunks_hold_one_channel_with_square_tiles(self, mocker: MockerFixture) -> None:
         data = da.zeros((7, 5, 3), chunks=(7, 5, 3), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
@@ -65,10 +65,11 @@ class TestImage:
 
         assert result is mocker.sentinel.image
         assert parse.call_args.kwargs["dims"] == ("c", "y", "x")
-        assert parse.call_args.kwargs["chunks"] == {"c": None, "y": 1024, "x": 1024}
+        assert parse.call_args.kwargs["chunks"] == {"c": 1, "y": 1024, "x": 1024}
+        assert parse.call_args.kwargs["scale_factors"] is None
 
-    def test_preserves_default_channel_and_depth_chunks(self, mocker: MockerFixture) -> None:
-        data = da.zeros((3, 2, 11, 13), chunks=(1, 1, 11, 13), dtype=np.uint8)
+    def test_default_3d_chunks_hold_one_channel_and_plane(self, mocker: MockerFixture) -> None:
+        data = da.zeros((3, 2, 11, 13), chunks=(3, 2, 11, 13), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
             return_value=LazyRaster(data=data, axes=("c", "z", "y", "x")),
@@ -81,25 +82,21 @@ class TestImage:
         result = image("image.tif", "czyx", "global")
 
         assert result is mocker.sentinel.image
-        assert parse.call_args.kwargs["chunks"] == {"c": None, "z": None, "y": 1024, "x": 1024}
+        assert parse.call_args.kwargs["chunks"] == {"c": 1, "z": 1, "y": 1024, "x": 1024}
 
     @pytest.mark.parametrize(
         ("chunks", "expected"),
         [
+            (4, {"c": 4, "z": 4, "y": 4, "x": 4}),
             ((1, 2, 5, 7), {"c": 1, "z": 2, "y": 5, "x": 7}),
-            (
-                ((1, 2), (1, 1), (5, 6), (6, 7)),
-                {"c": (1, 2), "z": (1, 1), "y": (5, 6), "x": (6, 7)},
-            ),
-            ({"c": 1, "z": 2, "y": 5, "x": 7}, {"c": 1, "z": 2, "y": 5, "x": 7}),
-            ({"c": None, "z": None, "y": 5, "x": 7}, {"c": None, "z": None, "y": 5, "x": 7}),
+            ({"x": 7, "c": 1, "y": 5, "z": 2}, {"c": 1, "z": 2, "y": 5, "x": 7}),
         ],
     )
     def test_accepts_custom_3d_chunks_in_canonical_order(
         self,
         mocker: MockerFixture,
-        chunks: tuple[int, ...] | tuple[tuple[int, ...], ...] | dict[str, int | None],
-        expected: dict[str, int | tuple[int, ...] | None],
+        chunks: Chunks,
+        expected: dict[str, int],
     ) -> None:
         data = da.zeros((2, 11, 13, 3), chunks=(2, 11, 13, 3), dtype=np.uint8)
         mocker.patch(
@@ -116,6 +113,27 @@ class TestImage:
         assert result is mocker.sentinel.image
         assert parse.call_args.kwargs["dims"] == ("c", "z", "y", "x")
         assert parse.call_args.kwargs["chunks"] == expected
+
+    def test_forwards_owned_scale_factors_to_the_model(self, mocker: MockerFixture) -> None:
+        data = da.zeros((5, 7), chunks=(5, 7), dtype=np.uint8)
+        mocker.patch(
+            "spatialdata_io.readers.generic._images._read_raster",
+            return_value=LazyRaster(data=data, axes=("y", "x")),
+        )
+        parse = mocker.patch(
+            "spatialdata_io.readers.generic._images.Image2DModel.parse",
+            return_value=mocker.sentinel.image,
+        )
+        factors = [2, 4]
+
+        image("image.tif", "yx", "global", scale_factors=factors)
+        factors.append(8)
+
+        assert parse.call_args.kwargs["scale_factors"] == [2, 4]
+
+    def test_rejects_invalid_scale_factors_before_reading(self) -> None:
+        with pytest.raises(ValueError, match="at least 2"):
+            image("missing.tif", "yx", "global", scale_factors=(1,))
 
     def test_forwards_tiff_selection_once(self, mocker: MockerFixture) -> None:
         metadata = mocker.sentinel.metadata
@@ -166,29 +184,29 @@ class TestImage:
                 tiff_level=tiff_level,
             )
 
-    def test_rejects_boolean_chunks(self, mocker: MockerFixture) -> None:
-        data = da.zeros((5, 7), chunks=(5, 7), dtype=np.uint8)
-        mocker.patch(
-            "spatialdata_io.readers.generic._images._read_raster",
-            return_value=LazyRaster(data=data, axes=("y", "x")),
-        )
-
-        with pytest.raises(TypeError, match="not a boolean"):
-            image("image.tif", "yx", "global", chunks=False)
-
     @pytest.mark.parametrize(
         ("chunks", "error", "match"),
         [
+            (False, TypeError, "one positive integer per canonical axis"),
             (0, ValueError, "must be positive"),
             ((1, 0, 7), ValueError, "must be positive"),
-            ({"c": True, "y": 5, "x": 7}, TypeError, "must not be a boolean"),
-            ({"c": 1, "y": (), "x": 7}, ValueError, "must not be empty"),
-            ({"c": 1, "y": [5], "x": 7}, TypeError, "integer, tuple of integers, or None"),
-            ({"c": 1, "y": (5, "bad"), "x": 7}, TypeError, "only integers"),
-            ({"c": 1, "y": (5, 0), "x": 7}, ValueError, "only positive sizes"),
-            ((1, (5,), 7), TypeError, "either one integer or one tuple"),
+            ({"c": True, "y": 5, "x": 7}, TypeError, "one positive integer per canonical axis"),
+            ({"c": None, "y": 5, "x": 7}, TypeError, "one positive integer per canonical axis"),
+            ({"c": 1, "y": (3, 2), "x": 7}, TypeError, "one positive integer per canonical axis"),
+            (((1,), (3, 2), (7,)), TypeError, "one positive integer per canonical axis"),
             ((1, 5), ValueError, "length must match canonical axes"),
-            ([1, 5, 7], TypeError, "integer, tuple, mapping, or None"),
+            ([1, 5, 7], TypeError, "one positive integer per canonical axis"),
+        ],
+        ids=[
+            "bool",
+            "zero",
+            "zero-size",
+            "bool-size",
+            "none-size",
+            "irregular-mapping",
+            "irregular-tuple",
+            "two-sizes",
+            "list",
         ],
     )
     def test_rejects_invalid_chunk_values(

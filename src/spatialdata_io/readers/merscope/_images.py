@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
 from math import prod
 from typing import TYPE_CHECKING, cast
 
@@ -19,49 +17,11 @@ if TYPE_CHECKING:
     from dask.array import Array
     from xarray import DataArray, DataTree
 
+    from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.merscope._layout import MosaicLayer
 
-_MIN_FACTOR = 2
 _IMAGE_AXES = ("c", "y", "x")
-
-
-@dataclass(frozen=True, slots=True)
-class RasterOptions:
-    """Own validated downsampling factors and CYX output chunk sizes."""
-
-    scale_factors: tuple[int, ...] | None
-    chunks: int | tuple[int, int, int] | None
-
-
-def make_raster_options(
-    scale_factors: Sequence[int] | None, chunks: int | tuple[int, int, int] | None
-) -> RasterOptions:
-    """Validate raster options once without retaining caller-owned sequences."""
-    if scale_factors is not None and (
-        isinstance(scale_factors, str | bytes) or not isinstance(scale_factors, Sequence)
-    ):
-        message = "scale_factors must be an ordered sequence of integer factors or None."
-        raise TypeError(message)
-    factors = None if scale_factors is None else tuple(scale_factors)
-    if factors is not None and (
-        not factors
-        or any(isinstance(value, bool) or not isinstance(value, int) or value < _MIN_FACTOR for value in factors)
-    ):
-        message = "scale_factors must contain integer factors greater than one and cannot be empty."
-        raise ValueError(message)
-    if chunks is not None:
-        sizes = chunks if isinstance(chunks, tuple) else (chunks,)
-        if isinstance(chunks, tuple) and len(chunks) != len(_IMAGE_AXES):
-            message = "chunks must contain three sizes in CYX order."
-            raise ValueError(message)
-        if any(isinstance(size, bool) or not isinstance(size, int) for size in sizes):
-            message = "chunks must be a positive integer or a tuple of three integers."
-            raise TypeError(message)
-        if any(size <= 0 for size in sizes):
-            message = "chunks must contain only positive sizes."
-            raise ValueError(message)
-    return RasterOptions(factors, chunks)
 
 
 def _read_channel(path: ArtifactFile) -> Array:
@@ -117,7 +77,7 @@ def read_images(
                     expected=f"common shape {reference[0]} and dtype {reference[1]}",
                 )
         image = da.stack(arrays, axis=0)
-        if options.scale_factors is not None and min(image.shape[-2:]) < prod(options.scale_factors):
+        if options.scale_factors and min(image.shape[-2:]) < prod(options.scale_factors):
             message = "Requested scale_factors exceed the spatial extent of a MERSCOPE mosaic."
             raise ValueError(message)
         images[f"{dataset_id}_z{layer.z}"] = Image2DModel.parse(
@@ -125,8 +85,8 @@ def read_images(
             dims=_IMAGE_AXES,
             c_coords=[channel.stain for channel in layer.channels],
             rgb=False,
-            scale_factors=options.scale_factors,
-            chunks=options.chunks or tuple(max(parts) for parts in image.chunks),
+            scale_factors=options.model_scale_factors,
+            chunks=options.image_chunks(),
             transformations={"global": Identity()},
         )
     return images

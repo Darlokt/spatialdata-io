@@ -36,7 +36,7 @@ def _file(path: Path) -> Path:
     return path
 
 
-def _discover(
+def _discover(  # noqa: PLR0913, RUF100 - mirrors the discovery keywords.
     root: Path,
     *,
     sample_id: str | None = None,
@@ -599,3 +599,18 @@ class TestImageNames:
         assert StainedImage(file, "mask", "HE").name == "HE_mask"
         assert GridImage(file, "mask").name == "mask"
         assert DistanceMask(file, "HE", 25).name == "HE_distance_mask_25"
+
+
+class TestIsMask:
+    """Mask roles, including the expression tissue cut, are read as labels."""
+
+    def test_roles(self) -> None:
+        file = ArtifactFile(Path("sample_HE_regist.tif"))
+        assert not StainedImage(file, "registered", "HE").is_mask
+        assert StainedImage(file, "mask", "HE").is_mask
+        assert StainedImage(file, "tissue_cut", "HE").is_mask
+        assert not GridImage(file, "registered").is_mask
+        assert not GridImage(file, "expression").is_mask
+        assert GridImage(file, "mask").is_mask
+        assert GridImage(ArtifactFile(Path("bin1_img_tissue_cut.tif")), "tissue_cut").is_mask
+        assert DistanceMask(file, "HE", 25).is_mask

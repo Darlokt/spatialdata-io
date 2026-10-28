@@ -224,7 +224,13 @@ class TestVisiumSyntheticWorkflow:
         fullres_data = np.arange(3 * 6 * 8, dtype=np.uint16).reshape(3, 6, 8)
         tifffile.imwrite(fullres, fullres_data, metadata={"axes": "CYX"}, photometric="minisblack", tile=(16, 16))
 
-        result = visium(tmp_path, dataset_id=dataset_id, fullres_image_file=fullres, chunks=(1, 3, 4))
+        result = visium(
+            tmp_path,
+            dataset_id=dataset_id,
+            fullres_image_file=fullres,
+            scale_factors=(2,),
+            chunks={"c": 1, "y": 3, "x": 4},
+        )
 
         assert set(result.images) == {"sample_full_image", "sample_hires_image", "sample_lowres_image"}
         assert set(result.shapes) == {"sample"}
@@ -239,17 +245,20 @@ class TestVisiumSyntheticWorkflow:
 
         full_pyramid = result.images["sample_full_image"]
         assert isinstance(full_pyramid, DataTree)
-        assert list(full_pyramid.children) == ["scale0", "scale1", "scale2"]
+        assert list(full_pyramid.children) == ["scale0", "scale1"]
+        assert full_pyramid["scale1"]["image"].shape == (3, 3, 4)
 
         full_image = full_pyramid["scale0"]["image"]
         assert full_image.dims == ("c", "y", "x")
         assert full_image.shape == (3, 6, 8)
         assert full_image.dtype == np.dtype(np.uint16)
-        np.testing.assert_array_equal(full_image.data[:, :2, :3].compute(), fullres_data[:, :2, :3])
+        assert full_image.chunksizes == {"c": (1, 1, 1), "y": (3, 3), "x": (4, 4)}
+        np.testing.assert_array_equal(full_image.data.compute(), fullres_data)
 
         hires = result.images["sample_hires_image"]
         assert isinstance(hires, DataArray)
         assert hires.shape == (3, 4, 5)
+        assert hires.chunksizes == {"c": (1, 1, 1), "y": (3, 1), "x": (4, 1)}
         np.testing.assert_array_equal(_affine_matrix(hires, "sample"), np.diag([2.0, 2.0, 1.0]))
 
         circles = result.shapes["sample"]
@@ -315,7 +324,8 @@ class TestVisiumSyntheticWorkflow:
         restored = SpatialData.read(store)
 
         assert set(restored.images) == {"sample_full_image", "sample_hires_image", "sample_lowres_image"}
-        assert isinstance(restored.images["sample_full_image"], DataTree)
+        # Without explicit scale factors the full-resolution image is single-scale.
+        assert isinstance(restored.images["sample_full_image"], DataArray)
         assert set(restored.shapes) == {"sample"}
         assert restored.tables["table"].shape == (3, 3)
 

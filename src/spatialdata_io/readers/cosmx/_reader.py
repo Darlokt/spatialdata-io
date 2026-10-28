@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.cosmx._layout import discover_layout
-from spatialdata_io.readers.cosmx._rasters import make_raster_options, read_image, read_labels
+from spatialdata_io.readers.cosmx._rasters import read_image, read_labels
 from spatialdata_io.readers.cosmx._tables import build_table, read_counts, read_fov_positions, read_metadata
 from spatialdata_io.readers.cosmx._transcripts import read_transcripts
 from spatialdata_io.readers.cosmx._transforms import solve_placements
@@ -27,8 +28,8 @@ def cosmx(
     *,
     dataset_id: str | None = None,
     include_transcripts: bool = True,
-    scale_factors: Sequence[int] | None = None,
-    chunks: int | tuple[int, int, int] | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read a CosMx Spatial Molecular Imager flat-file export.
 
@@ -55,12 +56,12 @@ def cosmx(
     include_transcripts
         Return the lazy transcript points.
     scale_factors
-        Optional integer factors greater than one for generated image and
-        label pyramid levels. None keeps the full-resolution single scale.
+        Integer factors of at least two, one per generated pyramid level of the
+        images and labels; empty for a single scale.
     chunks
-        Positive integer or three positive CYX sizes; labels use the final two.
-        None keeps storage-aligned source chunks (TIFF tiles, or whole strips
-        grouped into bands of at most 16 MiB). Rechunking remains lazy.
+        One positive size for every axis or three ``c, y, x`` sizes of the
+        images; labels use the ``y`` and ``x`` sizes. By default one channel per
+        chunk and square 1024-pixel tiles.
 
     Returns
     -------

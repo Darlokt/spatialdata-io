@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io._cli.commands.iss import iss_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -49,10 +50,9 @@ class TestIssCommand:
             table_file=Path("cells.h5ad"),
             instance_key=None,
             dataset_id="region",
-            image_scale_factors=None,
-            labels_scale_factors=None,
+            scale_factors=DEFAULT_SCALE_FACTORS,
             data_axes=None,
-            chunks=None,
+            chunks=DEFAULT_CHUNKS,
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -84,12 +84,10 @@ class TestIssCommand:
             "sample",
             "--data-axes",
             "CYX",
-            "--image-scale-factors",
+            "--scale-factors",
             "2",
-            "--image-scale-factors",
+            "--scale-factors",
             "3",
-            "--labels-scale-factors",
-            "2",
         ]
         for value in chunk_args:
             args.extend(["--chunks", value])
@@ -104,8 +102,7 @@ class TestIssCommand:
             table_file=Path("cells.h5ad"),
             instance_key="cell_id",
             dataset_id="sample",
-            image_scale_factors=(2, 3),
-            labels_scale_factors=(2,),
+            scale_factors=(2, 3),
             data_axes="CYX",
             chunks=expected,
         )
@@ -131,8 +128,8 @@ class TestIssCommand:
         [
             ["--chunks", "1", "--chunks", "2"],
             ["--chunks", "0"],
-            ["--labels-scale-factors", "1"],
-            ["--image-scale-factors", "1"],
+            ["--scale-factors", "1"],
+            ["--image-scale-factors", "2"],
             ["--imread-kwargs", "{}"],
         ],
     )

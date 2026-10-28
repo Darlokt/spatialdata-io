@@ -24,7 +24,7 @@ combined = stereoseq(
     "run",
     cell_bins="both",
     image_roles=("registered",),
-    chunks=(1, 1024, 1024),
+    scale_factors=(2, 2),
 )
 ```
 
@@ -34,9 +34,9 @@ combined = stereoseq(
 | `cell_bins="none"` | No raw cells. Choose `"unadjusted"`, `"adjusted"` or `"both"`. |
 | `cell_geometry="centroids"` | Return source cell centers as points. Choose `"polygons"` for strictly validated stored contours. |
 | `analysis_files=()` | No analysis. Pass exact H5AD paths; clustering resolutions are never all loaded implicitly. |
-| `image_roles=()` | No images. Select `"registered"`, `"mask"`, `"tissue_cut"`, `"distance_mask"` or `"expression"`; all matching stains are included. |
+| `image_roles=()` | No images or masks. Select `"registered"`, `"mask"`, `"tissue_cut"`, `"distance_mask"` or `"expression"`; all matching stains are included. Mask roles return labels. |
 | `sample_id=None` | Infer a unique source sample; supply its full identifier when several samples are present. Dots in identifiers are retained. |
-| `chunks=None` | Keep native TIFF chunks. A positive integer or three positive CYX sizes requests rechunking. |
+| `scale_factors=()`, `chunks=(1, 1024, 1024)` | A single scale in one-channel 1024-pixel tiles. Both apply to every selected image and mask; see [raster options](raster_options.md). |
 
 Only stored square bins are read. A tissue GEF containing bin1 cannot satisfy `bin_sizes=(50,)`; the reader reports the available bins instead of deriving a coarser bin or choosing another count population. Explicit `"all"` can require substantial memory.
 
@@ -197,19 +197,21 @@ Raw tables retain `uns["stereoseq"]["origin"]` and `["resolution"]`. A common ch
 
 Centroid mode is the default and never reads or validates unselected borders. Polygon mode adds signed centroid-relative offsets after widening, removes only paired terminal padding, and requires simple nondegenerate contours. Mismatched/interior padding, invalid rings and self-intersections fail without repair, omitted cells or fallback. Some vendor cell contours are nonsimple even with the documented decoding; choose centroid mode explicitly when their exact counts and centers are the desired product. Source area remains a measurement, independent of the polygon's geometric area.
 
-## Images, execution and ownership
+## Images, labels, execution and ownership
 
-| Role | Image names |
-| --- | --- |
-| `registered` | `<stain>_registered`, or `registered` without a stain. |
-| `mask` | `<stain>_mask`, or `mask` without a stain. |
-| `tissue_cut` | `<stain>_tissue_cut`, historical `tissue_cut`, and `expression_tissue_cut` for `bin1_img_tissue_cut.tif`. |
-| `distance_mask` | `<stain>_distance_mask_<distance>`. |
-| `expression` | `expression` for `bin1_img.tif`. |
+| Role | Element | Names |
+| --- | --- | --- |
+| `registered` | image | `<stain>_registered`, or `registered` without a stain. |
+| `mask` | labels | `<stain>_mask`, or `mask` without a stain. |
+| `tissue_cut` | labels | `<stain>_tissue_cut`, historical `tissue_cut`, and `expression_tissue_cut` for `bin1_img_tissue_cut.tif`. |
+| `distance_mask` | labels | `<stain>_distance_mask_<distance>`. |
+| `expression` | image | `expression` for `bin1_img.tif`. |
 
-Masks are images, not instance labels. The expression-distribution TIFF and its derived tissue mask remain distinct products. Each TIFF must contain one supported image series; the reader uses its first full-resolution level and constructs no automatic pyramid. Images have axes `(c, y, x)`, source dtype and source channel order. Grayscale gains one channel; RGB(A) TIFF samples receive `r`, `g`, `b`, `a` channel names. Unsupported non-singleton dimensions fail.
+The expression-distribution TIFF and its derived tissue mask remain distinct products. Each TIFF must contain one supported image series; the reader uses its first full-resolution level and constructs no pyramid unless `scale_factors` requests one. Images have axes `(c, y, x)`, source dtype and source channel order. Grayscale gains one channel; RGB(A) TIFF samples receive `r`, `g`, `b`, `a` channel names. Masks are labels with axes `(y, x)` and their source boolean or integer dtype and values; multichannel or floating-point masks fail. Unsupported non-singleton dimensions fail.
 
-Raster pixels remain lazy and constructing the reader result executes zero pixel tasks. Native TIFF tiles/strips determine initial chunks; requested `chunks` applies rechunking afterward. Partial computation reads the selected chunks, subject to the source codec's decoding granularity. Source paths must remain available for later image computation. Lazy graphs own no open HDF5/TIFF handles.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. The same factors apply to every selected image and mask. Generated label levels are downsampled by nearest neighbour, so every level of a mask contains only source mask values.
+
+Raster pixels remain lazy and constructing the reader result executes zero pixel tasks. Pixels are decoded from the TIFF tiles or strips that overlap the computed chunks. Many SAW microscopy TIFFs store full-width strips, so a small selection decodes the strip bands spanning one 1024-row tile. Source paths must remain available for later image computation. Lazy graphs own no open HDF5/TIFF handles.
 
 GEF expression and metadata are eager. Expression/exon input slices share an 8 MiB record budget, but eager output, numerical buffers and coordinate indexing use memory proportional to the selected records and targets. This is a bound on input slices, not on total process memory. Returned point graphs wrap already materialized count or analysis coordinates; they are not lazy GEF/H5AD scans. Files close on success and failure, and no caller-owned scientific container is mutated.
 
@@ -219,12 +221,16 @@ GEF expression and metadata are eager. Expression/exon input slices share an 8 M
 spatialdata_io stereoseq --input task --output result.zarr \
     --bin-sizes 50 --cell-bins unadjusted \
     --analysis-files outs/analysis/sample.cellbin_0.5.h5ad \
-    --image-roles registered --chunks 1 --chunks 1024 --chunks 1024
+    --image-roles registered --scale-factors 2 --scale-factors 2
 ```
 
-Repeat `--bin-sizes`, `--analysis-files` and `--image-roles` for multiple values. Pass `--bin-sizes all` alone to select every stored bin. `--chunks` accepts one value or three CYX values. The CLI otherwise mirrors the Python names, choices and defaults.
+Repeat `--bin-sizes`, `--analysis-files`, `--image-roles` and `--scale-factors` for multiple values. Pass `--bin-sizes all` alone to select every stored bin. `--chunks` accepts one value or three CYX values. The CLI otherwise mirrors the Python names, choices and defaults.
 
-The former `dataset_id`, `read_square_bin`, `optional_tif`, `imread_kwargs` and `image_models_kwargs` parameters have been removed. Use `sample_id`, explicit product selections and `chunks`. Raw GEF counts and analysis tables now remain separate; square features follow source order, raw counts use uint64 sparse arrays, and cell targets use source centroids or validated polygons instead of an additional circle representation.
+The former `dataset_id`, `read_square_bin`, `optional_tif`, `imread_kwargs` and `image_models_kwargs` parameters have been removed. Use `sample_id`, explicit product selections, `scale_factors` and `chunks`. Raw GEF counts and analysis tables now remain separate; square features follow source order, raw counts use uint64 sparse arrays, and cell targets use source centroids or validated polygons instead of an additional circle representation.
+
+Images are now chunked `(1, 1024, 1024)` by default instead of keeping the TIFF storage chunks, and `chunks` no longer accepts `None` or tuples other than three CYX sizes. Pass `chunks` explicitly to restore a storage-aligned layout. The new `scale_factors` option builds pyramid levels.
+
+The `mask`, `tissue_cut` and `distance_mask` roles now return `(y, x)` elements in `sdata.labels` instead of single-channel `(c, y, x)` elements in `sdata.images`, under the same names.
 
 Invalid public options raise `TypeError` or `ValueError`. Missing paths and wrong filesystem kinds retain their standard path exceptions. Malformed, ambiguous or scientifically inconsistent artifacts raise a contextual `ReaderFormatError`; selected artifacts are never silently omitted.
 

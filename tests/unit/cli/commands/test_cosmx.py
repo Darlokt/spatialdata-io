@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io._cli.commands.cosmx import cosmx_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,7 +28,11 @@ class TestCosmxCommand:
         result = runner.invoke(cosmx_command, ["--input", str(tmp_path), "--output", str(output)])
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
-            tmp_path, dataset_id=None, include_transcripts=True, scale_factors=None, chunks=None
+            tmp_path,
+            dataset_id=None,
+            include_transcripts=True,
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=DEFAULT_CHUNKS,
         )
         reader_result.write.assert_called_once_with(output)
 

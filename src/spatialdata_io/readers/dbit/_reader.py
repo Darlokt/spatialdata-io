@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
+from xarray import DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.dbit._barcodes import _read_barcodes
@@ -20,10 +22,11 @@ from spatialdata_io.readers.dbit._schemas import GRID_DTYPE, SAMPLE_DTYPE, _vali
 from spatialdata_io.readers.dbit._tables import _read_table
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     import numpy.typing as npt
-    from xarray import DataArray, DataTree
+    from xarray import DataArray
 
 _MAX_BORDER_SCALE = 4
 
@@ -67,7 +70,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     data_axes: str | None = None,
     tiff_series: int = 0,
     tiff_level: int = 0,
-    chunks: int | tuple[int, int, int] | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read an unversioned DBiT H5AD export and its barcode-position grid.
 
@@ -115,11 +119,15 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     tiff_series, tiff_level
         Nonnegative TIFF series and stored pyramid-level indices. Both default
         to zero. Nonzero selections require a TIFF image.
+    scale_factors
+        Integer factors of at least two, one per generated pyramid level of the
+        images; empty for a single scale.
     chunks
-        Positive integer for all output image axes or three positive integers
-        in CYX order. Storage-aligned source chunks (TIFF tiles, or whole
-        strips grouped into bands of at most 16 MiB) are retained by default. Image
-        options require an image. Axis overrides require TIFF.
+        One positive size for every axis or three ``c, y, x`` sizes; by default
+        one channel per chunk and square 1024-pixel tiles.
+
+        Image options other than their defaults require an image; axis and
+        TIFF selections require a TIFF image.
 
     Returns
     -------
@@ -152,10 +160,12 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
 
         Optional ``images['<dataset_id>_image']`` is lazy CYX, preserving source
         dtype and channel order, positional RGB labels, and available OME
-        channel names or IDs. Grid and image use identity transforms to
-        ``global``. Construction executes zero pixel tasks. TIFF partial
-        computations retain native storage selection. PNG/JPEG computations
-        decode a whole frame. Resources close after inspection or inside each
+        channel names or IDs. It is a single scale unless ``scale_factors``
+        requests pyramid levels; the grid step uses its full-resolution extent.
+        Grid and image use identity transforms to ``global``. Construction
+        executes zero pixel tasks. TIFF partial computations decode only the
+        tiles or strips they overlap. PNG/JPEG computations decode a whole
+        frame. Resources close after inspection or inside each
         lazy task. Caller-owned state and source files are never mutated.
         Provenance records the reader and package version.
 
@@ -171,7 +181,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         If option or expression types are unsupported.
     """
     _validate_grid_options(dataset_id, include_border=include_border, border_scale=border_scale)
-    _validate_image_options(data_axes, tiff_series, tiff_level, chunks)
+    _validate_image_options(data_axes, tiff_series, tiff_level)
+    raster = make_raster_options(scale_factors, chunks)
 
     layout = _discover_layout(
         path, table_file=table_file, barcode_positions_file=barcode_positions_file, image_file=image_file
@@ -180,8 +191,9 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         dataset_id = layout.table.stem
         _validate_grid_options(dataset_id, include_border=include_border, border_scale=border_scale)
 
-    if layout.image is None and (data_axes is not None or tiff_series != 0 or tiff_level != 0 or chunks is not None):
-        message = "data_axes, tiff_series, tiff_level, and chunks require an image."
+    image_options = data_axes is not None or tiff_series != 0 or tiff_level != 0 or raster != make_raster_options()
+    if layout.image is None and image_options:
+        message = "data_axes, tiff_series, tiff_level, and nondefault scale_factors or chunks require an image."
         raise ValueError(message)
 
     barcodes = _read_barcodes(layout.barcode_positions)
@@ -191,13 +203,15 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     scale = 1.0
     if layout.image is not None:
         image = _read_image(
-            layout.image, data_axes=data_axes, tiff_series=tiff_series, tiff_level=tiff_level, chunks=chunks
+            layout.image, data_axes=data_axes, tiff_series=tiff_series, tiff_level=tiff_level, raster=raster
         )
         images[f"{dataset_id}_image"] = image
 
         # Preserve the square-grid convention for a pre-registered crop. Use
-        # the selected level's spatial extent, independent of channel count.
-        scale = max(image.sizes["y"], image.sizes["x"]) / len(barcodes.a)
+        # the selected level's full-resolution extent, independent of channel
+        # count and of generated pyramid levels.
+        scale0 = next(iter(image["scale0"].data_vars.values())) if isinstance(image, DataTree) else image
+        scale = max(scale0.sizes["y"], scale0.sizes["x"]) / len(barcodes.a)
 
     # _read_table produces these exact int64 coordinates in final row order.
     coordinates = cast("npt.NDArray[np.int64]", table.obsm["spatial"])

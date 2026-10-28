@@ -11,13 +11,14 @@ import pandas as pd
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.stereoseq._analysis import read_analysis
 from spatialdata_io.readers.stereoseq._cells import read_cells
 from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygons
-from spatialdata_io.readers.stereoseq._images import read_image
 from spatialdata_io.readers.stereoseq._layout import discover_layout
+from spatialdata_io.readers.stereoseq._rasters import read_image, read_mask
 from spatialdata_io.readers.stereoseq._square import read_square
 
 if TYPE_CHECKING:
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.stereoseq._square import SquareCounts
 
 _ROLES = frozenset({"registered", "mask", "tissue_cut", "distance_mask", "expression"})
-_IMAGE_RANK = 3
 
 
 def _sequence[T](values: Sequence[T], name: str) -> tuple[T, ...]:
@@ -62,7 +62,6 @@ def _validate_options(
     cell_geometry: Literal["centroids", "polygons"],
     roles: tuple[ImageRole, ...],
     analyses: tuple[str | Path, ...],
-    chunks: int | tuple[int, ...] | None,
 ) -> None:
     """Validate independent product choices before discovery or source reads."""
     if sample_id is not None and (
@@ -87,16 +86,6 @@ def _validate_options(
     if any(not isinstance(file, (str, Path)) for file in analyses):
         message = "analysis_files must contain filesystem paths."
         raise TypeError(message)
-
-    if chunks is not None:
-        sizes = (chunks,) if isinstance(chunks, int) else chunks
-        if not isinstance(sizes, tuple) or any(isinstance(size, bool) or not isinstance(size, int) for size in sizes):
-            message = "chunks must be a positive integer or a tuple of three positive CYX integers."
-            raise TypeError(message)
-
-        if any(size <= 0 for size in sizes) or (isinstance(chunks, tuple) and len(sizes) != _IMAGE_RANK):
-            message = "chunks must be positive, with exactly three CYX values when a tuple is provided."
-            raise ValueError(message)
 
 
 def _validate_frames(products: Sequence[SquareCounts | CellCounts], sample: str | None, path: Path) -> None:
@@ -151,7 +140,7 @@ def _link(table: ad.AnnData, target: str, index: pd.Index) -> ad.AnnData:
     )
 
 
-def stereoseq(
+def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the public boundary typed.
     path: str | Path,
     *,
     sample_id: str | None = None,
@@ -163,7 +152,8 @@ def stereoseq(
     adjusted_cell_counts_file: str | Path | None = None,
     analysis_files: Sequence[str | Path] = (),
     image_roles: Sequence[Literal["registered", "mask", "tissue_cut", "distance_mask", "expression"]] = (),
-    chunks: int | tuple[int, ...] | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
+    chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
     """Read independent SAW transcriptomic counts, clustering analysis and images.
 
@@ -205,10 +195,15 @@ def stereoseq(
     image_roles
         Registered microscopy, binary masks, tissue-cut images, expanded masks,
         or ``bin1_img.tif`` expression intensity. All stains for each selected
-        role are included. Masks are images, not instance labels.
+        role are included. Masks, tissue cuts and expanded masks become labels.
+    scale_factors
+        Integer factors of at least two, one per generated pyramid level;
+        empty for a single scale. The same factors apply to every selected
+        image and mask.
     chunks
-        Positive integer or three CYX chunk sizes. Default retains native TIFF
-        chunks; no pyramid is generated. Pixels remain lazy after return.
+        One positive size for every axis or three ``c, y, x`` sizes; by default
+        one channel per chunk and square 1024-pixel tiles. Masks use the
+        ``y, x`` sizes. Pixels remain lazy after return.
 
     Returns
     -------
@@ -224,12 +219,14 @@ def stereoseq(
 
         Analysis products use ``<population>_analysis[_r<resolution>]`` plus
         ``_points``/``_table``; decimal points in clustering resolution become
-        underscores. Historical unknown resolution is omitted. Images use
-        ``<stain>_<role>`` (distance masks append their pixel distance), or the
-        role alone without a stain. ``bin1_img_tissue_cut.tif`` becomes
-        ``expression_tissue_cut`` to distinguish its mask from microscopy.
-        Image axes are CYX with source dtype and
-        channel order. RGB(A) samples use r/g/b/a channel names.
+        underscores. Historical unknown resolution is omitted. Images and
+        labels use ``<stain>_<role>`` (distance masks append their pixel
+        distance), or the role alone without a stain. ``bin1_img_tissue_cut.tif``
+        becomes ``expression_tissue_cut`` to distinguish its mask from
+        microscopy. Registered and expression images have CYX axes with source
+        dtype and channel order; RGB(A) samples use r/g/b/a channel names.
+        Masks are YX labels with their source boolean or integer dtype and
+        values; generated levels downsample by nearest neighbour.
 
         All elements map by identity to ``global``, in the matching normalized
         expression grid (XY in tables/points). Stored square coordinates are
@@ -243,10 +240,12 @@ def stereoseq(
     Raises
     ------
     TypeError, ValueError
-        Invalid options, no selected products, unsupported axes or invalid data.
+        Invalid options, no selected products, unsupported axes (including
+        multichannel masks) or invalid data.
         Format errors use the contextual ``ReaderFormatError`` subclass:
         ambiguous layouts, malformed schemas, overflow, identity/coordinate
-        disagreement, invalid polygons, or missing selected products.
+        disagreement, invalid polygons, non-integer masks, or missing selected
+        products.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         Missing selected artifacts or incorrect filesystem kinds.
     """
@@ -259,8 +258,8 @@ def stereoseq(
         cell_geometry=cell_geometry,
         roles=roles,
         analyses=analyses,
-        chunks=chunks,
     )
+    raster = make_raster_options(scale_factors, chunks)
     if not bins and cell_bins == "none" and not roles and not analyses:
         message = "Select products, e.g. stereoseq(path, bin_sizes=(50,)) or stereoseq(path, cell_bins='unadjusted')."
         raise ValueError(message)
@@ -340,7 +339,12 @@ def stereoseq(
         points[target] = make_points(analysis.coordinates, analysis.instance_ids)
         tables[name] = _link(analysis.table, target, analysis.instance_ids)
 
-    images = {source.name: read_image(source, chunks=chunks) for source in layout.images}
-    result = SpatialData(images=images, points=points, shapes=shapes, tables=tables)
+    result = SpatialData(
+        images={source.name: read_image(source, raster=raster) for source in layout.images if not source.is_mask},
+        labels={source.name: read_mask(source, raster=raster) for source in layout.images if source.is_mask},
+        points=points,
+        shapes=shapes,
+        tables=tables,
+    )
     set_reader_provenance(result.attrs, reader="stereoseq")
     return result

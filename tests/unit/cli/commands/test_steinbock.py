@@ -9,6 +9,7 @@ import click
 import pytest
 
 from spatialdata_io._cli.commands.steinbock import steinbock_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.steinbock import steinbock
 
 if TYPE_CHECKING:
@@ -34,9 +35,8 @@ class TestSteinbockCommand:
         reader.assert_called_once_with(
             tmp_path,
             labels_kind="deepcell",
-            image_scale_factors=None,
-            labels_scale_factors=None,
-            chunks=None,
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=DEFAULT_CHUNKS,
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -59,12 +59,10 @@ class TestSteinbockCommand:
             str(output),
             "--labels-kind",
             "ilastik",
-            "--image-scale-factors",
+            "--scale-factors",
             "2",
-            "--image-scale-factors",
+            "--scale-factors",
             "3",
-            "--labels-scale-factors",
-            "2",
         ]
         for value in chunk_values:
             arguments.extend(["--chunks", value])
@@ -75,8 +73,7 @@ class TestSteinbockCommand:
         reader.assert_called_once_with(
             tmp_path,
             labels_kind="ilastik",
-            image_scale_factors=(2, 3),
-            labels_scale_factors=(2,),
+            scale_factors=(2, 3),
             chunks=expected_chunks,
         )
         reader_result.write.assert_called_once_with(output)
@@ -85,12 +82,12 @@ class TestSteinbockCommand:
         "extra",
         [
             ["--labels-kind", "unknown"],
-            ["--image-scale-factors", "1"],
-            ["--labels-scale-factors", "0"],
+            ["--scale-factors", "1"],
+            ["--image-scale-factors", "2"],
             ["--chunks", "0"],
             ["--chunks", "1", "--chunks", "2"],
             ["--chunks", "1", "--chunks", "2", "--chunks", "3", "--chunks", "4"],
-            ["--image-scale-factors", "[2, 2]"],
+            ["--scale-factors", "[2, 2]"],
             ["--imread-kwargs", "{}"],
             ["--image-models-kwargs", "{}"],
         ],
@@ -113,8 +110,7 @@ class TestSteinbockCommand:
             "input_path",
             "output_path",
             "labels_kind",
-            "image_scale_factors",
-            "labels_scale_factors",
+            "scale_factors",
             "chunks",
         ]
         reader_parameters = inspect.signature(steinbock).parameters
@@ -123,11 +119,11 @@ class TestSteinbockCommand:
         choice = options["labels_kind"].type
         assert isinstance(choice, click.Choice)
         assert choice.choices == ("deepcell", "ilastik")
-        for name in ("image_scale_factors", "labels_scale_factors", "chunks"):
+        assert options["scale_factors"].default == reader_parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert options["chunks"].default == reader_parameters["chunks"].default == DEFAULT_CHUNKS
+        for name in ("scale_factors", "chunks"):
             option = options[name]
             assert option.multiple
-            assert option.default == ()
-            assert reader_parameters[name].default is None
             option_type = option.type
             assert isinstance(option_type, click.IntRange)
             assert option_type.min == (1 if name == "chunks" else 2)

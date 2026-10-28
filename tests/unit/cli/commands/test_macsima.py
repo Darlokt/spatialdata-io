@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io._cli.commands.macsima import macsima_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,8 +74,8 @@ class TestMacsimaCommand:
             nuclei_channel_name="DAPI",
             split_threshold_nuclei_channel=2,
             include_transformations=True,
-            scale_factors=None,
-            chunks=(1, 1024, 1024),
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=DEFAULT_CHUNKS,
         )
 
     @pytest.mark.parametrize("case", [("none", None), ("NONE", None), ("0", 0), ("7", 7)])
@@ -105,7 +106,7 @@ class TestMacsimaCommand:
         [
             (("--split-threshold-nuclei-channel", "-1"), "neither a non-negative integer nor 'none'"),
             (("--split-threshold-nuclei-channel", "two"), "neither a non-negative integer nor 'none'"),
-            (("--chunks", "1", "--chunks", "2"), "Pass --chunks once or three times"),
+            (("--chunks", "1", "--chunks", "2"), "Pass --chunks once for every axis"),
             (("--exclude-cycles", "-1"), "is not in the range"),
             (("--scale-factors", "1"), "is not in the range"),
         ],

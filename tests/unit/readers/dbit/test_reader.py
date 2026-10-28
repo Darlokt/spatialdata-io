@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -16,9 +17,11 @@ from spatialdata_io.readers.dbit._reader import _validate_grid_options
 from tests.integration.readers.dbit.test_reader import _write_layout
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from pytest_mock import MockerFixture
+    from spatialdata import SpatialData
 
 
 class TestValidateGridOptions:
@@ -76,17 +79,38 @@ class TestDbit:
 
         discovery.assert_not_called()
 
+    def test_invalid_raster_option_fails_before_discovery(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        discovery = mocker.spy(dbit_reader, "_discover_layout")
+
+        with pytest.raises(ValueError, match="chunks"):
+            dbit(tmp_path / "absent", chunks=0)
+
+        discovery.assert_not_called()
+
     @pytest.mark.parametrize(
-        ("data_axes", "tiff_series", "tiff_level", "chunks"),
-        [("YX", 0, 0, None), (None, 1, 0, None), (None, 0, 1, None), (None, 0, 0, 8)],
+        "read",
+        [
+            partial(dbit, data_axes="YX"),
+            partial(dbit, tiff_series=1),
+            partial(dbit, tiff_level=1),
+            partial(dbit, scale_factors=(2,)),
+            partial(dbit, chunks=8),
+            partial(dbit, chunks=(1, 512, 512)),
+        ],
+        ids=["data_axes", "tiff_series", "tiff_level", "scale_factors", "chunks", "chunk_tuple"],
     )
-    def test_image_options_require_image(
-        self, tmp_path: Path, data_axes: str | None, tiff_series: int, tiff_level: int, chunks: int | None
-    ) -> None:
+    def test_nondefault_image_options_require_image(self, tmp_path: Path, read: Callable[[Path], SpatialData]) -> None:
         _write_layout(tmp_path)
 
         with pytest.raises(ValueError, match="require an image"):
-            dbit(tmp_path, data_axes=data_axes, tiff_series=tiff_series, tiff_level=tiff_level, chunks=chunks)
+            read(tmp_path)
+
+    def test_explicit_default_image_options_need_no_image(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+
+        result = dbit(tmp_path, tiff_series=0, tiff_level=0, scale_factors=(), chunks=(1, 1024, 1024))
+
+        assert dict(result.images) == {}
 
     @pytest.mark.parametrize("name", ["invalid name.h5ad", "..h5ad", "...h5ad", "table.h5ad", "TABLE.h5ad"])
     def test_inferred_name_is_validated_before_loading(self, tmp_path: Path, mocker: MockerFixture, name: str) -> None:

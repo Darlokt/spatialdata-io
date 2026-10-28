@@ -211,9 +211,15 @@ class TestSeqfish:
         root = write_seqfish_dataset(tmp_path, rois=("Roi1",))
         result = seqfish(root)
         assert result.images["Roi1_DAPI"].dims == ("c", "y", "x")
+        assert result.images["Roi1_DAPI"].data.chunks == ((1,), (8,), (12,))
+        assert result.labels["Roi1_Segmentation"].data.chunks == ((8,), (12,))
         pyramid = seqfish(root, scale_factors=(2,))
         assert list(pyramid.images["Roi1_DAPI"].children) == ["scale0", "scale1"]
         assert list(pyramid.labels["Roi1_Segmentation"].children) == ["scale0", "scale1"]
+
+    def test_invalid_raster_option_fails_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="scale_factors"):
+            seqfish(tmp_path / "missing", scale_factors=2)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
     def test_zero_count_control_is_part_of_known_transcript_vocabulary(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path, rois=("Roi1",))

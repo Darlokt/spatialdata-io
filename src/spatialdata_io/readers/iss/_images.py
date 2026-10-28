@@ -13,12 +13,11 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     import numpy as np
     from dask.array import Array
     from xarray import DataArray, DataTree
 
+    from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.image.tiff import TiffMetadata
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.iss._layout import _IssLayout
@@ -26,17 +25,6 @@ if TYPE_CHECKING:
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
 _MAX_EXACT_LABEL_BYTES = 4
-_MIN_SCALE_FACTOR = 2
-
-
-@dataclass(frozen=True, slots=True)
-class _ImageOptions:
-    """Own validated axis, pyramid and chunk choices independently of caller lists."""
-
-    data_axes: str | None
-    image_scale_factors: tuple[int, ...] | None
-    labels_scale_factors: tuple[int, ...] | None
-    chunks: int | tuple[int, int, int] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,66 +36,23 @@ class _IssRasters:
     label_dtype: np.dtype[np.generic]
 
 
-def _image_options(
-    *,
-    data_axes: str | None,
-    image_scale_factors: Sequence[int] | None,
-    labels_scale_factors: Sequence[int] | None,
-    chunks: int | tuple[int, int, int] | None,
-) -> _ImageOptions:
-    """Validate public raster options and materialize borrowed factor sequences."""
-    if data_axes is not None:
-        if not isinstance(data_axes, str):
-            message = "data_axes must be a string or None."
-            raise TypeError(message)
-        if (
-            not data_axes
-            or not data_axes.isascii()
-            or not data_axes.isalpha()
-            or len(set(data_axes.lower())) != len(data_axes)
-            or not {"x", "y"}.issubset(data_axes.lower())
-        ):
-            message = "data_axes must contain unique alphabetic axis names including X and Y."
-            raise ValueError(message)
-        data_axes = data_axes.lower()
-
-    # Own borrowed sequences before lazy products retain the selected configuration.
-    factors: list[tuple[int, ...] | None] = []
-    for name, supplied in (
-        ("image_scale_factors", image_scale_factors),
-        ("labels_scale_factors", labels_scale_factors),
-    ):
-        if supplied is None:
-            factors.append(None)
-            continue
-
-        values = tuple(supplied)
-        if not values or any(
-            isinstance(value, bool) or not isinstance(value, int) or value < _MIN_SCALE_FACTOR for value in values
-        ):
-            message = f"{name} must be a nonempty sequence of integer downsampling factors greater than one."
-            raise ValueError(message)
-        factors.append(values)
-
-    _validate_chunks(chunks)
-    return _ImageOptions(data_axes, factors[0], factors[1], chunks)
-
-
-def _validate_chunks(chunks: int | tuple[int, int, int] | None) -> None:
-    """Require positive model chunk sizes in canonical CYX order."""
-    if chunks is None:
-        return
-
-    sizes = chunks if isinstance(chunks, tuple) else (chunks,)
-    if isinstance(chunks, tuple) and len(chunks) != len(_IMAGE_AXES):
-        message = "chunks must contain three values in CYX order."
-        raise ValueError(message)
-    if any(isinstance(size, bool) or not isinstance(size, int) for size in sizes):
-        message = "chunks must be a positive integer or a tuple of three integers."
+def _validate_data_axes(data_axes: str | None) -> str | None:
+    """Validate an explicit raw-image axis interpretation and normalize it to lowercase."""
+    if data_axes is None:
+        return None
+    if not isinstance(data_axes, str):
+        message = "data_axes must be a string or None."
         raise TypeError(message)
-    if any(size <= 0 for size in sizes):
-        message = "chunks must contain only positive sizes."
+    if (
+        not data_axes
+        or not data_axes.isascii()
+        or not data_axes.isalpha()
+        or len(set(data_axes.lower())) != len(data_axes)
+        or not {"x", "y"}.issubset(data_axes.lower())
+    ):
+        message = "data_axes must contain unique alphabetic axis names including X and Y."
         raise ValueError(message)
+    return data_axes.lower()
 
 
 def _read_raster(
@@ -146,11 +91,12 @@ def _read_raster(
     return array, metadata
 
 
-def _read_rasters(layout: _IssLayout, options: _ImageOptions) -> _IssRasters:
-    """Construct pixel-aligned raw and labels models without executing pixel tasks."""
-    image, metadata = _read_raster(
-        layout.raw_image, name="raw image", target_axes=_IMAGE_AXES, data_axes=options.data_axes
-    )
+def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOptions) -> _IssRasters:
+    """Construct pixel-aligned raw and labels models without executing pixel tasks.
+
+    One pyramid applies to the raw image and its labels, which share a pixel grid.
+    """
+    image, metadata = _read_raster(layout.raw_image, name="raw image", target_axes=_IMAGE_AXES, data_axes=data_axes)
     labels, _ = _read_raster(layout.labels, name="labels", target_axes=_LABEL_AXES)
 
     if image.shape[-2:] != labels.shape:
@@ -167,19 +113,16 @@ def _read_rasters(layout: _IssLayout, options: _ImageOptions) -> _IssRasters:
             found=f"dtype {labels.dtype}",
             expected="integer label pixels, with zero reserved for background",
         )
-    if options.labels_scale_factors is not None and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
+    factors = raster.scale_factors
+    if factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
         message = (
             "Generated label pyramids require <=32-bit integer labels. The upstream model rounds 64-bit IDs. "
-            "Use labels_scale_factors=None for exact 64-bit labels."
+            "Use scale_factors=() for exact 64-bit labels."
         )
         raise ValueError(message)
-    for array, factors, path in (
-        (image, options.image_scale_factors, layout.raw_image),
-        (labels, options.labels_scale_factors, layout.labels),
-    ):
-        if factors is not None and min(array.shape[-2:]) < prod(factors):
-            message = f"Requested scale factors {factors} exceed the spatial extent of ISS raster {path}."
-            raise ValueError(message)
+    if factors and min(labels.shape) < prod(factors):
+        message = f"Requested scale factors {factors} exceed the spatial extent of the ISS rasters in {layout.root}."
+        raise ValueError(message)
 
     # OME names describe scientific channels, regardless of a three/four-channel count.
     channel_names = None
@@ -207,27 +150,21 @@ def _read_rasters(layout: _IssLayout, options: _ImageOptions) -> _IssRasters:
                 expected="unique channel names or OME IDs",
             )
 
-    # Integer chunk sizes work at every pyramid level. Complete base partitions do not.
-    image_chunks = options.chunks or tuple(max(parts) for parts in image.chunks)
-    label_chunks = image_chunks[-2:] if isinstance(image_chunks, tuple) else image_chunks
-    if options.chunks is None:
-        label_chunks = tuple(max(parts) for parts in labels.chunks)
-
     return _IssRasters(
         Image2DModel.parse(
             image,
             dims=_IMAGE_AXES,
             c_coords=channel_names,
             rgb=False,
-            chunks=image_chunks,
-            scale_factors=options.image_scale_factors,
+            chunks=raster.image_chunks(),
+            scale_factors=raster.model_scale_factors,
             transformations={"global": Identity()},
         ),
         Labels2DModel.parse(
             labels,
             dims=_LABEL_AXES,
-            chunks=label_chunks,
-            scale_factors=options.labels_scale_factors,
+            chunks=raster.label_chunks(),
+            scale_factors=raster.model_scale_factors,
             transformations={"global": Identity()},
         ),
         labels.dtype,

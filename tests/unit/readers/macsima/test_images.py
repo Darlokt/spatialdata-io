@@ -13,9 +13,10 @@ from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 from spatialdata_io.readers.macsima._channels import ChannelOptions, StackPlan, plan_stack
-from spatialdata_io.readers.macsima._images import RasterOptions, make_image, make_raster_options
+from spatialdata_io.readers.macsima._images import make_image
 from spatialdata_io.readers.macsima._layout import StackFiles
 from spatialdata_io.readers.macsima._metadata import read_channel
 from tests.integration.readers.macsima._fixtures import ChannelSpec, full_resolution, write_channel
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from pytest_mock import MockerFixture
 
-_OPTIONS = RasterOptions(None, (1, 1024, 1024), include_transformations=True)
+_DEFAULT = make_raster_options()
 
 
 def _plan(
@@ -50,38 +51,6 @@ def _plan(
     return plan, pixels
 
 
-class TestMakeRasterOptions:
-    """Validate caller raster options once."""
-
-    def test_owns_factors(self) -> None:
-        factors = [2, 4]
-
-        options = make_raster_options(factors, 256, include_transformations=False)
-
-        assert options == RasterOptions((2, 4), 256, include_transformations=False)
-
-    @pytest.mark.parametrize(
-        ("arguments", "error", "match"),
-        [
-            (("22", 1, True), TypeError, "ordered sequence"),
-            (((), 1, True), ValueError, "nonempty sequence"),
-            (((1,), 1, True), ValueError, "greater than one"),
-            (((2.0,), 1, True), TypeError, "only integers"),
-            (((True,), 1, True), TypeError, "only integers"),
-            ((None, (1, 2), True), ValueError, "three values in CYX order"),
-            ((None, (1, 2, 2.0), True), TypeError, "positive integer or a tuple"),
-            ((None, True, True), TypeError, "positive integer or a tuple"),
-            ((None, 0, True), ValueError, "only positive sizes"),
-            ((None, (1, 0, 4), True), ValueError, "only positive sizes"),
-            ((None, 1, 1), TypeError, "must be a boolean"),
-        ],
-    )
-    def test_rejects(self, arguments: tuple[object, object, object], error: type[Exception], match: str) -> None:
-        factors, chunks, transformations = arguments
-        with pytest.raises(error, match=match):
-            make_raster_options(factors, chunks, include_transformations=transformations)  # pyrefly: ignore[bad-argument-type] - Invalid runtime inputs.
-
-
 class TestMakeImage:
     """Build one lazy CYX image without executing pixel tasks."""
 
@@ -90,7 +59,9 @@ class TestMakeImage:
         executed: list[object] = []
 
         with Callback(posttask=lambda *args: executed.append(args)):
-            element = make_image(plan.channels, frame="run", pixel_size_um=0.17, options=_OPTIONS)
+            element = make_image(
+                plan.channels, frame="run", pixel_size_um=0.17, include_transformations=True, raster=_DEFAULT
+            )
 
         assert not executed
         assert isinstance(element, DataArray)
@@ -109,7 +80,9 @@ class TestMakeImage:
         )
         plan, pixels = _plan(tmp_path, specs, padded=True)
 
-        element = make_image(plan.channels, frame="run", pixel_size_um=0.17, options=_OPTIONS)
+        element = make_image(
+            plan.channels, frame="run", pixel_size_um=0.17, include_transformations=True, raster=_DEFAULT
+        )
 
         expected = np.zeros((2, 8, 9), dtype=np.uint16)
         expected[0, 2:8, 0:8] = pixels[0]
@@ -123,7 +96,8 @@ class TestMakeImage:
             plan.channels,
             frame="run",
             pixel_size_um=0.17,
-            options=RasterOptions(None, 1, include_transformations=False),
+            include_transformations=False,
+            raster=make_raster_options(chunks=1),
         )
 
         frames = get_transformation(element, get_all=True)
@@ -140,7 +114,8 @@ class TestMakeImage:
             plan.channels,
             frame="run",
             pixel_size_um=0.17,
-            options=RasterOptions((2, 2), (2, 8, 8), include_transformations=True),
+            include_transformations=True,
+            raster=make_raster_options((2, 2), (2, 8, 8)),
         )
 
         assert isinstance(element, DataTree)
@@ -155,12 +130,15 @@ class TestMakeImage:
                 plan.channels,
                 frame="run",
                 pixel_size_um=0.17,
-                options=RasterOptions((2, 4), 1, include_transformations=True),
+                include_transformations=True,
+                raster=make_raster_options((2, 4), 1),
             )
 
     def test_small_region_reads_one_band_of_one_channel(self, tmp_path: Path, mocker: MockerFixture) -> None:
         plan, pixels = _plan(tmp_path, (ChannelSpec("CD3", 1, "APC"), ChannelSpec("CD4", 2, "PE")))
-        element = make_image(plan.channels, frame="run", pixel_size_um=0.17, options=_OPTIONS)
+        element = make_image(
+            plan.channels, frame="run", pixel_size_um=0.17, include_transformations=True, raster=_DEFAULT
+        )
         selection = mocker.spy(tiff_dask, "_read_tiff_selection")
 
         np.testing.assert_array_equal(full_resolution(element).data[1, :2, :3].compute(), pixels[1][:2, :3])

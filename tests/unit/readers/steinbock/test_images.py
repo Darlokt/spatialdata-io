@@ -1,4 +1,4 @@
-"""Steinbock OME channels, raster options, exact labels, and lazy TIFF reads."""
+"""Steinbock OME channels, explicit chunks, exact labels, and lazy TIFF reads."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
 from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.steinbock._images import _image_options, _read_raster, _read_rasters
+from spatialdata_io.readers.steinbock._images import _read_raster, _read_rasters
 from spatialdata_io.readers.steinbock._layout import _SampleLayout
 
 if TYPE_CHECKING:
@@ -40,42 +41,6 @@ def _write_sample(root: Path) -> tuple[_SampleLayout, NDArray[np.uint16], NDArra
     )
     tifffile.imwrite(label_path, labels, photometric="minisblack", tile=(16, 16))
     return _SampleLayout("sample", ArtifactFile(image_path), ArtifactFile(label_path)), image, labels
-
-
-class TestImageOptions:
-    """Own borrowed choices and reject malformed factors/chunks before source work."""
-
-    def test_factor_ownership(self) -> None:
-        image_factors, label_factors = [2, 3], [2]
-
-        result = _image_options(
-            image_scale_factors=image_factors, labels_scale_factors=label_factors, chunks=(1, 8, 16)
-        )
-        image_factors.append(5)
-        label_factors.append(7)
-        assert result.image_scale_factors == (2, 3)
-        assert result.labels_scale_factors == (2,)
-        assert result.chunks == (1, 8, 16)
-        assert not hasattr(result, "__dict__")
-
-    @pytest.mark.parametrize("factors", [[], [1], [0], [-1], [True], [2.0]])
-    def test_invalid_factors(self, factors: list[float]) -> None:
-        with pytest.raises(ValueError, match="image_scale_factors"):
-            _image_options(image_scale_factors=factors, labels_scale_factors=None, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Invalid values from an untyped caller.
-
-        with pytest.raises(ValueError, match="labels_scale_factors"):
-            _image_options(image_scale_factors=None, labels_scale_factors=factors, chunks=None)  # type: ignore[bad-argument-type, arg-type]  # Invalid values from an untyped caller.
-
-    @pytest.mark.parametrize("chunks", [None, 16, (1, 8, 16)])
-    def test_valid_chunks(self, chunks: int | tuple[int, int, int] | None) -> None:
-        result = _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=chunks)
-
-        assert result.chunks == chunks
-
-    @pytest.mark.parametrize("chunks", [0, -1, (1, 0, 2), (), (1, 2), True, 2.0, "auto", (1, 2.0, 3)])
-    def test_invalid_chunks(self, chunks: float | str | tuple[int | float, ...]) -> None:
-        with pytest.raises((TypeError, ValueError), match="chunks"):
-            _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=chunks)  # type: ignore[bad-argument-type, arg-type]  # Invalid values from an untyped caller.
 
 
 class TestReadRaster:
@@ -111,7 +76,7 @@ class TestReadRaster:
 class TestReadRasters:
     """Prove channels, masks, graph bounds, pyramid safety, and sample coordinates."""
 
-    @pytest.mark.parametrize("invalid", ["shape", "float", "image_factor", "label_factor", "uint64", "int64", "no_ome"])
+    @pytest.mark.parametrize("invalid", ["shape", "float", "factor", "uint64", "int64", "no_ome"])
     def test_invalid_contract_fails_before_pixels(self, tmp_path: Path, mocker: MockerFixture, invalid: str) -> None:
         sample, image, _ = _write_sample(tmp_path)
         dtype = (
@@ -128,19 +93,11 @@ class TestReadRasters:
         if invalid == "no_ome":
             tifffile.imwrite(sample.image, image, ome=False, photometric="minisblack", metadata={"axes": "CYX"})
 
-        options = _image_options(
-            image_scale_factors=[128] if invalid == "image_factor" else None,
-            labels_scale_factors=[128]
-            if invalid == "label_factor"
-            else [2]
-            if invalid in {"uint64", "int64"}
-            else None,
-            chunks=None,
-        )
+        factors = (128,) if invalid == "factor" else (2,) if invalid in {"uint64", "int64"} else ()
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
 
         with pytest.raises(ValueError, match=r"extent|integer mask|32-bit|OME metadata"):
-            _read_rasters(sample, options)
+            _read_rasters(sample, make_raster_options(factors))
         pixels.assert_not_called()
 
     @pytest.mark.parametrize("names", [["DNA", "CD3"], ["DNA", "DNA"], ["", "CD3"], None])
@@ -149,7 +106,7 @@ class TestReadRasters:
         metadata = {"axes": "CYX"} if names is None else {"axes": "CYX", "Channel": {"Name": names}}
         tifffile.imwrite(sample.image, image, ome=True, photometric="minisblack", metadata=metadata)
 
-        result = _read_rasters(sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None))
+        result = _read_rasters(sample, make_raster_options())
 
         assert isinstance(result.image, DataArray)
         expected = names if names and all(names) and len(set(names)) == len(names) else ["Channel:0:0", "Channel:0:1"]
@@ -169,7 +126,7 @@ class TestReadRasters:
             metadata={"axes": "CYX", "Channel": {"Name": names}},
         )
 
-        result = _read_rasters(sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None))
+        result = _read_rasters(sample, make_raster_options())
 
         assert isinstance(result.image, DataArray)
         assert result.image.coords["c"].to_numpy().tolist() == names
@@ -185,7 +142,7 @@ class TestReadRasters:
         )
         tifffile.imwrite(sample.labels, labels, photometric="minisblack")
 
-        result = _read_rasters(sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None))
+        result = _read_rasters(sample, make_raster_options())
 
         assert isinstance(result.image, DataArray)
         assert isinstance(result.labels, DataArray)
@@ -212,10 +169,9 @@ class TestReadRasters:
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
 
+        # Chunks equal to the 16-pixel tiles keep one task per stored tile.
         with Callback(posttask=tasks):
-            result = _read_rasters(
-                sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=None)
-            )
+            result = _read_rasters(sample, make_raster_options(chunks=(1, 16, 16)))
         tasks.assert_not_called()
         pixels.assert_not_called()
         assert isinstance(result.image, DataArray)
@@ -232,20 +188,26 @@ class TestReadRasters:
         assert result.label_shape == (48, 64)
         assert result.label_dtype == np.dtype(np.uint16)
 
-    @pytest.mark.parametrize("chunks", [8, (1, 8, 16)])
+    @pytest.mark.parametrize(
+        ("chunks", "image_chunks", "label_chunks"),
+        [(DEFAULT_CHUNKS, (1, 48, 64), (48, 64)), (8, (2, 8, 8), (8, 8)), ((1, 8, 16), (1, 8, 16), (8, 16))],
+        ids=["default", "size", "cyx"],
+    )
     def test_requested_chunks_keep_corresponding_label_axes(
-        self, tmp_path: Path, chunks: int | tuple[int, int, int]
+        self,
+        tmp_path: Path,
+        chunks: int | tuple[int, int, int],
+        image_chunks: tuple[int, int, int],
+        label_chunks: tuple[int, int],
     ) -> None:
         sample, _, _ = _write_sample(tmp_path)
 
-        result = _read_rasters(
-            sample, _image_options(image_scale_factors=None, labels_scale_factors=None, chunks=chunks)
-        )
+        result = _read_rasters(sample, make_raster_options(chunks=chunks))
 
         assert isinstance(result.image, DataArray)
         assert isinstance(result.labels, DataArray)
-        assert result.image.data.chunksize == ((1, 8, 16) if isinstance(chunks, tuple) else (2, 8, 8))
-        assert result.labels.data.chunksize == ((8, 16) if isinstance(chunks, tuple) else (8, 8))
+        assert result.image.data.chunksize == image_chunks
+        assert result.labels.data.chunksize == label_chunks
 
     @pytest.mark.parametrize("dtype", [np.uint16, np.uint32, np.int32])
     @pytest.mark.parametrize("factors", [(2, 2, 2), (3, 2)])
@@ -265,9 +227,7 @@ class TestReadRasters:
         )
         tifffile.imwrite(sample.labels, labels, photometric="minisblack", tile=(16, 16))
 
-        result = _read_rasters(
-            sample, _image_options(image_scale_factors=factors, labels_scale_factors=factors, chunks=None)
-        )
+        result = _read_rasters(sample, make_raster_options(factors))
 
         assert isinstance(result.image, DataTree)
         assert isinstance(result.labels, DataTree)

@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 import spatialdata_io
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.visium import visium
 
 
@@ -27,6 +28,7 @@ class TestVisium:
             "make_var_names_unique",
             "data_axes",
             "tiff_series",
+            "scale_factors",
             "chunks",
         ]
         assert all(
@@ -38,7 +40,8 @@ class TestVisium:
         assert signature.parameters["make_var_names_unique"].default is True
         assert signature.parameters["data_axes"].default is None
         assert signature.parameters["tiff_series"].default is None
-        assert signature.parameters["chunks"].default is None
+        assert signature.parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert signature.parameters["chunks"].default == DEFAULT_CHUNKS
 
     def test_lazy_root_export_is_the_same_reader(self) -> None:
         assert spatialdata_io.visium is visium

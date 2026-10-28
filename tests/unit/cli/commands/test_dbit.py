@@ -10,6 +10,7 @@ import click
 import pytest
 
 from spatialdata_io._cli.commands.dbit import dbit_command
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.dbit import dbit
 
 if TYPE_CHECKING:
@@ -42,7 +43,8 @@ class TestDbitCommand:
             data_axes=None,
             tiff_series=0,
             tiff_level=0,
-            chunks=None,
+            scale_factors=DEFAULT_SCALE_FACTORS,
+            chunks=DEFAULT_CHUNKS,
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -88,6 +90,10 @@ class TestDbitCommand:
             "2",
             "--tiff-level",
             "1",
+            "--scale-factors",
+            "2",
+            "--scale-factors",
+            "3",
         ]
         for value in chunk_values:
             arguments.extend(["--chunks", value])
@@ -106,6 +112,7 @@ class TestDbitCommand:
             data_axes="YXC",
             tiff_series=2,
             tiff_level=1,
+            scale_factors=(2, 3),
             chunks=12 if len(chunk_values) == 1 else (1, 8, 16),
         )
         reader_result.write.assert_called_once_with(output)
@@ -192,10 +199,7 @@ class TestDbitCommand:
         [
             ["--tiff-series", "-1"],
             ["--tiff-level", "-1"],
-            ["--chunks", "0"],
             ["--chunks", "1", "--chunks", "2"],
-            ["--chunks", "1", "--chunks", "2", "--chunks", "3", "--chunks", "4"],
-            ["--chunks", "[1, 8, 16]"],
             ["--anndata-path", "table.h5ad"],
             ["--barcode-position", "positions.tsv"],
             ["--image-path", "image.png"],
@@ -228,6 +232,8 @@ class TestDbitCommand:
             "data_axes",
             "tiff_series",
             "tiff_level",
+            "scale_factors",
+            "chunks",
         ):
             assert options[name].default == reader_parameters[name].default
 
@@ -250,11 +256,10 @@ class TestDbitCommand:
         assert scale_type.max == 4
         assert scale_type.max_open
 
-        for name in ("tiff_series", "tiff_level", "chunks"):
+        for name in ("tiff_series", "tiff_level"):
             option_type = options[name].type
             assert isinstance(option_type, click.IntRange)
-            assert option_type.min == (1 if name == "chunks" else 0)
+            assert option_type.min == 0
 
-        assert options["chunks"].multiple
-        assert options["chunks"].default == ()
-        assert reader_parameters["chunks"].default is None
+        assert options["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert options["chunks"].default == DEFAULT_CHUNKS

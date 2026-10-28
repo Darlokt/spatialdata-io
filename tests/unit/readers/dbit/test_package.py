@@ -7,6 +7,7 @@ import inspect
 
 import pytest
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.dbit import dbit
 
 
@@ -34,6 +35,7 @@ class TestPackage:
             "data_axes",
             "tiff_series",
             "tiff_level",
+            "scale_factors",
             "chunks",
         ]
         assert parameters["path"].default is inspect.Parameter.empty
@@ -53,7 +55,8 @@ class TestPackage:
             "data_axes": None,
             "tiff_series": 0,
             "tiff_level": 0,
-            "chunks": None,
+            "scale_factors": DEFAULT_SCALE_FACTORS,
+            "chunks": DEFAULT_CHUNKS,
         }
 
     def test_path_is_required_at_runtime(self) -> None:
