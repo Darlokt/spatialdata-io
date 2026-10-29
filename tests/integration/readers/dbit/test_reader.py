@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING
 
 import anndata as ad
 import dask.array as da
+import imagecodecs
 import numpy as np
 import pandas as pd
 import pytest
 import shapely
 import tifffile
-from PIL import Image
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
@@ -57,7 +57,7 @@ def _write_layout(path: Path, *, sparse_source: bool = True) -> None:
 def _write_image(path: Path) -> NDArray[np.uint8]:
     pixels = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
     if path.suffix == ".png":
-        Image.fromarray(pixels).save(path)
+        path.write_bytes(imagecodecs.png_encode(pixels))
     else:
         tifffile.imwrite(path, pixels, photometric="rgb")
     return pixels

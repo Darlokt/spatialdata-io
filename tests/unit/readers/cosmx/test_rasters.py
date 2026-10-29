@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import imagecodecs
 import numpy as np
 import pytest
 import tifffile
 from dask.callbacks import Callback
-from PIL import Image
 from spatialdata.transformations import BaseTransformation, get_transformation
 from xarray import DataArray, DataTree
 
@@ -43,7 +43,7 @@ class TestReadImage:
 
     def test_png_color_composite(self, tmp_path: Path) -> None:
         pixels = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
-        Image.fromarray(pixels).save(tmp_path / "C_F002.png")
+        (tmp_path / "C_F002.png").write_bytes(imagecodecs.png_encode(pixels))
         tasks: list[object] = []
         with Callback(posttask=lambda *args: tasks.append(args)):
             element, grid = read_image(
@@ -61,7 +61,7 @@ class TestReadImage:
         np.testing.assert_array_equal(_matrix(frames["global"]), [[1, 0, 999.5], [0, -1, 5005.0], [0, 0, 1]])
 
     def test_jpeg_and_grayscale_tiff(self, tmp_path: Path) -> None:
-        Image.fromarray(np.zeros((4, 5, 3), np.uint8)).save(tmp_path / "C_F001.jpg")
+        (tmp_path / "C_F001.jpg").write_bytes(imagecodecs.jpeg8_encode(np.zeros((4, 5, 3), np.uint8)))
         jpeg, _ = read_image(ArtifactFile(tmp_path / "C_F001.jpg"), fov=1, placement=_PLACEMENT, options=_DEFAULT)
         assert jpeg.shape == (3, 4, 5)
         tifffile.imwrite(tmp_path / "C_F001.tif", np.ones((4, 5), np.uint16))

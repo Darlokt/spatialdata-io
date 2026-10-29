@@ -100,7 +100,7 @@ from tempfile import TemporaryDirectory
 import anndata as ad
 import numpy as np
 import pandas as pd
-from PIL import Image
+import imagecodecs
 from scipy import sparse
 
 from spatialdata_io import dbit
@@ -117,7 +117,7 @@ with TemporaryDirectory() as directory:
         encoding="utf-8",
     )
     pixels = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
-    Image.fromarray(pixels).save(root / "tissue_lowres_image.png")
+    (root / "tissue_lowres_image.png").write_bytes(imagecodecs.png_encode(pixels))
 
     sdata = dbit(root)
     table = sdata.tables["table"]

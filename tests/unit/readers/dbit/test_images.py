@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import imagecodecs
 import numpy as np
 import pytest
 import tifffile
-from PIL import Image
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -136,7 +136,7 @@ class TestReadImage:
     def test_scale_factors_build_a_pyramid(self, tmp_path: Path) -> None:
         path = tmp_path / "image.png"
         source = np.arange(3 * 8 * 12, dtype=np.uint8).reshape(8, 12, 3)
-        Image.fromarray(source).save(path)
+        path.write_bytes(imagecodecs.png_encode(source))
 
         image = _read_image(
             ArtifactFile(path), data_axes=None, tiff_series=0, tiff_level=0, raster=make_raster_options((2,), 4)

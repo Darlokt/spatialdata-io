@@ -396,13 +396,11 @@ We recommend studying existing readers and reusing code from them. A few technic
 
 If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. Experimental entry points belong under the [`experimental`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/experimental/__init__.py) module until their supported artifact contracts are documented and covered by executable workflows. The public [`iss()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/iss/_reader.py) reader, for example, supports explicitly selected TIFF images, integer segmentation labels, and a linked h5ad table.
 
-#### Separating the constants from the reader logic
+#### Reader-owned schemas and layout names
 
-Each raw data format introduces specific naming schemes. To reduce the risk of typos and maintain an overview of all the names used in a reader, we list all the string constants in the file [src/spatialdata_io.\_constants/\_constants.py](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/_constants/_constants.py).
-
-##### Technical notes
-
-By using the decorator `inject_docs`, you can include constants in the docstring of reader functions. [See an example here](https://github.com/scverse/spatialdata-io/blob/d2fe0bc18349093ad2cafce752590117729baee8/src/spatialdata_io/readers/xenium.py#L55).
+Keep vendor column schemas and their validation in the reader's `_schemas.py`.
+Keep artifact names and version-specific layout interpretation with discovery
+in that reader's `_layout.py`; do not introduce shared vendor constants.
 
 ### Adding tests: small data vs real data
 
@@ -429,13 +427,11 @@ To streamline the usage of datasets, we kindly ask you to provide two scripts vi
 
 Please create a folder in the [root directory of `spatialdata-sandbox`](https://github.com/giovp/spatialdata-sandbox/tree/main) named after your technology. Please include a format version if available. We also add the suffix `_io`: we use this to distinguish between scripts that reuse `spatialdata_io` for converting the data to SpatialData Zarr and scripts that parse the data from scratch.
 
-An example is [`visium_hd_3.1.1_io`](https://github.com/giovp/spatialdata-sandbox/tree/main/visium_hd_3.1.1_io). Here, [`download.py`](https://github.com/giovp/spatialdata-sandbox/blob/main/visium_hd_3.1.1_io/download.py) fetches Visium HD v3.1.1 data, and [`to_zarr.py`](https://github.com/giovp/spatialdata-sandbox/blob/main/visium_hd_3.1.1_io/to_zarr.py) uses `spatialdata_io.visium_hd()` to parse the data.
 
 A note: `spatialdata-sandbox` is primarily used by scverse developers and, as the name suggests, we mainly use it as a sandbox for experimenting and for small scripts. We do not have pre-commit installed nor CI set up, so feel free not to worry about the code style.
 
 ##### The `download.py` script
 
-The `download.py` script simply downloads the raw data inside the subfolder `data` and, if it is zipped, unzips it. Example [`download.py`](https://github.com/giovp/spatialdata-sandbox/blob/main/visium_hd_3.1.1_io/download.py) for Visium HD data.
 
 When the data does not follow any specification (for instance, for in-house data), it sometimes also performs some manipulation on the data and, in such cases, stores the result in any convenient way. Example [`download.py`](https://github.com/giovp/spatialdata-sandbox/blob/main/merfish/download.py) for in-house MERFISH data.
 
@@ -581,7 +577,7 @@ As a wrap-up, here is a checklist of the main points to consider when contributi
 
 - Reader implementation
     - [ ] Implement reader functions in `src/spatialdata_io/readers/` (if no formal spec available, place under `experimental/`)
-    - [ ] Place string constants in `src/spatialdata_io/_constants/_constants.py`
+    - [ ] Keep schemas and layout names in their reader-owned modules
 
 - Example data
     - [ ] Provide (very) small public test dataset(s) (~100kB–10MB, preferred), licensed with a permissive license (e.g. CC BY 4.0)

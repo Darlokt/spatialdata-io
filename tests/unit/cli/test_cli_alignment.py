@@ -38,8 +38,8 @@ _READER_CASES = (
     _ReaderCase("spatialdata_io.readers.visium_hd", "visium_hd", "visium-hd"),
     _ReaderCase("spatialdata_io.readers.xenium", "xenium", "xenium"),
 )
-# Readers without images or labels; Visium HD adopts the raster options in its own cohort.
-_WITHOUT_RASTER_OPTIONS = frozenset({"curio", "visium_hd"})
+# Readers without images or labels.
+_WITHOUT_RASTER_OPTIONS = frozenset({"curio"})
 _RASTER_DEFAULTS = {"scale_factors": DEFAULT_SCALE_FACTORS, "chunks": DEFAULT_CHUNKS}
 
 

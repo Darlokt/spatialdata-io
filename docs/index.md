@@ -16,6 +16,7 @@ cosmx.md
 macsima.md
 stereoseq.md
 xenium.md
+visium_hd.md
 raster_options.md
 table_contracts.md
 changelog.md

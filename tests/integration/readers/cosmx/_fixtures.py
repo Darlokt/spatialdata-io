@@ -6,10 +6,10 @@ import gzip
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+import imagecodecs
 import numpy as np
 import pandas as pd
 import tifffile
-from PIL import Image
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,7 +145,7 @@ def _write_rasters(path: Path) -> None:
         image = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
         image[..., 0] = np.arange(HEIGHT * WIDTH, dtype=np.uint8).reshape(HEIGHT, WIDTH)
         image[..., 1] = fov
-        Image.fromarray(image).save(path / "CellComposite" / f"CellComposite_F{fov:03d}.png")
+        (path / "CellComposite" / f"CellComposite_F{fov:03d}.png").write_bytes(imagecodecs.png_encode(image))
 
 
 def write_cosmx_dataset(  # noqa: PLR0913, RUF100 - Independent format variants exercise reader boundaries.

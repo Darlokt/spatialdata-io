@@ -1,133 +1,160 @@
-"""Visium HD command."""
+"""Convert selected Visium HD products with explicit typed options."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import click
 
-from spatialdata_io._cli._common import dataset_io_options, parse_json_object
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
 
-    class _VisiumHdOptions(TypedDict):
-        dataset_id: str | None
-        filtered_counts_file: bool
-        bin_size: tuple[int, ...]
-        bins_as_squares: bool
+    class _VisiumHDOptions(TypedDict):
+        """Values validated by Click and the reader's option boundary."""
+
+        bin_sizes: tuple[int, ...] | Literal["all"]
+        bin_geometry: Literal["squares", "labels"]
+        bin_counts_kind: Literal["filtered", "raw"]
+        include_cell_boundaries: bool | None
+        include_nucleus_boundaries: bool | None
+        include_nucleus_table: bool
+        cell_counts_kind: Literal["filtered", "raw"]
+        invalid_geometries: Literal["keep", "drop", "raise"]
+        include_images: bool
+        include_cytassist_image: bool
         fullres_image_file: Path | None
-        load_all_images: bool
-        annotate_table_by_labels: bool
-        load_segmentations_only: bool | None
-        load_nucleus_segmentations: bool
-        var_names_make_unique: bool
-        gex_only: bool
-        imread_kwargs: str
-        image_models_kwargs: str
-        anndata_kwargs: str
+        data_axes: tuple[str, ...] | None
+        tiff_series: int | None
+        make_var_names_unique: bool
+        scale_factors: tuple[int, ...]
+        chunks: int | tuple[int, int, int]
+
+
+def _bin_sizes(
+    _context: click.Context, _parameter: click.Parameter, values: tuple[str, ...]
+) -> tuple[int, ...] | Literal["all"]:
+    """Parse repeated sizes, all, or none for a segmentation-only workflow."""
+    if values == ("all",):
+        return "all"
+    if values == ("none",):
+        return ()
+
+    if any(not value.isascii() or not value.isdecimal() or int(value) == 0 or int(value) % 2 for value in values):
+        message = "Pass positive even sizes, or all or none alone."
+        raise click.BadParameter(message)
+
+    sizes = tuple(int(value) for value in values)
+    if len(set(sizes)) != len(sizes):
+        message = "Bin sizes must be distinct."
+        raise click.BadParameter(message)
+
+    return tuple(sorted(sizes))
+
+
+def _axes(_context: click.Context, _parameter: click.Parameter, values: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Treat an omitted axis override as metadata-driven selection."""
+    return values or None
 
 
 @click.command(name="visium-hd")
 @dataset_io_options
-@click.option("--dataset-id", type=str, default=None, help="Dataset identifier; inferred when omitted.")
 @click.option(
-    "--filtered-counts-file",
-    type=bool,
-    default=True,
+    "--bin-sizes",
+    multiple=True,
+    default=("all",),
     show_default=True,
-    help="Whether to read filtered rather than raw counts.",
+    callback=_bin_sizes,
+    help="Repeat sizes, or all/none alone.",
 )
-@click.option("--bin-size", type=int, multiple=True, default=None, help="Repeated spatial bin sizes to load.")
 @click.option(
-    "--bins-as-squares",
-    type=bool,
-    default=True,
+    "--bin-geometry",
+    type=click.Choice(["squares", "labels"]),
+    default="squares",
     show_default=True,
-    help="Whether bins are squares rather than circles.",
+    help="Represent nominal bins as exact squares or a grid of labels.",
+)
+@click.option(
+    "--bin-counts-kind",
+    type=click.Choice(["filtered", "raw"]),
+    default="filtered",
+    show_default=True,
+    help="Select the bin matrix population.",
+)
+@click.option(
+    "--include-cell-boundaries/--no-include-cell-boundaries", default=None, help="Default: read when present."
+)
+@click.option(
+    "--include-nucleus-boundaries/--no-include-nucleus-boundaries", default=None, help="Default: read when present."
+)
+@click.option(
+    "--include-nucleus-table/--no-include-nucleus-table",
+    default=False,
+    show_default=True,
+    help="Aggregate raw 2 micrometre counts into nuclei.",
+)
+@click.option(
+    "--cell-counts-kind",
+    type=click.Choice(["filtered", "raw"]),
+    default="filtered",
+    show_default=True,
+    help="Select the cell matrix population.",
+)
+@click.option(
+    "--invalid-geometries",
+    type=click.Choice(["keep", "drop", "raise"]),
+    default="keep",
+    show_default=True,
+    help="Policy for invalid source polygons.",
+)
+@click.option(
+    "--include-images/--no-include-images", default=True, show_default=True, help="Include available microscope images."
+)
+@click.option(
+    "--include-cytassist-image/--no-include-cytassist-image",
+    default=False,
+    show_default=True,
+    help="Include the lazily warped CytAssist image.",
 )
 @click.option(
     "--fullres-image-file",
-    type=click.Path(path_type=Path, exists=True),
+    type=click.Path(path_type=Path, dir_okay=False),
     default=None,
-    help="Path to the full-resolution tissue image.",
+    help="Full-resolution image override relative to input or absolute.",
 )
+@click.option("--data-axes", multiple=True, default=(), callback=_axes, help="Repeat axis names in source array order.")
+@click.option("--tiff-series", type=click.IntRange(min=0), default=None, help="Full-resolution TIFF series index.")
 @click.option(
-    "--load-all-images",
-    type=bool,
-    default=False,
-    show_default=True,
-    help="Whether to load all available image products.",
-)
-@click.option(
-    "--annotate-table-by-labels",
-    type=bool,
-    default=False,
-    show_default=True,
-    help="Whether to annotate the table using segmentation labels.",
-)
-@click.option(
-    "--load-segmentations-only",
-    type=bool,
-    default=None,
-    help="Whether to load only segmented-cell products; omission uses the reader's deprecated default.",
-)
-@click.option(
-    "--load-nucleus-segmentations",
-    type=bool,
-    default=False,
-    show_default=True,
-    help="Whether to load nucleus segmentations.",
-)
-@click.option(
-    "--var-names-make-unique",
-    type=bool,
+    "--make-var-names-unique/--no-make-var-names-unique",
     default=True,
     show_default=True,
-    help="Whether to make feature names unique.",
+    help="Make duplicate feature symbols unique in all tables.",
 )
-@click.option(
-    "--gex-only", type=bool, default=False, show_default=True, help="Whether to retain only gene-expression features."
-)
-@click.option(
-    "--imread-kwargs", type=str, default="{}", show_default=True, help="JSON object of legacy image-reader options."
-)
-@click.option(
-    "--image-models-kwargs",
-    type=str,
-    default="{}",
-    show_default=True,
-    help="JSON object of legacy image-model options.",
-)
-@click.option(
-    "--anndata-kwargs", type=str, default="{}", show_default=True, help="JSON object of legacy AnnData-reader options."
-)
-def visium_hd_command(
-    input_path: Path,
-    output_path: Path,
-    **options: Unpack[_VisiumHdOptions],
-) -> None:
-    """Convert Visium HD data to SpatialData."""
-    # Keep top-level CLI help independent of scientific reader imports.
-    from spatialdata_io.readers.visium_hd import visium_hd  # noqa: PLC0415, RUF100
+@scale_factors_option
+@chunks_option
+def visium_hd_command(input_path: Path, output_path: Path, **options: Unpack[_VisiumHDOptions]) -> None:
+    """Read Space Ranger HD outputs and write a SpatialData Zarr store."""
+    from spatialdata_io.readers.visium_hd import visium_hd  # noqa: PLC0415, RUF100 - Keep command help lightweight.
 
-    bin_size = options["bin_size"]
     result = visium_hd(
-        path=input_path,
-        dataset_id=options["dataset_id"],
-        filtered_counts_file=options["filtered_counts_file"],
-        load_segmentations_only=options["load_segmentations_only"],
-        load_nucleus_segmentations=options["load_nucleus_segmentations"],
-        bin_size=list(bin_size) if bin_size else None,
-        bins_as_squares=options["bins_as_squares"],
+        input_path,
+        bin_sizes=options["bin_sizes"],
+        bin_geometry=options["bin_geometry"],
+        bin_counts_kind=options["bin_counts_kind"],
+        include_cell_boundaries=options["include_cell_boundaries"],
+        include_nucleus_boundaries=options["include_nucleus_boundaries"],
+        include_nucleus_table=options["include_nucleus_table"],
+        cell_counts_kind=options["cell_counts_kind"],
+        invalid_geometries=options["invalid_geometries"],
+        include_images=options["include_images"],
+        include_cytassist_image=options["include_cytassist_image"],
         fullres_image_file=options["fullres_image_file"],
-        load_all_images=options["load_all_images"],
-        annotate_table_by_labels=options["annotate_table_by_labels"],
-        var_names_make_unique=options["var_names_make_unique"],
-        gex_only=options["gex_only"],
-        imread_kwargs=parse_json_object(options["imread_kwargs"], parameter="imread_kwargs"),
-        image_models_kwargs=parse_json_object(options["image_models_kwargs"], parameter="image_models_kwargs"),
-        anndata_kwargs=parse_json_object(options["anndata_kwargs"], parameter="anndata_kwargs"),
+        data_axes=options["data_axes"],
+        tiff_series=options["tiff_series"],
+        make_var_names_unique=options["make_var_names_unique"],
+        scale_factors=options["scale_factors"],
+        chunks=options["chunks"],
     )
     result.write(output_path)
