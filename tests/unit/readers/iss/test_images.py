@@ -133,6 +133,24 @@ class TestReadRasters:
         assert result.image.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(result.image.data.compute(), dataset.raw)
 
+    @pytest.mark.parametrize("ome", [False, True])
+    @pytest.mark.parametrize("samples", [3, 4])
+    def test_explicit_sample_expansion_preserves_values_and_identities(
+        self, tmp_path: Path, *, ome: bool, samples: int
+    ) -> None:
+        write_iss_dataset(tmp_path)
+        source = np.arange(32 * 40 * samples, dtype=np.uint8).reshape(32, 40, samples)
+        tifffile.imwrite(tmp_path / "raw.tiff", source, ome=ome, photometric="rgb", metadata={"axes": "YXS"})
+        layout = _discover_layout(
+            tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+        )
+        with pytest.raises(ReaderFormatError, match="Axis 's'"):
+            _read_rasters(layout, data_axes=None, raster=make_raster_options())
+        result = _read_rasters(layout, data_axes="yxc", raster=make_raster_options())
+        expected = [f"Channel:0:0:sample:{index}" for index in range(samples)] if ome else list(range(samples))
+        assert result.image.coords["c"].to_numpy().tolist() == expected
+        np.testing.assert_array_equal(result.image.data.compute(), source.transpose(2, 0, 1))
+
     @pytest.mark.parametrize("compression", [None, "deflate"])
     def test_lazy_native_tiles_are_serializable_and_bounded(
         self, tmp_path: Path, mocker: MockerFixture, compression: str | None

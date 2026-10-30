@@ -1,4 +1,4 @@
-"""Integration workflows for bounded JSON metadata."""
+"""Integration workflows for strict JSON metadata."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class TestReadJsonObject:
         artifact = require_file(alias, context=context)
         assert_type(artifact, ArtifactFile)
 
-        result = read_json_object(artifact, max_bytes=128, context=context)
+        result = read_json_object(artifact, context=context)
         assert_type(result, dict[str, object])
 
         assert root == tmp_path.resolve()
@@ -45,7 +45,7 @@ class TestReadJsonObject:
         artifact = require_file(alias, context=context)
 
         with pytest.raises(ReaderFormatError) as raised:
-            read_json_object(artifact, max_bytes=2, context=context)
+            read_json_object(artifact, context=context)
 
         assert raised.value.context is context
         assert raised.value.path == target.resolve()

@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 STRING_DTYPE = pd.ArrowDtype(pa.string())
 FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 CELL_COLUMNS = ("label", "area", "center_x", "center_y")
-_MAX_NUMBER_CHARACTERS = 128
 _LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 
 
@@ -72,7 +71,7 @@ def normalize_ids(
         (series.dtype == STRING_DTYPE or isinstance(series.dtype, pd.StringDtype))
         and len(series)
         and not series.isna().any()
-        and series.str.fullmatch(r"[0-9]{1,128}").all()
+        and series.str.fullmatch(r"[0-9]+").all()
     ):
         try:
             integers = series.astype(pd.ArrowDtype(pa.uint64()))
@@ -85,7 +84,7 @@ def normalize_ids(
             return integers.to_numpy(dtype=dtype)
     for value in series:
         token = str(value)
-        if isinstance(value, (bool, np.bool_)) or len(token) > _MAX_NUMBER_CHARACTERS:
+        if isinstance(value, (bool, np.bool_)):
             raise schema_error(path, found=f"identifier {token!r}", expected="finite integral 64-bit identifiers")
         try:
             exact = Decimal(float(value)) if isinstance(value, (float, np.floating)) else Decimal(token)
@@ -105,8 +104,6 @@ def normalize_floats(series: pd.Series, path: ArtifactFile, column: str) -> pd.S
     """Decode correctly rounded float64 values, rejecting overflow and destructive underflow."""
     lexical = series.astype(STRING_DTYPE)
     expected = "finite float64 values without underflow or integer precision loss"
-    if lexical.str.len().gt(_MAX_NUMBER_CHARACTERS).any():
-        raise schema_error(path, found=f"oversized {column} value", expected=expected)
     try:
         normalized = lexical.astype(FLOAT_DTYPE)
     except (ValueError, TypeError, pa.ArrowInvalid) as error:

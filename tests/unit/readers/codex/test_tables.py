@@ -184,14 +184,6 @@ class TestReadCellTable:
         with pytest.raises(ReaderFormatError, match="row width"):
             _read_cell_table(ArtifactFile(path))
 
-    def test_bounded_header(self, tmp_path: Path) -> None:
-        """Reject an oversized CSV header before parsing the event population."""
-        path = tmp_path / "cells.csv"
-        path.write_text("x" * 1_048_577, encoding="utf-8")
-
-        with pytest.raises(ReaderFormatError, match="oversized"):
-            _read_cell_table(ArtifactFile(path))
-
     def test_fcs_without_marker_labels(self, tmp_path: Path) -> None:
         """Keep cycle feature IDs valid when optional FCS marker labels are absent."""
         path = tmp_path / "cells.fcs"

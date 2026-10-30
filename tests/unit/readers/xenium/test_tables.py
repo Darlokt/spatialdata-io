@@ -22,7 +22,6 @@ from spatialdata_io.readers.xenium._cells import read_cells_store
 from spatialdata_io.readers.xenium._layout import H5Counts, MtxArchive, MtxDirectory, TabularSource
 from spatialdata_io.readers.xenium._metadata import ProteinPanel, ProteinTarget
 from spatialdata_io.readers.xenium._tables import (
-    MAX_HEADER_BYTES,
     Cells,
     build_table,
     link_table,
@@ -142,18 +141,6 @@ class TestReadCounts:
             read_counts(_h5(bundle), None, partial)
 
     @pytest.mark.filterwarnings("ignore:Variable names are not unique")
-    def test_counts_beyond_exact_float32_raise(self, tmp_path: Path) -> None:
-        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
-        with h5py.File(tmp_path / "cell_feature_matrix.h5", "r+") as handle:
-            data = handle["matrix/data"][...]
-            # 2**24 + 1 is already rounded to 2**24 by the float32 conversion.
-            data[0] = 2**24 + 1
-            handle["matrix/data"][...] = data
-
-        with pytest.raises(ReaderFormatError, match=r"values outside \[0, 2\*\*24\)"):
-            read_counts(_h5(bundle), None, None)
-
-    @pytest.mark.filterwarnings("ignore:Variable names are not unique")
     def test_repeated_features_raise(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         with h5py.File(tmp_path / "cell_feature_matrix.h5", "r+") as handle:
@@ -193,6 +180,41 @@ class TestReadCounts:
 
 class TestReadFeatureIndex:
     """Every count source yields the same features and barcodes."""
+
+    @pytest.mark.parametrize("member", ["features.tsv.gz", "barcodes.tsv.gz", "matrix.mtx.gz"])
+    def test_repeated_required_archive_members_raise(self, tmp_path: Path, member: str) -> None:
+        fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(counts=("mtx_archive",)))
+        path = tmp_path / "cell_feature_matrix.tar.gz"
+        with tarfile.open(path, "r:gz") as archive:
+            payloads: list[tuple[tarfile.TarInfo, bytes]] = []
+            for info in archive:
+                if info.isfile():
+                    handle = archive.extractfile(info)
+                    assert handle is not None
+                    with handle:
+                        payloads.append((info, handle.read()))
+        with tarfile.open(path, "w:gz") as archive:
+            for info, payload in payloads:
+                archive.addfile(info, io.BytesIO(payload))
+                if info.name.endswith(member):
+                    archive.addfile(info, io.BytesIO(payload))
+        source = MtxArchive(ArtifactFile(path))
+        with pytest.raises(ReaderFormatError, match="exactly one"):
+            read_feature_index(source)
+        with pytest.raises(ReaderFormatError, match="exactly one"):
+            read_counts(source, None, None)
+
+    def test_metadata_only_archive_reads_never_extract_matrix(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(counts=("mtx_archive",)))
+        extract = mocker.spy(tarfile.TarFile, "extractall")
+        index = read_feature_index(MtxArchive(ArtifactFile(tmp_path / "cell_feature_matrix.tar.gz")))
+        assert index.features.tolist() == list(bundle.features)
+        assert index.barcodes.tolist() == list(bundle.barcodes)
+        members = extract.call_args.kwargs["members"]
+        assert {info.name for info in members} == {
+            "cell_feature_matrix/features.tsv.gz",
+            "cell_feature_matrix/barcodes.tsv.gz",
+        }
 
     def test_all_sources_agree(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(counts=("h5", "mtx", "mtx_archive")))
@@ -272,10 +294,6 @@ class TestReadCells:
 
         path.write_text('"cell_id\n')
         with pytest.raises(ReaderFormatError, match="malformed CSV header"):
-            read_header(TabularSource(ArtifactFile(path), "csv"))
-
-        path.write_text("a" * (MAX_HEADER_BYTES + 2))
-        with pytest.raises(ReaderFormatError, match="oversized header"):
             read_header(TabularSource(ArtifactFile(path), "csv"))
 
     def test_csv_record_width(self, tmp_path: Path) -> None:

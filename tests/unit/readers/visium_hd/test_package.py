@@ -26,5 +26,7 @@ from spatialdata_io import visium_hd
 from spatialdata_io.readers.visium_hd import visium_hd as packaged
 assert visium_hd is packaged
 """
-        result = subprocess.run([sys.executable, "-c", script], check=False, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(  # noqa: S603, RUF100 - Fixed test-owned interpreter and script.
+            [sys.executable, "-c", script], check=False, capture_output=True, text=True, timeout=30
+        )
         assert result.returncode == 0, result.stderr

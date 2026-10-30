@@ -34,7 +34,7 @@ unsupported units fail. Linked-grid declarations must agree, including partial
 ones. Calibration applies at level zero and retains the native raster origin;
 OME plane stage positions are not used to invent registration.
 
-Steinbock discovers only root `images.csv`, with a maximum input size of 8 MiB.
+Steinbock discovers only root `images.csv`, parsed from an owned CSV stream.
 Its named fields are `image`, `width_px`, `height_px`, and optional paired
 `acquisition_width_um`, `acquisition_height_um`. Fields may be reordered and
 additional fields are allowed. The exact association is `<sample>.tiff` to

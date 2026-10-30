@@ -112,8 +112,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         Optional ``images['images']`` is lazy CYX and retains source dtype and
         channel order. It is a single scale unless ``scale_factors`` requests
         pyramid levels; no pyramid is added automatically. Raster channels use
-        OME names or IDs when
-        available and positional labels otherwise. They are not matched to table
+        OME names only when every name is nonempty and unique, and otherwise
+        use OME IDs collectively. Channels without OME metadata use positional labels. They are not matched to table
         markers. Scientific three- and four-channel stacks are not guessed to be
         RGB. Raster metadata is eager, construction executes zero pixel tasks,
         and partial computations decode only the TIFF tiles or strips of the

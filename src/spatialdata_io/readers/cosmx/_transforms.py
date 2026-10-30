@@ -90,7 +90,7 @@ def raster_to_local(height: int) -> Affine:
 def _intervals(samples: AxisSamples, rows: npt.NDArray[np.bool_]) -> dict[Sign, tuple[float, float]]:
     """Return the offset interval consistent with every selected cell, for each sign."""
     local, global_ = samples.local[rows], samples.global_[rows]
-    budget = (
+    rounding_tolerance = (
         samples.local_half[rows]
         + samples.global_half[rows]
         + _DECODING_ULPS * np.maximum(np.abs(local), np.abs(global_))
@@ -98,7 +98,7 @@ def _intervals(samples: AxisSamples, rows: npt.NDArray[np.bool_]) -> dict[Sign, 
     feasible: dict[Sign, tuple[float, float]] = {}
     for sign in (1, -1):
         offsets = global_ - sign * local
-        low, high = float((offsets - budget).max()), float((offsets + budget).min())
+        low, high = float((offsets - rounding_tolerance).max()), float((offsets + rounding_tolerance).min())
         if low <= high:
             feasible[sign] = (low, high)
     return feasible

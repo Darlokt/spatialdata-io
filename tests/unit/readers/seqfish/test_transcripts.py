@@ -107,14 +107,6 @@ class TestReadTranscripts:
             read_transcripts(path, features=_FEATURES, roi="Roi1")
         parser.assert_not_called()
 
-    def test_oversized_header_is_bounded_and_rejected(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = ArtifactFile(tmp_path / "transcripts.csv")
-        path.write_bytes(b"name,x,y," + b"a" * (1024 * 1024) + b"\n")
-        parser = mocker.spy(transcript_module, "read_bytes")
-        with pytest.raises(ReaderFormatError, match="oversized CSV header"):
-            read_transcripts(path, features=_FEATURES, roi="Roi1")
-        parser.assert_not_called()
-
     def test_warning_filters_restore_when_public_model_parser_fails(
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:

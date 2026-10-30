@@ -79,7 +79,7 @@ def steinbock(
         ``<sample>.tiff`` identities using ``image``, ``width_px``, ``height_px``
         and optional paired ``acquisition_width_um``/``acquisition_height_um``.
         Positive acquisition extents divided by exact matching raster dimensions
-        calibrate XY in micrometres. The bounded 8 MiB CSV accepts reordered and
+        calibrate XY in micrometres. The streamed CSV accepts reordered and
         additional columns; duplicate names, malformed pairs, stale dimensions
         and conflicting OME sizes fail. Missing rows or empty physical pairs
         supply no IMC calibration. Complete source OME sizes in µm, nm or mm
@@ -146,7 +146,7 @@ def steinbock(
         )
         for sample in layout.samples
     }
-    table = _read_table(layout.table, samples)
+    table = _read_table(layout.table, {name: sample.grid for name, sample in samples.items()})
 
     # _read_table validates eager frames; AnnData also types backed Dataset2D.
     context = ReaderErrorContext("steinbock", "linked cell table")

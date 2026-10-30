@@ -15,7 +15,7 @@ dataset/
 
 `table_file`, `barcode_positions_file`, and `image_file` override discovery. Relative overrides resolve against `path`; absolute overrides may point outside that directory. Missing or ambiguous required artifacts fail. An explicitly requested image must exist; when the default image is absent, the reader returns the table and shapes without an image. Image overrides support TIFF, OME-TIFF, BigTIFF/BTF, PNG, and JPEG.
 
-Discovered artifacts, including symlink targets, must remain inside the dataset root. The barcode map is a headerless, tab-separated file with exactly two columns and at most 16 KiB of metadata:
+Discovered artifacts, including symlink targets, must remain inside the dataset root. The barcode map is a headerless, tab-separated file with exactly two columns and at most fifty A and fifty B positions:
 
 ```text
 A1	AACCGGTT

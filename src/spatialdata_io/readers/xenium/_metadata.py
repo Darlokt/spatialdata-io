@@ -1,4 +1,4 @@
-"""Read bounded Xenium run, metrics and panel metadata into JSON-serializable records."""
+"""Read Xenium run, metrics and panel metadata into JSON-serializable records."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import csv
 import math
 import re
 from dataclasses import dataclass
+from itertools import islice
 from typing import TYPE_CHECKING, cast
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -17,13 +18,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.xenium._version import Family
-
-# Observed experiment.xenium files are 1.4-3.2 KB, metrics 0.7-2.2 KB, gene panels
-# up to 2.7 MB (5K panels) and protein panels about 2 KB.
-MAX_EXPERIMENT_BYTES = 64 * 1024
-MAX_METRICS_BYTES = 64 * 1024
-MAX_GENE_PANEL_BYTES = 32 * 1024 * 1024
-MAX_PROTEIN_PANEL_BYTES = 1024 * 1024
 
 # Path blocks name files inside the bundle and are not dataset metadata. The Xenium
 # Ranger command line can contain the producer's local paths.
@@ -94,9 +88,7 @@ def read_experiment(path: ArtifactFile) -> Experiment:
         positive when present, ``images`` is not an object of text paths, or the
         format version is unsupported.
     """
-    experiment = read_json_object(
-        path, max_bytes=MAX_EXPERIMENT_BYTES, context=ReaderErrorContext("xenium", "experiment.xenium")
-    )
+    experiment = read_json_object(path, context=ReaderErrorContext("xenium", "experiment.xenium"))
 
     software = experiment.get("analysis_sw_version")
     if type(software) is not str:
@@ -138,19 +130,16 @@ def read_metrics(path: ArtifactFile) -> dict[str, object]:
     Raises
     ------
     ReaderFormatError
-        If the file exceeds 64 KiB, is not UTF-8, or is not one unique header and
-        one record of equal width.
+        If the file is not UTF-8, or is not one unique header and one record
+        of equal width.
     """
-    with path.open("rb") as handle:
-        payload = handle.read(MAX_METRICS_BYTES + 1)
-    expected = "a UTF-8 CSV of at most 64 KiB with one unique header and one record"
-    if len(payload) > MAX_METRICS_BYTES:
-        raise _error(path, "metrics_summary.csv", found="an oversized file", expected=expected)
+    expected = "a UTF-8 CSV with one unique header and one record"
     try:
-        rows = list(csv.reader(payload.decode("utf-8-sig").splitlines(), strict=True))
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            records = (row for row in csv.reader(handle, strict=True) if row)
+            rows = list(islice(records, _METRICS_RECORDS + 1))
     except (UnicodeDecodeError, csv.Error) as error:
         raise _error(path, "metrics_summary.csv", found="malformed CSV", expected=expected) from error
-    rows = [row for row in rows if row]
     if (
         len(rows) != _METRICS_RECORDS
         or len(rows[0]) != len(rows[1])
@@ -173,9 +162,7 @@ def _panel_identity(panel: dict[str, object], spec: object, path: ArtifactFile, 
 
 def read_gene_panel(path: ArtifactFile) -> dict[str, object]:
     """Return the identity of ``gene_panel.json``: name, design ID, version, species, tissue, targets, spec."""
-    document = read_json_object(
-        path, max_bytes=MAX_GENE_PANEL_BYTES, context=ReaderErrorContext("xenium", "gene_panel.json")
-    )
+    document = read_json_object(path, context=ReaderErrorContext("xenium", "gene_panel.json"))
     payload = _object(document.get("payload"), "payload", path, "gene_panel.json")
     panel = _object(payload.get("panel"), "payload.panel", path, "gene_panel.json")
     return _panel_identity(panel, payload.get("spec_version"), path, "gene_panel.json")
@@ -190,7 +177,7 @@ def read_protein_panel(path: ArtifactFile) -> ProteinPanel:
         If targets are malformed or a ``public_id`` repeats.
     """
     artifact = "protein_panel.json"
-    document = read_json_object(path, max_bytes=MAX_PROTEIN_PANEL_BYTES, context=ReaderErrorContext("xenium", artifact))
+    document = read_json_object(path, context=ReaderErrorContext("xenium", artifact))
     payload = _object(document.get("payload"), "payload", path, artifact)
     panel = _object(payload.get("panel"), "payload.panel", path, artifact)
     targets_value = panel.get("targets")

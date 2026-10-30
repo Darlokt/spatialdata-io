@@ -1,4 +1,4 @@
-"""Tests for bounded JPEG metadata inspection."""
+"""Tests for JPEG metadata inspection without pixel or ancillary-payload reads."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ import numpy as np
 import pytest
 
 from spatialdata_io.readers._utils.errors import RasterFormatError
-from spatialdata_io.readers._utils.image._encoded import MAX_HEADER_BYTES
+from spatialdata_io.readers._utils.image import _jpeg
 from spatialdata_io.readers._utils.image._jpeg import inspect_jpeg_header
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pytest_mock import MockerFixture
 
 
 def _jpeg_segment(marker: int, payload: bytes) -> bytes:
@@ -91,17 +93,16 @@ class TestInspectJpegHeader:
 
         assert inspect_jpeg_header(path).shape == (3, 5, 3)
 
-    def test_enforces_header_scan_bound(self, tmp_path: Path) -> None:
-        path = tmp_path / "oversized.jpg"
-        segment = _jpeg_segment(0xE1, b"x" * (2**16 - 3))
-        path.write_bytes(b"\xff\xd8" + segment * (MAX_HEADER_BYTES // len(segment) + 1))
+    def test_skips_ancillary_payloads(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "metadata.jpg"
+        path.write_bytes(b"\xff\xd8" + _jpeg_segment(0xE1, b"x" * 4096) + _jpeg_sof()[2:])
+        reads = mocker.spy(_jpeg, "_read_exact")
+        assert inspect_jpeg_header(path).shape == (3, 5, 3)
+        assert max(call.args[1] for call in reads.call_args_list) <= 15
 
-        with pytest.raises(RasterFormatError, match="inspection limit"):
-            inspect_jpeg_header(path)
-
-    def test_bounds_marker_fill_scanning(self, tmp_path: Path) -> None:
+    def test_rejects_truncated_marker_fill(self, tmp_path: Path) -> None:
         path = tmp_path / "marker-fill.jpg"
-        path.write_bytes(b"\xff\xd8" + b"\xff" * MAX_HEADER_BYTES)
+        path.write_bytes(b"\xff\xd8" + b"\xff" * 5)
 
-        with pytest.raises(RasterFormatError, match="inspection limit"):
+        with pytest.raises(RasterFormatError, match="Truncated"):
             inspect_jpeg_header(path)

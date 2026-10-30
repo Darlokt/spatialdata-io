@@ -179,7 +179,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     boundaries = None
 
     if layout.boundaries is not None:
-        boundaries = read_boundaries(layout.boundaries.path, policy=policy, frame=vector_frame)
+        boundaries = read_boundaries(layout.boundaries, policy=policy, frame=vector_frame)
         shapes[f"{dataset_id}_polygons"] = boundaries.shapes
 
     if layout.transcripts is not None:

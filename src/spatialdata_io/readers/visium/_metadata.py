@@ -1,4 +1,4 @@
-"""Bounded scale-factor and HDF5 metadata parsing for Visium."""
+"""Scale-factor and HDF5 metadata parsing for Visium."""
 
 from __future__ import annotations
 
@@ -16,8 +16,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.visium._layout import CountsLayout
 
-MAX_SCALE_FACTOR_BYTES = 64 * 1024
-MAX_METADATA_TEXT_LENGTH = 4_096
 HIRES_SCALE = "tissue_hires_scalef"
 LOWRES_SCALE = "tissue_lowres_scalef"
 SPOT_DIAMETER = "spot_diameter_fullres"
@@ -69,8 +67,8 @@ def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile)
 
 
 def read_scale_factors(path: ArtifactFile) -> ScaleFactors:
-    """Read and validate the bounded Space Ranger scale-factor object."""
-    values = read_json_object(path, max_bytes=MAX_SCALE_FACTOR_BYTES, context=_context("scale factors"))
+    """Read and validate the Space Ranger scale-factor object."""
+    values = read_json_object(path, context=_context("scale factors"))
     return ScaleFactors(
         hires=_positive_number(values, HIRES_SCALE, path=path),
         lowres=_positive_number(values, LOWRES_SCALE, path=path),
@@ -87,7 +85,7 @@ def _text(value: object, *, attribute: str, path: ArtifactFile) -> str:
             raise ReaderFormatError(
                 context=_context("count metadata"),
                 found=f"non-UTF-8 bytes in attribute {attribute!r}",
-                expected="bounded UTF-8 text",
+                expected="UTF-8 text",
                 path=path,
             ) from error
     elif isinstance(value, str | np.str_):
@@ -96,15 +94,15 @@ def _text(value: object, *, attribute: str, path: ArtifactFile) -> str:
         raise ReaderFormatError(
             context=_context("count metadata"),
             found=f"attribute {attribute!r} with value type {type(value).__name__}",
-            expected="bounded UTF-8 text",
+            expected="UTF-8 text",
             path=path,
         )
 
-    if not result or len(result) > MAX_METADATA_TEXT_LENGTH:
+    if not result:
         raise ReaderFormatError(
             context=_context("count metadata"),
             found=f"attribute {attribute!r} with {len(result)} characters",
-            expected=f"nonempty text of at most {MAX_METADATA_TEXT_LENGTH} characters",
+            expected="nonempty text",
             path=path,
         )
 
@@ -120,20 +118,20 @@ def _library_id(attributes: h5py.AttributeManager, *, path: ArtifactFile) -> str
         return None
 
     raw: object = attributes["library_ids"]
-    values = raw.reshape(-1).tolist() if isinstance(raw, np.ndarray) else [raw]
-    if len(values) != 1:
+    if isinstance(raw, np.ndarray) and raw.size != 1:
         raise ReaderFormatError(
             context=_context("count metadata"),
-            found=f"{len(values)} library IDs",
+            found=f"{raw.size} library IDs",
             expected="exactly one library ID from single-library spaceranger count output",
             path=path,
         )
 
-    return _text(values[0], attribute="library_ids", path=path)
+    value = raw.reshape(-1)[0] if isinstance(raw, np.ndarray) else raw
+    return _text(value, attribute="library_ids", path=path)
 
 
 def read_count_metadata(counts: CountsLayout) -> CountMetadata:
-    """Copy bounded optional HDF5 metadata, or return empty MEX metadata."""
+    """Copy optional HDF5 metadata, or return empty MEX metadata."""
     if not isinstance(counts, H5Counts):
         return CountMetadata(library_id=None, chemistry_description=None, software_version=None)
 

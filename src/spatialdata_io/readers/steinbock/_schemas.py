@@ -28,12 +28,19 @@ if TYPE_CHECKING:
     import anndata as ad
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.steinbock._images import _SampleRasters
 
 _OBJECT_NAME = re.compile(r"Object ([0-9]+) in (.+)")
 REQUIRED_OBSERVATION_COLUMNS = frozenset({"image", "centroid-0", "centroid-1"})
 SIGNED_CELL_ID_DTYPE = pd.ArrowDtype(pa.int64())
 UNSIGNED_CELL_ID_DTYPE = pd.ArrowDtype(pa.uint64())
+
+
+@dataclass(frozen=True, slots=True)
+class LabelGrid:
+    """Carry independently inspected label extents and the exact integer dtype."""
+
+    shape: tuple[int, int]
+    dtype: np.dtype[np.generic]
 
 
 def _format_error(path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
@@ -70,7 +77,7 @@ def _validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
         raise _format_error(path, found=f"columns {obs.columns.tolist()}", expected=f"columns {sorted(required)}")
 
 
-def _instance_identifiers(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: ArtifactFile) -> list[int]:
+def _instance_identifiers(obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path: ArtifactFile) -> list[int]:
     """Parse exact compound identifiers and require every discovered sample in the table."""
     source_names = {f"{name}.tiff": name for name in samples}
     if obs["image"].isna().any() or set(obs["image"]) != set(source_names):
@@ -80,7 +87,7 @@ def _instance_identifiers(obs: pd.DataFrame, samples: Mapping[str, _SampleRaster
 
     # The upstream compound name includes the complete filename, including spaces.
     # Parse decimal IDs directly: a float intermediate cannot retain uint64 values.
-    maxima = {f"{name}.tiff": np.iinfo(sample.label_dtype.str).max for name, sample in samples.items()}
+    maxima = {f"{name}.tiff": np.iinfo(sample.dtype.str).max for name, sample in samples.items()}
     identifiers: list[int] = []
     for observation, source_name in zip(obs.index, obs["image"], strict=True):
         match = _OBJECT_NAME.fullmatch(observation)
@@ -141,7 +148,7 @@ def _centroid_columns(obs: pd.DataFrame, path: ArtifactFile) -> tuple[np.ndarray
 
 
 def _validate_centroids(
-    coordinates: np.ndarray, obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: ArtifactFile
+    coordinates: np.ndarray, obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path: ArtifactFile
 ) -> None:
     """Require finite XY pixel centers within each cell's independently inspected frame."""
     if not np.isfinite(coordinates).all():
@@ -150,7 +157,7 @@ def _validate_centroids(
     # Group once rather than rescanning the entire cell population for each image.
     for filename, rows in obs.groupby("image", sort=False, observed=True).indices.items():
         positions = coordinates[rows]
-        height, width = samples[str(filename).removesuffix(".tiff")].label_shape
+        height, width = samples[str(filename).removesuffix(".tiff")].shape
         if (positions < 0).any() or (positions[:, 0] > width - 1).any() or (positions[:, 1] > height - 1).any():
             raise _format_error(
                 path,

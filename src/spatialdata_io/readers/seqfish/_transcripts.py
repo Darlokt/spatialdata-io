@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_HEADER_BYTES = 1024 * 1024
 _BLOCK_BYTES = 8 * 1024 * 1024
 
 
@@ -58,14 +57,12 @@ def _read_partition(
 def read_transcripts(path: ArtifactFile, *, features: tuple[str, ...], roi: str) -> dd.DataFrame:
     """Return lazy XY points with validated feature categories and raw z annotation.
 
-    Only a bounded CSV header is read at construction. Known categories
+    Only the CSV header is read at construction. Known categories
     and an explicit no-sort policy prevent the public model parser from
     executing a feature or index scan. Row validation belongs to each task.
     """
     with path.open("rb") as source:
-        header = source.readline(_HEADER_BYTES + 1)
-    if len(header) > _HEADER_BYTES:
-        raise schema_error(path, found="oversized CSV header", expected="a header at most 1 MiB")
+        header = source.readline()
     try:
         names = next(csv.reader([header.decode("utf-8-sig")], strict=True), [])
     except (UnicodeError, csv.Error) as error:

@@ -1,4 +1,4 @@
-"""Bounded, projected, strictly parsed IMC sidecar metadata and file ownership."""
+"""Projected, strictly parsed IMC sidecar metadata and file ownership."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class TestReadImageMetadata:
         [
             b"\xff",
             b"\x00",
-            b"x" * (8 * 1024 * 1024 + 1),
+            _HEADER + b"s.tiff,12,8,6,20\x00\n",
             _HEADER + b'"s.tiff,12,8,6,20\n',
             b"",
             b"image,width_px,height_px\ns.tiff,12,8,extra\n",

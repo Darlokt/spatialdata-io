@@ -119,11 +119,6 @@ class TestReadTable:
         assert result.var_names.tolist() == ["Gene,A"]
         np.testing.assert_array_equal(result.obsm["spatial"], [[1.5, 2]])
 
-    def test_oversized_header(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_HEADER_CHARACTERS", 2)
-        with pytest.raises(ReaderFormatError, match="oversized header"):
-            read_table(*_sources(tmp_path))
-
 
 class TestFinalizeTable:
     """Normalize final owned annotations and link only to the selected target."""

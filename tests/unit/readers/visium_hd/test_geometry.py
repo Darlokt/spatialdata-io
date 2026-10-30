@@ -19,8 +19,6 @@ from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pytest_mock import MockerFixture
-
 
 def _frame() -> SlideFrame:
     return SlideFrame(np.eye(3), np.eye(3), np.eye(3), 0.0, 0.0)
@@ -114,12 +112,8 @@ class TestReadBoundaries:
         with pytest.raises(ReaderFormatError, match="centroid"):
             geometry.read_boundaries(_write(tmp_path, [feature]), _frame(), kind="cell")
 
-    def test_bounded_input_malformed_file_and_io(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_malformed_file_and_io(self, tmp_path: Path) -> None:
         path = _write(tmp_path, [_feature()])
-        mocker.patch.object(geometry, "MAX_GEOJSON_BYTES", 1)
-        with pytest.raises(ReaderFormatError, match="oversized"):
-            geometry.read_boundaries(path, _frame(), kind="cell")
-        mocker.stopall()
         path.write_text("not geojson")
         with pytest.raises(ReaderFormatError, match="malformed"):
             geometry.read_boundaries(path, _frame(), kind="cell")

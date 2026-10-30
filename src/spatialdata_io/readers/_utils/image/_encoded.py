@@ -21,8 +21,6 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-MAX_HEADER_BYTES = 1 << 20
-
 
 def validate_decoded_size(metadata: _EncodedHeader) -> None:
     """Reject dimensions whose decoded allocation cannot fit in a NumPy array."""

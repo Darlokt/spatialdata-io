@@ -19,9 +19,9 @@ per-cell data and stay unread.
 from __future__ import annotations
 
 import csv
-import io
 import re
 import tarfile
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
@@ -35,14 +35,14 @@ from spatialdata_io.readers.xenium._layout import AnalysisDirectory
 from spatialdata_io.readers.xenium._schemas import schema_error, text_series
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
     from pathlib import Path
+    from typing import IO
 
     from numpy.typing import NDArray
 
     from spatialdata_io.readers.xenium._layout import AnalysisSource
 
-MAX_MEMBER_BYTES = 2 * 1024**3
 BARCODE = "Barcode"
 CLUSTER = "Cluster"
 _MEMBER = re.compile(
@@ -61,43 +61,64 @@ class Analysis:
     projections: dict[str, NDArray[np.float64]]
 
 
-def _members(source: AnalysisSource) -> Iterator[tuple[str, str, bytes, Path]]:
-    """Yield (kind, method, payload, path) of the per-cell CSVs in sorted order."""
+def _identity(name: str, seen: set[tuple[str, str]], path: Path) -> tuple[str, str] | None:
+    """Reject ambiguous semantic artifacts before reading any selected payload."""
+    match = _MEMBER.fullmatch(name)
+    if match is None or match["file"] != _FILES[match["kind"]]:
+        return None
+    identity = match["kind"], match["method"]
+    if identity in seen:
+        raise schema_error(
+            path, "analysis", found=f"repeated analysis identity {identity!r}", expected="one CSV per kind and method"
+        )
+    seen.add(identity)
+    return identity
+
+
+def _members(source: AnalysisSource) -> Generator[tuple[str, str, IO[bytes], Path], None, None]:
+    """Own selected CSV streams after rejecting repeated semantic identities."""
+    seen: set[tuple[str, str]] = set()
     if isinstance(source, AnalysisDirectory):
+        files: list[tuple[str, str, Path]] = []
+        path: Path
         for path in sorted(source.directory.rglob("*.csv")):
-            match = _MEMBER.fullmatch(path.relative_to(source.directory).as_posix())
-            if match and match["file"] == _FILES[match["kind"]]:
-                yield match["kind"], match["method"], path.read_bytes(), path
+            identity = _identity(path.relative_to(source.directory).as_posix(), seen, path)
+            if identity is not None:
+                files.append((*identity, path))
+        for kind, method, path in files:
+            with path.open("rb") as handle:
+                yield kind, method, handle, path
         return
     with tarfile.open(source.file, "r:gz") as archive:
-        members = sorted((member for member in archive if member.isfile()), key=lambda member: member.name)
-        for member in members:
-            match = _MEMBER.fullmatch(str(PurePosixPath(member.name)))
-            if not match or match["file"] != _FILES[match["kind"]]:
-                continue
-            if member.size > MAX_MEMBER_BYTES:
-                raise schema_error(
-                    source.file, member.name, found=f"{member.size} bytes", expected="a member within 2 GiB"
-                )
-            handle = archive.extractfile(member)
-            if handle is None:  # pragma: no cover - isfile() members always have a payload
-                continue
-            yield match["kind"], match["method"], handle.read(), source.file
+        members: list[tuple[str, str, tarfile.TarInfo]] = []
+        for member in sorted((member for member in archive if member.isfile()), key=lambda member: member.name):
+            identity = _identity(str(PurePosixPath(member.name)), seen, source.file)
+            if identity is not None:
+                members.append((*identity, member))
+        for kind, method, member in members:
+            member_handle = archive.extractfile(member)
+            if member_handle is None:  # pragma: no cover - isfile() members always have a payload
+                raise schema_error(source.file, member.name, found="no payload", expected="a regular analysis CSV")
+            with member_handle:
+                yield kind, method, member_handle, source.file
 
 
-def _header(payload: bytes, path: Path) -> list[str]:
+def _header(handle: IO[bytes], path: Path) -> list[str]:
     try:
-        line = payload.split(b"\n", 1)[0].decode("utf-8-sig")
-        return next(csv.reader([line], strict=True), [])
+        line = handle.readline()
+        header = next(csv.reader([line.decode("utf-8-sig")], strict=True), [])
     except (UnicodeDecodeError, csv.Error) as error:
         raise schema_error(path, "analysis", found="a malformed header", expected="one UTF-8 CSV header") from error
+    # Arrow reads the header itself; no encoded body buffer is retained.
+    handle.seek(0)
+    return header
 
 
-def _table(payload: bytes, header: list[str], value: pa.DataType, path: Path) -> pa.Table:
-    """Parse one analysis CSV with text barcodes and typed values."""
+def _table(handle: IO[bytes], header: list[str], value: pa.DataType, path: Path) -> pa.Table:
+    """Parse an owned CSV stream directly with text barcodes and typed values."""
     try:
         return pacsv.read_csv(
-            io.BytesIO(payload),
+            handle,
             read_options=pacsv.ReadOptions(use_threads=False),
             convert_options=pacsv.ConvertOptions(
                 column_types={BARCODE: pa.string(), **dict.fromkeys(header[1:], value)},
@@ -144,23 +165,25 @@ def read_analysis(source: AnalysisSource, barcodes: pd.Index) -> Analysis:
     ------
     ReaderFormatError
         If a CSV has an unexpected header, malformed or nonfinite values,
-        nonpositive clusters, or unknown or repeated barcodes.
+        nonpositive clusters, unknown or repeated barcodes, or repeated semantic
+        artifacts.
     """
     clusters: dict[str, pd.Categorical] = {}
     projections: dict[str, NDArray[np.float64]] = {}
-    for kind, method, payload, path in _members(source):
-        header = _header(payload, path)
-        if kind == "clustering":
-            if header != [BARCODE, CLUSTER]:
-                raise schema_error(path, "analysis", found=f"header {header!r}", expected="Barcode,Cluster")
-            clusters[method] = _clusters(_table(payload, header, pa.int64(), path), barcodes, path)
-            continue
+    with closing(_members(source)) as members:
+        for kind, method, handle, path in members:
+            header = _header(handle, path)
+            if kind == "clustering":
+                if header != [BARCODE, CLUSTER]:
+                    raise schema_error(path, "analysis", found=f"header {header!r}", expected="Barcode,Cluster")
+                clusters[method] = _clusters(_table(handle, header, pa.int64(), path), barcodes, path)
+                continue
 
-        prefix = _PREFIXES[kind]
-        expected = [BARCODE, *(f"{prefix}-{index}" for index in range(1, len(header)))]
-        if len(header) < _MIN_PROJECTION_COLUMNS or header != expected:
-            raise schema_error(path, "analysis", found=f"header {header!r}", expected=f"Barcode,{prefix}-1,...")
-        projections[f"{kind}_{method}"] = _projection(
-            _table(payload, header, pa.float64(), path), header, barcodes, path
-        )
+            prefix = _PREFIXES[kind]
+            expected = [BARCODE, *(f"{prefix}-{index}" for index in range(1, len(header)))]
+            if len(header) < _MIN_PROJECTION_COLUMNS or header != expected:
+                raise schema_error(path, "analysis", found=f"header {header!r}", expected=f"Barcode,{prefix}-1,...")
+            projections[f"{kind}_{method}"] = _projection(
+                _table(handle, header, pa.float64(), path), header, barcodes, path
+            )
     return Analysis(clusters, projections)

@@ -30,6 +30,27 @@ if TYPE_CHECKING:
 class TestIss:
     """Read genuine artifacts without compatibility shims or mocked parsers."""
 
+    @pytest.mark.parametrize("ome", [False, True])
+    def test_explicit_sample_channels_compose_with_linked_tables(self, tmp_path: Path, *, ome: bool) -> None:
+        dataset = write_iss_dataset(tmp_path)
+        source = np.arange(32 * 40 * 3, dtype=np.uint8).reshape(32, 40, 3)
+        tifffile.imwrite(tmp_path / "raw.tiff", source, ome=ome, photometric="rgb", metadata={"axes": "YXS"})
+        result = iss(
+            tmp_path,
+            raw_image_file="raw.tiff",
+            labels_file="labels.tiff",
+            table_file="cells.h5ad",
+            data_axes="YXC",
+            dataset_id="samples",
+        )
+        image = result.images["samples_raw_image"]
+        expected = [f"Channel:0:0:sample:{index}" for index in range(3)] if ome else [0, 1, 2]
+        assert image.coords["c"].to_numpy().tolist() == expected
+        np.testing.assert_array_equal(image.data.compute(), source.transpose(2, 0, 1))
+        np.testing.assert_array_equal(result.labels["samples_labels_image"].data.compute(), dataset.labels)
+        assert isinstance(result.tables["table"].X, sparse.csr_array)
+        assert result.tables["table"].obs["region"].unique().tolist() == ["samples_labels_image"]
+
     @pytest.mark.parametrize("label_spacing", [None, (0.3, 0.7)])
     def test_calibrated_pair_preserves_native_table_and_lazy_pixels(
         self, iss_dataset: IssDataset, label_spacing: tuple[float, float] | None

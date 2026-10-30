@@ -102,7 +102,11 @@ def transcript_types(names: Sequence[str], *, path: Path) -> dict[str, pa.DataTy
 
 
 def cast_column(column: pa.ChunkedArray, kind: pa.DataType, name: str, *, path: Path, artifact: str) -> pa.ChunkedArray:
-    """Cast a projected column to its documented type; lossy casts raise."""
+    """Cast to the vendor type with Arrow's checked casts.
+
+    Floating coordinates intentionally normalize to the declared float32 type;
+    Arrow permits that rounding. Integer casts reject overflow and truncation.
+    """
     if column.type == kind:
         return column
     try:

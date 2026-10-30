@@ -187,11 +187,3 @@ class TestDiscoverLayout:
             _discover(tmp_path)
 
         assert error.value.filename == str(tmp_path / "filtered_feature_bc_matrix.h5")
-
-    def test_bounds_position_header_inspection(self, tmp_path: Path) -> None:
-        _write_required_spatial(tmp_path)
-        (tmp_path / "filtered_feature_bc_matrix.h5").touch()
-        (tmp_path / "spatial" / "tissue_positions.csv").write_bytes(b"x" * 1_025 + b"\n")
-
-        with pytest.raises(ReaderFormatError, match="first row longer than 1024 bytes"):
-            _discover(tmp_path)

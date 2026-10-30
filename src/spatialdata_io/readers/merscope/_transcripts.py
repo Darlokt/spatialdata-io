@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.merscope._layout import TranscriptSource
 
-_HEADER_BYTES = 1024 * 1024
 _BLOCK_BYTES = 8 * 1024 * 1024
 
 
@@ -73,9 +72,7 @@ def read_transcripts(
     """
     path = source.path
     with path.open("rb") as handle:
-        header = handle.readline(_HEADER_BYTES + 1)
-    if len(header) > _HEADER_BYTES:
-        raise schema_error(path, found="oversized CSV header", expected="a header at most 1 MiB")
+        header = handle.readline()
 
     try:
         names = next(csv.reader([header.decode("utf-8-sig")], strict=True), [])

@@ -28,7 +28,6 @@ POSITIONS_V2 = "tissue_positions.csv"
 SCALE_FACTORS = "scalefactors_json.json"
 HIRES_IMAGE = "tissue_hires_image.png"
 LOWRES_IMAGE = "tissue_lowres_image.png"
-MAX_POSITION_HEADER_BYTES = 1_024
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,22 +172,14 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
 
 
 def _position_format(path: ArtifactFile) -> PositionFormat:
-    """Read one bounded first row and classify its schema."""
+    """Read the first line and classify its named or positional schema."""
     context = _context("tissue positions")
     try:
         with path.open("rb") as stream:
-            first_line = stream.readline(MAX_POSITION_HEADER_BYTES + 1)
+            first_line = stream.readline()
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise
-
-    if len(first_line) > MAX_POSITION_HEADER_BYTES:
-        raise ReaderFormatError(
-            context=context,
-            found=f"a first row longer than {MAX_POSITION_HEADER_BYTES} bytes",
-            expected="a bounded CSV header or six-field data row",
-            path=path,
-        )
 
     try:
         row = first_line.decode("utf-8-sig")

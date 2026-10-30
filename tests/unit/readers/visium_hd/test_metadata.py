@@ -1,4 +1,4 @@
-"""Bounded calibration, nullable registration pairs and count identity."""
+"""Calibration, nullable registration pairs and count identity."""
 
 from __future__ import annotations
 
@@ -41,10 +41,13 @@ class TestReadSourceMetadata:
                 handle.attrs["metadata_json"] = json.dumps(values)
         result = metadata.read_source_metadata(_source(tmp_path))
         assert (result.nrows, result.ncols, result.sample_id, result.spot_pitch) == (17, 17, "synthetic", 2.0)
-        assert (result.spot_to_microscope is None) == (null == "microscope")
-        assert (result.spot_to_cytassist is None) == (null == "cytassist")
-        if result.spot_to_microscope is not None:
-            assert not result.spot_to_microscope.flags.writeable
+        assert (result.microscope is None) == (null == "microscope")
+        assert (result.cytassist is None) == (null == "cytassist")
+        for pair in (result.microscope, result.cytassist):
+            if pair is not None:
+                assert not pair.spot_to_image.flags.writeable
+                assert not pair.image_to_spot.flags.writeable
+                np.testing.assert_allclose(pair.spot_to_image @ pair.image_to_spot, np.eye(3), rtol=0, atol=1e-12)
         with h5py.File(_source(tmp_path), "r+"):
             pass
 
@@ -117,14 +120,13 @@ class TestReadSourceMetadata:
         with pytest.raises(ReaderFormatError):
             metadata.read_source_metadata(path)
 
-    def test_oversized_invalid_bytes_and_io(self, tmp_path: Path) -> None:
+    def test_invalid_bytes_and_io(self, tmp_path: Path) -> None:
         write_bundle(tmp_path)
         path = _source(tmp_path)
-        for raw in ("x" * (metadata.MAX_METADATA_BYTES + 1), np.bytes_(b"\xff")):
-            with h5py.File(path, "r+") as handle:
-                handle.attrs["metadata_json"] = raw
-            with pytest.raises(ReaderFormatError):
-                metadata.read_source_metadata(path)
+        with h5py.File(path, "r+") as handle:
+            handle.attrs["metadata_json"] = np.bytes_(b"\xff")
+        with pytest.raises(ReaderFormatError):
+            metadata.read_source_metadata(path)
         path.unlink()
         with pytest.raises(FileNotFoundError):
             metadata.read_source_metadata(path)

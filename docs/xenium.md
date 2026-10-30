@@ -81,7 +81,11 @@ Every element is in the `global` coordinate system in micrometres, with its orig
 
 ## Table
 
+MatrixMarket archives must contain exactly one of each required `cell_feature_matrix/{features,barcodes}.tsv.gz` and `cell_feature_matrix/matrix.mtx.gz`. Transcript-only reads extract the two metadata files without writing the matrix to temporary storage; traversing the compressed archive may still be necessary.
+
 `X` is an eager float32 canonical CSR sparse array in the feature order of `cell_feature_matrix`. `feature_types=None` selects Gene Expression and, when present, Protein Expression; `"all"` keeps every feature type (negative controls, unassigned and deprecated codewords, genomic controls); a sequence selects exactly the named types, each of which must exist. Observation names are the matrix barcodes. `var` holds `gene_ids` and `feature_types`; protein features add `long_name`, `clone` and `codeword_index` from `protein_panel.json`.
+
+Float32 count storage is retained without a maximum-count or precision ceiling. Negative and fractional counts fail. MatrixMarket inputs must declare integer coordinate records.
 
 `obs` holds the `cells` table columns in source order with documented types: integer IDs are int64, other IDs are text, `nucleus_area` is NaN for cells without a nucleus. With `cells.zarr.zip`, `label_id` (uint32), `nucleus_centroid_x` and `nucleus_centroid_y` are added; XOA 2.0 cells tables lack `nucleus_count` and `segmentation_method`, which then also come from the store. `obsm["spatial"]` holds the float64 µm centroids.
 
@@ -98,9 +102,9 @@ The table annotates one returned element, chosen with `table_target`:
 
 A target that is not returned fails before any file is read.
 
-Protein Expression values (XOA 4.0) are the mean stain intensity per cell after the 100-count offset was removed. The HDF5 matrix stores them multiplied by the root attribute `protein_scaling_factor` (10 in the public protein bundle); the reader divides once in float32 and records `{"scaling_factor", "metric"}` in `attrs["xenium"]["protein"]`. `protein_metric` must be `MEAN_PER_CELL_STAIN`. The MatrixMarket twins lack the factor, so protein features from them fail.
+Protein Expression values (XOA 4.0) are the mean stain intensity per cell after the 100-count offset was removed. The HDF5 matrix stores them multiplied by the root attribute `protein_scaling_factor` (10 in the public protein bundle); the reader divides once in float32 and records `{"scaling_factor", "metric"}` in `attrs["xenium"]["protein"]`. `protein_metric` must be `MEAN_PER_CELL_STAIN`. The factor must be a positive integer with a finite float32 representation. The MatrixMarket twins lack the factor, so protein features from them fail.
 
-With `include_analysis=True`, 10x secondary analysis from `analysis/` or `analysis.tar.gz` is added: each clustering becomes a categorical `obs` column named by its method (`gene_expression_graphclust`, ...) with text categories in numeric order, and PCA and UMAP projections become float64 `obsm["pca_<method>"]` and `obsm["umap_<method>"]`. Cells that 10x filtered before clustering are missing values.
+With `include_analysis=True`, 10x secondary analysis from `analysis/` or `analysis.tar.gz` is added: each clustering becomes a categorical `obs` column named by its method (`gene_expression_graphclust`, ...) with text categories in numeric order, and PCA and UMAP projections become float64 `obsm["pca_<method>"]` and `obsm["umap_<method>"]`. Cells that 10x filtered before clustering are missing values. Each `(kind, method)` must identify exactly one recognized CSV, including in archives with repeated filenames or alternate `analysis/` prefixes. Extracted files and archive members stream directly into Arrow without a separate complete encoded-input copy; source handles close after parsing, including on failure. Returned annotations and projection arrays are eager.
 
 ## Transcripts
 

@@ -1,4 +1,4 @@
-"""Bounded affine parsing with explicit direction and numerically stable invertibility."""
+"""Affine parsing with explicit direction and numerically stable invertibility."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-import spatialdata_io.readers.merscope._transforms as transform_module
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.merscope._transforms import read_transform
@@ -71,20 +70,13 @@ class TestReadTransform:
         with pytest.raises(ReaderFormatError, match="inverse"):
             read_transform(path)
 
-    def test_size_bound(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = ArtifactFile(tmp_path / "transform.csv")
-        path.write_bytes(b"1 0 0\n0 1 0\n0 0 1\n")
-        mocker.patch.object(transform_module, "_MAX_TRANSFORM_BYTES", 8)
-        with pytest.raises(ReaderFormatError, match="oversized"):
-            read_transform(path)
-
     def test_io_error_retains_identity_context_and_resource_cleanup(
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
         path = ArtifactFile(tmp_path / "transform.csv")
         error = OSError("injected")
         handle = mocker.MagicMock()
-        handle.read.side_effect = error
+        handle.__iter__.side_effect = error
         owner = mocker.patch("pathlib.Path.open")
         owner.return_value.__enter__.return_value = handle
         with pytest.raises(OSError, match="injected") as caught:

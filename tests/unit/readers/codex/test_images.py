@@ -147,6 +147,27 @@ class TestReadImage:
 
         assert result.shape == (2, 8, 10)
 
+    @pytest.mark.parametrize(
+        ("names", "expected"),
+        [
+            (["CD3", "DAPI"], ["CD3", "DAPI"]),
+            (["CD3", "CD3"], ["Channel:0:0", "Channel:0:1"]),
+            (["CD3", ""], ["Channel:0:0", "Channel:0:1"]),
+            (["Channel:0:1", ""], ["Channel:0:0", "Channel:0:1"]),
+        ],
+    )
+    def test_ome_channel_identities_are_collectively_unique(
+        self, tmp_path: Path, names: list[str], expected: list[str]
+    ) -> None:
+        path = tmp_path / "image.ome.tif"
+        source = np.arange(2 * 8 * 10, dtype=np.uint16).reshape(2, 8, 10)
+        tifffile.imwrite(
+            path, source, ome=True, photometric="minisblack", metadata={"axes": "CYX", "Channel": {"Name": names}}
+        )
+        result = _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+        assert result.coords["c"].to_numpy().tolist() == expected
+        np.testing.assert_array_equal(result.data.compute(), source)
+
     def test_invalid_declared_axes(self, tmp_path: Path) -> None:
         path = tmp_path / "image.tif"
         write_image(path)

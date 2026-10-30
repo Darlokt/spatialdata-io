@@ -32,7 +32,6 @@ from spatialdata_io.readers.cosmx._tables import read_header
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from pathlib import Path
 
     from dask.delayed import Delayed
     from spatialdata.transformations import BaseTransformation
@@ -41,13 +40,8 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.cosmx._transforms import Placement
 
 _BLOCK_BYTES = 8 * 1024 * 1024
-_GZIP_RANGE_BYTES = 16 * 1024 * 1024
-_GZIP_MAGIC = b"\x1f\x8b\x08"
-_GZIP_RESERVED_FLAGS = 0xE0
-_GZIP_HEADER_BYTES = 10
+_GZIP_RANGE_BYTES = 8 * 1024 * 1024
 _READ_BYTES = 1024 * 1024
-# A first member larger than this is not the independently compressed layout.
-_MAX_MEMBER_BYTES = 64 * 1024 * 1024
 
 
 def _normalize(table: pa.Table, *, features: tuple[str, ...], path: ArtifactFile) -> pd.DataFrame:
@@ -86,11 +80,11 @@ class _Projection:
     path: ArtifactFile
 
 
-def _parse(payload: bytes, projection: _Projection) -> pd.DataFrame:
+def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
     """Parse projected lexical fields while checking the full source record width."""
     names, columns, path = projection.names, projection.columns, projection.path
     if not payload:
-        # A compressed range inside a member that began earlier owns no records.
+        # A compressed range crossed by an earlier member owns no records.
         payload_table = pa.table({name: pa.array([], pa.string()) for name in columns})
         return _normalize(payload_table, features=projection.features, path=path)
     # Arrow checks full record widths but can accept malformed CSV quoting.
@@ -121,112 +115,71 @@ def _plain_block(block: bytes, projection: _Projection, *, first: bool) -> pd.Da
     return _parse(_without_header(block) if first else block, projection)
 
 
-def _decode_member(handle: BinaryIO, offset: int, path: ArtifactFile) -> tuple[bytes, int] | None:
-    """Decode one complete gzip member, or return None if ``offset`` does not start one.
-
-    zlib verifies the deflate stream end, CRC32 and size trailer, so a byte pattern
-    inside compressed data is practically never mistaken for a member start.
-    """
-    handle.seek(offset)
+def _decode_member(
+    handle: BinaryIO, offset: int, path: ArtifactFile, payload: bytearray, pending: bytes
+) -> tuple[int, bytes]:
+    """Append one member from an exact boundary, verifying its CRC and trailer."""
+    # Reuse bounded compressed read-ahead across members within the same owned task.
+    handle.seek(offset + len(pending))
     decoder = zlib.decompressobj(31)
-    parts: list[bytes] = []
-    consumed = 0
+    member_start = len(payload)
     while not decoder.eof:
-        chunk = handle.read(_READ_BYTES)
+        chunk = pending or handle.read(_READ_BYTES)
         if not chunk:
-            return None
+            raise schema_error(path, found=f"corrupt gzip member at byte {offset}", expected="complete members")
         try:
-            parts.append(decoder.decompress(chunk))
-        except zlib.error:
-            return None
-        consumed += len(chunk)
-        if consumed > _MAX_MEMBER_BYTES and not decoder.eof:
+            decoded = decoder.decompress(chunk, _READ_BYTES)
+        except zlib.error as error:
             raise schema_error(
-                path,
-                found=f"a gzip member at byte {offset} larger than {_MAX_MEMBER_BYTES} compressed bytes",
-                expected="independently compressed members of bounded size",
-            )
-    return b"".join(parts), consumed - len(decoder.unused_data)
-
-
-def _first_member(handle: BinaryIO, start: int, stop: int, path: ArtifactFile) -> tuple[int, bytes, int] | None:
-    """Find the first verified member starting in ``[start, stop)``."""
-    position = start
-    while position < stop:
-        handle.seek(position)
-        # Each window owns candidates in its first _READ_BYTES and sees their whole header.
-        window = handle.read(_READ_BYTES + _GZIP_HEADER_BYTES)
-        index = window.find(_GZIP_MAGIC)
-        while index != -1 and index < _READ_BYTES and position + index < stop:
-            if index + 3 < len(window) and window[index + 3] & _GZIP_RESERVED_FLAGS == 0:
-                decoded = _decode_member(handle, position + index, path)
-                if decoded is not None:
-                    return position + index, *decoded
-            index = window.find(_GZIP_MAGIC, index + 1)
-        if len(window) <= _READ_BYTES:
-            return None
-        position += _READ_BYTES
-    return None
+                path, found=f"corrupt gzip member at byte {offset}: {error}", expected="complete members"
+            ) from error
+        payload.extend(decoded)
+        pending = decoder.unconsumed_tail
+    if len(payload) == member_start or not payload.endswith(b"\n"):
+        raise schema_error(
+            path, found=f"gzip member at byte {offset} ending inside a record", expected="record-aligned members"
+        )
+    return handle.tell() - len(decoder.unused_data), decoder.unused_data
 
 
 @dataclass(frozen=True, slots=True)
 class _MemberRange:
     """Immutable task state: a compressed byte range, ending at most at the file end."""
 
-    path: Path
     start: int
     stop: int
 
 
-def _gzip_range(spec: _MemberRange, projection: _Projection) -> pd.DataFrame:
-    """Decode the whole members starting in one compressed range; each must end a record."""
-    path = projection.path
-    payloads: list[bytes] = []
-    with spec.path.open("rb") as handle:
-        found = _first_member(handle, spec.start, spec.stop, path)
-        while found is not None:
-            offset, payload, size = found
-            if not payload.endswith(b"\n"):
-                raise schema_error(
-                    path,
-                    found=f"gzip member at byte {offset} ending inside a record",
-                    expected="record-aligned members",
-                )
-            payloads.append(payload)
-            offset += size
-            if offset >= spec.stop:
-                break
-            # Members are contiguous, so a member must start exactly where the previous one ended.
-            decoded = _decode_member(handle, offset, path)
-            if decoded is None:
-                raise schema_error(path, found=f"corrupt gzip member at byte {offset}", expected="complete members")
-            found = (offset, *decoded)
-    data = b"".join(payloads)
-    return _parse(_without_header(data) if spec.start == 0 else data, projection)
+def _gzip_range(spec: _MemberRange, projection: _Projection, offset: int) -> tuple[int, pd.DataFrame]:
+    """Read contiguously from the predecessor's verified boundary, never resynchronizing.
 
-
-def _gzip_ranges(path: ArtifactFile) -> list[_MemberRange]:
-    """Validate the member-aligned layout cheaply and split it into compressed ranges."""
-    size = path.stat().st_size
-    with path.open("rb") as handle:
-        first = _decode_member(handle, 0, path)
-    expected = "a gzip file of independently compressed record-aligned members"
-    if first is None:
-        raise schema_error(path, found="an oversized, corrupt or non-gzip first member", expected=expected)
-    if first[1] >= size:
-        raise schema_error(
-            path, found="a single-stream gzip file", expected=f"{expected}; decompress it or recompress it in blocks"
-        )
-    return [
-        _MemberRange(path, start, min(start + _GZIP_RANGE_BYTES, size)) for start in range(0, size, _GZIP_RANGE_BYTES)
-    ]
+    The scalar end offset orders source reads without keeping open resources in
+    the graph. A member crossing several ranges belongs wholly to its first task;
+    those subsequent ranges return empty partitions.
+    """
+    payload = bytearray()
+    pending = b""
+    with projection.path.open("rb") as handle:
+        while offset < spec.stop:
+            offset, pending = _decode_member(handle, offset, projection.path, payload, pending)
+    if spec.start == 0:
+        del payload[: payload.find(b"\n") + 1]
+    return offset, _parse(payload, projection)
 
 
 def _partitions(projection: _Projection) -> list[Delayed]:
     """Return one delayed parser per plain block or compressed member range."""
     path = projection.path
     if path.name.endswith(".gz"):
-        return [delayed(_gzip_range)(spec, projection) for spec in _gzip_ranges(path)]
+        size = path.stat().st_size
+        offset: int | Delayed = 0
+        partitions: list[Delayed] = []
+        for start in range(0, size, _GZIP_RANGE_BYTES):
+            spec = _MemberRange(start, min(start + _GZIP_RANGE_BYTES, size))
+            task = delayed(_gzip_range, nout=2)(spec, projection, offset)
+            offset, partition = task
+            partitions.append(partition)
+        return partitions
 
     # read_bytes has no typed signature; this is its documented result when include_path is false.
     read_blocks = cast("Callable[..., tuple[bytes | bool, list[list[Delayed]]]]", read_bytes)
@@ -237,7 +190,7 @@ def _partitions(projection: _Projection) -> list[Delayed]:
 def read_transcripts(
     path: ArtifactFile, *, features: tuple[str, ...], placements: Mapping[int, Placement]
 ) -> dd.DataFrame:
-    """Return global XY points with every FOV frame, without reading transcript rows.
+    """Return lazy global XY points and every FOV frame after header inspection.
 
     Records must each occupy one physical line. Values are validated when their
     partition is computed.
@@ -250,7 +203,7 @@ def read_transcripts(
 
     transformations: dict[str, BaseTransformation] = {"global": Identity()}
     transformations.update({str(fov): placement.global_to_local() for fov, placement in placements.items()})
-    # Independent partitions are deliberately unsorted. Known target categories and
+    # Partitions are deliberately unsorted. Known target categories and
     # sort=False avoid the public model's eager category and index scans.
     with warnings.catch_warnings():
         warnings.filterwarnings(

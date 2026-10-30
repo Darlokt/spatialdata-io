@@ -48,12 +48,10 @@ def _canonical_native(
 ) -> csr_array:
     matrix = csr_array((counts, feature_indices, indptr), shape=(len(indptr) - 1, features))
     matrix.sort_indices()
-    for start, stop in zip(matrix.indptr[:-1], matrix.indptr[1:], strict=True):
-        row_feature_indices = matrix.indices[start:stop]
-        if np.any(row_feature_indices[1:] == row_feature_indices[:-1]):
-            raise _schemas.format_error(
-                path, "cellExp", "repeated feature within a cell", "unique native cell-feature records"
-            )
+    if not matrix.has_canonical_format:
+        raise _schemas.format_error(
+            path, "cellExp", "repeated feature within a cell", "unique native cell-feature records"
+        )
 
     return as_csr_array(matrix)
 

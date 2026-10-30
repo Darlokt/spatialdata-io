@@ -36,7 +36,7 @@ def _sources(
 
 
 class TestReadFeatureNames:
-    """Vocabulary discovery reads only a bounded header without decoding count rows."""
+    """Vocabulary discovery reads only the header without decoding count rows."""
 
     def test_header_only(self, tmp_path: Path) -> None:
         counts, _ = _sources(tmp_path, "cell,B,Blank-1,A\nnot,a,valid,record,at,all\n")
@@ -46,12 +46,6 @@ class TestReadFeatureNames:
     def test_bad_header(self, tmp_path: Path, header: str) -> None:
         counts, _ = _sources(tmp_path, header)
         with pytest.raises(ReaderFormatError):
-            read_feature_names(counts)
-
-    def test_header_bound(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        counts, _ = _sources(tmp_path)
-        mocker.patch("spatialdata_io.readers.merscope._tables._MAX_HEADER_CHARACTERS", 2)
-        with pytest.raises(ReaderFormatError, match="oversized"):
             read_feature_names(counts)
 
 

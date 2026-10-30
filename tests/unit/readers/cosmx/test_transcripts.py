@@ -15,7 +15,8 @@ from spatialdata.transformations import BaseTransformation, Identity, get_transf
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.cosmx._transcripts import _first_member, read_transcripts
+from spatialdata_io.readers.cosmx import _transcripts
+from spatialdata_io.readers.cosmx._transcripts import read_transcripts
 from spatialdata_io.readers.cosmx._transforms import Placement
 
 if TYPE_CHECKING:
@@ -126,7 +127,33 @@ class TestReadTranscripts:
 
 
 class TestGzipLayout:
-    """Only independently compressed, record-aligned gzip members are partitioned."""
+    """Contiguous record-aligned gzip members are verified without scanning for magic bytes."""
+
+    def test_corrupt_first_owned_member_is_not_skipped(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = _members(tmp_path, size=1)
+        header = gzip.compress(_HEADER.encode(), mtime=0)
+        data = bytearray(path.read_bytes())
+        # The second task owns this member; a later intact member must not hide its corrupt CRC.
+        data[len(header) + len(gzip.compress(_ROWS[0].encode(), mtime=0)) - 8] ^= 0xFF
+        path.write_bytes(data)
+        mocker.patch("spatialdata_io.readers.cosmx._transcripts._GZIP_RANGE_BYTES", len(header))
+        points = read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+        with pytest.raises(ReaderFormatError, match="corrupt gzip member"):
+            points.compute()
+
+    def test_header_and_many_rows_in_first_member_stay_lazy(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "tx.csv.gz"
+        path.write_bytes(
+            gzip.compress((_HEADER + _ROWS[0] * 100_000).encode(), mtime=0) + gzip.compress(_ROWS[1].encode(), mtime=0)
+        )
+        decoder = mocker.spy(_transcripts, "_decode_member")
+        # The decoder owns gzip's read-ahead; this spy measures eager source I/O.
+        header_reader = mocker.spy(gzip._GzipReader, "read")  # noqa: SLF001, RUF100
+        points = read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
+        decoder.assert_not_called()
+        assert 0 < sum(len(block) for block in header_reader.spy_return_list) < 65536
+        # Every first-member row is returned once, including when it crosses compressed task ranges.
+        assert len(points.compute()) == 100_001
 
     def test_without_optional_annotations(self, tmp_path: Path) -> None:
         path = tmp_path / "tx.csv"
@@ -136,16 +163,6 @@ class TestGzipLayout:
         result = read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS).compute()
         assert result.columns.tolist() == ["x", "y", "target", "fov", "cell_ID", "x_local", "y_local"]
 
-    def test_false_magic_candidate_is_rejected_before_the_real_member(self, tmp_path: Path) -> None:
-        member = gzip.compress(b"payload\n", mtime=0)
-        handle = io.BytesIO(b"junk\x1f\x8b\x08\x00not a member" + member)
-        start = len(b"junk\x1f\x8b\x08\x00not a member")
-        assert _first_member(handle, 0, len(handle.getvalue()), ArtifactFile(tmp_path / "tx.csv.gz")) == (
-            start,
-            b"payload\n",
-            len(member),
-        )
-
     def test_truncated_final_member_fails(self, tmp_path: Path) -> None:
         path = _members(tmp_path)
         path.write_bytes(path.read_bytes()[:-5])
@@ -153,20 +170,20 @@ class TestGzipLayout:
         with pytest.raises(ReaderFormatError, match="corrupt gzip member"):
             points.compute()
 
-    def test_corrupt_header_member_fails_at_construction(self, tmp_path: Path) -> None:
+    def test_corrupt_header_member_fails(self, tmp_path: Path) -> None:
         path = _members(tmp_path)
         data = bytearray(path.read_bytes())
         header_member = len(gzip.compress(_HEADER.encode(), mtime=0))
         data[header_member - 8] ^= 0xFF
         path.write_bytes(bytes(data))
-        with pytest.raises(ReaderFormatError, match="corrupt or non-gzip first member"):
-            read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+        with pytest.raises(ReaderFormatError, match=r"corrupt gzip member|invalid gzip data"):
+            read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS).compute()
 
-    def test_single_stream_gzip_fails_at_construction(self, tmp_path: Path) -> None:
+    def test_single_stream_gzip_is_supported(self, tmp_path: Path) -> None:
         path = tmp_path / "tx.csv.gz"
         path.write_bytes(gzip.compress((_HEADER + "".join(_ROWS)).encode(), mtime=0))
-        with pytest.raises(ReaderFormatError, match="single-stream gzip"):
-            read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
+        result = read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS).compute()
+        assert len(result) == len(_ROWS)
 
     def test_not_gzip_fails_at_construction(self, tmp_path: Path) -> None:
         path = tmp_path / "tx.csv.gz"
@@ -194,11 +211,35 @@ class TestGzipLayout:
         with pytest.raises(ReaderFormatError, match="corrupt gzip member"):
             points.compute()
 
-    def test_oversized_member_fails(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_crossed_ranges_serialize_and_return_every_row_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _members(tmp_path, size=10)
-        header_member = len(gzip.compress(_HEADER.encode(), mtime=0))
-        mocker.patch("spatialdata_io.readers.cosmx._transcripts._READ_BYTES", 8)
-        mocker.patch("spatialdata_io.readers.cosmx._transcripts._MAX_MEMBER_BYTES", header_member + 8)
+        mocker.patch("spatialdata_io.readers.cosmx._transcripts._GZIP_RANGE_BYTES", 8)
         points = read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
-        with pytest.raises(ReaderFormatError, match="larger than"):
+        restored = pickle.loads(pickle.dumps(points))  # noqa: S301, RUF100 - Deserialize this test's own graph.
+        assert restored.npartitions > 10
+        assert len(restored.compute(scheduler="processes")) == len(_ROWS)
+
+    @pytest.mark.parametrize("trailer", [b"junk", b"\x1f\x8b\x08\x00"])
+    def test_trailing_corruption_is_not_skipped(self, tmp_path: Path, trailer: bytes) -> None:
+        path = _members(tmp_path)
+        path.write_bytes(path.read_bytes() + trailer)
+        points = read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+        with pytest.raises(ReaderFormatError, match="corrupt gzip member"):
             points.compute()
+
+    @pytest.mark.parametrize("corrupt", [False, True])
+    def test_lazy_sources_close_on_success_and_failure(
+        self, tmp_path: Path, mocker: MockerFixture, *, corrupt: bool
+    ) -> None:
+        path = _members(tmp_path)
+        if corrupt:
+            path.write_bytes(path.read_bytes()[:-4])
+        points = read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+        sources = mocker.spy(type(path), "open")
+        if corrupt:
+            with pytest.raises(ReaderFormatError, match="corrupt gzip member"):
+                points.compute(scheduler="single-threaded")
+        else:
+            assert len(points.compute(scheduler="single-threaded")) == len(_ROWS)
+        assert sources.spy_return_list
+        assert all(handle.closed for handle in sources.spy_return_list)

@@ -1,4 +1,4 @@
-"""Tests for bounded Visium metadata parsing."""
+"""Tests for Visium metadata parsing."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ class TestReadScaleFactors:
 
 
 class TestReadCountMetadata:
-    """Read only bounded attributes while the HDF5 owner is open."""
+    """Read optional attributes while the HDF5 owner is open."""
 
     def test_reads_single_library_and_optional_text(self, tmp_path: Path) -> None:
         path = tmp_path / "counts.h5"
@@ -94,14 +94,6 @@ class TestReadCountMetadata:
             source.attrs["library_ids"] = library_ids
 
         with pytest.raises(ReaderFormatError, match="exactly one library ID"):
-            read_count_metadata(H5Counts(path=ArtifactFile(path), filename_prefix=None))
-
-    def test_rejects_unbounded_attribute_text(self, tmp_path: Path) -> None:
-        path = tmp_path / "counts.h5"
-        with h5py.File(path, "w") as source:
-            source.attrs["software_version"] = "x" * 4_097
-
-        with pytest.raises(ReaderFormatError, match="at most 4096"):
             read_count_metadata(H5Counts(path=ArtifactFile(path), filename_prefix=None))
 
 

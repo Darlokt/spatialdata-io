@@ -6,6 +6,7 @@ import pickle
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import pytest
 from click.testing import CliRunner
 from dask.callbacks import Callback
@@ -129,6 +130,21 @@ class TestCosmx:
         (fixture.root / "CellLabels" / "CellLabels_F010.tif").unlink()
         with pytest.raises(ReaderFormatError, match=r"no labels for FOVs \[10\]"):
             cosmx(fixture.root)
+
+    def test_ids_must_fit_their_own_fov_label_dtype_without_reading_pixels(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path)
+        for suffix in ("metadata", "exprMat"):
+            path = fixture.root / f"Run_1_{suffix}_file.csv"
+            frame = pd.read_csv(path)
+            frame.loc[(frame["fov"] == 2) & (frame["cell_ID"] == 1), "cell_ID"] = 70000
+            frame.to_csv(path, index=False)
+        tasks: list[object] = []
+        with (
+            Callback(posttask=lambda *args: tasks.append(args)),
+            pytest.raises(ReaderFormatError, match=r"70000.*uint16"),
+        ):
+            cosmx(fixture.root)
+        assert not tasks
 
     def test_without_rasters_or_transcripts(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path, rasters=False, positions=False)

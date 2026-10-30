@@ -195,7 +195,7 @@ def read_images(
 def _cytassist_image(
     path: ArtifactFile, frame: SlideFrame, source: SourceMetadata | None, options: RasterOptions
 ) -> DataArray | DataTree:
-    if source is None or source.spot_to_cytassist is None or source.cytassist_to_spot is None:
+    if source is None or source.cytassist is None:
         raise ReaderFormatError(
             context=ReaderErrorContext("visium_hd", "CytAssist registration"),
             path=path,
@@ -213,7 +213,7 @@ def _cytassist_image(
         )
 
     pixels = _normalize(read_tiff(metadata, series=0, level=0))
-    warped, matrix = warp_cytassist(pixels, frame, source.spot_to_cytassist, options)
+    warped, matrix = warp_cytassist(pixels, frame, source.cytassist.spot_to_image, options)
     image = _parse_image(warped, matrix, options)
     image.attrs["interpolation"] = "bilinear"
     return image

@@ -1,4 +1,4 @@
-"""Tests for bounded PNG metadata inspection."""
+"""Tests for PNG metadata inspection without pixel or ancillary-payload reads."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 
 from spatialdata_io.readers._utils.errors import RasterFormatError
-from spatialdata_io.readers._utils.image._encoded import MAX_HEADER_BYTES
+from spatialdata_io.readers._utils.image import _png
 from spatialdata_io.readers._utils.image._png import inspect_png_header
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pytest_mock import MockerFixture
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -164,10 +166,9 @@ class TestInspectPngHeader:
 
         assert inspect_png_header(path).shape == shape
 
-    def test_enforces_header_scan_bound_before_allocation(self, tmp_path: Path) -> None:
-        path = tmp_path / "oversized.png"
-        oversized_text = _png_chunk(b"tEXt", b"x" * MAX_HEADER_BYTES)
-        _write_png_header(path, before_idat=oversized_text)
-
-        with pytest.raises(RasterFormatError, match="inspection limit"):
-            inspect_png_header(path)
+    def test_skips_ancillary_payloads(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "metadata.png"
+        _write_png_header(path, before_idat=_png_chunk(b"tEXt", b"x" * 4096))
+        reads = mocker.spy(_png, "_read_exact")
+        assert inspect_png_header(path).shape == (3, 5, 3)
+        assert max(call.args[1] for call in reads.call_args_list) <= 13

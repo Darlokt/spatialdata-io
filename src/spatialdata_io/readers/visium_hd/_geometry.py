@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-MAX_GEOJSON_BYTES = 512 * 1024 * 1024
 MAX_CELL_ID = 999_999_999
 
 
@@ -73,7 +72,6 @@ def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cel
 
     GDAL retains source order and ring vertices. Only Polygon exteriors are
     supported; malformed geometry is rejected independently of validity policy.
-    Files are limited to 512 MiB; this is an input limit, not a peak-memory bound.
     """
     context = ReaderErrorContext(reader="visium_hd", artifact=f"{kind} boundaries")
 
@@ -81,9 +79,8 @@ def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cel
         return ReaderFormatError(context=context, found=found, expected=expected, path=path)
 
     try:
-        if path.stat().st_size > MAX_GEOJSON_BYTES:
-            msg = "oversized GeoJSON"
-            raise fail(msg, f"at most {MAX_GEOJSON_BYTES} encoded bytes")
+        # Preserve standard I/O errors before GDAL wraps failures as driver errors.
+        path.stat()
         source = gpd.read_file(path, engine="pyogrio", columns=["cell_id", f"{kind}_centroid"], on_invalid="raise")
     except (DataSourceError, GeometryError, GEOSException) as error:
         msg = "malformed GeoJSON or polygon ring"

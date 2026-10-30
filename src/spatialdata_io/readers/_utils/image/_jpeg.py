@@ -5,11 +5,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from spatialdata_io.readers._utils.errors import RasterFormatError
-from spatialdata_io.readers._utils.image._encoded import (
-    MAX_HEADER_BYTES,
-    encoded_result,
-    validate_decoded_size,
-)
+from spatialdata_io.readers._utils.image._encoded import encoded_result, validate_decoded_size
 from spatialdata_io.readers._utils.image._path import normalize_file_path
 from spatialdata_io.readers._utils.image._types import LazyRaster, _EncodedHeader
 
@@ -33,29 +29,17 @@ def _read_exact(stream: BinaryIO, size: int, *, context: str) -> bytes:
     return data
 
 
-def _next_marker(stream: BinaryIO, *, remaining: int) -> tuple[int, int]:
-    if remaining < 1:
-        message = "JPEG marker metadata exceeds the bounded inspection limit."
-        raise RasterFormatError(message)
+def _next_marker(stream: BinaryIO) -> int:
     if _read_exact(stream, 1, context="marker prefix") != b"\xff":
         message = "JPEG contains non-marker data before the first scan."
         raise RasterFormatError(message)
-    consumed = 1
-    if consumed >= remaining:
-        message = "JPEG marker metadata exceeds the bounded inspection limit."
-        raise RasterFormatError(message)
     marker = _read_exact(stream, 1, context="marker")
-    consumed += 1
     while marker == b"\xff":
-        if consumed >= remaining:
-            message = "JPEG marker metadata exceeds the bounded inspection limit."
-            raise RasterFormatError(message)
         marker = _read_exact(stream, 1, context="marker padding")
-        consumed += 1
     if marker == b"\x00":
         message = "JPEG contains a stuffed zero byte before the first scan."
         raise RasterFormatError(message)
-    return marker[0], consumed
+    return marker[0]
 
 
 def _sof_metadata(path: Path, marker: int, payload: bytes) -> _EncodedHeader:
@@ -86,56 +70,41 @@ def _sof_metadata(path: Path, marker: int, payload: bytes) -> _EncodedHeader:
 
 
 def inspect_jpeg_header(path: Path) -> _EncodedHeader:
-    """Inspect bounded JPEG frame metadata without decoding pixels."""
+    """Inspect JPEG frame metadata without decoding pixels or retaining ancillary data."""
     with path.open("rb") as stream:
         if _read_exact(stream, 2, context="SOI") != b"\xff\xd8":
             message = f"File does not contain a JPEG SOI marker: {path}"
             raise RasterFormatError(message)
-        scanned = 2
-        while scanned <= MAX_HEADER_BYTES:
-            marker, marker_bytes = _next_marker(
-                stream,
-                remaining=MAX_HEADER_BYTES - scanned,
-            )
-            scanned += marker_bytes
+        while True:
+            marker = _next_marker(stream)
             if marker in _STANDALONE_MARKERS:
                 continue
             if marker in {0xD8, 0xD9, 0xDA}:
                 message = f"JPEG {path} reached marker 0xFF{marker:02X} before a supported SOF marker."
                 raise RasterFormatError(message)
 
-            if scanned + _SEGMENT_LENGTH_BYTES > MAX_HEADER_BYTES:
-                message = f"JPEG metadata exceeds the {MAX_HEADER_BYTES}-byte inspection limit: {path}"
-                raise RasterFormatError(message)
             length = int.from_bytes(_read_exact(stream, _SEGMENT_LENGTH_BYTES, context="segment length"), "big")
-            scanned += _SEGMENT_LENGTH_BYTES
             if length < _SEGMENT_LENGTH_BYTES:
                 message = f"JPEG {path} has invalid segment length {length} at marker 0xFF{marker:02X}."
                 raise RasterFormatError(message)
             payload_size = length - _SEGMENT_LENGTH_BYTES
-            if scanned + payload_size > MAX_HEADER_BYTES:
-                message = f"JPEG metadata exceeds the {MAX_HEADER_BYTES}-byte inspection limit: {path}"
-                raise RasterFormatError(message)
-            context = f"0xFF{marker:02X} segment"
-            payload = _read_exact(stream, payload_size, context=context)
-            scanned += payload_size
             if marker in _ALL_SOF:
+                payload = _read_exact(stream, payload_size, context=f"0xFF{marker:02X} segment")
                 return _sof_metadata(path, marker, payload)
-        message = f"JPEG metadata exceeds the {MAX_HEADER_BYTES}-byte inspection limit: {path}"
-        raise RasterFormatError(message)
+            stream.seek(payload_size, 1)
 
 
 def read_jpeg(path: str | Path) -> LazyRaster:
     """Read JPEG pixels as one delayed whole-frame task.
 
-    Metadata inspection is bounded and eager; pixel decoding is lazy. Computing
+    Metadata inspection is eager and skips ancillary payloads; pixel decoding is lazy. Computing
     any selection decodes the complete JPEG frame. EXIF orientation is not
     applied implicitly.
 
     Parameters
     ----------
     path
-        JPEG source. Its SOI marker and bounded frame metadata are validated;
+        JPEG source. Its SOI marker and frame metadata are validated;
         file names and extensions remain layout-reader concerns.
 
     Returns
@@ -146,7 +115,7 @@ def read_jpeg(path: str | Path) -> LazyRaster:
     Raises
     ------
     RasterFormatError
-        If the bounded header is malformed or describes an unsupported JPEG.
+        If the header is malformed or describes an unsupported JPEG.
     """
     normalized = normalize_file_path(path)
     return encoded_result(normalized, "jpeg", inspect_jpeg_header(normalized))

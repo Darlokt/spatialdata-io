@@ -43,7 +43,6 @@ MORPHOLOGY = frozenset(
         "Orientation",
     }
 )
-_MAX_NUMBER_CHARACTERS = 128
 _LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 
 
@@ -141,8 +140,8 @@ def float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: s
     """Decode correctly rounded finite float64 values without silent underflow."""
     expected = f"finite float64 {name!r} values"
     lexical = _lexical(column)
-    if column.null_count or lexical.str.len().gt(_MAX_NUMBER_CHARACTERS).any():
-        raise schema_error(path, found=f"missing or oversized {name!r} values", expected=expected)
+    if column.null_count:
+        raise schema_error(path, found=f"missing {name!r} values", expected=expected)
     try:
         values = pc.cast(column, pa.float64()).to_numpy(zero_copy_only=False)
     except pa.ArrowInvalid as error:

@@ -22,7 +22,7 @@ The count matrix needs `fov` and `cell_ID` columns. Every other column is an exp
 
 Table rows follow metadata order. Observation names are the vendor `cell` IDs when the metadata provides them (AtoMx) and row positions `"0"`, `"1"`, ... otherwise. AtoMx's `cell_id` column is an exact copy of `cell` and a case variant of `cell_ID`, so it is dropped; any other case-variant column names fail. `fov` and `cell_ID` are int64. `Area`, `Area.um2`, `AspectRatio`, `Width`, `Height` and every `Mean.*`/`Max.*` intensity are float64, with empty fields and `NA` as missing values. All other metadata columns stay exact text. `obsm["spatial"]` and `obsm["global"]` hold the local and global cell centers in pixels.
 
-With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with instance key `cell_ID`, and every FOV with cells must have labels. Without that directory the table is returned unlinked.
+With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with instance key `cell_ID`, and every FOV with cells must have labels. Cell IDs must fit their own FOV's inspected integer label dtype; this check does not read label pixels or establish full pixel membership. Without that directory the table is returned unlinked.
 
 ## Coordinates
 
@@ -42,7 +42,11 @@ The raster convention has only been evidenced for exports whose global axes run 
 
 Transcript points are placed at their global `x_global_px`/`y_global_px` positions; the local coordinates are kept as `x_local` and `y_local`. Targets are categorical with the count features as categories. Annotations are `fov`, `cell_ID` (0 marks unassigned transcripts) and, when present, `z_raw`, `CellComp` and `cell`. `z_raw` is the vendor's slice number in arbitrary units and can be negative; it is not a physical coordinate.
 
-Construction reads only the header. Plain CSV sources are split into newline-delimited blocks of about 8 MiB, so each record must occupy one physical line. Compressed `.csv.gz` sources must consist of independently compressed members that each end with a complete record, as AtoMx exports do; these members are split into lazy ranges of about 16 MiB of compressed data without decompressing the file first. A single-stream gzip file (for example from the `gzip` command) fails: decompress it, or recompress it in blocks. Unknown targets and malformed values fail when their partition is computed.
+Construction reads the CSV header, with small gzip decoder read-ahead; it does not decode a complete first member to discover boundaries. Each record must occupy one physical line. Plain CSV sources are split into newline-delimited blocks of about 8 MiB.
+
+Compressed `.csv.gz` sources support concatenated, independently compressed members as emitted by AtoMx. Each member must be nonempty and end with a complete newline-terminated record; the first may contain both the header and rows. A single-stream gzip file is also accepted. Lazy tasks read consecutive members from byte zero, using the exact end offset verified by the preceding task. Every member's deflate stream, CRC and size trailer is checked; corrupt members and trailing garbage fail instead of being skipped. Source decoding is sequential, and computing a later partition requires its predecessors. There is no preliminary full-file scan or temporary conversion.
+
+One task owns members beginning in about 8 MiB of compressed data, including the complete final member crossing that range. Decoder buffers use 1 MiB chunks, but complete members accumulate before CSV parsing, and projected Arrow fields and the returned pandas partition require additional storage. The compressed range target does not bound decoded partition size. A single-stream gzip file forms one nonempty partition containing all its rows; use plain CSV for independently readable partitions of a large single stream. Unknown targets and malformed values also fail when their partition is computed.
 
 ## Options and execution
 

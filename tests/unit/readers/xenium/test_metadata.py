@@ -1,4 +1,4 @@
-"""Bounded experiment, metrics and panel metadata become typed JSON-serializable records."""
+"""Experiment, metrics and panel metadata become typed JSON-serializable records."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._metadata import (
-    MAX_METRICS_BYTES,
     read_experiment,
     read_gene_panel,
     read_metrics,
@@ -99,13 +98,6 @@ class TestReadExperiment:
         assert experiment.images == {}
         assert dict(experiment.attrs) == minimal
 
-    def test_bounded_and_strict_json(self, tmp_path: Path) -> None:
-        oversized = tmp_path / "experiment.xenium"
-        oversized.write_text(json.dumps(EXPERIMENT | {"padding": "x" * 70_000}))
-
-        with pytest.raises(ReaderFormatError, match="more than 65536 encoded bytes"):
-            read_experiment(ArtifactFile(oversized))
-
 
 class TestReadMetrics:
     """metrics_summary.csv is one strict record of exact values."""
@@ -144,12 +136,8 @@ class TestReadMetrics:
         with pytest.raises(ReaderFormatError, match="one unique header and one record"):
             read_metrics(ArtifactFile(path))
 
-    def test_rejects_oversized_and_non_utf8(self, tmp_path: Path) -> None:
+    def test_rejects_non_utf8(self, tmp_path: Path) -> None:
         path = tmp_path / "metrics_summary.csv"
-        path.write_bytes(b"a\n" + b"1" * MAX_METRICS_BYTES)
-        with pytest.raises(ReaderFormatError, match="oversized"):
-            read_metrics(ArtifactFile(path))
-
         path.write_bytes(b"a\n\xff\n")
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_metrics(ArtifactFile(path))

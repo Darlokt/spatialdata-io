@@ -104,18 +104,21 @@ unless `make_var_names_unique=False`.
 
 10x supplies cell matrices but no nucleus matrix. The nucleus table sums **raw
 2 µm counts** over bins with `in_nucleus=True`, including bins outside the tissue
-mask, in the selected cell population's order. Integer accumulation is exact;
-source counts and sums outside the exact float32 integer range are rejected
-before a lossy conversion. Every returned expression matrix is a canonical
-SciPy CSR sparse **array** with float32 data. Nothing is densified. Linkage is
-performed once after all filtering, using independent shape or label IDs.
+mask, in the selected cell population's order. Bin and cell count dtypes follow
+Scanpy: vendor int32 sources become float32, while alternate numeric source
+dtypes are retained. Counts must be finite, nonnegative and integer-valued. Nucleus
+aggregation uses int64, rejecting unsafe integer conversion or possible sum
+overflow; final counts use float32, whose precision applies to large values.
+Every returned expression matrix is a canonical SciPy CSR sparse **array**.
+Nothing is densified. Linkage is performed once after all filtering, using
+independent shape or label IDs.
 
 `invalid_geometries="keep"` preserves source topology. `"drop"` removes an invalid
 returned cell polygon with its cell table row and associated nucleus; an invalid
 nucleus removes only its nucleus polygon and nucleus table row. `"raise"` rejects
 invalid geometry. Missing or malformed geometries, holes, MultiPolygons, duplicate
-IDs and nonfinite coordinates raise in every mode. GeoJSON is limited to 512 MiB
-of encoded input; this is not a limit on working memory.
+IDs and nonfinite coordinates raise in every mode. GeoJSON properties are
+projected during ingestion; the returned geometry vector is eager.
 
 ## Physical coordinates
 
@@ -127,6 +130,18 @@ orientation, including reflection. Bin squares, segmentation vertices and
 `obsm["spatial"]` are stored in this frame; vectors carry identity transforms.
 The bin source `pxl_col_in_fullres` and `pxl_row_in_fullres` columns remain in
 `obs` for traceability.
+
+Every selected positions file must agree with the 2 µm registration, including
+rows absent from filtered counts. For bin factor `k = size_um / 2`, Space Ranger
+writes the source pixel position as `H(k * col, k * row) + offset`, where
+`offset = (H(k - 1, k - 1) - H(0, 0)) / 2` and `H` is the 2 µm homography.
+The offset also applies to partial edge bins. This is the producer's image-space
+convention, which differs from projecting each nominal centre when registration
+is projective. The reader checks it with the same maximum 1e-9 pixel residual
+used to validate the base registration; inconsistent selected-bin artifacts raise.
+See the [Space Ranger bin-position implementation](https://github.com/10XGenomics/spaceranger/blob/0bc95c49e1c4db6247a97ed57998f7fe3719e2fa/lib/rust/spatial/src/stages/bin_count_matrix.rs#L99-L124).
+The source pixel columns are preserved; physical geometry uses nominal grid
+centres and extents.
 
 Squares have the exact nominal physical side length, including the last partial
 row or column. They can extend beyond the captured barcodes (for example 4 µm

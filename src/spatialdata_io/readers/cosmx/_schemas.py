@@ -35,7 +35,6 @@ TRANSCRIPT_OPTIONAL = ("z", "CellComp", CELL)
 # Vendor morphology and stain-intensity fields; every other metadata field stays exact text.
 _NUMERIC_METADATA = re.compile(r"Area|Area\.um2|AspectRatio|Width|Height|(?:Mean|Max)\..+")
 _FOV_POSITION_PIXELS = (("x_px", "y_px"), ("x_global_px", "y_global_px"))
-_MAX_NUMBER_CHARACTERS = 128
 _LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 _DECIMAL = r"[+-]?(?:\d+(?:\.(?P<fraction>\d*))?|\.(?P<leading>\d+))(?:[eE](?P<exponent>[+-]?\d+))?"
 
@@ -43,6 +42,18 @@ _DECIMAL = r"[+-]?(?:\d+(?:\.(?P<fraction>\d*))?|\.(?P<leading>\d+))(?:[eE](?P<e
 def schema_error(path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
     """Describe a source contract violation with its reader and artifact identity."""
     return ReaderFormatError(context=ReaderErrorContext("cosmx", path.name), path=path, found=found, expected=expected)
+
+
+def validate_label_ids(cell_ids: npt.NDArray[np.int64], dtype: np.dtype[np.generic], path: ArtifactFile) -> None:
+    """Require normalized positive cell IDs to fit their inspected integer label dtype."""
+    maximum = int(cell_ids.max(initial=0))
+    limit = np.iinfo(dtype.str).max
+    if maximum > limit:
+        raise schema_error(
+            path,
+            found=f"cell_ID {maximum} outside the {dtype} label range",
+            expected=f"cell_ID values representable by the target labels (at most {limit})",
+        )
 
 
 def validate_columns(columns: Sequence[str], path: ArtifactFile) -> None:
@@ -146,8 +157,8 @@ def float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: s
     """Decode correctly rounded finite float64 values without silent underflow."""
     expected = f"finite float64 {name!r} values"
     lexical = _lexical(column)
-    if column.null_count or lexical.str.len().gt(_MAX_NUMBER_CHARACTERS).any():
-        raise schema_error(path, found=f"missing or oversized {name!r} values", expected=expected)
+    if column.null_count:
+        raise schema_error(path, found=f"missing {name!r} values", expected=expected)
     try:
         values = pc.cast(column, pa.float64()).to_numpy(zero_copy_only=False)
     except pa.ArrowInvalid as error:

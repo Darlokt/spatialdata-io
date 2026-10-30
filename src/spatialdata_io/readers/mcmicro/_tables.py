@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.mcmicro._layout import Quantification
     from spatialdata_io.readers.mcmicro._schemas import MarkerPanel
 
-_MAX_HEADER_CHARACTERS = 1_048_576
 _CSV_BLOCK_BYTES = 1024 * 1024
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
 _MAX_BATCH_ROWS = 10_000
@@ -56,11 +55,9 @@ class _Measurements:
 
 
 def _read_header(path: ArtifactFile) -> list[str]:
-    """Bound the first physical UTF-8 CSV record before interpreting names."""
+    """Read the first physical UTF-8 CSV record before interpreting names."""
     with path.open(encoding="utf-8-sig", newline="") as handle:
-        header = handle.readline(_MAX_HEADER_CHARACTERS + 1)
-    if len(header) > _MAX_HEADER_CHARACTERS:
-        raise schema_error(path, found="oversized CSV header", expected="a header of at most 1 Mi characters")
+        header = handle.readline()
     try:
         return next(csv.reader([header], strict=True), [])
     except csv.Error as error:

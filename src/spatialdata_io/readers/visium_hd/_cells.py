@@ -1,4 +1,4 @@
-"""Cell identities and exact sparse aggregation of raw bins into nuclei."""
+"""Cell identities and integer sparse aggregation of raw bins into nuclei."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from scipy.sparse import csr_array
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.visium_hd._schemas import validate_mapping_schema, validate_mappings
-from spatialdata_io.readers.visium_hd._tables import MAX_EXACT_COUNT, read_counts
+from spatialdata_io.readers.visium_hd._tables import read_counts
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -75,7 +75,15 @@ def read_nucleus_table(
         )
 
     # read_counts guarantees canonical CSR; only the accumulation buffer changes dtype.
-    counts = cast("csr_array", raw.X).astype(np.int64)
+    imported = cast("csr_array", raw.X)
+    # Compare Python integers so NumPy cannot round int64's upper bound when
+    # imported counts use floating storage.
+    maximum = int(imported.data.max(initial=0))
+    if maximum > np.iinfo(np.int64).max:
+        raise ReaderFormatError(
+            context=context, path=raw_file, found="counts exceed int64", expected="safe int64 nucleus accumulation"
+        )
+    counts = imported.astype(np.int64)
     source_rows: list[NDArray[np.int64]] = []
     target_rows: list[NDArray[np.int64]] = []
     seen = np.zeros(raw.n_obs, dtype=np.bool_)
@@ -123,7 +131,6 @@ def read_nucleus_table(
     rows = np.concatenate(target_rows) if target_rows else np.empty(0, dtype=np.int64)
     columns = np.concatenate(source_rows) if source_rows else np.empty(0, dtype=np.int64)
     contributing = np.bincount(rows, minlength=population.n_obs)
-    maximum = int(counts.data.max(initial=0))
     if maximum * int(contributing.max(initial=0)) > np.iinfo(np.int64).max:
         raise ReaderFormatError(
             context=context, found="possible int64 sum overflow", expected="exact int64 accumulation"
@@ -132,13 +139,6 @@ def read_nucleus_table(
     # One operator row per selected cell sums its member bins without densifying counts.
     operator = csr_array((np.ones(rows.size, dtype=np.int64), (rows, columns)), shape=(population.n_obs, raw.n_obs))
     aggregated = operator @ counts
-    if np.any(aggregated.data > MAX_EXACT_COUNT):
-        raise ReaderFormatError(
-            context=context,
-            found="nucleus sums above 2**24",
-            expected="exact float32 counts without rounding",
-        )
-
     # Both annotations are eager frames from the shared count boundary, never Dataset2D.
     return ad.AnnData(
         aggregated.astype(np.float32),

@@ -1,4 +1,4 @@
-"""Bounded structured-metadata utilities for private reader layouts."""
+"""Strict structured-metadata utilities for private reader layouts."""
 
 from __future__ import annotations
 

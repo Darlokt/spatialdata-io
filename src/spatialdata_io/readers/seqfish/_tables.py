@@ -37,16 +37,13 @@ if TYPE_CHECKING:
 
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
 _MAX_BATCH_ROWS = 10_000
-_MAX_HEADER_CHARACTERS = 1_048_576
 _CSV_BLOCK_BYTES = 1024 * 1024
 
 
 def _read_header(path: ArtifactFile) -> list[str]:
-    """Read a bounded CSV header before Arrow can normalize duplicate names."""
+    """Read the CSV header before Arrow can normalize duplicate names."""
     with path.open(encoding="utf-8-sig", newline="") as handle:
-        header = handle.readline(_MAX_HEADER_CHARACTERS + 1)
-        if len(header) > _MAX_HEADER_CHARACTERS:
-            raise schema_error(path, found="oversized header", expected="a header of at most 1 Mi characters")
+        header = handle.readline()
         try:
             columns = next(csv.reader([header], strict=True), list[str]())
         except csv.Error as error:

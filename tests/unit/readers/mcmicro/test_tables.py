@@ -118,9 +118,3 @@ class TestReadTable:
         source = _quantification(tmp_path, "s", _HEADER)
         with pytest.raises(ReaderFormatError, match="no quantified cells"):
             read_table((source,), _panel(), _dtypes(source))
-
-    def test_header_bound(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        source = _quantification(tmp_path, "s", _HEADER + "1,1,0,0,0,1,a\n")
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._MAX_HEADER_CHARACTERS", 4)
-        with pytest.raises(ReaderFormatError, match="oversized CSV header"):
-            read_table((source,), _panel(), _dtypes(source))

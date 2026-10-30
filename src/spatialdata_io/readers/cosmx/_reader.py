@@ -11,6 +11,7 @@ from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FA
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.cosmx._layout import discover_layout
 from spatialdata_io.readers.cosmx._rasters import read_image, read_labels
+from spatialdata_io.readers.cosmx._schemas import validate_label_ids
 from spatialdata_io.readers.cosmx._tables import build_table, read_counts, read_fov_positions, read_metadata
 from spatialdata_io.readers.cosmx._transcripts import read_transcripts
 from spatialdata_io.readers.cosmx._transforms import solve_placements
@@ -77,7 +78,8 @@ def cosmx(
         intensities are nullable float64; other metadata stay text.
         ``obsm['spatial']`` and ``obsm['global']`` hold local and global cell
         centers in pixels. With labels, ``region`` links each cell to
-        ``<fov>_labels`` with instance key ``cell_ID``; without a
+        ``<fov>_labels`` with instance key ``cell_ID``. IDs must fit their
+        FOV's inspected integer label dtype, without reading pixels; without a
         ``CellLabels`` directory the table is unlinked.
 
         ``images['<fov>_image']`` is a lazy ``(c, y, x)`` array with source
@@ -113,11 +115,21 @@ def cosmx(
     are not reversed between frames; the raster convention of exports with a
     reversed global axis has not been evidenced, so such rasters fail.
 
-    Transcript partitions are newline-delimited blocks of plain CSV, or the
-    independently compressed, record-aligned members of a ``.csv.gz`` file.
-    A single-stream gzip transcript file fails; decompress it or recompress it
-    in blocks. Unknown targets and malformed values fail when their partition
-    is computed. Encoded JPEG and PNG images decode their whole frame for any
+    Construction reads the transcript CSV header, with small gzip decoder
+    read-ahead. Plain CSV partitions contain about 8 MiB of
+    newline-delimited records. Gzip supports concatenated record-aligned
+    members, including rows in the first member, and single streams.
+    Each nonempty member must end with a newline. Lazy source reads are
+    sequential and verify every member's CRC and trailer from the exact
+    preceding boundary. Later partitions depend on earlier partitions.
+    Tasks own members starting in about 8 MiB compressed, including the
+    complete final member. Decoder buffers use 1 MiB chunks; complete
+    members accumulate before CSV parsing. The compressed range target
+    does not bound decoded partition size. A single-stream gzip file forms
+    one nonempty partition containing all its rows. Use plain CSV for
+    independently readable partitions of a large single stream.
+    Unknown targets and malformed values fail when their partition is
+    computed. Encoded JPEG and PNG images decode their whole frame for any
     selection. Construction executes no raster or transcript tasks.
     """
     if not isinstance(include_transcripts, bool):
@@ -149,9 +161,10 @@ def cosmx(
         )
     labels: dict[str, DataArray | DataTree] = {}
     for item in layout.labels:
-        labels[f"{item.fov}_labels"], _ = read_labels(
+        labels[f"{item.fov}_labels"], dtype = read_labels(
             item.path, fov=item.fov, grid=grids.get(item.fov), placement=placements[item.fov], options=options
         )
+        validate_label_ids(metadata.cell_ids[metadata.fovs == item.fov], dtype, item.path)
 
     # A CellLabels directory is the table target; every FOV with cells needs its labels.
     linked = bool(layout.labels)

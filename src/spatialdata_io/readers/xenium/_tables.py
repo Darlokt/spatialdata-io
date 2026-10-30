@@ -2,7 +2,7 @@
 
 Counts come from ``cell_feature_matrix.h5`` or its MatrixMarket twin (directory or
 ``cell_feature_matrix.tar.gz``); 10x writes identical values to both. Scanpy
-returns float32 values, which hold integers below 2**24 exactly. Protein
+normally returns float32 values, suitable for realistic count magnitudes. Protein
 Expression features (XOA 4.0+) store the mean stain intensity multiplied by the
 integer ``protein_scaling_factor`` of the HDF5 root attributes; the MatrixMarket
 twin lacks that factor.
@@ -68,14 +68,8 @@ type FeatureSelection = tuple[str, ...] | Literal["all"] | None
 GENE_EXPRESSION = "Gene Expression"
 PROTEIN_EXPRESSION = "Protein Expression"
 PROTEIN_METRIC = "MEAN_PER_CELL_STAIN"
-MAX_HEADER_BYTES = 1024 * 1024
-MAX_ARCHIVE_BYTES = 32 * 1024**3
 RESERVED_OBS = ("label_id", "nucleus_centroid_x", "nucleus_centroid_y", "region")
 STRING_DTYPE = pd.ArrowDtype(pa.string())
-# float32 holds every integer below 2**24 exactly. Scanpy converts the int32 counts
-# in place, so a float32 value of 2**24 or more may already be a rounded integer
-# (2**24 + 1 becomes 2**24) and cannot be trusted.
-FLOAT32_EXACT_LIMIT = 2**24
 _MTX_MEMBERS = frozenset({"barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz"})
 
 
@@ -116,8 +110,8 @@ def _source_path(source: CountSource) -> Path:
     return source.directory if isinstance(source, MtxDirectory) else source.file
 
 
-def _extract_archive(file: ArtifactFile, destination: Path) -> ArtifactDirectory:
-    """Extract only the three MatrixMarket members, with contained names and a size bound."""
+def _extract_archive(file: ArtifactFile, destination: Path, *, metadata_only: bool = False) -> ArtifactDirectory:
+    """Validate required members once and extract only the selected, contained products."""
     with tarfile.open(file, "r:gz") as archive:
         members = [
             member
@@ -126,16 +120,19 @@ def _extract_archive(file: ArtifactFile, destination: Path) -> ArtifactDirectory
             and PurePosixPath(member.name).parent == PurePosixPath("cell_feature_matrix")
             and PurePosixPath(member.name).name in _MTX_MEMBERS
         ]
-        total = sum(member.size for member in members)
-        if {PurePosixPath(member.name).name for member in members} != _MTX_MEMBERS or total > MAX_ARCHIVE_BYTES:
+        names = [PurePosixPath(member.name).name for member in members]
+        if set(names) != _MTX_MEMBERS or len(names) != len(_MTX_MEMBERS):
             raise schema_error(
                 file,
                 "cell_feature_matrix.tar.gz",
-                found=f"members {sorted(member.name for member in members)} totalling {total} bytes",
-                expected="cell_feature_matrix/{barcodes,features}.tsv.gz and matrix.mtx.gz within 32 GiB",
+                found=f"members {sorted(member.name for member in members)}",
+                expected="exactly one cell_feature_matrix/{barcodes,features}.tsv.gz and matrix.mtx.gz",
             )
         # The data filter additionally rejects links and unsafe names.
-        archive.extractall(destination, members=members, filter="data")
+        selected = [
+            member for member in members if not metadata_only or PurePosixPath(member.name).name != "matrix.mtx.gz"
+        ]
+        archive.extractall(destination, members=selected, filter="data")
     return require_directory(destination / "cell_feature_matrix", context=_context("cell_feature_matrix.tar.gz"))
 
 
@@ -168,8 +165,12 @@ def _protein_scaling(source: CountSource) -> int:
         factor: object = handle.attrs.get("protein_scaling_factor")
         metric: object = handle.attrs.get("protein_metric")
     metric = metric.decode() if isinstance(metric, bytes) else metric
-    if not isinstance(factor, int | np.integer) or isinstance(factor, bool) or not 0 < factor < FLOAT32_EXACT_LIMIT:
+    if not isinstance(factor, int | np.integer) or isinstance(factor, bool) or factor <= 0:
         raise schema_error(source.file, "protein_scaling_factor", found=f"{factor!r}", expected="a positive integer")
+    if not np.isfinite(np.float32(factor)):
+        raise schema_error(
+            source.file, "protein_scaling_factor", found=f"{factor!r}", expected="a finite positive float32 divisor"
+        )
     if metric != PROTEIN_METRIC:
         raise schema_error(source.file, "protein_metric", found=f"{metric!r}", expected=repr(PROTEIN_METRIC))
     return int(factor)
@@ -212,8 +213,8 @@ def read_counts(source: CountSource, feature_types: FeatureSelection, panel: Pro
     Raises
     ------
     ReaderFormatError
-        If feature names or barcodes repeat, values are not exact nonnegative
-        float32 integers, an explicit feature type is absent, protein is selected
+        If feature names or barcodes repeat, count values are malformed,
+        an explicit feature type is absent, protein is selected
         without a valid HDF5 factor and metric, or a protein lacks a panel entry.
     """
     source_table = _read_matrix(source)
@@ -227,13 +228,7 @@ def read_counts(source: CountSource, feature_types: FeatureSelection, panel: Pro
             expected="unique names and barcodes",
         )
 
-    # Defensive guard: realistic transcript counts stay far below 2**24, but a
-    # rounded float32 count would be silently wrong, and one max is cheap.
     matrix = cast("sparse.csr_array", source_table.X)
-    if matrix.nnz and (matrix.data.min() < 0 or matrix.data.max() >= FLOAT32_EXACT_LIMIT):
-        raise schema_error(
-            path, "cell-feature matrix", found="values outside [0, 2**24)", expected="exact nonnegative float32 counts"
-        )
 
     types = source_var["feature_types"].to_numpy(dtype=np.str_)
     selected = np.isin(types, _selected_types(tuple(dict.fromkeys(types)), feature_types, path))
@@ -274,22 +269,20 @@ def read_feature_index(source: CountSource) -> FeatureIndex:
         barcodes_file = (source.directory / "barcodes.tsv.gz").read_bytes()
     else:
         with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
-            directory = _extract_archive(source.file, Path(temporary))
+            directory = _extract_archive(source.file, Path(temporary), metadata_only=True)
             features = (directory / "features.tsv.gz").read_bytes()
             barcodes_file = (directory / "barcodes.tsv.gz").read_bytes()
     return FeatureIndex(_tsv_column(features, 1), _tsv_column(barcodes_file, 0))
 
 
 def read_header(source: TabularSource) -> list[str]:
-    """Read the bounded first record of a CSV twin."""
+    """Read only the first record of a CSV twin."""
     if source.kind == "csv_gz":
         with gzip.open(source.file, "rt", encoding="utf-8-sig", newline="") as handle:
-            line = handle.readline(MAX_HEADER_BYTES + 1)
+            line = handle.readline()
     else:
         with source.file.open(encoding="utf-8-sig", newline="") as handle:
-            line = handle.readline(MAX_HEADER_BYTES + 1)
-    if len(line) > MAX_HEADER_BYTES:
-        raise schema_error(source.file, source.file.name, found="an oversized header", expected="a header below 1 MiB")
+            line = handle.readline()
     try:
         return next(csv.reader([line], strict=True), [])
     except csv.Error as error:

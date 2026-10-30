@@ -34,5 +34,8 @@ def make_channel_table(channels: Sequence[PlannedChannel]) -> AnnData:
         # A missing exposure becomes NaN in the float column.
         "exposure": [row.exposure_ms for row in metadata],
     }
-    var = pd.DataFrame(values, index=pd.Index([channel.name for channel in channels]), columns=list(CHANNEL_VAR_DTYPES))
-    return TableModel.parse(AnnData(var=var.astype(dict(CHANNEL_VAR_DTYPES))))
+    # Type source values before DataFrame inference can round nullable integer IDs.
+    index = pd.Index([channel.name for channel in channels])
+    columns = {name: pd.Series(values[name], index=index, dtype=dtype) for name, dtype in CHANNEL_VAR_DTYPES.items()}
+    var = pd.DataFrame(columns, index=index)
+    return TableModel.parse(AnnData(var=var))

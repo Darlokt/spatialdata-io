@@ -24,7 +24,6 @@ STRING_DTYPE = pd.ArrowDtype(pa.string())
 GEOMETRY_REPRESENTATION_DTYPE = pd.CategoricalDtype(["union_footprint", "source_components"])
 FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 INTEGER_DTYPE = pd.ArrowDtype(pa.int64())
-_MAX_NUMBER_CHARACTERS = 128
 _LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 _BLANK_NAME = re.compile(r"Blank-[1-9][0-9]*")
 _METADATA_FLOATS = frozenset(
@@ -95,14 +94,12 @@ def integer_values(
     """Decode nonnegative integral values without any floating intermediate."""
     column = pa.array(source.astype(STRING_DTYPE)) if isinstance(source, pd.Series) else pc.cast(source, pa.string())
     if column.null_count:
-        raise schema_error(path, found="missing or oversized integer", expected="nonnegative 64-bit integral values")
+        raise schema_error(path, found="missing integer", expected="nonnegative 64-bit integral values")
     try:
         # Arrow's native integer parser is the common count and stack-index path.
         values = pc.cast(column, pa.uint64()).to_numpy()
     except pa.ArrowInvalid:
         tokens = column.to_pylist()
-        if any(len(token) > _MAX_NUMBER_CHARACTERS for token in tokens):
-            raise schema_error(path, found="oversized integer", expected="nonnegative 64-bit integral values") from None
         exact_values: list[int] = []
         for token in tokens:
             try:
@@ -123,8 +120,6 @@ def normalize_floats(series: pd.Series, path: ArtifactFile, column: str) -> pd.S
     """Decode float64 physical values, rejecting nonfinite values and destructive conversion."""
     lexical = series.astype(STRING_DTYPE)
     expected = "finite float64 values without underflow or integer precision loss"
-    if lexical.str.len().gt(_MAX_NUMBER_CHARACTERS).any():
-        raise schema_error(path, found=f"oversized {column} values", expected=expected)
     try:
         normalized = lexical.astype(FLOAT_DTYPE)
     except (ValueError, TypeError, pa.ArrowInvalid) as error:

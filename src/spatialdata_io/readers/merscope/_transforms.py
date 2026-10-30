@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+from itertools import islice
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,9 +12,10 @@ from spatialdata.transformations import Affine
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_MAX_TRANSFORM_BYTES = 64 * 1024
 _AFFINE_SHAPE = (3, 3)
 
 
@@ -21,17 +23,11 @@ def read_transform(path: ArtifactFile) -> Affine:
     """Return the validated inverse mapping mosaic pixels into source micrometres."""
     context = ReaderErrorContext("merscope", "micron-to-mosaic transform")
     try:
-        with path.open("rb") as source:
-            payload = source.read(_MAX_TRANSFORM_BYTES + 1)
+        with path.open(encoding="utf-8") as source:
+            matrix = _parse_matrix(source)
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise
-    if len(payload) > _MAX_TRANSFORM_BYTES:
-        raise ReaderFormatError(
-            context=context, path=path, found="oversized transform file", expected="a 3x3 space-delimited affine matrix"
-        )
-    try:
-        matrix = _parse_matrix(payload)
     except (UnicodeError, ValueError, InvalidOperation, OverflowError) as error:
         raise ReaderFormatError(
             context=context,
@@ -63,9 +59,9 @@ def read_transform(path: ArtifactFile) -> Affine:
     return Affine(inverse, input_axes=("x", "y"), output_axes=("x", "y"))
 
 
-def _parse_matrix(payload: bytes) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
-    """Parse exactly nine bounded textual coefficients in row-major order."""
-    rows = [line.split() for line in payload.decode("utf-8").splitlines() if line.strip()]
+def _parse_matrix(source: Iterable[str]) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
+    """Parse exactly nine textual coefficients in row-major order."""
+    rows = list(islice((line.split() for line in source if line.strip()), _AFFINE_SHAPE[0] + 1))
     if len(rows) != _AFFINE_SHAPE[0] or any(len(row) != _AFFINE_SHAPE[1] for row in rows):
         message = "Expected exactly three rows of three coefficients."
         raise ValueError(message)

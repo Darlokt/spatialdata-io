@@ -30,6 +30,7 @@ class TestDiscoverLayout:
         assert layout.feature_slice.name == prefix + name
         assert (layout.segmentation is not None) == version.startswith("4")
         assert layout.images is None
+        assert layout.nucleus_counts is None
 
     def test_selected_raw_and_nested_mappings(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, sizes=(2, 6), prefix="abc_")
@@ -40,17 +41,17 @@ class TestDiscoverLayout:
         assert layout.segmentation is not None
         assert layout.segmentation.counts is not None
         assert layout.segmentation.counts.name == "raw_feature_cell_matrix.h5"
-        assert layout.barcode_mappings is not None
-        assert layout.barcode_mappings.parent.name == "segmented_outputs"
-        assert layout.raw_two_micron_counts is not None
+        assert layout.nucleus_counts is not None
+        assert layout.nucleus_counts.barcode_mappings.parent.name == "segmented_outputs"
+        assert layout.nucleus_counts.raw_two_micron_counts.name == "raw_feature_bc_matrix.h5"
 
     def test_root_mappings_and_identity_fallback(self, tmp_path: Path) -> None:
         write_bundle(tmp_path)
         nested = tmp_path / "segmented_outputs/barcode_mappings.parquet"
         nested.rename(tmp_path / "abc_barcode_mappings.parquet")
         layout = discover_layout(tmp_path, bin_sizes=[], include_cell_boundaries=False, include_nucleus_table=True)
-        assert layout.barcode_mappings is not None
-        assert layout.barcode_mappings.name == "abc_barcode_mappings.parquet"
+        assert layout.nucleus_counts is not None
+        assert layout.nucleus_counts.barcode_mappings.name == "abc_barcode_mappings.parquet"
         images = discover_layout(
             tmp_path, bin_sizes=[], include_cell_boundaries=False, include_nucleus_boundaries=False
         )

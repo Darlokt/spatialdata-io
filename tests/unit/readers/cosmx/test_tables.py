@@ -40,17 +40,12 @@ def _write(tmp_path: Path, name: str, text: str, *, compressed: bool = False) ->
 
 
 class TestReadHeader:
-    """Headers are bounded, UTF-8, and parsed with quoting."""
+    """Headers are UTF-8, and parsed with quoting."""
 
     @pytest.mark.parametrize("compressed", [False, True])
     def test_quoted_header(self, tmp_path: Path, *, compressed: bool) -> None:
         path = _write(tmp_path, "c.csv", _COUNTS, compressed=compressed)
         assert read_header(path) == ["fov", "cell_ID", "B", "HLA-A", "NegPrb1"]
-
-    def test_bound(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_HEADER_BYTES", 4)
-        with pytest.raises(ReaderFormatError, match="oversized"):
-            read_header(_write(tmp_path, "c.csv", _COUNTS))
 
     @pytest.mark.parametrize("payload", [b"\xff\xfe,a\n", b'"unterminated\n'])
     def test_malformed(self, tmp_path: Path, payload: bytes) -> None:

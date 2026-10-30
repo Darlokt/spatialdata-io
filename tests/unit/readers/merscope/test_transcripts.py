@@ -116,14 +116,6 @@ class TestReadTranscripts:
             read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         parser.assert_not_called()
 
-    def test_bounds_header_read(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        source = _write_source(tmp_path / "transcripts.csv")
-        mocker.patch.object(transcript_module, "_HEADER_BYTES", 32)
-        parser = mocker.spy(transcript_module, "read_bytes")
-        with pytest.raises(ReaderFormatError, match="oversized CSV header"):
-            read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
-        parser.assert_not_called()
-
     @pytest.mark.parametrize("record", ["40,GeneB,1,2\n", "40,GeneB,1,2,0,-1,0,1,t,9,8,annotation,excess\n"])
     def test_projection_cannot_hide_bad_record_width(self, tmp_path: Path, mocker: MockerFixture, record: str) -> None:
         source = _write_source(tmp_path / "transcripts.csv")

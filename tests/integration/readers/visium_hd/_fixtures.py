@@ -82,7 +82,7 @@ def _pixels(col: NDArray[np.float64], row: NDArray[np.float64]) -> NDArray[np.fl
     return homogeneous[:, :2] / homogeneous[:, 2:]
 
 
-def write_bundle(
+def write_bundle(  # noqa: PLR0913, RUF100 - Independently select supported fixture products.
     root: Path,
     *,
     version: str = "4.1.0",
@@ -233,9 +233,11 @@ def _write_bins(
         names = [barcode(size, int(r), int(c)) for r, c in zip(rows, cols, strict=True)]
         write_counts(directory / "raw_feature_bc_matrix.h5", values, names, version)
         write_counts(directory / "filtered_feature_bc_matrix.h5", values[indices], [names[i] for i in indices], version)
-        pixels = _pixels(
-            cols.astype(np.float64) * factor + (factor - 1) / 2, rows.astype(np.float64) * factor + (factor - 1) / 2
-        )
+        # Space Ranger uses one image-space offset for every bin, including
+        # partial edges, rather than projecting each nominal bin centre.
+        corners = _pixels(np.array([0.0, factor - 1.0]), np.array([0.0, factor - 1.0]))
+        pixels = _pixels(cols.astype(np.float64) * factor, rows.astype(np.float64) * factor)
+        pixels += (corners[1] - corners[0]) / 2
         tissue = np.zeros(len(values), dtype=np.uint8)
         tissue[indices] = 1
         schema = pa.schema(

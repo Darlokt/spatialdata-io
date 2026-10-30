@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -77,6 +78,13 @@ class TestMakeChannelTable:
         )
         assert isinstance(table.var, pd.DataFrame)
         pd.testing.assert_frame_equal(table.var, expected)
+
+    def test_nullable_roi_preserves_large_integer_before_storage_inference(self) -> None:
+        source = replace(_STAIN, roi=2**53 + 1)
+        table = make_channel_table([_channel("stain", source), _channel("bleach", _BLEACH)])
+        assert table.var["ROI"].iloc[0] == 2**53 + 1
+        assert pd.isna(table.var["ROI"].iloc[1])
+        assert str(table.var["ROI"].dtype) == "Int64"
 
     def test_annotates_no_element(self) -> None:
         table = make_channel_table([_channel("CD3", _STAIN)])

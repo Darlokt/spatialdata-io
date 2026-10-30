@@ -152,19 +152,30 @@ def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOp
     ome = metadata.ome
     if ome is not None:
         channels = ome.images[0].pixels.channels
-        if len(channels) != image.shape[0]:
+        source_axes = tuple(axis.lower() for axis in metadata.series[0].levels[0].axes)
+        samples_expanded = (
+            data_axes is not None
+            and "s" in source_axes
+            and data_axes.lower()[source_axes.index("s")] == "c"
+            and len(channels) == 1
+            and channels[0].samples_per_pixel == image.shape[0]
+        )
+        if samples_expanded:
+            channel_names = [f"{channels[0].id}:sample:{index}" for index in range(int(image.shape[0]))]
+        elif len(channels) != image.shape[0]:
             raise ReaderFormatError(
                 context=ReaderErrorContext("iss", "raw image channels"),
                 path=layout.raw_image,
                 found=f"{len(channels)} OME channels and {image.shape[0]} raster channels",
                 expected="one OME channel record per output channel",
             )
-        names = [channel.name for channel in channels]
-        channel_names = (
-            [str(name) for name in names]
-            if all(names) and len(set(names)) == len(names)
-            else [channel.id for channel in channels]
-        )
+        else:
+            names = [channel.name for channel in channels]
+            channel_names = (
+                [str(name) for name in names]
+                if all(names) and len(set(names)) == len(names)
+                else [channel.id for channel in channels]
+            )
         if len(set(channel_names)) != len(channel_names):
             raise ReaderFormatError(
                 context=ReaderErrorContext("iss", "raw image channels"),

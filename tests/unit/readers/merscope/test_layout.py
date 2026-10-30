@@ -9,9 +9,8 @@ import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.merscope._layout import (
-    InstrumentLayout,
+    MerscopeLayout,
     Selection,
-    VptLayout,
     discover_layout,
     make_selection,
 )
@@ -114,8 +113,8 @@ class TestDiscoverLayout:
     def test_standard_sorted_grid_and_explicit_layer_order(self, tmp_path: Path) -> None:
         _standard(tmp_path)
         inferred = discover_layout(tmp_path, _selection())
-        assert isinstance(inferred, InstrumentLayout)
-        assert inferred.kind == "instrument"
+        assert isinstance(inferred, MerscopeLayout)
+        assert inferred.boundaries == tmp_path / "cell_boundaries.parquet"
         assert inferred.root == tmp_path.resolve()
         assert inferred.names.dataset_id == f"{tmp_path.parent.name}_{tmp_path.name}"
         assert inferred.images is not None
@@ -144,13 +143,12 @@ class TestDiscoverLayout:
         if current:
             _files(analysis, "detected_transcripts.csv")
         layout = discover_layout(tmp_path, _selection(), vpt_directory="vpt")
-        assert isinstance(layout, VptLayout)
-        assert layout.vpt_root == analysis
+        assert isinstance(layout, MerscopeLayout)
         assert layout.tables is not None
         assert layout.tables.counts.parent == analysis
         boundaries, transcripts = layout.boundaries, layout.transcripts
         assert boundaries is not None
-        assert boundaries.kind == profile
+        assert boundaries == analysis / f"{profile}_micron_space.parquet"
         assert transcripts is not None
         assert transcripts.assignment == ("current" if current else "original")
         assert transcripts.path.parent == (analysis if current else tmp_path)
@@ -160,7 +158,7 @@ class TestDiscoverLayout:
         root, analysis = tmp_path / "region", tmp_path / "analysis"
         _standard(root)
         _files(analysis, "cell_by_gene.csv", "cell_metadata.csv", "cellpose_micron_space.parquet")
-        assert isinstance(discover_layout(root, _selection(), vpt_directory=analysis), VptLayout)
+        assert isinstance(discover_layout(root, _selection(), vpt_directory=analysis), MerscopeLayout)
 
     @pytest.mark.parametrize(
         "artifact",

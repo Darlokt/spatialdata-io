@@ -107,5 +107,5 @@ class TestPixelScale:
         assert metadata.ome is not None
         metadata.ome.images[0].pixels.physical_size_x = value
         metadata.ome.images[0].pixels.physical_size_x_unit = unit
-        with pytest.raises(ReaderFormatError, match="overflows or underflows"):
+        with pytest.raises(ReaderFormatError, match="representable in µm"):
             pixel_scale(metadata)

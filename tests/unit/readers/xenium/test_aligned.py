@@ -34,7 +34,7 @@ def _rgb(path: Path) -> np.ndarray:
 
 
 class TestReadAlignment:
-    """Alignment files are bounded, finite, invertible 3 x 3 affine matrices."""
+    """Alignment files are finite, invertible 3 x 3 affine matrices."""
 
     def test_real_matrix(self, tmp_path: Path) -> None:
         np.testing.assert_array_equal(read_alignment(_csv(tmp_path / "a.csv", MATRIX)), MATRIX)
@@ -48,16 +48,14 @@ class TestReadAlignment:
             "1,0,x\n0,1,0\n0,0,1\n",
             "1,0,inf\n0,1,0\n0,0,1\n",
             "1,0\n0,1\n0,0,1\n",
+            "1,0,0\n0,1,0\n0,0,1\n0,0,1\n",
+            '"1,0,0\n',
         ],
-        ids=["rows", "last-row", "singular", "text", "infinite", "width"],
+        ids=["rows", "last-row", "singular", "text", "infinite", "width", "extra-row", "quote"],
     )
     def test_rejects_malformed_matrices(self, tmp_path: Path, text: str) -> None:
         with pytest.raises(ReaderFormatError, match="3 x 3"):
             read_alignment(_csv(tmp_path / "a.csv", text))
-
-    def test_rejects_oversized_files(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="oversized"):
-            read_alignment(_csv(tmp_path / "a.csv", "1" * 70_000))
 
 
 class TestXeniumAlignedImage:

@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_MAX_BOUNDARY_BYTES = 64 * 1024 * 1024
 _CONTEXT = ReaderErrorContext("seqfish", "cell boundaries")
 
 
@@ -30,7 +29,7 @@ def read_boundaries(
     path: ArtifactFile, *, instance_ids: pd.Index, roi: str, scale: Scale, policy: InvalidGeometryPolicy
 ) -> gpd.GeoDataFrame:
     """Read eager GeoJSON polygons and align their independently encoded IDs."""
-    document = read_json_object(path, max_bytes=_MAX_BOUNDARY_BYTES, context=_CONTEXT)
+    document = read_json_object(path, context=_CONTEXT)
     features, identifiers = boundary_features(document, path)
     geometries = geojson_polygons([feature["geometry"] for feature in features], context=_CONTEXT, path=path)
     # Match GeoDataFrame.from_features: properties become columns in first-seen order.

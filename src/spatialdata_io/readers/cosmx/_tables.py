@@ -51,7 +51,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_MAX_HEADER_BYTES = 1024 * 1024
 _CSV_BLOCK_BYTES = 1024 * 1024
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
 _MAX_BATCH_ROWS = 10_000
@@ -63,14 +62,12 @@ def open_source(path: ArtifactFile) -> io.BufferedReader | gzip.GzipFile:
 
 
 def read_header(path: ArtifactFile) -> list[str]:
-    """Bound and parse the first CSV record before interpreting names."""
+    """Read and parse the first CSV record before interpreting names."""
     try:
         with open_source(path) as handle:
-            line = handle.readline(_MAX_HEADER_BYTES + 1)
+            line = handle.readline()
     except (gzip.BadGzipFile, EOFError, zlib.error) as error:
         raise schema_error(path, found=f"invalid gzip data: {error}", expected="a readable gzip stream") from error
-    if len(line) > _MAX_HEADER_BYTES:
-        raise schema_error(path, found="oversized CSV header", expected="a header of at most 1 MiB")
     try:
         return next(csv.reader([line.decode("utf-8-sig")], strict=True), [])
     except (UnicodeDecodeError, csv.Error) as error:

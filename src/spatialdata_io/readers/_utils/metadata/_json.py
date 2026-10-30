@@ -1,7 +1,7 @@
-"""Implement bounded JSON-object reading for private reader layouts.
+"""Implement strict JSON-object reading for private reader layouts.
 
 The module owns only the regular-file JSON storage contract. Readers retain
-artifact discovery, byte-limit selection, schema validation, version semantics,
+artifact discovery, schema validation, version semantics,
 and interpretation of metadata values.
 """
 
@@ -61,10 +61,6 @@ def _reject_nonstandard_constant(_value: str) -> Never:
     raise _JsonContentError(_NONSTANDARD_NUMBER)
 
 
-def _expected_json_object(max_bytes: int) -> str:
-    return f"a UTF-8 JSON object with unique names and finite numbers no larger than {max_bytes} bytes"
-
-
 def _json_value_kind(value: object) -> str:
     return _JSON_VALUE_KINDS[type(value)]
 
@@ -73,10 +69,9 @@ def read_json_object(
     path: ArtifactFile,
     /,
     *,
-    max_bytes: int,
     context: ReaderErrorContext,
 ) -> dict[str, object]:
-    """Read one validated regular file as a bounded owned JSON object.
+    """Read one validated regular file as an owned JSON object.
 
     Parameters
     ----------
@@ -84,9 +79,6 @@ def read_json_object(
         Canonical regular file previously validated by the shared path
         boundary. The path is borrowed and is not resolved or kind-checked
         again.
-    max_bytes
-        Positive reader-selected maximum encoded size. At most one additional
-        byte is read to detect oversized content.
     context
         Reader, artifact, and optional detected-version identity included in
         content failures and added to I/O failures.
@@ -99,10 +91,8 @@ def read_json_object(
 
     Raises
     ------
-    ValueError
-        If ``max_bytes`` is not positive.
     ReaderFormatError
-        If the file is oversized, is not strict UTF-8 JSON, contains duplicate
+        If the file is not strict UTF-8 JSON, contains duplicate
         object names or non-finite numbers, exceeds parser limits, or does not
         have a top-level object.
     OSError
@@ -111,33 +101,23 @@ def read_json_object(
 
     Notes
     -----
-    Parsing is eager because reader layout and version decisions need this
-    bounded metadata immediately. The function performs one bounded binary
-    read, one strict UTF-8 decode, and one JSON parse. It does not validate or
-    coerce vendor-specific keys and values.
+    Parsing is eager because reader layout and version decisions need the
+    metadata immediately. The standard JSON decoder consumes one owned UTF-8
+    text stream. No reader-selected file-size ceiling is imposed. The function
+    does not validate or coerce vendor-specific keys and values.
     """
-    if max_bytes <= 0:
-        message = "max_bytes must be positive."
-        raise ValueError(message)
-
+    expected = "a UTF-8 JSON object with unique names and finite numbers"
     try:
-        with path.open("rb") as file:
-            payload = file.read(max_bytes + 1)
+        with path.open(encoding="utf-8", errors="strict") as source:
+            parsed: object = json.load(
+                source,
+                object_pairs_hook=_plain_object,
+                parse_constant=_reject_nonstandard_constant,
+                parse_float=_finite_float,
+            )
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise
-
-    expected = _expected_json_object(max_bytes)
-    if len(payload) > max_bytes:
-        raise ReaderFormatError(
-            context=context,
-            found=f"more than {max_bytes} encoded bytes",
-            expected=expected,
-            path=path,
-        )
-
-    try:
-        text = payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise ReaderFormatError(
             context=context,
@@ -146,13 +126,6 @@ def read_json_object(
             path=path,
         ) from error
 
-    try:
-        parsed: object = json.loads(
-            text,
-            object_pairs_hook=_plain_object,
-            parse_constant=_reject_nonstandard_constant,
-            parse_float=_finite_float,
-        )
     except _JsonContentError as error:
         raise ReaderFormatError(
             context=context,

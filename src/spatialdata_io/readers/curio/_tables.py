@@ -25,17 +25,11 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.curio._layout import _CurioLayout
 
-_MAX_ENRICHMENT_HEADER_CHARACTERS = 1_048_576
-
 
 def _read_named_table(path: ArtifactFile, *, delimiter: str, feature_ids: bool = False) -> pd.DataFrame:
-    """Read a bounded raw header before parsing lexical Arrow annotation fields."""
+    """Read the raw header before parsing lexical Arrow annotation fields."""
     with path.open(encoding="utf-8-sig", newline="") as source:
-        header = source.readline(_MAX_ENRICHMENT_HEADER_CHARACTERS + 1)
-        if len(header) > _MAX_ENRICHMENT_HEADER_CHARACTERS:
-            raise schema_error(
-                path, found="oversized enrichment header", expected="a header of at most 1 Mi characters"
-            )
+        header = source.readline()
 
         columns = next(csv.reader([header], delimiter=delimiter, strict=True), [])
         validate_header(columns, path, feature_ids=feature_ids)

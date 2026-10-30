@@ -1,4 +1,4 @@
-"""Tests for bounded JSON-object metadata reading."""
+"""Tests for strict JSON-object metadata reading."""
 
 from __future__ import annotations
 
@@ -58,11 +58,11 @@ class _ManagedStream:
             raise self.close_error
         self.closed = True
 
-    def read(self, size: int) -> bytes:
+    def read(self, size: int = -1) -> str:
         self.read_sizes.append(size)
         if self.read_error is not None:
             raise self.read_error
-        return self.payload[:size]
+        return (self.payload if size < 0 else self.payload[:size]).decode("utf-8")
 
 
 class _ShortRawStream(io.RawIOBase):
@@ -88,11 +88,29 @@ class _ShortRawStream(io.RawIOBase):
 
 
 class TestReadJsonObject:
+    @pytest.mark.parametrize("payload", [b"[]", b'{"value":"\xff"}', b"{"])
+    def test_closes_on_content_failure(self, tmp_path: Path, mocker: MockerFixture, payload: bytes) -> None:
+        path = cast("ArtifactFile", tmp_path / "metadata.json")
+        stream = _ManagedStream(payload)
+        mocker.patch.object(Path, "open", autospec=True, return_value=stream)
+        with pytest.raises(ReaderFormatError):
+            read_json_object(path, context=_CONTEXT)
+        assert stream.closed
+
+    def test_short_raw_reads_are_consumed_and_closed(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = cast("ArtifactFile", tmp_path / "metadata.json")
+        raw = _ShortRawStream(b'{"unit":"\xc2\xb5m"}', chunk_size=1)
+        buffered = io.BufferedReader(raw, buffer_size=2)
+        text = io.TextIOWrapper(buffered, encoding="utf-8")
+        mocker.patch.object(Path, "open", autospec=True, return_value=text)
+        assert read_json_object(path, context=_CONTEXT) == {"unit": "µm"}
+        assert raw.closed
+
     def test_returns_owned_plain_nested_objects(self, tmp_path: Path) -> None:
         path = _artifact(tmp_path, b'{"outer":{"items":[{"value":1}]},"flag":true,"missing":null}')
 
-        first = read_json_object(path, max_bytes=128, context=_CONTEXT)
-        second = read_json_object(path, max_bytes=128, context=_CONTEXT)
+        first = read_json_object(path, context=_CONTEXT)
+        second = read_json_object(path, context=_CONTEXT)
 
         assert type(first) is dict
         assert type(first["outer"]) is dict
@@ -104,17 +122,7 @@ class TestReadJsonObject:
         first_outer["new"] = "owned"
         assert "new" not in second_outer
 
-    def test_requires_positive_bound_before_artifact_access(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = cast("ArtifactFile", tmp_path / "missing.json")
-        open_file = mocker.patch.object(Path, "open", autospec=True)
-
-        for max_bytes in (0, -1):
-            with pytest.raises(ValueError, match="max_bytes must be positive"):
-                read_json_object(path, max_bytes=max_bytes, context=_CONTEXT)
-
-        open_file.assert_not_called()
-
-    def test_issues_one_bounded_binary_read_and_closes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_uses_one_owned_text_stream_without_path_revalidation(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = cast("ArtifactFile", tmp_path / "metadata.json")
         stream = _ManagedStream(b"{}")
         open_file = mocker.patch.object(Path, "open", autospec=True, return_value=stream)
@@ -122,66 +130,22 @@ class TestReadJsonObject:
         stat = mocker.patch.object(Path, "stat", autospec=True)
         is_file = mocker.patch.object(Path, "is_file", autospec=True)
 
-        assert read_json_object(path, max_bytes=2, context=_CONTEXT) == {}
+        assert read_json_object(path, context=_CONTEXT) == {}
 
-        open_file.assert_called_once_with(path, "rb")
+        open_file.assert_called_once_with(path, encoding="utf-8", errors="strict")
         resolve.assert_not_called()
         stat.assert_not_called()
         is_file.assert_not_called()
-        assert stream.read_sizes == [3]
+        assert stream.read_sizes == [-1]
         assert stream.close_attempted
         assert stream.closed
-
-    @pytest.mark.parametrize(
-        ("payload", "max_bytes"),
-        [(b"{} ", 2), (b'{"value":"\xff"}', 32), (b"{", 1)],
-    )
-    def test_closes_before_post_read_content_failures(
-        self,
-        tmp_path: Path,
-        mocker: MockerFixture,
-        payload: bytes,
-        max_bytes: int,
-    ) -> None:
-        path = cast("ArtifactFile", tmp_path / "metadata.json")
-        stream = _ManagedStream(payload)
-        mocker.patch.object(Path, "open", autospec=True, return_value=stream)
-
-        with pytest.raises(ReaderFormatError):
-            read_json_object(path, max_bytes=max_bytes, context=_CONTEXT)
-
-        assert stream.close_attempted
-        assert stream.closed
-
-    def test_accepts_exact_limit_and_rejects_one_byte_over_before_decoding(self, tmp_path: Path) -> None:
-        payload = b' {"value":1} '
-        path = _artifact(tmp_path, payload)
-
-        assert read_json_object(path, max_bytes=len(payload), context=_CONTEXT) == {"value": 1}
-
-        with pytest.raises(ReaderFormatError, match="more than") as raised:
-            read_json_object(path, max_bytes=len(payload) - 1, context=_CONTEXT)
-
-        assert raised.value.__cause__ is None
-        assert raised.value.path == path
-
-    def test_counts_multibyte_utf8_as_encoded_bytes(self, tmp_path: Path) -> None:
-        payload = '{"unit":"µm","symbol":"λ"}'.encode()
-        path = _artifact(tmp_path, payload)
-
-        assert read_json_object(path, max_bytes=len(payload), context=_CONTEXT) == {
-            "unit": "µm",
-            "symbol": "λ",
-        }
-        with pytest.raises(ReaderFormatError, match="encoded bytes"):
-            read_json_object(path, max_bytes=len(payload) - 1, context=_CONTEXT)
 
     @pytest.mark.parametrize("payload", [b"", b"{", b"{} trailing", b"\xef\xbb\xbf{}"])
     def test_rejects_empty_malformed_and_bom_documents(self, tmp_path: Path, payload: bytes) -> None:
         path = _artifact(tmp_path, payload)
 
         with pytest.raises(ReaderFormatError, match="malformed JSON") as raised:
-            read_json_object(path, max_bytes=max(1, len(payload)), context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert isinstance(raised.value.__cause__, ValueError)
 
@@ -189,7 +153,7 @@ class TestReadJsonObject:
         path = _artifact(tmp_path, b'{"value":"\xff"}')
 
         with pytest.raises(ReaderFormatError, match="not valid UTF-8") as raised:
-            read_json_object(path, max_bytes=32, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert isinstance(raised.value.__cause__, UnicodeDecodeError)
 
@@ -198,7 +162,7 @@ class TestReadJsonObject:
         path = _artifact(tmp_path, f'{{"value":{token}}}'.encode())
 
         with pytest.raises(ReaderFormatError, match="nonstandard non-finite") as raised:
-            read_json_object(path, max_bytes=64, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert isinstance(raised.value.__cause__, ValueError)
 
@@ -207,7 +171,7 @@ class TestReadJsonObject:
         path = _artifact(tmp_path, f'{{"value":{token}}}'.encode())
 
         with pytest.raises(ReaderFormatError, match="finite float range") as raised:
-            read_json_object(path, max_bytes=64, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert isinstance(raised.value.__cause__, ValueError)
 
@@ -224,7 +188,7 @@ class TestReadJsonObject:
         path = _artifact(tmp_path, payload)
 
         with pytest.raises(ReaderFormatError, match="duplicate object name") as raised:
-            read_json_object(path, max_bytes=128, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert isinstance(raised.value.__cause__, ValueError)
 
@@ -243,7 +207,7 @@ class TestReadJsonObject:
         path = _artifact(tmp_path, payload)
 
         with pytest.raises(ReaderFormatError, match=f"top-level JSON {kind}") as raised:
-            read_json_object(path, max_bytes=16, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert raised.value.__cause__ is None
 
@@ -262,7 +226,7 @@ class TestReadJsonObject:
         mocker.patch.object(_json.json, "loads", side_effect=parser_error)
 
         with pytest.raises(ReaderFormatError, match=expected_message) as raised:
-            read_json_object(path, max_bytes=2, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert raised.value.__cause__ is parser_error
 
@@ -272,7 +236,7 @@ class TestReadJsonObject:
         mocker.patch.object(_json.json, "loads", side_effect=error)
 
         with pytest.raises(MemoryError) as raised:
-            read_json_object(path, max_bytes=2, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert raised.value is error
 
@@ -298,7 +262,7 @@ class TestReadJsonObject:
             mocker.patch.object(Path, "open", autospec=True, return_value=stream)
 
         with pytest.raises(PermissionError) as raised:
-            read_json_object(path, max_bytes=2, context=_CONTEXT)
+            read_json_object(path, context=_CONTEXT)
 
         assert raised.value is error
         assert raised.value.__cause__ is cause
@@ -310,27 +274,3 @@ class TestReadJsonObject:
             assert stream.close_attempted
         if stage == "read":
             assert stream.closed
-
-    @pytest.mark.parametrize(("payload", "max_bytes", "oversized"), [(b"{}", 2, False), (b"{} ", 2, True)])
-    def test_buffered_short_raw_reads_cannot_truncate_or_bypass_bound(
-        self,
-        tmp_path: Path,
-        mocker: MockerFixture,
-        payload: bytes,
-        max_bytes: int,
-        *,
-        oversized: bool,
-    ) -> None:
-        path = cast("ArtifactFile", tmp_path / "metadata.json")
-        raw = _ShortRawStream(payload, chunk_size=1)
-        buffered = io.BufferedReader(raw, buffer_size=2)
-        mocker.patch.object(Path, "open", autospec=True, return_value=buffered)
-
-        if oversized:
-            with pytest.raises(ReaderFormatError, match="encoded bytes"):
-                read_json_object(path, max_bytes=max_bytes, context=_CONTEXT)
-        else:
-            assert read_json_object(path, max_bytes=max_bytes, context=_CONTEXT) == {}
-
-        assert buffered.closed
-        assert raw.closed

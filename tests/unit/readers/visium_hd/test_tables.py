@@ -1,4 +1,4 @@
-"""Exact source CSC storage and final independent table linkage."""
+"""Shared count ingestion, HD population validation and independent linkage."""
 
 from __future__ import annotations
 
@@ -19,8 +19,6 @@ from tests.integration.readers.visium_hd._fixtures import write_counts
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pytest_mock import MockerFixture
-
 
 def _source(tmp_path: Path) -> ArtifactFile:
     path = ArtifactFile(tmp_path / "matrix.h5")
@@ -35,25 +33,17 @@ def _replace(path: ArtifactFile, name: str, values: object) -> None:
 
 
 class TestReadCounts:
-    """Prove source integers remain exact before Scanpy's float32 conversion."""
+    """Preserve source populations through shared sparse count ingestion."""
 
-    def test_exact_values_dtype_and_batch_boundaries(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = _source(tmp_path)
-        mocker.patch.object(tables, "_COUNT_BATCH_SIZE", 1)
-        result = tables.read_counts(path)
+    def test_values_dtype_and_order(self, tmp_path: Path) -> None:
+        result = tables.read_counts(_source(tmp_path))
         assert isinstance(result.X, csr_array)
         assert result.X.dtype == np.float32
-        assert_array_equal(csr_array(result.X).toarray(), [[0, 1, 2], [3, 0, 4]])
+        assert_array_equal(result.X.toarray(), [[0, 1, 2], [3, 0, 4]])
         assert_array_equal(result.obs_names, ["first", "second"])
-        with h5py.File(path, "r+"):
-            pass
 
-    def test_exact_limit_and_zero_counts(self, tmp_path: Path) -> None:
+    def test_zero_counts(self, tmp_path: Path) -> None:
         path = _source(tmp_path)
-        _replace(path, "data", np.array([tables.MAX_EXACT_COUNT, 0, 0, 0], dtype=np.uint64))
-        result = tables.read_counts(path)
-        assert isinstance(result.X, csr_array)
-        assert result.X.data.max() == tables.MAX_EXACT_COUNT
         for name, values in (
             ("data", np.array([], dtype=np.int32)),
             ("indices", np.array([], dtype=np.int32)),
@@ -64,73 +54,32 @@ class TestReadCounts:
         assert isinstance(zero.X, csr_array)
         assert zero.X.nnz == 0
 
-    @pytest.mark.parametrize("mode", ["duplicate", "unsorted", "duplicate-limit", "across-batch"])
-    def test_noncanonical_coordinates(self, tmp_path: Path, mode: str, mocker: MockerFixture) -> None:
+    @pytest.mark.parametrize("entries", [[1, 1, 0, 2], [2, 1, 0, 2]])
+    def test_normalized_source_coordinates(self, tmp_path: Path, entries: list[int]) -> None:
         path = _source(tmp_path)
-        values = np.array(
-            [tables.MAX_EXACT_COUNT, 1, 1, 1] if mode == "duplicate-limit" else [1, 1, 1, 1], dtype=np.int64
-        )
-        entries = np.array([2, 1, 0, 2] if mode == "unsorted" else [1, 1, 0, 2], dtype=np.int32)
-        _replace(path, "data", values)
-        _replace(path, "indices", entries)
-        if mode == "across-batch":
-            mocker.patch.object(tables, "_COUNT_BATCH_SIZE", 1)
-        with pytest.raises(ReaderFormatError, match="duplicate or unsorted"):
+        _replace(path, "indices", np.array(entries, dtype=np.int32))
+        result = tables.read_counts(path)
+        assert isinstance(result.X, csr_array)
+        assert result.X.has_canonical_format
+        expected = [[0, 3, 0], [3, 0, 4]] if entries[0] == 1 else [[0, 2, 1], [3, 0, 4]]
+        assert_array_equal(result.X.toarray(), expected)
+
+    @pytest.mark.parametrize("value", [-1.0, 0.5, np.nan, np.inf])
+    def test_invalid_count_values(self, tmp_path: Path, value: float) -> None:
+        path = _source(tmp_path)
+        _replace(path, "data", np.array([value, 2, 3, 4], dtype=np.float64))
+        with pytest.raises((ReaderFormatError, ValueError)):
             tables.read_counts(path)
 
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            "missing",
-            "group",
-            "dtype",
-            "ndim",
-            "shape",
-            "dimension",
-            "length",
-            "first",
-            "last",
-            "descending",
-            "past-nnz",
-            "negative-pointer",
-            "feature-high",
-            "feature-negative",
-            "negative",
-            "overflow",
-            "barcodes",
-            "io",
-        ],
-    )
-    def test_malformed_source(self, tmp_path: Path, mode: str) -> None:
+    def test_duplicate_barcodes(self, tmp_path: Path) -> None:
         path = _source(tmp_path)
-        replacements: dict[str, tuple[str, object]] = {
-            "dtype": ("data", np.array([1.0, 2.0, 3.0, 4.0])),
-            "ndim": ("data", np.array([[1, 2, 3, 4]], dtype=np.int32)),
-            "shape": ("shape", np.array([3, 2, 1])),
-            "dimension": ("shape", np.array([0, 2])),
-            "length": ("indices", np.array([1, 2, 0])),
-            "first": ("indptr", np.array([1, 2, 4])),
-            "last": ("indptr", np.array([0, 2, 3])),
-            "descending": ("indptr", np.array([0, -1, 4])),
-            "past-nnz": ("indptr", np.array([0, 5, 4])),
-            "negative-pointer": ("indptr", np.array([0, -2, 4])),
-            "feature-high": ("indices", np.array([1, 3, 0, 2])),
-            "feature-negative": ("indices", np.array([-1, 2, 0, 2])),
-            "negative": ("data", np.array([-1, 2, 3, 4])),
-            "overflow": ("data", np.array([2**24 + 1, 2, 3, 4])),
-            "barcodes": ("barcodes", np.array([b"same", b"same"])),
-        }
-        if mode in replacements:
-            _replace(path, *replacements[mode])
-        elif mode in {"missing", "group"}:
-            with h5py.File(path, "r+") as handle:
-                del handle["matrix/data"]
-                if mode == "group":
-                    handle.create_group("matrix/data")
-        elif mode == "io":
-            path.unlink()
-        with pytest.raises((ReaderFormatError, FileNotFoundError)):
+        _replace(path, "barcodes", np.array([b"same", b"same"]))
+        with pytest.raises(ReaderFormatError, match="duplicate barcodes"):
             tables.read_counts(path)
+
+    def test_missing_source(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            tables.read_counts(ArtifactFile(tmp_path / "absent.h5"))
 
 
 class TestLinkTable:

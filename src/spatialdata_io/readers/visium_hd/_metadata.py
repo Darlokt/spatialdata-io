@@ -1,4 +1,4 @@
-"""Bounded Space Ranger identity, calibration and feature-slice metadata."""
+"""Space Ranger identity, calibration and feature-slice metadata."""
 
 from __future__ import annotations
 
@@ -19,9 +19,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-MAX_METADATA_BYTES = 1024 * 1024
-MAX_SCALE_FACTOR_BYTES = 64 * 1024
-MAX_GRID_DIMENSION = 100_000
 SPOT_PITCH_UM = 2.0
 
 
@@ -45,6 +42,14 @@ class ScaleFactors:
 
 
 @dataclass(frozen=True, slots=True)
+class TransformPair:
+    """Validated mutually inverse spot-to-image and image-to-spot matrices."""
+
+    spot_to_image: NDArray[np.float64]
+    image_to_spot: NDArray[np.float64]
+
+
+@dataclass(frozen=True, slots=True)
 class SourceMetadata:
     """Small owned metadata copied from a closed feature-slice file."""
 
@@ -52,10 +57,8 @@ class SourceMetadata:
     ncols: int
     spot_pitch: float
     sample_id: str
-    spot_to_microscope: NDArray[np.float64] | None
-    microscope_to_spot: NDArray[np.float64] | None
-    spot_to_cytassist: NDArray[np.float64] | None
-    cytassist_to_spot: NDArray[np.float64] | None
+    microscope: TransformPair | None
+    cytassist: TransformPair | None
 
 
 def _context(artifact: str) -> ReaderErrorContext:
@@ -71,10 +74,10 @@ def _text(value: object, *, path: ArtifactFile) -> str:
         try:
             value = bytes(value).decode("utf-8", errors="strict")
         except UnicodeDecodeError as error:
-            raise _error(path, "non-UTF-8 metadata", "bounded UTF-8 text") from error
+            raise _error(path, "non-UTF-8 metadata", "UTF-8 text") from error
 
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > MAX_METADATA_BYTES:
-        raise _error(path, "missing, empty or oversized metadata text", f"UTF-8 text up to {MAX_METADATA_BYTES} bytes")
+    if not isinstance(value, str) or not value:
+        raise _error(path, "missing or empty metadata text", "nonempty UTF-8 text")
 
     return value
 
@@ -113,7 +116,7 @@ def _json_object(value: object, *, path: ArtifactFile) -> dict[str, object]:
             parse_float=_finite_float,
         )
     except (ValueError, RecursionError) as error:
-        raise _error(path, "malformed metadata JSON", "a bounded JSON object with unique keys") from error
+        raise _error(path, "malformed metadata JSON", "a JSON object with unique keys") from error
 
     if not isinstance(parsed, dict):
         raise _error(path, "non-object metadata JSON", "a JSON object")
@@ -129,8 +132,8 @@ def _positive(values: dict[str, object], name: str, *, path: ArtifactFile) -> fl
 
 
 def read_scale_factors(path: ArtifactFile) -> ScaleFactors:
-    """Read one bounded scale-factor object and validate scientific calibration."""
-    values = read_json_object(path, max_bytes=MAX_SCALE_FACTOR_BYTES, context=_context("scale factors"))
+    """Read one scale-factor object and validate scientific calibration."""
+    values = read_json_object(path, context=_context("scale factors"))
     return ScaleFactors(
         hires=_positive(values, "tissue_hires_scalef", path=path),
         lowres=_positive(values, "tissue_lowres_scalef", path=path),
@@ -201,14 +204,14 @@ def _matrix(value: object, *, path: ArtifactFile, name: str) -> NDArray[np.float
 
 def _dimension(values: dict[str, object], name: str, *, path: ArtifactFile) -> int:
     value = values.get(name)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > MAX_GRID_DIMENSION:
-        raise _error(path, f"{name}={value!r}", "a positive integer grid dimension up to 100000")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise _error(path, f"{name}={value!r}", "a positive integer grid dimension")
 
     return value
 
 
 def read_source_metadata(path: ArtifactFile) -> SourceMetadata:
-    """Read bounded feature-slice metadata and close its HDF5 owner before return."""
+    """Read feature-slice metadata and close its HDF5 owner before return."""
     try:
         with h5py.File(path, "r") as source:
             values = _json_object(source.attrs.get("metadata_json"), path=path)
@@ -222,7 +225,7 @@ def read_source_metadata(path: ArtifactFile) -> SourceMetadata:
     if not isinstance(matrices, dict):
         raise _error(path, "missing transform_matrices object", "nullable forward/inverse matrix pairs")
 
-    pairs: list[NDArray[np.float64] | None] = []
+    pairs: list[TransformPair | None] = []
     for frame in ("microscope", "cytassist"):
         forward = f"spot_colrow_to_{frame}_colrow"
         inverse = f"{frame}_colrow_to_spot_colrow"
@@ -237,7 +240,9 @@ def read_source_metadata(path: ArtifactFile) -> SourceMetadata:
             product = first @ second
             if product[2, 2] == 0 or not np.allclose(product / product[2, 2], np.eye(3), rtol=1e-6, atol=1e-6):
                 raise _error(path, f"inconsistent {frame} matrix pair", "mutual inverses")
-        pairs.extend((first, second))
+            pairs.append(TransformPair(first, second))
+        else:
+            pairs.append(None)
 
     pitch = _positive(values, "spot_pitch", path=path)
     if pitch != SPOT_PITCH_UM:
@@ -250,6 +255,4 @@ def read_source_metadata(path: ArtifactFile) -> SourceMetadata:
         _text(values.get("sample_id"), path=path),
         pairs[0],
         pairs[1],
-        pairs[2],
-        pairs[3],
     )

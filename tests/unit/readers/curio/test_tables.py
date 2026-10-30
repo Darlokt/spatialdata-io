@@ -155,7 +155,7 @@ class TestReadTable:
 
 
 class TestReadNamedTable:
-    """Keep bounded headers, exact physical row widths, and explicit file ownership."""
+    """Keep source headers, exact physical row widths, and explicit file ownership."""
 
     @pytest.mark.parametrize("delimiter", [",", "\t"])
     @pytest.mark.parametrize("ending", ["", "\n", "\r\n"])
@@ -213,9 +213,9 @@ class TestReadNamedTable:
 
         assert frame.iloc[0].tolist() == ["001", "before\x00after"]
 
-    @pytest.mark.parametrize("content", ["gene\tI\ngene\n", "x" * 1_048_577])
+    @pytest.mark.parametrize("content", ["gene\tI\ngene\n"])
     def test_malformed_artifact(self, tmp_path: Path, content: str) -> None:
-        """Reject oversized headers and physically incomplete enrichment rows."""
+        """Reject physically incomplete enrichment rows."""
         path = tmp_path / "features.tsv"
         path.write_text(content, encoding="utf-8")
 

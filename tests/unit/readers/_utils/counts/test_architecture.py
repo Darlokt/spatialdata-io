@@ -18,7 +18,6 @@ _FORBIDDEN_CALLS = {
     "compute",
     "exists",
     "is_dir",
-    "is_file",
     "load",
     "read_text",
     "resolve",

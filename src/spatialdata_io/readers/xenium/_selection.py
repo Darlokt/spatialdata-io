@@ -35,11 +35,9 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-MAX_SELECTION_BYTES = 256 * 1024 * 1024
 _NAME_PREFIX = "#Selection name:"
 _MIN_VERTICES = 3
 _COMMENT_LINES = 2
-_COORDINATES = 2
 _CONTEXT = ReaderErrorContext("xenium", "Explorer selection")
 _EXPECTED = "two '#' comment lines, then 'Selection,X,Y' or 'X,Y' records of finite numbers"
 
@@ -48,48 +46,46 @@ def _error(path: Path, *, found: str) -> ReaderFormatError:
     return ReaderFormatError(context=_CONTEXT, path=path, found=found, expected=_EXPECTED)
 
 
-def _rows(path: ArtifactFile) -> list[list[str]]:
-    """Return the nonblank records of a bounded UTF-8 file after its two comment lines are checked."""
-    with path.open("rb") as handle:
-        payload = handle.read(MAX_SELECTION_BYTES + 1)
-    if len(payload) > MAX_SELECTION_BYTES:
-        raise _error(path, found="a file larger than 256 MiB")
-    try:
-        rows = [row for row in csv.reader(payload.decode("utf-8-sig").splitlines(), strict=True) if row]
-    except (UnicodeDecodeError, csv.Error) as caught:
-        raise _error(path, found="malformed CSV text") from caught
-    if len(rows) <= _COMMENT_LINES or not all(row[0].startswith("#") for row in rows[:_COMMENT_LINES]):
-        raise _error(path, found=f"{len(rows)} records without two leading comment lines")
-    return rows
+def _selection_name(header: list[str], comments: list[list[str]], path: ArtifactFile) -> str | None:
+    """Resolve the single-selection and named-selection header conventions."""
+    if not header or not all(row and row[0].startswith("#") for row in comments):
+        raise _error(path, found="records without two leading comment lines")
+    if header == ["Selection", "X", "Y"]:
+        return None
+    if header != ["X", "Y"]:
+        raise _error(path, found=f"header {header!r}")
+    comment = ",".join(comments[0])
+    if not comment.startswith(_NAME_PREFIX) or not comment.removeprefix(_NAME_PREFIX).strip():
+        raise _error(path, found=f"comment {comment!r} without a selection name")
+    return comment.removeprefix(_NAME_PREFIX).strip()
 
 
 def _parse(path: ArtifactFile) -> tuple[list[str], list[tuple[float, float]]]:
-    """Return one name per vertex row and the vertices in file order."""
-    rows = _rows(path)
-    header, records = rows[_COMMENT_LINES], rows[_COMMENT_LINES + 1 :]
-    if not records:
-        raise _error(path, found="a header without records")
-    if header == ["X", "Y"]:
-        comment = ",".join(rows[0])
-        if not comment.startswith(_NAME_PREFIX) or not comment.removeprefix(_NAME_PREFIX).strip():
-            raise _error(path, found=f"comment {comment!r} without a selection name")
-        names = [comment.removeprefix(_NAME_PREFIX).strip()] * len(records)
-    elif header == ["Selection", "X", "Y"]:
-        names = [record[0] for record in records]
-        records = [record[1:] for record in records]
-    else:
-        raise _error(path, found=f"header {header!r}")
-
+    """Parse one owned text stream, keeping only the returned names and coordinates."""
+    names: list[str] = []
+    vertices: list[tuple[float, float]] = []
     try:
-        vertices = [(float(record[0]), float(record[1])) for record in records if len(record) == _COORDINATES]
-    except ValueError as caught:
-        raise _error(path, found="non-numeric coordinates") from caught
-    if (
-        len(vertices) != len(records)
-        or not all(math.isfinite(x) and math.isfinite(y) for x, y in vertices)
-        or any(not name for name in names)
-    ):
-        raise _error(path, found="records of the wrong width, unnamed selections or nonfinite coordinates")
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            rows = (row for row in csv.reader(handle, strict=True) if row)
+            comments = [next(rows, []) for _ in range(_COMMENT_LINES)]
+            header: list[str] = next(rows, [])
+            single_name = _selection_name(header, comments, path)
+            for row in rows:
+                if len(row) != len(header):
+                    raise _error(path, found="records of the wrong width, unnamed selections or nonfinite coordinates")
+                name = single_name if single_name is not None else row[0]
+                try:
+                    x, y = float(row[-2]), float(row[-1])
+                except ValueError as caught:
+                    raise _error(path, found="non-numeric coordinates") from caught
+                if not name or not math.isfinite(x) or not math.isfinite(y):
+                    raise _error(path, found="records of the wrong width, unnamed selections or nonfinite coordinates")
+                names.append(name)
+                vertices.append((x, y))
+    except (UnicodeDecodeError, csv.Error) as caught:
+        raise _error(path, found="malformed CSV text") from caught
+    if not names:
+        raise _error(path, found="a header without records")
     return names, vertices
 
 

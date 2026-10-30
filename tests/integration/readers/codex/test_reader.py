@@ -290,7 +290,11 @@ class TestCodex:
         assert raster.shape == (1, 6, 7)
         np.testing.assert_array_equal(raster.data.compute(), np.full((1, 6, 7), 17, dtype=np.uint16))
 
-    def test_ome_channel_labels_and_singletons(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("names", "expected"),
+        [(["marker-z", "marker-a"], ["marker-z", "marker-a"]), (["CD3", "CD3"], ["Channel:0:0", "Channel:0:1"])],
+    )
+    def test_ome_channel_labels_and_singletons(self, tmp_path: Path, names: list[str], expected: list[str]) -> None:
         """Retain OME channel labels while removing only named singleton dimensions."""
         write_csv(tmp_path / "cells.csv")
         image = np.arange(2 * 8 * 10, dtype=np.uint16).reshape(1, 1, 2, 8, 10)
@@ -298,13 +302,13 @@ class TestCodex:
             tmp_path / "stitched.ome.tif",
             image,
             photometric="minisblack",
-            metadata={"axes": "TZCYX", "Channel": {"Name": ["marker-z", "marker-a"]}},
+            metadata={"axes": "TZCYX", "Channel": {"Name": names}},
         )
 
         result = codex(tmp_path)
         raster = result.images["images"]
 
-        assert raster.coords["c"].to_numpy().tolist() == ["marker-z", "marker-a"]
+        assert raster.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(raster.data.compute(), image[0, 0])
 
     def test_csv_multiple_batches_and_exact_identifiers(self, tmp_path: Path) -> None:

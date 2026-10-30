@@ -11,11 +11,11 @@ from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_pixel_sizes_um, read_tiff
+from spatialdata_io.readers.steinbock._schemas import LabelGrid
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import numpy as np
     from dask.array import Array
     from xarray import DataArray, DataTree
 
@@ -37,8 +37,7 @@ class _SampleRasters:
 
     image: DataArray | DataTree
     labels: DataArray | DataTree
-    label_shape: tuple[int, int]
-    label_dtype: np.dtype[np.generic]
+    grid: LabelGrid
 
 
 def _read_raster(path: ArtifactFile, *, target_axes: tuple[str, ...]) -> tuple[Array, TiffMetadata]:
@@ -195,6 +194,5 @@ def _read_rasters(
             scale_factors=raster.model_scale_factors,
             transformations={coordinate_system: transform},
         ),
-        label_shape=(int(labels.shape[0]), int(labels.shape[1])),
-        label_dtype=labels.dtype,
+        grid=LabelGrid((int(labels.shape[0]), int(labels.shape[1])), labels.dtype),
     )

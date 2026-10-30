@@ -14,6 +14,7 @@ from spatialdata.transformations import Identity, Translation, get_transformatio
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.xenium import _geometry
 from spatialdata_io.readers.xenium._cells import read_cells_store
 from spatialdata_io.readers.xenium._geometry import (
     apply_policy,
@@ -29,6 +30,8 @@ from tests.integration.readers.xenium import _fixtures as fx
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from pytest_mock import MockerFixture
 
     from spatialdata_io.readers.xenium._cells import CellStore
 
@@ -178,6 +181,17 @@ class TestApplyPolicy:
         np.testing.assert_array_equal(apply_policy(polygons, "drop", "cell"), [True, False, True, True])
         with pytest.raises(ReaderFormatError, match=r"1 invalid geometries .*\['ffkpbaba-1'\]"):
             apply_policy(polygons, "raise", "cell")
+
+    def test_keep_does_not_classify_topology_or_materialize_cell_identifiers(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(bowtie_cells=(1,)))
+        polygons = read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle))
+        topology = mocker.spy(_geometry, "invalid_geometry_mask")
+        identifiers = mocker.spy(pd.Index, "tolist")
+        np.testing.assert_array_equal(apply_policy(polygons, "keep", "cell"), [True] * 4)
+        topology.assert_not_called()
+        identifiers.assert_not_called()
 
     def test_degenerate_rings(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(short_nuclei=(0,)))

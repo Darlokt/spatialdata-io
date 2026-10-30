@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import math
 from collections.abc import Sequence
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
-MAX_ALIGNMENT_BYTES = 64 * 1024
 _MATRIX_SHAPE = (3, 3)
 _RGB_CHANNELS = ("r", "g", "b", "a")
 _RGB_SIZES = (3, 4)
@@ -50,23 +50,25 @@ def read_alignment(path: ArtifactFile) -> NDArray[np.float64]:
     Raises
     ------
     ReaderFormatError
-        If the file exceeds 64 KiB, is not three rows of three finite numbers,
-        has another last row, or is not invertible.
+        If the file is not three rows of three finite numbers, has another
+        last row, or is not invertible.
     """
     context = ReaderErrorContext("xenium", "image alignment")
     expected = "a 3 x 3 comma-separated finite invertible matrix with last row 0,0,1"
-    with path.open("rb") as handle:
-        payload = handle.read(MAX_ALIGNMENT_BYTES + 1)
-    if len(payload) > MAX_ALIGNMENT_BYTES:
-        raise ReaderFormatError(context=context, path=path, found="an oversized file", expected=expected)
     try:
-        rows = [row for row in csv.reader(payload.decode("utf-8-sig").splitlines(), strict=True) if row]
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            records = (row for row in csv.reader(handle, strict=True) if row)
+            rows = list(islice(records, _MATRIX_SHAPE[0] + 1))
+    except (UnicodeDecodeError, csv.Error) as error:
+        raise ReaderFormatError(context=context, path=path, found="malformed CSV content", expected=expected) from error
+    if len(rows) != _MATRIX_SHAPE[0] or any(len(row) != _MATRIX_SHAPE[1] for row in rows):
+        raise ReaderFormatError(context=context, path=path, found="records of the wrong shape", expected=expected)
+    try:
         matrix = np.asarray([[float(value) for value in row] for row in rows], dtype=np.float64)
-    except (UnicodeDecodeError, csv.Error, ValueError) as error:
+    except ValueError as error:
         raise ReaderFormatError(context=context, path=path, found="non-numeric content", expected=expected) from error
     if (
-        matrix.shape != _MATRIX_SHAPE
-        or not np.isfinite(matrix).all()
+        not np.isfinite(matrix).all()
         or not np.array_equal(matrix[2], [0.0, 0.0, 1.0])
         or np.linalg.det(matrix[:2, :2]) == 0
     ):

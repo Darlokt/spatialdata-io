@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import traceback
 from typing import TYPE_CHECKING, cast
 
@@ -11,7 +12,8 @@ from anndata import AnnData
 from scipy import sparse
 
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.counts._10x import _normalize_counts, _validate_mtx_header
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,6 +23,12 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 
 _CONTEXT = ReaderErrorContext(reader="test_reader", artifact="count matrix", detected_version="3")
+
+
+@pytest.fixture(autouse=True)
+def source_validation(mocker: MockerFixture) -> None:
+    """Keep MatrixMarket artifact inspection in the integration contract tests."""
+    mocker.patch("spatialdata_io.readers._utils.counts._10x._validate_mtx_header")
 
 
 def _artifact_file(path: Path) -> ArtifactFile:
@@ -287,3 +295,56 @@ class TestRead10xMtx:
         assert caught.value.__notes__ == [f"While handling {_CONTEXT.describe(path=path)}."]
         source.assert_called_once()
         normalizer.assert_not_called()
+
+
+class TestNormalizeCounts:
+    @pytest.mark.parametrize("dtype", [np.int32, np.int64, np.float32, np.float64])
+    def test_realistic_counts_keep_storage_and_dtype(
+        self, tmp_path: Path, dtype: type[np.int32 | np.int64 | np.float32 | np.float64]
+    ) -> None:
+        data = sparse.csr_array(np.asarray([[0, 1, 100_000]], dtype=dtype))
+        table = AnnData(data)
+        result = _normalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
+        assert result is table
+        assert result.X is data
+        assert result.X.dtype == dtype
+
+    @pytest.mark.parametrize("value", [-1, 0.5])
+    def test_rejects_malformed_counts(self, tmp_path: Path, value: float) -> None:
+        table = AnnData(sparse.csr_array(np.asarray([[value]], dtype=np.float32)))
+        with pytest.raises(ReaderFormatError):
+            _normalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
+
+    def test_empty_counts(self, tmp_path: Path) -> None:
+        empty = AnnData(sparse.csr_array((2, 2), dtype=np.float32))
+        _normalize_counts(empty, tmp_path / "counts.h5", _CONTEXT)
+
+    def test_fraction_checks_are_bounded(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        table = AnnData(sparse.csr_array(np.asarray([[1.0, 2.0, 0.5]], dtype=np.float32)))
+        mocker.patch("spatialdata_io.readers._utils.counts._10x._VALIDATION_BATCH_SIZE", 1)
+        with pytest.raises(ReaderFormatError, match="fractional"):
+            _normalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
+
+    def test_missing_expression(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="missing count data"):
+            _normalize_counts(AnnData(), tmp_path / "counts.h5", _CONTEXT)
+
+
+class TestValidateMtxHeader:
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_integer_header(self, tmp_path: Path, *, compressed: bool) -> None:
+        payload = b"%%MatrixMarket matrix coordinate integer general\n1 1 1\n1 1 1\n"
+        path = tmp_path / ("x_matrix.mtx.gz" if compressed else "x_matrix.mtx")
+        path.write_bytes(gzip.compress(payload) if compressed else payload)
+        _validate_mtx_header(_artifact_directory(tmp_path), context=_CONTEXT, prefix="x_", compressed=compressed)
+
+    def test_legacy_ignores_compression(self, tmp_path: Path) -> None:
+        (tmp_path / "genes.tsv").touch()
+        (tmp_path / "matrix.mtx").write_bytes(b"%%MatrixMarket matrix coordinate integer general\n")
+        _validate_mtx_header(_artifact_directory(tmp_path), context=_CONTEXT, prefix=None, compressed=True)
+
+    @pytest.mark.parametrize("header", [b"real general", b"integer skew-symmetric", b"pattern general", b"x" * 1024])
+    def test_rejects_non_count_declarations(self, tmp_path: Path, header: bytes) -> None:
+        (tmp_path / "matrix.mtx").write_bytes(b"%%MatrixMarket matrix coordinate " + header + b"\n")
+        with pytest.raises(ReaderFormatError, match="integer coordinate"):
+            _validate_mtx_header(_artifact_directory(tmp_path), context=_CONTEXT, prefix=None, compressed=False)

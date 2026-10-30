@@ -17,15 +17,15 @@ from spatialdata_io.readers._utils.geometry import (
 )
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers.visium_hd._bins import read_bin_table, read_grid_shape
+from spatialdata_io.readers.visium_hd._bins import read_bin_table
 from spatialdata_io.readers.visium_hd._cells import read_cell_table, read_nucleus_table
 from spatialdata_io.readers.visium_hd._geometry import bin_squares, read_boundaries
 from spatialdata_io.readers.visium_hd._images import make_image_options, read_images
 from spatialdata_io.readers.visium_hd._labels import make_bin_labels
 from spatialdata_io.readers.visium_hd._layout import discover_layout
 from spatialdata_io.readers.visium_hd._metadata import read_bin_scale_factors, read_identity, read_source_metadata
+from spatialdata_io.readers.visium_hd._positions import fit_slide_frame, read_grid_shape
 from spatialdata_io.readers.visium_hd._tables import link_table
-from spatialdata_io.readers.visium_hd._transforms import fit_slide_frame
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -156,20 +156,18 @@ def _segmentations(
             )
 
         # Matrices define the returned population. Geometry-only nuclei retain source order.
-        table = population if kind == "cell" or layout.raw_two_micron_counts is not None else None
+        table = population if kind == "cell" or layout.nucleus_counts is not None else None
         if table is not None:
             table, geometry = _select_population(table, boundaries.shapes.index, geometry, path)
 
         name = f"{kind}_boundaries"
         shapes[name] = geometry
-        if table is None or (kind == "nucleus" and layout.raw_two_micron_counts is None):
+        if table is None:
             continue
 
-        if kind == "nucleus":
-            raw, mapping = layout.raw_two_micron_counts, layout.barcode_mappings
-            # Discovery resolves these together when nucleus counts are selected.
+        if kind == "nucleus" and (source := layout.nucleus_counts) is not None:
             table = read_nucleus_table(
-                cast("ArtifactFile", raw), cast("ArtifactFile", mapping), table, boundaries.shapes.index
+                source.raw_two_micron_counts, source.barcode_mappings, table, boundaries.shapes.index
             )
 
         if boundaries.centroids is not None:
@@ -179,7 +177,7 @@ def _segmentations(
     return shapes, tables
 
 
-def _validate_options(
+def _validate_options(  # noqa: PLR0913, RUF100 - Validate related explicit public options together.
     *,
     bin_counts_kind: str,
     cell_counts_kind: str,
@@ -221,7 +219,7 @@ def _validate_options(
         raise ValueError(message)
 
 
-def visium_hd(
+def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format choices.
     path: str | Path,
     *,
     bin_sizes: Sequence[int] | Literal["all"] = "all",
@@ -294,8 +292,9 @@ def visium_hd(
         Source pixel positions remain in bin obs. Labels use exact rigid grid
         transforms. Images have (c, y, x) axes, source dtype/channel order and
         a fitted affine, whose maximum residual in µm is recorded in attrs.
-        Raster pixels stay lazy; shapes and canonical float32 CSR sparse-array
-        tables are eager. Inputs are never mutated; returned lazy sources must
+        Raster pixels stay lazy; shapes and canonical CSR sparse-array tables
+        are eager. Bin/cell count dtypes follow Scanpy (vendor int32 becomes
+        float32); nucleus counts use float32. Inputs are never mutated; lazy sources must
         remain accessible. See the format guide for layouts and memory costs.
 
     Raises
@@ -306,7 +305,7 @@ def visium_hd(
         Missing or wrong-kind artifacts.
     spatialdata_io.readers._utils.errors.ReaderFormatError
         Malformed, ambiguous, unsupported or scientifically inconsistent input,
-        including counts that cannot be stored exactly as float32.
+        including negative or fractional counts and unsafe int64 nucleus aggregation.
     """
     sizes = _bin_sizes(bin_sizes)
     policy = validate_invalid_geometry_policy(invalid_geometries)

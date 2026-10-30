@@ -66,14 +66,31 @@ class TestReadNucleusTable:
         raw, mapping, population = _sources(tmp_path)
         result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
         assert isinstance(result.X, csr_array)
+        assert result.X.dtype == np.float32
         assert isinstance(population.X, csr_array)
         assert result.X[0, 0] == 5
         assert population.X[0, 0] == 1
         assert result.var_names.tolist() == ["Gene", "Gene-1", "Other"]
 
-    def test_sum_precision(self, tmp_path: Path) -> None:
-        raw, mapping, population = _sources(tmp_path, (2**24, 1))
-        with pytest.raises(ReaderFormatError, match="nucleus sums"):
+    def test_int64_limit_with_one_contributor(self, tmp_path: Path) -> None:
+        raw, mapping, population = _sources(tmp_path)
+        maximum = np.iinfo(np.int64).max
+        with h5py.File(raw, "r+") as source:
+            del source["matrix/data"]
+            source.create_dataset("matrix/data", data=np.array([maximum, 0], dtype=np.int64))
+        source_mapping = pq.read_table(mapping)
+        pq.write_table(source_mapping.set_column(3, "in_nucleus", pa.array([True, False])), mapping)
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
+        assert isinstance(result.X, csr_array)
+        assert result.X[0, 0] == np.float32(maximum)
+
+    @pytest.mark.parametrize("value", [2**62, 2**63])
+    def test_int64_accumulation_overflow(self, tmp_path: Path, value: int) -> None:
+        raw, mapping, population = _sources(tmp_path)
+        with h5py.File(raw, "r+") as source:
+            del source["matrix/data"]
+            source.create_dataset("matrix/data", data=np.array([value, value], dtype=np.uint64))
+        with pytest.raises(ReaderFormatError, match="int64"):
             read_nucleus_table(raw, mapping, population, pd.Index([1]))
 
     @pytest.mark.parametrize("fault", ["duplicate", "unknown_bin", "unknown_cell", "missing"])

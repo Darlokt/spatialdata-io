@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 
 _CSV_BATCH_ROWS = 10_000
 _CSV_MAX_DENSE_BYTES = 32 * 1024 * 1024
-_MAX_HEADER_CHARACTERS = 1_048_576
 
 
 def _split_cells(
@@ -61,9 +60,7 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
     blocks: list[sparse.csr_array] = []
     observations: list[pd.DataFrame] = []
     with path.open(encoding="utf-8-sig", newline="") as source:
-        header = source.readline(_MAX_HEADER_CHARACTERS + 1)
-        if len(header) > _MAX_HEADER_CHARACTERS:
-            raise schema_error(path, found="oversized CSV header", expected="a header of at most 1 Mi characters")
+        header = source.readline()
 
         columns = next(csv.reader([header], strict=True), [])
         features, metadata = cell_columns(columns, path)

@@ -1,7 +1,8 @@
-"""MCMICRO workflow-mode and marker-panel parsing under bounded resource ownership."""
+"""MCMICRO workflow-mode and marker-panel parsing under explicit resource ownership."""
 
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING
 
 import pytest
@@ -66,11 +67,6 @@ class TestReadWorkflow:
         with pytest.raises(ReaderFormatError, match="malformed YAML"):
             read_workflow(_write(tmp_path, "[" * 100_000 + "]" * 100_000))
 
-    def test_size_bound(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.mcmicro._metadata._MAX_PARAMS_BYTES", 8)
-        with pytest.raises(ReaderFormatError, match="more than 8 bytes"):
-            read_workflow(_write(tmp_path, "workflow:\n  tma: false\n"))
-
     def test_invalid_utf8(self, tmp_path: Path) -> None:
         path = tmp_path / "params.yml"
         path.write_bytes(b"workflow:\n  tma: \xff\n")
@@ -80,6 +76,19 @@ class TestReadWorkflow:
 
 class TestReadMarkers:
     """The panel keeps quoted text exactly and rejects malformed records."""
+
+    @pytest.mark.parametrize(
+        "payload", [b"marker_name\nA\n", b"marker_name,marker_name\nA,B\n", b"marker_name,note\nA\n"]
+    )
+    def test_source_closes_on_every_parse_result(self, tmp_path: Path, mocker: MockerFixture, payload: bytes) -> None:
+        source = io.BytesIO(payload)
+        mocker.patch("pathlib.Path.open", return_value=source)
+        if payload == b"marker_name\nA\n":
+            assert read_markers(ArtifactFile(tmp_path / "markers.csv")).features == ("A",)
+        else:
+            with pytest.raises(ReaderFormatError):
+                read_markers(ArtifactFile(tmp_path / "markers.csv"))
+        assert source.closed
 
     def test_quoted_text_and_order(self, tmp_path: Path) -> None:
         panel = read_markers(_write(tmp_path, 'marker_name,note\nDAPI,"a, b"\nCD3,\nDAPI,0001\n', "markers.csv"))

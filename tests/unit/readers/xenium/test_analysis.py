@@ -115,13 +115,70 @@ class TestReadAnalysis:
         with pytest.raises(ReaderFormatError, match=match):
             read_analysis(_directory(tmp_path, members), BARCODES)
 
-    def test_archive_members_are_bounded(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    @pytest.mark.parametrize("names", [(CLUSTERS, CLUSTERS), (CLUSTERS, f"analysis/{CLUSTERS}")])
+    def test_duplicate_archive_identities_are_rejected_before_csv_parsing(
+        self, tmp_path: Path, mocker: MockerFixture, names: tuple[str, str]
+    ) -> None:
         payload = b"Barcode,Cluster\na-1,1\n"
-        with tarfile.open(tmp_path / "analysis.tar.gz", "w:gz") as archive:
-            info = tarfile.TarInfo(f"analysis/{CLUSTERS}")
+        path = tmp_path / "analysis.tar.gz"
+        with tarfile.open(path, "w:gz") as archive:
+            for name in names:
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+        parse = mocker.spy(_analysis, "_table")
+        with pytest.raises(ReaderFormatError, match="repeated analysis identity"):
+            read_analysis(AnalysisArchive(ArtifactFile(path)), BARCODES)
+        parse.assert_not_called()
+
+    def test_duplicate_extracted_identities_are_rejected(self, tmp_path: Path) -> None:
+        source = _directory(
+            tmp_path, {CLUSTERS: "Barcode,Cluster\na-1,1\n", f"analysis/{CLUSTERS}": "Barcode,Cluster\na-1,2\n"}
+        )
+        with pytest.raises(ReaderFormatError, match="repeated analysis identity"):
+            read_analysis(source, BARCODES)
+
+    def test_extracted_csv_streams_directly_into_arrow(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        source = _directory(tmp_path, {CLUSTERS: "Barcode,Cluster\na-1,1\n"})
+        handle = io.BytesIO(b"Barcode,Cluster\na-1,1\n")
+        read = mocker.spy(handle, "read")
+        parsed = mocker.spy(_analysis, "_table")
+        mocker.patch.object(type(source.directory), "open", return_value=handle)
+        result = read_analysis(source, BARCODES)
+        assert parsed.call_args.args[0] is handle
+        assert result.clusters["graphclust"].codes.tolist() == [0, -1, -1]
+        assert all(call.args and call.args[0] > 0 for call in read.call_args_list)
+        assert handle.closed
+
+    @pytest.mark.parametrize("kind", ["clusters", "projection"])
+    def test_header_only_analysis_remains_empty(self, tmp_path: Path, kind: str) -> None:
+        name, header = (CLUSTERS, "Barcode,Cluster\n") if kind == "clusters" else (PCA, "Barcode,PC-1,PC-2\n")
+        result = read_analysis(_directory(tmp_path, {name: header}), BARCODES)
+        if kind == "clusters":
+            assert result.clusters["graphclust"].codes.tolist() == [-1, -1, -1]
+        else:
+            assert np.isnan(result.projections["pca_gene_expression_2_components"]).all()
+
+    @pytest.mark.parametrize("malformed", [False, True])
+    def test_archive_payload_handles_close_on_success_and_parser_failure(
+        self, tmp_path: Path, mocker: MockerFixture, *, malformed: bool
+    ) -> None:
+        payload = b"Barcode,Cluster\na-1,x\n" if malformed else b"Barcode,Cluster\na-1,1\n"
+        path = tmp_path / "analysis.tar.gz"
+        with tarfile.open(path, "w:gz") as archive:
+            info = tarfile.TarInfo(CLUSTERS)
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
-        mocker.patch.object(_analysis, "MAX_MEMBER_BYTES", len(payload) - 1)
-
-        with pytest.raises(ReaderFormatError, match="a member within 2 GiB"):
-            read_analysis(AnalysisArchive(ArtifactFile(tmp_path / "analysis.tar.gz")), BARCODES)
+        extract = mocker.spy(tarfile.TarFile, "extractfile")
+        parsed = mocker.spy(_analysis, "_table")
+        opened = mocker.spy(tarfile, "open")
+        source = AnalysisArchive(ArtifactFile(path))
+        if malformed:
+            with pytest.raises(ReaderFormatError, match="malformed CSV"):
+                read_analysis(source, BARCODES)
+        else:
+            read_analysis(source, BARCODES)
+        assert extract.spy_return is not None
+        assert parsed.call_args.args[0] is extract.spy_return
+        assert extract.spy_return.closed
+        assert opened.spy_return.closed

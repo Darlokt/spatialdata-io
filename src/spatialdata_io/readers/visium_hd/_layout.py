@@ -55,6 +55,14 @@ class ImageLayout:
 
 
 @dataclass(frozen=True, slots=True)
+class NucleusCountSource:
+    """The two required artifacts for aggregation of nucleus counts."""
+
+    raw_two_micron_counts: ArtifactFile
+    barcode_mappings: ArtifactFile
+
+
+@dataclass(frozen=True, slots=True)
 class VisiumHDLayout:
     """Validated immutable paths, without live files or parsed metadata."""
 
@@ -65,8 +73,7 @@ class VisiumHDLayout:
     base_scale_factors: ArtifactFile
     bins: tuple[BinLayout, ...]
     segmentation: SegmentationLayout | None
-    barcode_mappings: ArtifactFile | None
-    raw_two_micron_counts: ArtifactFile | None
+    nucleus_counts: NucleusCountSource | None
     images: ImageLayout | None
 
 
@@ -144,7 +151,7 @@ def _bin_directories(root: DatasetRoot) -> dict[int, Path]:
     return directories
 
 
-def discover_layout(
+def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product selections once.
     path: str | Path,
     *,
     bin_sizes: Sequence[int] | Literal["all"] = "all",
@@ -208,7 +215,7 @@ def discover_layout(
         )
     segmentation = SegmentationLayout(cell_counts, cell, nucleus) if cell is not None or nucleus is not None else None
 
-    mappings = None
+    nucleus_counts = None
     if include_nucleus_table:
         loose = _loose_file(root, ("barcode_mappings.parquet",), entries, required=False)
         nested = (
@@ -227,11 +234,9 @@ def discover_layout(
         if mappings is None:
             mappings = require_file(root / "barcode_mappings.parquet", context=_context("barcode mappings"))
 
-    raw = (
-        require_file(base / "raw_feature_bc_matrix.h5", context=_context("raw two-micron counts"))
-        if include_nucleus_table
-        else None
-    )
+        nucleus_counts = NucleusCountSource(
+            require_file(base / "raw_feature_bc_matrix.h5", context=_context("raw two-micron counts")), mappings
+        )
 
     identity = bins[0].counts if bins else cell_counts
     if identity is None:
@@ -257,5 +262,5 @@ def discover_layout(
         )
 
     return VisiumHDLayout(
-        root, feature, identity, base_positions, base_scale, bins, segmentation, mappings, raw, images
+        root, feature, identity, base_positions, base_scale, bins, segmentation, nucleus_counts, images
     )

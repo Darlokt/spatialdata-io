@@ -5,17 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import anndata as ad
-import dask.array as da
 import numpy as np
 import pandas as pd
 import pytest
 from dask.callbacks import Callback
 from scipy import sparse
-from xarray import DataArray
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.steinbock._images import _SampleRasters
+from spatialdata_io.readers.steinbock._schemas import LabelGrid
 from spatialdata_io.readers.steinbock._tables import (
     _centroids,
     _clean_metadata,
@@ -29,14 +27,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
-def _sample(*, shape: tuple[int, int] = (8, 12), dtype: str = "uint16") -> _SampleRasters:
-    """Provide lazy raster placeholders with independent frame and dtype metadata."""
-    return _SampleRasters(
-        DataArray(da.empty((2, *shape), dtype=np.float32), dims=("c", "y", "x")),
-        DataArray(da.empty(shape, dtype=dtype), dims=("y", "x")),
-        shape,
-        np.dtype(dtype),
-    )
+def _sample(*, shape: tuple[int, int] = (8, 12), dtype: str = "uint16") -> LabelGrid:
+    """Provide independently inspected grid metadata without constructing models."""
+    return LabelGrid(shape, np.dtype(dtype))
 
 
 def _write_table(path: Path) -> ArtifactFile:

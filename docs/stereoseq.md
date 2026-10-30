@@ -213,7 +213,7 @@ The expression-distribution TIFF and its derived tissue mask remain distinct pro
 
 Raster pixels remain lazy and constructing the reader result executes zero pixel tasks. Pixels are decoded from the TIFF tiles or strips that overlap the computed chunks. Many SAW microscopy TIFFs store full-width strips, so a small selection decodes the strip bands spanning one 1024-row tile. Source paths must remain available for later image computation. Lazy graphs own no open HDF5/TIFF handles.
 
-GEF expression and metadata are eager. Expression/exon input slices share an 8 MiB record budget, but eager output, numerical buffers and coordinate indexing use memory proportional to the selected records and targets. This is a bound on input slices, not on total process memory. Returned point graphs wrap already materialized count or analysis coordinates; they are not lazy GEF/H5AD scans. Files close on success and failure, and no caller-owned scientific container is mutated.
+GEF expression and metadata are eager. Expression/exon input slices use batches targeting 8 MiB, but eager output, numerical buffers and coordinate indexing use memory proportional to the selected records and targets. This is a bound on input slices, not on total process memory. Returned point graphs wrap already materialized count or analysis coordinates; they are not lazy GEF/H5AD scans. Files close on success and failure, and no caller-owned scientific container is mutated.
 
 ## Command line and migration
 

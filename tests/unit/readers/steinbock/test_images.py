@@ -187,8 +187,8 @@ class TestReadRasters:
         assert pixels.call_args.args[1] == (slice(0, 1), slice(0, 16), slice(0, 16))
         np.testing.assert_array_equal(result.labels.data[:4, :6].compute(scheduler="synchronous"), labels[:4, :6])
         assert pixels.call_count == 2
-        assert result.label_shape == (48, 64)
-        assert result.label_dtype == np.dtype(np.uint16)
+        assert result.grid.shape == (48, 64)
+        assert result.grid.dtype == np.dtype(np.uint16)
 
     @pytest.mark.parametrize(
         ("chunks", "image_chunks", "label_chunks"),

@@ -15,7 +15,7 @@ from scipy import io as scipy_io
 from scipy import sparse
 
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import require_directory, require_file
 
 if TYPE_CHECKING:
@@ -152,6 +152,18 @@ def _open_hdf5_sources() -> set[Path]:
 
 
 class TestRead10xH5:
+    @pytest.mark.parametrize("value", [-1.0, 0.5])
+    def test_rejects_negative_and_fractional_counts(self, tmp_path: Path, value: float) -> None:
+        source = tmp_path / "matrix.h5"
+        _write_h5_v3(source)
+        with h5py.File(source, "r+") as handle:
+            values = _COUNTS.data.astype(np.float64)
+            values[0] = value
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=values)
+        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
+            read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT, gex_only=False)
+
     @pytest.mark.parametrize(
         ("genome", "gex_only", "selected"),
         [
@@ -280,6 +292,14 @@ class TestRead10xH5:
 
 
 class TestRead10xMtx:
+    def test_rejects_real_count_declaration_before_float_conversion(self, tmp_path: Path) -> None:
+        _write_mtx_v3(tmp_path, prefix="", compressed=False)
+        source = tmp_path / "matrix.mtx"
+        payload = source.read_text()
+        source.write_text(payload.replace("coordinate integer", "coordinate real", 1))
+        with pytest.raises(ReaderFormatError, match="integer coordinate"):
+            read_10x_mtx(require_directory(tmp_path, context=_CONTEXT), context=_CONTEXT, compressed=False)
+
     @pytest.mark.parametrize(("compressed", "prefix"), [(False, ""), (False, "sample_"), (True, ""), (True, "样本_")])
     # Pytest injects the boolean parameter from the explicit case table.
     def test_v3_preserves_orientation_order_filtering_and_unique_names(

@@ -7,7 +7,7 @@ It turns one validated raster file into a lazy Dask array.
 
 The package owns:
 
-- bounded metadata inspection before graph construction;
+- metadata inspection without pixel decoding before graph construction;
 - TIFF series, pyramid-level, axes, shape, dtype, and native-chunk discovery;
 - complete typed OME metadata parsing;
 - path-based, serializable Dask graphs;
@@ -74,7 +74,8 @@ image = Image2DModel.parse(data, dims=("c", "y", "x"), rgb=None)
 choose the first image in a scientific file that contains several images.
 
 PNG and JPEG have no selectable series or levels, so their entry points combine
-bounded header inspection with lazy graph construction:
+header inspection with lazy graph construction. Ancillary PNG and JPEG payloads
+are skipped without materialization; no total header-size ceiling is imposed:
 
 ```python
 from spatialdata_io.readers._utils.image import read_jpeg, read_png

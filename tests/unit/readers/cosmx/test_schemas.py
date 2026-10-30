@@ -22,6 +22,7 @@ from spatialdata_io.readers.cosmx._schemas import (
     optional_float_values,
     transcript_columns,
     validate_columns,
+    validate_label_ids,
 )
 
 if TYPE_CHECKING:
@@ -41,6 +42,23 @@ class TestValidateColumns:
     def test_rejects(self, tmp_path: Path, columns: list[str]) -> None:
         with pytest.raises(ReaderFormatError, match="unique nonempty"):
             validate_columns(columns, _path(tmp_path))
+
+
+class TestValidateLabelIds:
+    """The inspected label representation constrains linked positive cell IDs."""
+
+    @pytest.mark.parametrize("dtype", ["uint8", "int8", "uint16", "int16", "uint32", "int32"])
+    def test_exact_limit_and_overflow(self, tmp_path: Path, dtype: str) -> None:
+        label_dtype = np.dtype(dtype)
+        limit = np.iinfo(label_dtype).max
+        validate_label_ids(np.array([1, limit], np.int64), label_dtype, _path(tmp_path))
+        with pytest.raises(ReaderFormatError, match=r"outside.*label range"):
+            validate_label_ids(np.array([limit + 1], np.int64), label_dtype, _path(tmp_path))
+
+    @pytest.mark.parametrize("dtype", ["uint64", "int64"])
+    def test_64_bit_and_empty(self, tmp_path: Path, dtype: str) -> None:
+        validate_label_ids(np.array([2**63 - 1], np.int64), np.dtype(dtype), _path(tmp_path))
+        validate_label_ids(np.array([], np.int64), np.dtype(dtype), _path(tmp_path))
 
 
 class TestCountFeatures:
@@ -153,7 +171,7 @@ class TestFloatValues:
 
     @pytest.mark.parametrize(
         ("token", "match"),
-        [("inf", "nonfinite"), ("NA", "nonnumeric"), ("1e-400", "underflow"), ("1" * 129, "oversized")],
+        [("inf", "nonfinite"), ("NA", "nonnumeric"), ("1e-400", "underflow")],
     )
     def test_rejects(self, tmp_path: Path, token: str, match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match):

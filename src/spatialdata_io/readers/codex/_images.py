@@ -62,7 +62,19 @@ def _read_image(
     if metadata.ome is not None:
         channels = metadata.ome.images[tiff_series].pixels.channels
         if len(channels) == image.shape[0]:
-            channel_names = [channel.name or channel.id for channel in channels]
+            names = [channel.name for channel in channels]
+            channel_names = (
+                [str(name) for name in names]
+                if all(names) and len(set(names)) == len(names)
+                else [channel.id for channel in channels]
+            )
+            if len(set(channel_names)) != len(channel_names):
+                raise ReaderFormatError(
+                    context=ReaderErrorContext("codex", "stitched image channels"),
+                    path=path,
+                    found=f"duplicate channel identifiers {channel_names!r}",
+                    expected="unique channel names or OME IDs",
+                )
 
     return Image2DModel.parse(
         image,

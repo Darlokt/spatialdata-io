@@ -6,11 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from spatialdata_io.readers._utils.errors import RasterFormatError
-from spatialdata_io.readers._utils.image._encoded import (
-    MAX_HEADER_BYTES,
-    encoded_result,
-    validate_decoded_size,
-)
+from spatialdata_io.readers._utils.image._encoded import encoded_result, validate_decoded_size
 from spatialdata_io.readers._utils.image._path import normalize_file_path
 from spatialdata_io.readers._utils.image._types import LazyRaster, _EncodedHeader
 
@@ -92,9 +88,6 @@ def _png_output_metadata(
 
 
 def _parse_ihdr(path: Path, payload: bytes) -> tuple[int, int, int, int]:
-    if len(payload) != _IHDR_SIZE:
-        message = f"PNG {path} has an invalid IHDR chunk length {len(payload)}."
-        raise RasterFormatError(message)
     width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
     if compression != 0 or filtering != 0 or interlace not in {0, 1}:
         message = f"PNG {path} uses unsupported IHDR methods."
@@ -102,27 +95,10 @@ def _parse_ihdr(path: Path, payload: bytes) -> tuple[int, int, int, int]:
     return width, height, bit_depth, color_type
 
 
-def _read_chunk_payload(
-    stream: BinaryIO,
-    path: Path,
-    *,
-    chunk_type: bytes,
-    length: int,
-    scanned: int,
-) -> tuple[bytes, int]:
-    if scanned + length + 4 > MAX_HEADER_BYTES:
-        message = f"PNG metadata before IDAT exceeds the {MAX_HEADER_BYTES}-byte inspection limit: {path}"
-        raise RasterFormatError(message)
-    context = f"{chunk_type.decode('ascii', errors='replace')} payload"
-    payload = _read_exact(stream, length, context=context)
-    _read_exact(stream, 4, context="chunk CRC")
-    return payload, scanned + length + 4
-
-
 def _parse_optional_chunk(
     path: Path,
     chunk_type: bytes,
-    payload: bytes,
+    length: int,
     ihdr: tuple[int, int, int, int],
     state: tuple[int, bool],
 ) -> tuple[int, bool]:
@@ -137,7 +113,6 @@ def _parse_optional_chunk(
         message = f"PNG {path} contains more than one IHDR chunk."
         raise RasterFormatError(message)
     if chunk_type == b"PLTE":
-        length = len(payload)
         color_type = ihdr[3]
         maximum_palette_size = min(_MAX_PALETTE_SIZE, 3 * 2 ** ihdr[2])
         if (
@@ -154,7 +129,7 @@ def _parse_optional_chunk(
         if has_transparency:
             message = f"PNG {path} contains more than one tRNS chunk."
             raise RasterFormatError(message)
-        _validate_transparency(ihdr[3], len(payload), palette_entries)
+        _validate_transparency(ihdr[3], length, palette_entries)
         has_transparency = True
     elif not chunk_type[0] & 0x20:
         message = f"PNG {path} contains unsupported critical chunk {chunk_type!r}."
@@ -163,54 +138,41 @@ def _parse_optional_chunk(
 
 
 def inspect_png_header(path: Path) -> _EncodedHeader:
-    """Inspect bounded PNG metadata without decoding pixels."""
+    """Inspect PNG metadata without decoding pixels or retaining ancillary data."""
     with path.open("rb") as stream:
         if _read_exact(stream, len(_PNG_SIGNATURE), context="signature") != _PNG_SIGNATURE:
             message = f"File does not contain a PNG signature: {path}"
             raise RasterFormatError(message)
-        scanned = len(_PNG_SIGNATURE)
         header = _read_exact(stream, 8, context="IHDR chunk header")
-        scanned += 8
         length, chunk_type = struct.unpack(">I4s", header)
         if chunk_type != b"IHDR":
             message = f"PNG {path} does not start with an IHDR chunk."
             raise RasterFormatError(message)
-        payload, scanned = _read_chunk_payload(
-            stream,
-            path,
-            chunk_type=chunk_type,
-            length=length,
-            scanned=scanned,
-        )
+        if length != _IHDR_SIZE:
+            message = f"PNG {path} has an invalid IHDR chunk length {length}."
+            raise RasterFormatError(message)
+        payload = _read_exact(stream, _IHDR_SIZE, context="IHDR payload")
+        _read_exact(stream, 4, context="chunk CRC")
         ihdr = _parse_ihdr(path, payload)
         palette_entries = 0
         has_transparency = False
         while True:
-            if scanned + 8 > MAX_HEADER_BYTES:
-                message = f"PNG metadata exceeds the {MAX_HEADER_BYTES}-byte inspection limit: {path}"
-                raise RasterFormatError(message)
             header = _read_exact(stream, 8, context="chunk header")
-            scanned += 8
             length, chunk_type = struct.unpack(">I4s", header)
             if chunk_type == b"IDAT":
                 break
             if chunk_type == b"IEND":
                 message = f"PNG {path} ended before its first IDAT chunk."
                 raise RasterFormatError(message)
-            payload, scanned = _read_chunk_payload(
-                stream,
-                path,
-                chunk_type=chunk_type,
-                length=length,
-                scanned=scanned,
-            )
             palette_entries, has_transparency = _parse_optional_chunk(
                 path,
                 chunk_type,
-                payload,
+                length,
                 ihdr,
                 (palette_entries, has_transparency),
             )
+            stream.seek(length, 1)
+            _read_exact(stream, 4, context="chunk CRC")
     return _png_output_metadata(
         path,
         ihdr,
@@ -222,14 +184,14 @@ def inspect_png_header(path: Path) -> _EncodedHeader:
 def read_png(path: str | Path) -> LazyRaster:
     """Read PNG pixels as one delayed whole-frame task.
 
-    Metadata inspection is bounded and eager; pixel decoding is lazy. Computing
+    Metadata inspection is eager and skips ancillary payloads; pixel decoding is lazy. Computing
     any selection decodes the complete PNG frame because PNG is not a tiled
     source format at this boundary.
 
     Parameters
     ----------
     path
-        PNG source. Its byte signature and bounded header are validated; file
+        PNG source. Its byte signature and header are validated; file
         names and extensions remain layout-reader concerns.
 
     Returns
@@ -240,7 +202,7 @@ def read_png(path: str | Path) -> LazyRaster:
     Raises
     ------
     RasterFormatError
-        If the bounded header is malformed or describes an unsupported PNG.
+        If the header is malformed or describes an unsupported PNG.
     """
     normalized = normalize_file_path(path)
     return encoded_result(normalized, "png", inspect_png_header(normalized))

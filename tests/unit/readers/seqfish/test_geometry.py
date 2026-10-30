@@ -13,7 +13,6 @@ import shapely
 from shapely.geometry import LineString, MultiPolygon, Polygon
 from spatialdata.transformations import Identity, Scale, get_transformation
 
-import spatialdata_io.readers.seqfish._geometry as geometry_module
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._geometry import make_circles, read_boundaries
@@ -129,16 +128,6 @@ class TestReadBoundaries:
             )
         assert caught.value is error
         assert any("seqfish" in note and str(path) in note for note in error.__notes__)
-
-    def test_encoded_size_bound_rejects_before_geometry_construction(
-        self, tmp_path: Path, mocker: MockerFixture
-    ) -> None:
-        path = _write_boundaries(tmp_path / "boundaries.geojson", [Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], ("1",))
-        mocker.patch.object(geometry_module, "_MAX_BOUNDARY_BYTES", 32)
-        with pytest.raises(ReaderFormatError, match="32 bytes"):
-            read_boundaries(
-                path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
-            )
 
     @pytest.mark.parametrize("property_id", ["2", None])
     def test_top_level_id_is_required_and_cannot_conflict_with_properties(

@@ -72,7 +72,10 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         Optional source raw-image axes, such as ``CYX`` for an unlabeled
         stack. Otherwise TIFF axes are used. Scientific C channels never
         become RGB based on their number. Non-singleton sample axes require
-        an explicit interpretation as C. Singleton nonspatial axes may be
+        an explicit interpretation as C, for example ``YXC`` for RGB ``YXS``.
+        Expanded OME samples use ``<OME channel ID>:sample:<zero-based index>``
+        identities; plain TIFF samples use positional identities.
+        Singleton nonspatial axes may be
         removed, while singleton X/Y dimensions are retained. Labels require
         YX and only singleton extra axes.
     chunks

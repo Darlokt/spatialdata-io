@@ -8,7 +8,7 @@ from spatialdata_io.readers._utils.metadata import read_json_object
 
 
 class TestMetadataPackage:
-    def test_exports_only_bounded_json_object_reader(self) -> None:
+    def test_exports_only_json_object_reader(self) -> None:
         assert metadata.__all__ == ["read_json_object"]
         assert metadata.read_json_object is read_json_object
         assert not hasattr(_utils, "read_json_object")

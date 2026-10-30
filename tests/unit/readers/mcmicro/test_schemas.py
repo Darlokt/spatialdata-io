@@ -126,7 +126,6 @@ class TestFloatValues:
             ("abc", "nonnumeric"),
             ("", "nonnumeric"),
             ("1e-400", "underflow"),
-            ("1" * 129, "oversized"),
         ],
     )
     def test_rejects(self, tmp_path: Path, token: str, match: str) -> None:

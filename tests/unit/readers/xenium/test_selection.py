@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,7 +12,7 @@ from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity, get_transformation
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.xenium import _selection, xenium_explorer_selection
+from spatialdata_io.readers.xenium import xenium_explorer_selection
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -110,15 +111,28 @@ class TestXeniumExplorerSelection:
         with pytest.raises(ReaderFormatError, match=match):
             xenium_explorer_selection(_write(tmp_path / "coordinates.csv", text))
 
-    def test_rejects_non_utf8_and_oversized_files(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_rejects_non_utf8(self, tmp_path: Path) -> None:
         latin = tmp_path / "latin.csv"
         latin.write_bytes(b"#Selection name: \xe9\n#b\nX,Y\n0,0\n1,0\n0,1\n")
         with pytest.raises(ReaderFormatError, match="malformed CSV text"):
             xenium_explorer_selection(latin)
 
-        mocker.patch.object(_selection, "MAX_SELECTION_BYTES", 16)
-        with pytest.raises(ReaderFormatError, match="larger than 256 MiB"):
-            xenium_explorer_selection(_write(tmp_path / "coordinates.csv", SINGLE))
+    @pytest.mark.parametrize("malformed", [False, True])
+    def test_csv_is_parsed_directly_from_owned_stream(
+        self, tmp_path: Path, mocker: MockerFixture, *, malformed: bool
+    ) -> None:
+        path = _write(tmp_path / "coordinates.csv", SINGLE)
+        text = SINGLE + '\n"unfinished' if malformed else SINGLE
+        handle = io.StringIO(text)
+        read = mocker.spy(handle, "read")
+        mocker.patch.object(type(path), "open", return_value=handle)
+        if malformed:
+            with pytest.raises(ReaderFormatError, match="malformed CSV text"):
+                xenium_explorer_selection(path)
+        else:
+            assert xenium_explorer_selection(path).index.tolist() == ["Selection 1"]
+        read.assert_not_called()
+        assert handle.closed
 
     def test_rejects_invalid_options_and_paths(self, tmp_path: Path) -> None:
         path = _write(tmp_path / "coordinates.csv", SINGLE)

@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+import gzip
+from typing import TYPE_CHECKING, Literal, cast
 
+import numpy as np
 from scanpy import read_10x_h5 as _scanpy_read_10x_h5
 from scanpy import read_10x_mtx as _scanpy_read_10x_mtx
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.table import normalize_owned_anndata
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from anndata import AnnData
+    from scipy import sparse
 
     from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
+
+_VALIDATION_BATCH_SIZE = 1_048_576
 
 _WINDOWS_RESERVED_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
 _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
@@ -21,6 +28,52 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
     | {f"COM{suffix}" for suffix in "123456789¹²³"}
     | {f"LPT{suffix}" for suffix in "123456789¹²³"}
 )
+
+
+def _normalize_counts(adata: AnnData, path: Path, context: ReaderErrorContext) -> AnnData:
+    table = normalize_owned_anndata(adata)
+    # The source API always supplies expression; normalization has established
+    # its concrete eager CSR representation without duplicating its buffers.
+    matrix = cast("sparse.csr_array | None", table.X)
+    if matrix is None:
+        raise ReaderFormatError(context=context, path=path, found="missing count data", expected="a count matrix")
+    values = matrix.data
+    if values.size and values.min() < 0:
+        raise ReaderFormatError(
+            context=context, path=path, found="negative counts", expected="nonnegative count values"
+        )
+    if values.dtype.kind == "f":
+        for start in range(0, values.size, _VALIDATION_BATCH_SIZE):
+            batch = values[start : start + _VALIDATION_BATCH_SIZE]
+            if np.any(batch != np.floor(batch)):
+                raise ReaderFormatError(
+                    context=context, path=path, found="fractional counts", expected="integer count values"
+                )
+    return table
+
+
+def _validate_mtx_header(
+    path: ArtifactDirectory, *, context: ReaderErrorContext, prefix: str | None, compressed: bool
+) -> None:
+    """Check only the type declaration; Scanpy owns all record parsing."""
+    stem = prefix or ""
+    # Match Scanpy's legacy family selection, including its uncompressed v2 inputs.
+    legacy = (path / f"{stem}genes.tsv").is_file()
+    zipped = compressed and not legacy
+    file = path / f"{stem}matrix.mtx{'.gz' if zipped else ''}"
+    with gzip.open(file, "rb") if zipped else file.open("rb") as source:
+        header = source.readline()
+    fields = header.lower().split()
+    if fields[:-1] != [b"%%matrixmarket", b"matrix", b"coordinate", b"integer"] or fields[-1:] not in (
+        [b"general"],
+        [b"symmetric"],
+    ):
+        raise ReaderFormatError(
+            context=context,
+            path=file,
+            found=f"MatrixMarket header {header!r}",
+            expected="an integer coordinate matrix with general or symmetric storage",
+        )
 
 
 def read_10x_h5(
@@ -51,13 +104,14 @@ def read_10x_h5(
     -------
     anndata.AnnData
         An owned, eager, in-memory table whose ``X`` is a canonical
-        :class:`scipy.sparse.csr_array` when present.
+        :class:`scipy.sparse.csr_array` of finite nonnegative integer counts.
 
     Notes
     -----
     Network fallback is disabled. Scanpy owns source parsing, filtering,
     alignment, and source lifetime. Canonical CSR matrix storage can be wrapped
     as a sparse array without copying its buffers.
+    Float32 storage is retained without a maximum-count or precision ceiling.
     """
     try:
         adata = _scanpy_read_10x_h5(
@@ -66,7 +120,7 @@ def read_10x_h5(
             gex_only=gex_only,
             backup_url=None,
         )
-        return normalize_owned_anndata(adata)
+        return _normalize_counts(adata, path, context)
     except Exception as error:
         add_reader_context(error, context=context, path=path)
         raise
@@ -128,7 +182,7 @@ def read_10x_mtx(  # noqa: PLR0913, RUF100
     -------
     anndata.AnnData
         An owned, eager, in-memory table whose ``X`` is a canonical
-        :class:`scipy.sparse.csr_array` when present.
+        :class:`scipy.sparse.csr_array` of finite nonnegative integer counts.
 
     Raises
     ------
@@ -141,9 +195,12 @@ def read_10x_mtx(  # noqa: PLR0913, RUF100
     Scanpy caching is disabled. Scanpy owns source parsing, filtering,
     alignment, and source lifetime. Literal ``.`` and ``..`` prefixes are safe
     because Scanpy concatenates them with fixed companion basenames.
+    Only the MatrixMarket header is inspected outside Scanpy. Float32
+    storage is retained without a maximum-count or precision ceiling.
     """
     try:
         _validate_mtx_prefix(prefix)
+        _validate_mtx_header(path, context=context, prefix=prefix, compressed=compressed)
         adata = _scanpy_read_10x_mtx(
             path,
             var_names=var_names,
@@ -153,7 +210,7 @@ def read_10x_mtx(  # noqa: PLR0913, RUF100
             prefix=prefix,
             compressed=compressed,
         )
-        return normalize_owned_anndata(adata)
+        return _normalize_counts(adata, path, context)
     except Exception as error:
         add_reader_context(error, context=context, path=path)
         raise

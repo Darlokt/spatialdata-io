@@ -6,6 +6,8 @@ import json
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.sparse import csr_array, csr_matrix, spmatrix
@@ -44,7 +46,7 @@ class TestVisiumHD:
             ("4.1.0", False, (2, 8), "", "feature_slice.h5", "cytassist"),
         ],
     )
-    def test_layouts(
+    def test_layouts(  # noqa: PLR0913, RUF100 - Parametrized layout and version contract.
         self,
         tmp_path: Path,
         *,
@@ -112,6 +114,19 @@ class TestVisiumHD:
         assert_array_equal(table.X.toarray(), bundle.raw[8])
         # Edge squares retain the nominal full bin width.
         assert_allclose(result.shapes["square_008um"].geometry.iloc[-1].area, 64.0, rtol=1e-10)
+
+    @pytest.mark.parametrize("kind", ["filtered", "raw"])
+    @pytest.mark.parametrize("size", [6, 8, 16])
+    def test_contradictory_bin_registration(self, tmp_path: Path, kind: Literal["filtered", "raw"], size: int) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2, 6, 8, 16), segmented=False)
+        path = tmp_path / f"binned_outputs/square_{size:03d}um/spatial/tissue_positions.parquet"
+        source = pq.read_table(path)
+        values = source["pxl_col_in_fullres"].to_numpy().copy()
+        # This partial last-row bin is absent from every filtered fixture matrix.
+        values[-2] += 1_000_000
+        pq.write_table(source.set_column(5, source.schema.field(5), pa.array(values)), path)
+        with pytest.raises(ReaderFormatError, match="cross-bin registration residual"):
+            visium_hd(bundle.root, bin_sizes=(size,), bin_counts_kind=kind, include_images=False)
 
     def test_round_trip(self, tmp_path: Path) -> None:
         bundle = write_bundle(tmp_path / "source")

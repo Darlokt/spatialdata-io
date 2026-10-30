@@ -227,23 +227,25 @@ def apply_policy(polygons: Polygons, policy: InvalidGeometryPolicy, kind: Bounda
         ``"keep"`` for degenerate rings, which cannot be represented.
     """
     built = ~polygons.degenerate
+    context = ReaderErrorContext("xenium", f"{kind} boundaries")
+    # Report the identifiers that index the returned element, only when needed.
+    identifiers = polygons.labels if kind == "nucleus" and polygons.labels is not None else polygons.cell_ids
+    if policy == "keep":
+        if polygons.degenerate.any():
+            examples = identifiers[np.flatnonzero(polygons.degenerate)[:10]].tolist()
+            raise ReaderFormatError(
+                context=context,
+                path=polygons.source.file,
+                found=f"{int(polygons.degenerate.sum())} rings with fewer than four coordinates, e.g. {examples!r}",
+                expected="buildable polygons; invalid_geometries='drop' removes them as invalid entities",
+            )
+        return built
+
     invalid = polygons.degenerate.copy()
     invalid[built] = invalid_geometry_mask(polygons.geometries[built])
-    context = ReaderErrorContext("xenium", f"{kind} boundaries")
-    # Report the identifiers that index the returned element.
-    labels = polygons.labels if kind == "nucleus" else None
-    identifiers = polygons.cell_ids.tolist() if labels is None else labels.tolist()
-    if policy == "raise":
-        raise_invalid_geometries(invalid, identifiers, context=context, path=polygons.source.file)
-    if policy == "keep" and polygons.degenerate.any():
-        examples = [identifiers[index] for index in np.flatnonzero(polygons.degenerate)[:10]]
-        raise ReaderFormatError(
-            context=context,
-            path=polygons.source.file,
-            found=f"{int(polygons.degenerate.sum())} rings with fewer than four coordinates, e.g. {examples!r}",
-            expected="buildable polygons; invalid_geometries='drop' removes them as invalid entities",
-        )
-    return built if policy == "keep" else ~invalid
+    if policy == "raise" and invalid.any():
+        raise_invalid_geometries(invalid, identifiers.tolist(), context=context, path=polygons.source.file)
+    return ~invalid
 
 
 def _parse(frame: gpd.GeoDataFrame, source: TabularSource, kind: BoundaryKind, pixel_size: float) -> gpd.GeoDataFrame:

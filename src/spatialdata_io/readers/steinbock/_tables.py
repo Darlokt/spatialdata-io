@@ -24,10 +24,10 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.steinbock._images import _SampleRasters
+    from spatialdata_io.readers.steinbock._schemas import LabelGrid
 
 
-def _read_table(path: ArtifactFile, samples: Mapping[str, _SampleRasters]) -> ad.AnnData:
+def _read_table(path: ArtifactFile, samples: Mapping[str, LabelGrid]) -> ad.AnnData:
     """Read and enrich an owned table without loading any segmentation pixels."""
     try:
         table = ad.read_h5ad(path)
@@ -47,7 +47,7 @@ def _read_table(path: ArtifactFile, samples: Mapping[str, _SampleRasters]) -> ad
     return table
 
 
-def _set_instance_ids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: ArtifactFile) -> None:
+def _set_instance_ids(obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path: ArtifactFile) -> None:
     """Construct final exact IDs and sample-local region categories in the owned frame."""
     identifiers = _instance_identifiers(obs, samples, path)
     dtype = UNSIGNED_CELL_ID_DTYPE if max(identifiers) > np.iinfo(np.int64).max else SIGNED_CELL_ID_DTYPE
@@ -63,7 +63,7 @@ def _set_instance_ids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], 
     obs["region"] = regions
 
 
-def _centroids(obs: pd.DataFrame, samples: Mapping[str, _SampleRasters], path: ArtifactFile) -> np.ndarray:
+def _centroids(obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path: ArtifactFile) -> np.ndarray:
     """Extract XY coordinates from regionprops row/column fields."""
     coordinates = np.column_stack(_centroid_columns(obs, path))
     _validate_centroids(coordinates, obs, samples, path)

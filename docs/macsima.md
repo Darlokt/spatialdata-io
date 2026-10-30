@@ -74,7 +74,7 @@ Each table has no observations, `X=None` and one `var` row per image channel, wi
 | `cycle` | int64 | Acquisition cycle. |
 | `imagetype` | string | `stain`, `bleach` or `autofluorescence`. |
 | `well` | string | Plate well, or missing. |
-| `ROI` | nullable integer | ROI number, or missing. |
+| `ROI` | nullable integer | Exact ROI number, or missing; integers retain precision alongside missing values. |
 | `fluorophore` | string | Fluorophore, or missing. |
 | `clone` | string | Antibody clone, or missing. |
 | `exposure` | float64 | Exposure time in milliseconds, or NaN. |

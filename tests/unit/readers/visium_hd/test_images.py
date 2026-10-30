@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import dask.array as da
+import imagecodecs
 import numpy as np
 import pytest
 import tifffile
@@ -16,7 +17,7 @@ from spatialdata.transformations import Affine, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.image import LazyRaster, make_raster_options
+from spatialdata_io.readers._utils.image import LazyRaster, inspect_tiff, make_raster_options, read_tiff
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd._images import (
@@ -35,7 +36,8 @@ from spatialdata_io.readers.visium_hd._metadata import (
     read_scale_factors,
     read_source_metadata,
 )
-from spatialdata_io.readers.visium_hd._transforms import SlideFrame, apply_projective, fit_slide_frame
+from spatialdata_io.readers.visium_hd._positions import fit_slide_frame
+from spatialdata_io.readers.visium_hd._transforms import SlideFrame, apply_projective
 from tests.integration.readers.visium_hd._fixtures import _write_png, write_bundle
 
 if TYPE_CHECKING:
@@ -114,8 +116,6 @@ class TestReadFullres:
         png = ArtifactFile(tmp_path / "image.png")
         _write_png(png, np.zeros((8, 9, 3), np.uint8))
         assert _read_fullres(png, _options()).data.shape == (8, 9, 3)
-        import imagecodecs
-
         jpeg = ArtifactFile(tmp_path / "image.jpg")
         jpeg.write_bytes(imagecodecs.jpeg_encode(np.zeros((8, 9, 3), np.uint8)))
         assert _read_fullres(jpeg, _options()).data.shape == (8, 9, 3)
@@ -173,7 +173,7 @@ class TestReadImages:
         assert full.dtype == np.uint16
         expected = np.arange(96 * 96 * 3, dtype=np.uint16).reshape(96, 96, 3).transpose(2, 0, 1)
         np.testing.assert_array_equal(full.data.compute(), expected)
-        roundtrip = pickle.loads(pickle.dumps(full.data))
+        roundtrip = pickle.loads(pickle.dumps(full.data))  # noqa: S301, RUF100 - Test-owned lazy graph.
         np.testing.assert_array_equal(roundtrip[:, :2, :3].compute(), expected[:, :2, :3])
 
     def test_requested_pyramid_only_full_image(self, tmp_path: Path) -> None:
@@ -206,18 +206,10 @@ class TestReadImages:
         assert images["full_image"].shape == (3, 96, 89)
         assert "full_image" in read_images(replace(layout, hires=None), frame, scales, source, _options())
 
-    @pytest.mark.parametrize("pair", ["forward", "inverse", "missing-metadata"])
-    def test_absent_cytassist_transform(self, tmp_path: Path, pair: str) -> None:
+    @pytest.mark.parametrize("missing_metadata", [False, True])
+    def test_absent_cytassist_transform(self, tmp_path: Path, *, missing_metadata: bool) -> None:
         layout, frame, scales, source = _bundle(tmp_path)
-        selected_source = (
-            None
-            if pair == "missing-metadata"
-            else (
-                replace(source, spot_to_cytassist=None)
-                if pair == "forward"
-                else replace(source, cytassist_to_spot=None)
-            )
-        )
+        selected_source = None if missing_metadata else replace(source, cytassist=None)
         with pytest.raises(ReaderFormatError, match="null CytAssist"):
             read_images(layout, frame, scales, selected_source, _options())
 
@@ -269,7 +261,7 @@ class TestWarpCytassist:
         actual = pixels.compute(scheduler="synchronous")
         assert actual.dtype == source.dtype
         np.testing.assert_array_equal(actual, expected)
-        restored = pickle.loads(pickle.dumps(pixels))
+        restored = pickle.loads(pickle.dumps(pixels))  # noqa: S301, RUF100 - Test-owned lazy graph.
         np.testing.assert_array_equal(restored[:, :3, :4].compute(), expected[:, :3, :4])
 
     def test_physical_affine_ramp_at_pixel_centers(self) -> None:
@@ -299,8 +291,6 @@ class TestWarpCytassist:
         np.testing.assert_array_equal(actual[interior], (gx + 3 * gy)[interior])
 
     def test_tiled_tiff_partial_read(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
-
         path = ArtifactFile(tmp_path / "cytassist.tiff")
         source = np.arange(256 * 256, dtype=np.uint16).reshape(256, 256)
         tifffile.imwrite(path, source, tile=(16, 16), compression="deflate")

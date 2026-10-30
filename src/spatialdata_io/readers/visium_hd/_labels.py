@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 
 
-def make_bin_labels(
+def make_bin_labels(  # noqa: PLR0913, RUF100 - Explicit grid, frame and raster inputs.
     frame: SlideFrame,
     rows: NDArray[np.uint32],
     cols: NDArray[np.uint32],

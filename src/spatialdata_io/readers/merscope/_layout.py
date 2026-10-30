@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -68,14 +68,6 @@ class TranscriptSource:
 
 
 @dataclass(frozen=True, slots=True)
-class BoundarySource:
-    """Identify an instrument or explicitly selected VPT micron-space geometry."""
-
-    kind: Literal["instrument", "cellpose", "watershed"]
-    path: ArtifactFile
-
-
-@dataclass(frozen=True, slots=True)
 class MosaicChannel:
     """Pair a scientific stain name with one validated single-plane TIFF."""
 
@@ -100,33 +92,15 @@ class Mosaics:
 
 
 @dataclass(frozen=True, slots=True)
-class InstrumentLayout:
-    """Describe requested products from the original instrument region."""
+class MerscopeLayout:
+    """Keep normalized products from instrument or caller-selected VPT analysis."""
 
     root: DatasetRoot
     names: Names
     tables: TableFiles | None
     images: Mosaics | None
-    boundaries: BoundarySource | None
+    boundaries: ArtifactFile | None
     transcripts: TranscriptSource | None
-    kind: Literal["instrument"] = field(default="instrument", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class VptLayout:
-    """Keep the instrument region and caller-selected replacement analysis distinct."""
-
-    root: DatasetRoot
-    vpt_root: DatasetRoot
-    names: Names
-    tables: TableFiles | None
-    images: Mosaics | None
-    boundaries: BoundarySource | None
-    transcripts: TranscriptSource | None
-    kind: Literal["vpt"] = field(default="vpt", init=False)
-
-
-type MerscopeLayout = InstrumentLayout | VptLayout
 
 
 def make_selection(
@@ -179,15 +153,15 @@ def _file(root: DatasetRoot, name: str) -> ArtifactFile:
     return require_metadata_file(root, name, context=ReaderErrorContext("merscope", name))
 
 
-def _vpt_boundaries(root: DatasetRoot, entries: frozenset[str]) -> BoundarySource:
+def _vpt_boundaries(root: DatasetRoot, entries: frozenset[str]) -> ArtifactFile:
     """Reject absent or ambiguous supported VPT boundary outputs."""
     candidates = [
-        BoundarySource(kind, _file(root, f"{kind}_micron_space.parquet"))
+        _file(root, f"{kind}_micron_space.parquet")
         for kind in ("cellpose", "watershed")
         if f"{kind}_micron_space.parquet" in entries
     ]
     require_unique_path(
-        (source.path for source in candidates),
+        candidates,
         context=ReaderErrorContext("merscope", "VPT micron-space boundaries"),
         search_path=root,
     )
@@ -276,11 +250,7 @@ def discover_layout(
 
     boundaries = None
     if selection.boundaries:
-        boundaries = (
-            BoundarySource("instrument", _file(root, "cell_boundaries.parquet"))
-            if vpt_root is None
-            else _vpt_boundaries(analysis, entries)
-        )
+        boundaries = _file(root, "cell_boundaries.parquet") if vpt_root is None else _vpt_boundaries(analysis, entries)
 
     transcripts = None
     if selection.transcripts:
@@ -297,6 +267,4 @@ def discover_layout(
         image_directory = require_metadata_directory(root, "images", context=ReaderErrorContext("merscope", "images"))
         images = _mosaics(root, image_directory, selection.z_layers)
 
-    if vpt_root is None:
-        return InstrumentLayout(root, names, tables, images, boundaries, transcripts)
-    return VptLayout(root, vpt_root, names, tables, images, boundaries, transcripts)
+    return MerscopeLayout(root, names, tables, images, boundaries, transcripts)
