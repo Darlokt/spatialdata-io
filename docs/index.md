@@ -15,6 +15,7 @@ seqfish.md
 merscope.md
 mcmicro.md
 cosmx.md
+codex.md
 macsima.md
 stereoseq.md
 xenium.md

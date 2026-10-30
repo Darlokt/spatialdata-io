@@ -118,7 +118,10 @@ class TestReadLabels:
         path = _write(tmp_path / "cell.ome.tif", values, "CYX")
         decoder = mocker.spy(tifffile.TiffPage, "asarray")
         element, dtype = read_labels(
-            path, grid=ImageGrid((4, 5), (None, None)), frame="global", options=make_raster_options(chunks=(1, 2, 3))
+            path,
+            grid=ImageGrid((4, 5), (None, None), "global", "uncalibrated"),
+            frame="global",
+            options=make_raster_options(chunks=(1, 2, 3)),
         )
         decoder.assert_not_called()
         assert dtype == np.dtype(np.uint32)
@@ -134,7 +137,7 @@ class TestReadLabels:
     @pytest.mark.parametrize(
         ("dtype", "grid", "options", "match"),
         [
-            (np.uint16, ImageGrid((4, 6), (None, None)), _DEFAULT, "image grid"),
+            (np.uint16, ImageGrid((4, 6), (None, None), "global", "uncalibrated"), _DEFAULT, "image grid"),
             (np.float32, None, _DEFAULT, "integer labels"),
             (np.uint64, None, make_raster_options((2,)), "<=32-bit"),
             (np.uint16, None, make_raster_options((8,)), "exceed"),

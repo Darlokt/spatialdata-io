@@ -10,6 +10,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
@@ -139,12 +140,25 @@ def prepare_table(
     )
 
     # Vendor CSV coordinates are row/column, while SpatialData uses x/y.
-    adata.obsm["spatial"] = np.column_stack(
+    adata.obsm["spatial_pixels"] = np.column_stack(
         (
             aligned["pxl_col_in_fullres"].to_numpy(dtype=np.float64, copy=False),
             aligned["pxl_row_in_fullres"].to_numpy(dtype=np.float64, copy=False),
         )
     )
+
+    description: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial_pixels": {
+                "axes": ["x", "y"],
+                "units": "pixel",
+                "frame": options.dataset_id,
+                "position": "full-resolution spot centre",
+            }
+        },
+    }
+    adata.uns[POSITIONS_KEY] = description
 
     source_metadata = {
         key: value

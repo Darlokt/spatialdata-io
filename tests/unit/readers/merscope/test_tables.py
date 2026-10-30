@@ -163,8 +163,11 @@ class TestFinalizeTable:
     @pytest.mark.parametrize("target", [None, "slide_region_polygons"])
     def test_linkage_and_blank_roundtrip(self, tmp_path: Path, target: str | None) -> None:
         table, _ = read_table(*_sources(tmp_path))
+        native = table.obsm["spatial"]
+        expression = table.X
         result = finalize_table(
             table,
+            frame="global",
             region_name="region",
             slide_name="slide",
             dataset_id="slide_region",
@@ -173,6 +176,9 @@ class TestFinalizeTable:
             source_instances=None,
         )
         assert result is table
+        assert result.obsm["spatial"] is native
+        assert result.X is expression
+        assert result.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["frame"] == "global"
         assert result.obs["EntityID"].tolist() == ["b", "a"]
         assert result.obs["region"].tolist() == ["region", "region"]
         if target:
@@ -193,6 +199,7 @@ class TestFinalizeTable:
         with pytest.raises(ReaderFormatError):
             finalize_table(
                 table,
+                frame="global",
                 region_name="region",
                 slide_name="slide",
                 dataset_id="slide_region",
@@ -207,6 +214,7 @@ class TestFinalizeTable:
         with pytest.raises(ReaderFormatError, match="conflicting source"):
             finalize_table(
                 table,
+                frame="global",
                 region_name="region",
                 slide_name="slide",
                 dataset_id="slide_region",
@@ -220,8 +228,11 @@ class TestFinalizeTable:
         expected = {"region": "region", "slide": "slide", "dataset_id": "slide_region", "cells_region": "cells"}
         for column, value in expected.items():
             table.obs[column] = pd.Series(value, index=table.obs_names, dtype=STRING_DTYPE)
+        native = table.obsm["spatial"]
+        expression = table.X
         result = finalize_table(
             table,
+            frame="global",
             region_name="region",
             slide_name="slide",
             dataset_id="slide_region",
@@ -229,6 +240,8 @@ class TestFinalizeTable:
             expected_instances=pd.Index(["a", "b"]),
             source_instances=None,
         )
+        assert result.obsm["spatial"] is native
+        assert result.X is expression
         for column, value in expected.items():
             assert result.obs[column].tolist() == [value, value]
             assert result.obs[column].dtype == pd.CategoricalDtype([value])
@@ -239,6 +252,7 @@ class TestFinalizeTable:
         with pytest.raises(ReaderFormatError, match="unlinked table"):
             finalize_table(
                 table,
+                frame="global",
                 region_name="region",
                 slide_name="slide",
                 dataset_id="slide_region",

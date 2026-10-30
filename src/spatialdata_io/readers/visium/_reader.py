@@ -156,7 +156,9 @@ def visium(  # noqa: PLR0913, RUF100
     Position processing uses explicit Arrow-backed columns. Final observation
     fields ``in_tissue``, ``array_row``, and ``array_col`` are NumPy int64;
     ``spot_id`` is a pandas string and ``region`` is categorical. Coordinates
-    in ``obsm['spatial']`` are float64. Integer grid values are normalized
+    in ``obsm['spatial_pixels']`` are float64. Its snapshot description records
+    XY pixels in the dataset frame; physical ``spatial`` is absent.
+    Integer grid values are normalized
     exactly, without an intermediate floating-point representation.
     """
     if not isinstance(make_var_names_unique, bool):

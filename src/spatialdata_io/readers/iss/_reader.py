@@ -102,8 +102,10 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         names become unique. The optional ``counts`` layer is normalized in the
         same way. Other layers, additional H5AD annotation fields and their
         dtypes/missingness, and existing spatial metadata are retained. Imported
-        H5AD embeddings keep their source values and units; label linkage does
-        not establish their calibration. Annotation
+        H5AD ``obsm['spatial']`` moves exactly to ``spatial_source`` with its
+        original dtype and shape; an occupied destination raises. No axes or
+        units are inferred and no canonical ``spatial`` is returned. Label
+        linkage and OME image calibration do not establish table calibration. Annotation
         columns may be reordered; duplicate column names are rejected. Existing
         reserved output columns must be semantically equal to generated values.
         Final linkage uses categorical ``region`` and the selected integer

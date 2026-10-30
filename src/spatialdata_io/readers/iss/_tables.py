@@ -33,6 +33,8 @@ def _read_table(path: ArtifactFile, *, instance_key: str | None, label_dtype: np
         raise
 
     _validate_table(table, path=path, instance_key=instance_key)
+    if "spatial" in table.obsm:
+        table.obsm["spatial_source"] = table.obsm.pop("spatial")
 
     # AnnData cannot express the eager frame invariant established by the schema.
     _set_instance_ids(cast("pd.DataFrame", table.obs), instance_key=instance_key, label_dtype=label_dtype, path=path)

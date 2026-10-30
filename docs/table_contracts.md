@@ -105,6 +105,33 @@ transform `obsm["spatial"]`. Nor does the name `global` alone prove physical
 units or register independent samples. Refer to [calibration](calibration.md)
 for the spatial-element frames.
 
+### Coordinate declarations
+
+Canonical `obsm["spatial"]`, when present, is finite float64 XY micrometres.
+`uns["spatialdata_io_positions"]` declares `schema_version=1` and a
+`coordinates` mapping keyed by the actual embeddings. Each entry contains
+`axes=["x", "y"]`, `units`, `position` and either `frame` or `frame_key`.
+Physical entries include bounded descriptive `calibration` evidence keyed by
+frame. `frame_key` refers to a categorical string observation column, so row
+frames remain aligned under ordinary slicing. A region identifies a linkage
+target; several regions may share one physical frame.
+
+`spatial_pixels` and `spatial_grid` preserve established native semantics.
+Unknown imported `spatial` embeddings move to `spatial_source` with exact shape, dtype
+and values, without an invented axis or unit declaration. Reader-owned native
+observation fields need no redundant embedding. Occupied preservation keys,
+incoming declarations and generated frame columns fail rather than silently
+replace source data. Missing calibration leaves native-only positions; a table
+containing independently calibrated and uncalibrated samples has no canonical
+`spatial` array. Its population and table key remain unchanged.
+
+Coordinates are snapshots. Frame names are local to each SpatialData object;
+matching `global` names do not register independent datasets. Ordinary AnnData
+concatenation does not merge coordinate systems, and changing a spatial-element
+transformation does not update table arrays. Explicit coordinate refresh or
+export is needed after registration. The metadata describes coordinates, rather
+than storing a general transformation engine.
+
 ### Visium
 
 Space Ranger headerless/headered position layouts and HDF5/plain or compressed
@@ -120,8 +147,10 @@ usually becomes float32; MTX is float32). `obs` adds int64 `in_tissue`,
 `array_row`, `array_col`, textual `spot_id` and categorical `region` in that
 order. `spot_id` repeats the barcode and links to the generated spot circles
 indexed by barcode, using `region` as the region key. Float64
-`obsm["spatial"]` contains full-resolution image-pixel centres in XY order;
-these pixel fields are not also `obs` columns. `uns["spatial"]` retains the
+`obsm["spatial_pixels"]` contains full-resolution image-pixel centres in XY order;
+these pixel fields are not also `obs` columns. Canonical physical `spatial` is
+absent because display diameters and visualization scale factors do not prove
+a physical ruler. `uns["spatial"]` retains the
 library's metadata and vendor scale factors without embedded images. No
 expression layers or `raw` are created. See the
 [API](generated/spatialdata_io.visium.rst) for image selection and overrides.
@@ -138,10 +167,15 @@ matches these names; the target is generated from the same bead population.
 Dynamic Moran statistics join into active `var` by feature ID and are missing
 for unlisted features. Their source order follows existing feature annotations.
 Metric categories become dictionaries in `uns`; `Top_cluster_defining_features`
-is an eager DataFrame. Enrichment never changes `raw.var`. Source
-`obsm["spatial"]` is retained, and an identical `X_spatial` is removed. Its
-units remain the source coordinate units; bead radius does not establish a
-physical calibration. Only `X` is converted to canonical CSR. Every inherited
+is an eager DataFrame. Enrichment never changes `raw.var`. The supported Seeker primary profile
+requires `X_spatial` and accepts an
+additional agreeing `spatial` embedding. Exact native XY is retained in
+`obsm["spatial_pixels"]`; canonical float64 `spatial` uses the manufacturer
+approximate 0.647 µm/pixel calibration without reversing stored orientation.
+The circles use the same scale; their radius 10 is a display radius in source
+pixels, rather than a measured bead footprint. Reprocessed, merged and Trekker
+coordinate profiles require separate evidence. Only `X` is converted to
+canonical CSR. Every inherited
 layer, including a layer named `counts`, retains its source representation.
 Other embeddings, aligned mappings, nested metadata and `raw` are preserved.
 Inherited `spatialdata_attrs` is rejected. See the
@@ -153,14 +187,19 @@ CSV and FCS inputs return events in source order with positional string names
 `"0"`, `"1"`, … . Only complete `cycNNN_chNNN` names become features, in
 source order. `X` contains marker intensities, including valid negative and
 fractional values; CSV becomes float64, and FCS numerical widths follow the
-source. Feature names are the cycle/channel IDs; FCS can add textual
-`var["marker"]` aligned from its metadata.
+source. Complete Akoya `short_name:long_label` CSV headers are normalized at
+the first colon, with duplicate short names rejected; long marker labels become
+`var["marker"]`. Feature names remain cycle/channel IDs. FCS can add the same
+textual marker annotation aligned from its metadata.
 
 All other source columns remain in `obs`, including integer `cell_id`
 (int64 or uint64 as needed), categorical `region`, and numerical pixel `x`/`y`.
 CSV coordinates are float64 and additional CSV annotations remain text; FCS
 metadata retain their native primitive types. Optional annotations may be
-missing. Float64 `obsm["spatial"]` repeats XY pixels. Circles are linked by
+missing. Native XY remains in `obs["x"]`/`obs["y"]`. Canonical float64
+`obsm["spatial"]` exists only with an explicit or supported associated physical
+calibration; its declaration identifies the source metric and frame. Circles
+are linked by
 `(region, cell_id)` to their generated index; no independent segmentation
 population is inferred. No layers, `raw` or additional embeddings are created.
 See the [API](generated/spatialdata_io.codex.rst) for CSV/FCS selection.
@@ -171,7 +210,9 @@ The explicit image/labels/H5AD layout retains imported row names/order,
 feature order and expression dtype. Active feature names are made unique;
 `raw` retains its own feature vocabulary and metadata. Imported annotations,
 embeddings, aligned mappings and ordinary `uns` survive unchanged, apart from
-validated reserved output fields. No position array is derived.
+validated reserved output fields. Unknown imported `spatial` moves exactly to
+`spatial_source`; no physical position array is derived. Image/label OME spacing
+does not establish the imported table embedding's units or origin.
 
 Categorical `region` names `<dataset_id>_labels_image`. The default integer
 `instance_id` is parsed exactly from observation names, using int64 or uint64;
@@ -194,9 +235,13 @@ label dtype, without checking pixel membership.
 
 Active feature metadata column spaces become underscores, including
 `Final Concentration / Dilution` becoming `Final_Concentration`; values retain
-their source types. `obsm["spatial"]` becomes XY pixel centroids in
-`(centroid-1, centroid-0)` order and retains the supported source numerical
-width. Other mappings and metadata remain. `X` and optional `counts` become
+their source types. `obsm["spatial_pixels"]` contains XY source centroids in
+`(centroid-1, centroid-0)` order with the supported source numerical width.
+A displaced imported embedding is retained exactly as `spatial_source`.
+Complete per-sample calibration creates float64 micrometre `spatial` using
+`(source_xy + 0.5) * spacing_xy_um`, in the unchanged raster frame. Independent
+samples use categorical row frames. Mixed or absent calibration omits canonical
+`spatial` for the aggregate. Other mappings and metadata remain. `X` and optional `counts` become
 CSR; other layers and `raw` retain their values and representation. Renaming
 active feature columns does not rename `raw.var` columns. Inherited
 `spatialdata_attrs` is rejected. See the
@@ -211,7 +256,9 @@ Imported expression dtype, annotations and missingness remain. `array_A` and
 `array_B` are one-based int64 grid coordinates; textual `sample` and
 categorical `region` contain the dataset name, and int64 `pixel_id` is the
 zero-based sorted row position. Float64 is not inferred as a physical unit:
-`obsm["spatial"]` contains integer `(A, B)` grid positions.
+`obsm["spatial_grid"]` contains integer `(A, B)` grid positions. Any
+imported `spatial` is preserved exactly under `spatial_source` before sorting;
+canonical physical `spatial` is absent.
 
 The generated grid index checks final membership in `(region, pixel_id)`;
 source linkage is intentionally replaced. `X` and optional `counts` become
@@ -269,7 +316,12 @@ marker names receive MCQuant suffixes on every occurrence.
 `obs` contains categorical `region` and int64 `CellID`, optional nullable
 float64 morphology and additional text annotations in their declared source
 order. `X_centroid`/`Y_centroid` leave `obs` and become float64 local pixel
-`obsm["spatial"]`. Area is pixel², axis lengths and centroid annotations are
+`obsm["spatial_pixels"]`. Complete source-image XY calibration adds
+float64 micrometre `spatial` using `(source_xy + 0.5) * spacing_xy_um` in
+the unchanged raster frame. Native descriptions distinguish regionprops
+pixel-index frames from raster-corner frames. TMA cores remain independent;
+several segmentations of one image share its frame. Mixed-calibration aggregate
+tables retain native positions and omit canonical physical `spatial`. Area is pixel², axis lengths and centroid annotations are
 pixels, Orientation follows the source angle convention, and Eccentricity,
 Solidity and Extent are dimensionless. Calibrated spatial-element transforms
 do not rescale these annotations. `(region, CellID)` links to label images;
@@ -289,8 +341,13 @@ otherwise positional string names are generated. `var` has no columns.
 `region` even in unlinked mode. Optional `Area`, `Area.um2`, `AspectRatio`,
 `Width`, `Height`, and `Mean.*`/`Max.*` stain summaries are nullable float64;
 other metadata stay text. Centre columns leave `obs`:
-`obsm["spatial"]` is local XY pixels, and `obsm["global"]` is global XY
-pixels, both float64. The word global does not convert pixels into µm.
+`obsm["spatial_pixels"]` is local XY pixels, and `obsm["global"]` is
+global XY pixels, both float64. Local row frames identify the FOV; the native
+global declaration uses `global_pixels`. With explicit `pixel_size_um`,
+canonical float64 `spatial` contains scaled global XY micrometres, and the same
+scale follows placement for rasters and transcripts. Without calibration,
+canonical `spatial` is absent. A scalar scale does not establish a different
+local/global source mapping.
 Linkage, when requested, uses `(region, cell_ID)` with label dtype/range
 validation, without enumerating pixels. No layers or `raw` are created.
 See [CosMx](cosmx.md) for FOV transforms and chained gzip-member decoding,
@@ -321,7 +378,10 @@ order and first-occurrence coordinate order. Duplicate coordinate/feature
 records sum deterministically. `obs` contains categorical `region` and
 int64 `instance_id`; positional string observation names identify the bins.
 `var` retains source `gene` or `geneID`/`geneName`, `offset` and record-span
-`count`. Integer native-grid XY positions are in `obsm["spatial"]`;
+`count`. Exact integer native-grid XY positions are in `obsm["spatial_grid"]`;
+finite float64 `spatial` uses source pitch divided by 1000 in `global`
+micrometres, describing source bin reference positions rather than footprint
+centres;
 optional uint64 `exon` is a CSR layer. `uns["stereoseq"]` describes origin
 and resolution. Tables link to the returned bin points by exact IDs.
 
@@ -339,8 +399,11 @@ returned point/polygon IDs; invalid-cell drops filter the complete cell row.
 
 Analysis tables are separate products with their own point targets. Imported
 expression values, dtype, names/order, annotations, embeddings, ordinary
-metadata and `raw` remain. `obsm["spatial"]` is native-grid XY, and matching
-GEF inputs establish source identity without replacing analysis values.
+metadata and `raw` remain. `obsm["spatial_grid"]` retains native-grid XY
+with its original source dtype. Float64 `spatial` gives the same vendor reference positions in
+micrometres. Native identity matching and common-pitch resolution precede
+geometry filtering and final linkage; matching GEF inputs establish source
+identity without replacing analysis values.
 Only `X` and present `counts`, `log1p`, `exon` layers become CSR. Other
 layers and aligned mappings retain their storage. Final `region` and
 `instance_id` link to analysis points. Nonfinite expression fails during

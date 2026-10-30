@@ -31,6 +31,7 @@ class TestCosmxCommand:
             tmp_path,
             dataset_id=None,
             include_transcripts=True,
+            pixel_size_um=None,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
         )
@@ -58,7 +59,12 @@ class TestCosmxCommand:
         )
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
-            tmp_path, dataset_id="Lung5_Rep2", include_transcripts=False, scale_factors=(2,), chunks=(3, 512, 512)
+            tmp_path,
+            dataset_id="Lung5_Rep2",
+            include_transcripts=False,
+            pixel_size_um=None,
+            scale_factors=(2,),
+            chunks=(3, 512, 512),
         )
 
     def test_scalar_chunks(
@@ -97,3 +103,19 @@ class TestCosmxCommand:
         assert result.exit_code == 0
         for option in ("--dataset-id", "--include-transcripts", "--scale-factors", "--chunks"):
             assert option in result.output
+
+    def test_explicit_pixel_size(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
+        reader = mocker.patch("spatialdata_io.readers.cosmx.cosmx")
+        result = runner.invoke(
+            cosmx_command,
+            [
+                "--input",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "out"),
+                "--pixel-size-um",
+                "0.18",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert reader.call_args.kwargs["pixel_size_um"] == 0.18

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.steinbock._schemas import (
@@ -19,6 +20,7 @@ from spatialdata_io.readers.steinbock._schemas import (
     _metadata_columns,
     _validate_centroids,
     _validate_output_column,
+    _validate_position_destinations,
     _validate_table,
     image_metadata_columns,
     normalize_image_metadata,
@@ -336,3 +338,28 @@ class TestNormalizeImageMetadata:
             context.prec = 2
             metadata = normalize_image_metadata(columns, {"s.tiff"}, ArtifactFile(tmp_path))
         assert metadata["s.tiff"].spacing_um == (3 / 11, 7 / 13)
+
+
+class TestValidatePositionDestinations:
+    @pytest.mark.parametrize(
+        "collision", ["spatial_pixels", "spatial_source", "declaration", "spatial_frame", "spatial_pixel_frame"]
+    )
+    def test_existing_destinations_fail_before_mutation(self, tmp_path: Path, collision: str) -> None:
+        table = ad.AnnData(np.ones((2, 1)))
+        if collision == "declaration":
+            table.uns[POSITIONS_KEY] = {"schema_version": 1}
+        elif collision in {"spatial_frame", "spatial_pixel_frame"}:
+            table.obs[collision] = pd.Categorical(["s", "s"])
+        else:
+            table.obsm[collision] = np.zeros((2, 3), dtype=np.int16)
+            if collision == "spatial_source":
+                table.obsm["spatial"] = np.zeros((2, 3), dtype=np.int16)
+        with pytest.raises(ReaderFormatError, match="existing position"):
+            _validate_position_destinations(table, multiple=True, path=ArtifactFile(tmp_path / "cells.h5ad"))
+        assert "cell_id" not in table.obs
+
+    def test_unrelated_source_embedding_is_retained(self, tmp_path: Path) -> None:
+        table = ad.AnnData(np.ones((1, 1)))
+        table.obsm["spatial_source"] = np.zeros((1, 3), dtype=np.int16)
+        _validate_position_destinations(table, multiple=False, path=ArtifactFile(tmp_path / "cells.h5ad"))
+        assert "spatial_source" in table.obsm

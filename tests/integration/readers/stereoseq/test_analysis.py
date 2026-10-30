@@ -72,7 +72,7 @@ class TestStereoseqAnalysisResolution:
             assert_equal(actual.raw, source.raw, exact=True)
             for name in ("counts", "log1p", "exon", "metadata", "sparse_metadata"):
                 assert_equal(actual.layers[name], source.layers[name], exact=True)
-            np.testing.assert_array_equal(actual.obsm["spatial"], source.obsm["spatial"])
+            np.testing.assert_array_equal(actual.obsm["spatial_grid"], source.obsm["spatial"])
             np.testing.assert_array_equal(actual.obsm["X_pca"], source.obsm["X_pca"])
             np.testing.assert_array_equal(actual.varm["inherited"], source.varm["inherited"])
             for name in ("obsp", "varp"):

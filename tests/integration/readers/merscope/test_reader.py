@@ -6,12 +6,14 @@ import pickle
 import shutil
 from typing import TYPE_CHECKING, Literal
 
+import anndata as ad
 import dask.array as da
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
 import tifffile
+from anndata.tests.helpers import assert_equal
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
 from scipy import sparse
@@ -165,6 +167,21 @@ class TestMerscope:
         result = merscope(fixture.root, include_images=False)
         for element in (result.shapes["slide_region_polygons"], result.points["slide_region_transcripts"]):
             assert get_transformation(element, to_coordinate_system="global") == Identity()
+
+    @pytest.mark.parametrize("with_affine", [True, False])
+    def test_table_and_image_frames_without_other_vectors(self, tmp_path: Path, *, with_affine: bool) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        if not with_affine:
+            (fixture.root / "images" / "micron_to_mosaic_pixel_transform.csv").unlink()
+        result = merscope(fixture.root, include_transcripts=False, include_cell_boundaries=False)
+        frame = "global" if with_affine else "microns"
+        description = result.tables["table"].uns["spatialdata_io_positions"]["coordinates"]["spatial"]
+        assert description["frame"] == frame
+        assert description["units"] == "micrometer"
+        image_frames = get_transformation(result.images["slide_region_z0"], get_all=True)
+        assert isinstance(image_frames, dict)
+        assert set(image_frames) == ({"global"} if with_affine else {"mosaic_pixels"})
+        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[2, 2], [10, 1], [21, 1]])
 
     def test_image_only_uses_full_inverse_affine(self, tmp_path: Path) -> None:
         fixture = write_merscope_dataset(tmp_path)
@@ -494,6 +511,22 @@ class TestMerscope:
         result.write(output)
         restored = read_zarr(output)
         restored_table = restored.tables["table"]
+        assert_equal(restored_table.uns["spatialdata_io_positions"], table.uns["spatialdata_io_positions"], exact=True)
+        for storage in ("h5ad", "zarr"):
+            table_path = tmp_path / f"positions_merscope.{storage}"
+            source_table = table
+            if storage == "h5ad":
+                source_table.write_h5ad(table_path)
+                restored_positions = ad.read_h5ad(table_path)
+            else:
+                source_table.write_zarr(table_path)
+                restored_positions = ad.read_zarr(table_path)
+            assert_equal(
+                restored_positions.uns["spatialdata_io_positions"],
+                source_table.uns["spatialdata_io_positions"],
+                exact=True,
+            )
+            assert_equal(restored_positions.obsm, source_table.obsm, exact=True)
         assert isinstance(restored_table.X, sparse.csr_array | sparse.csr_matrix)
         assert_array_equal(restored_table.X.data, table.X.data)
         assert_array_equal(restored_table.obsm["blank"].data, table.obsm["blank"].data)

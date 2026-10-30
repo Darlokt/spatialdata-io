@@ -343,6 +343,10 @@ class TestBuildTable:
             table.obsm["spatial"], obs[["x_centroid", "y_centroid"]].to_numpy(dtype=np.float64)
         )
         assert table.obsm["spatial"].dtype == np.float64
+        description = table.uns["spatialdata_io_positions"]["coordinates"]["spatial"]
+        assert description["frame"] == "global"
+        assert description["position"] == "vendor cell centroid"
+        assert description["units"] == "micrometer"
         assert bundle.cell_ids == tuple(obs["cell_id"])
 
     def test_identity_mismatches_raise(self, tmp_path: Path) -> None:
@@ -392,7 +396,12 @@ class TestLinkTable:
     def test_targets(self, tmp_path: Path, target: TableTarget, instance_key: str, expected: pd.Index) -> None:
         _, table = _assemble(tmp_path, fx.XOA_3_0)
 
+        native = table.obsm["spatial"]
+        expression = table.X
         linked = link_table(table, target, expected)
+        assert linked is table
+        assert linked.obsm["spatial"] is native
+        assert linked.X is expression
 
         assert get_table_keys(linked) == (target, "region", instance_key)
         assert isinstance(linked.X, sparse.csr_array)

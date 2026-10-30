@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 class TestIss:
     """Read genuine artifacts without compatibility shims or mocked parsers."""
 
-    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
     def test_inherited_slots_and_raw_survive_persistence(self, tmp_path: Path, storage: str) -> None:
         """Keep inherited values aligned, including raw's independent feature vocabulary."""
         write_iss_dataset(tmp_path)
@@ -65,6 +65,9 @@ class TestIss:
         if storage == "h5ad":
             table.write_h5ad(destination)
             restored = ad.read_h5ad(destination)
+        elif storage == "anndata_zarr":
+            table.write_zarr(destination)
+            restored = ad.read_zarr(destination)
         else:
             result.write(destination)
             restored = read_zarr(destination).tables["table"]
@@ -85,7 +88,7 @@ class TestIss:
             assert actual.raw.obs_names.tolist() == expected.obs_names.tolist()
             assert actual.uns["inherited"] == expected.uns["inherited"]
             assert get_table_keys(actual) == get_table_keys(table)
-            np.testing.assert_array_equal(actual.obsm["spatial"], table.obsm["spatial"])
+            np.testing.assert_array_equal(actual.obsm["spatial_source"], table.obsm["spatial_source"])
         unchanged = ad.read_h5ad(path)
         assert unchanged.obs_names.equals(original.obs_names)
         assert "region" not in unchanged.obs
@@ -147,7 +150,7 @@ class TestIss:
             np.testing.assert_allclose(
                 transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")) @ [4, 3, 1], [1.2, 2.1, 1]
             )
-        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[2, 4], [26, 9]])
+        np.testing.assert_array_equal(result.tables["table"].obsm["spatial_source"], [[2, 4], [26, 9]])
         np.testing.assert_array_equal(result.images["region_raw_image"].data.compute(), iss_dataset.raw)
 
     @pytest.mark.parametrize("label_x", [0.4, 0.3])
@@ -234,7 +237,7 @@ class TestIss:
         assert table.obs[instance_key or "instance_id"].tolist() == [7, 2]
         assert table.obs["region"].tolist() == ["fov_labels_image", "fov_labels_image"]
         assert get_table_keys(table) == ("fov_labels_image", "region", instance_key or "instance_id")
-        np.testing.assert_array_equal(table.obsm["spatial"], [[2.0, 4.0], [26.0, 9.0]])
+        np.testing.assert_array_equal(table.obsm["spatial_source"], [[2.0, 4.0], [26.0, 9.0]])
 
     @pytest.mark.parametrize("channels", [1, 2, 3, 4])
     @pytest.mark.parametrize("factors", [(), (2, 2)])

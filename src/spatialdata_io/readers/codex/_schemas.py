@@ -61,6 +61,28 @@ def cell_columns(columns: list[str], path: ArtifactFile) -> tuple[list[str], lis
     return features, [column for column in columns if column not in feature_set]
 
 
+def csv_column_names(columns: list[str], path: ArtifactFile) -> tuple[list[str], list[str] | None]:
+    """Normalize complete Akoya short-name:long-label headers in source order.
+
+    Plain normalized tables retain additional metadata names literally. A
+    qualified export must qualify every field; duplicate short names remain
+    errors at the ordinary cell-column boundary. Split only the first colon.
+    """
+    if REQUIRED_COLUMNS.issubset(columns):
+        return columns, None
+    if not columns or not all(":" in column for column in columns):
+        return columns, None
+    names: list[str] = []
+    labels: list[str] = []
+    for column in columns:
+        name, _, label = column.partition(":")
+        if not label or "\x00" in label:
+            raise schema_error(path, found="empty or NUL-containing long label", expected="nonempty Akoya long labels")
+        names.append(name)
+        labels.append(label)
+    return names, labels
+
+
 def check_integer_promotion(values: npt.NDArray[np.number], path: ArtifactFile) -> None:
     """Reject integers that float64 expression or geometry storage would change."""
     if values.dtype.kind in "iu":

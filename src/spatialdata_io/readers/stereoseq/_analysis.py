@@ -33,6 +33,7 @@ class AnalysisResult:
     coordinates: npt.NDArray[np.int64]
     instance_ids: pd.Index
     name: str
+    population: str
     sample_id: str
     origin: tuple[int, int] | None
     resolution: int
@@ -116,6 +117,7 @@ def read_analysis(source: AnalysisSource, *, counts: Mapping[str, SquareCounts |
         coordinates=schema.coordinates,
         instance_ids=table.obs_names.copy(),
         name=analysis_name,
+        population=population_name,
         sample_id=source.sample_id,
         origin=origin,
         resolution=physical_resolution,

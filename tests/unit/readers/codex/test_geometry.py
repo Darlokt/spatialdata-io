@@ -7,7 +7,7 @@ from typing import cast
 import anndata as ad
 import numpy as np
 import pandas as pd
-from spatialdata.transformations import BaseTransformation, get_transformation
+from spatialdata.transformations import BaseTransformation, Identity, get_transformation
 
 from spatialdata_io.readers.codex._geometry import _make_shapes
 
@@ -20,7 +20,7 @@ class TestMakeShapes:
         table = ad.AnnData(obs=pd.DataFrame({"cell_id": [7, 2]}, index=["a", "b"]))
         table.obsm["spatial"] = coordinates
 
-        result = _make_shapes(table)
+        result = _make_shapes(table, coordinates, frame="table_pixels", transformation=Identity())
 
         assert result.index.tolist() == [7, 2]
         np.testing.assert_array_equal(result.geometry.x, [20, 2.5])
@@ -28,5 +28,5 @@ class TestMakeShapes:
         np.testing.assert_array_equal(result["radius"], [1, 1])
         np.testing.assert_array_equal(coordinates, [[20, 1.5], [2.5, 30]])
         assert table.obs_names.tolist() == ["a", "b"]
-        transform = cast("BaseTransformation", get_transformation(result, to_coordinate_system="global"))
+        transform = cast("BaseTransformation", get_transformation(result, to_coordinate_system="table_pixels"))
         np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.eye(3))

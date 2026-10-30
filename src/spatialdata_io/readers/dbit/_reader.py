@@ -153,7 +153,10 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         dtype range are rejected rather than wrapped.
 
         ``array_A`` and ``array_B`` are one-based int64 grid coordinates.
-        ``obsm['spatial']`` retains these two columns in A/B order. ``pixel_id``
+        ``obsm['spatial_grid']`` retains these columns in A/B order, described as
+        grid ordinals in the ``barcode_grid`` frame. Imported ``spatial`` moves
+        exactly to ``spatial_source`` before sorting; occupied destinations fail.
+        Physical ``spatial`` is absent. ``pixel_id``
         is the zero-based sorted row index. ``sample`` and categorical ``region``
         contain the grid name. Previous source linkage is replaced with exact
         membership in the new grid. Additional H5AD annotation fields accept
@@ -226,7 +229,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         scale = max(scale0.sizes["y"], scale0.sizes["x"]) / len(barcodes.a)
 
     # _read_table produces these exact int64 coordinates in final row order.
-    coordinates = cast("npt.NDArray[np.int64]", table.obsm["spatial"])
+    coordinates = cast("npt.NDArray[np.int64]", table.obsm["spatial_grid"])
     grid = _make_grid(coordinates, scale=scale, include_border=include_border, border_scale=border_scale)
 
     # _read_table validates eager frames; AnnData also types backed Dataset2D.

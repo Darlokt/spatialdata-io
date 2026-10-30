@@ -7,6 +7,7 @@ import json
 import shutil
 from typing import TYPE_CHECKING, Literal, cast
 
+import anndata as ad
 import h5py
 import imagecodecs
 import numpy as np
@@ -14,6 +15,7 @@ import pandas as pd
 import pytest
 import tifffile
 from anndata import read_h5ad
+from anndata.tests.helpers import assert_equal
 from scipy import sparse
 from scipy.io import mmwrite
 from spatialdata import SpatialData
@@ -143,7 +145,7 @@ def _assert_table_contract(result: SpatialData) -> None:
     assert table.obs["in_tissue"].tolist() == [1, 1, 1]
     assert table.obs["spot_id"].tolist() == ["barcode-a", "barcode-b", "barcode-c"]
     assert table.obs["region"].tolist() == ["sample", "sample", "sample"]
-    np.testing.assert_array_equal(table.obsm["spatial"], np.asarray([[20, 10], [40, 30], [60, 50]]))
+    np.testing.assert_array_equal(table.obsm["spatial_pixels"], np.asarray([[20, 10], [40, 30], [60, 50]]))
 
     assert table.uns["spatial"]["sample"]["scalefactors"]["fiducial_diameter_fullres"] == 8.0
     assert get_table_keys(table) == ("sample", "region", "spot_id")
@@ -335,6 +337,21 @@ class TestVisiumSyntheticWorkflow:
         result = visium(source, fullres_image_file=fullres.name)
         store = tmp_path / "result.zarr"
 
+        for storage in ("h5ad", "zarr"):
+            table_path = tmp_path / f"positions_visium.{storage}"
+            source_table = result.tables["table"]
+            if storage == "h5ad":
+                source_table.write_h5ad(table_path)
+                restored_positions = ad.read_h5ad(table_path)
+            else:
+                source_table.write_zarr(table_path)
+                restored_positions = ad.read_zarr(table_path)
+            assert_equal(
+                restored_positions.uns["spatialdata_io_positions"],
+                source_table.uns["spatialdata_io_positions"],
+                exact=True,
+            )
+            assert_equal(restored_positions.obsm, source_table.obsm, exact=True)
         result.write(store)
         restored = SpatialData.read(store)
 

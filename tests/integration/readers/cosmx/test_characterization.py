@@ -40,7 +40,7 @@ class TestCosmxCharacterization:
         assert isinstance(table.X, sparse.csr_array)
         np.testing.assert_array_equal(table.X.toarray(), [[1, 0, 2, 0], [0, 3, 0, 0], [4, 0, 0, 0], [0, 0, 7, 1]])
         assert table.var_names.tolist() == ["GeneB", "HLA-A", "GeneA", "NegPrb1"]
-        np.testing.assert_array_equal(table.obsm["spatial"], [[2, 5], [6, 2], [2, 5], [6, 2]])
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[2, 5], [6, 2], [2, 5], [6, 2]])
         np.testing.assert_array_equal(
             table.obsm["global"], [[1002, 5005.5], [1006, 5002.5], [3002.25, 7005], [3006.25, 7002]]
         )

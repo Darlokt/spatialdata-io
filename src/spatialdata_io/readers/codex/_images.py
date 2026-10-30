@@ -11,6 +11,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
 
 if TYPE_CHECKING:
+    from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
     from spatialdata_io.readers._utils.image import RasterOptions
@@ -32,8 +33,14 @@ def _validate_image_options(data_axes: str | None, tiff_series: int | None) -> N
         raise ValueError(message)
 
 
-def _read_image(
-    path: ArtifactFile, *, data_axes: str | None, tiff_series: int | None, raster: RasterOptions
+def _read_image(  # noqa: PLR0913, RUF100 - Explicit raster and registration state.
+    path: ArtifactFile,
+    *,
+    data_axes: str | None,
+    tiff_series: int | None,
+    raster: RasterOptions,
+    frame: str = "image_pixels",
+    transformation: BaseTransformation | None = None,
 ) -> DataArray | DataTree:
     """Build a level-zero image with declared axes and task-local TIFF ownership."""
     try:
@@ -83,5 +90,5 @@ def _read_image(
         scale_factors=raster.model_scale_factors,
         chunks=raster.image_chunks(),
         rgb=False,
-        transformations={"global": Identity()},
+        transformations={frame: Identity() if transformation is None else transformation},
     )

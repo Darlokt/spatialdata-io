@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
@@ -33,8 +34,22 @@ def read_counts(path: ArtifactFile) -> AnnData:
     return table
 
 
-def link_table(table: AnnData, target: str, identifiers: pd.Index) -> AnnData:
+def link_table(table: AnnData, target: str, identifiers: pd.Index, *, position: str) -> AnnData:
     """Link the final owned table once against its materialized target index."""
+    if "spatial" in table.obsm:
+        positions: PositionsMetadata = {
+            "schema_version": 1,
+            "coordinates": {
+                "spatial": {
+                    "axes": ["x", "y"],
+                    "units": "micrometer",
+                    "frame": "global",
+                    "position": position,
+                    "calibration": {"global": "Space Ranger manufactured bin grid and validated slide fit"},
+                }
+            },
+        }
+        table.uns[POSITIONS_KEY] = positions
     context = ReaderErrorContext("visium_hd", target)
     table.obs["region"] = pd.Categorical([target] * table.n_obs, categories=pd.Index([target]))
 

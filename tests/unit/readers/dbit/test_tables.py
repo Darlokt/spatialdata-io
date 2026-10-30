@@ -84,6 +84,35 @@ class TestExpressionArray:
 class TestReadTable:
     """Preserve auxiliary annotations while validating expression and identifiers."""
 
+    @pytest.mark.parametrize("destination", ["spatial_source", "spatial_grid", "spatialdata_io_positions"])
+    def test_coordinate_destinations_reject_collisions(self, tmp_path: Path, destination: str) -> None:
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        source.obsm["spatial"] = np.ones((source.n_obs, 3), dtype=np.int16)
+        if destination == "spatialdata_io_positions":
+            source.uns[destination] = {"source": "retained"}
+        else:
+            source.obsm[destination] = np.ones((source.n_obs, 2))
+        source.write_h5ad(path)
+        with pytest.raises(ReaderFormatError, match=r"destination|spatial_source"):
+            _read(tmp_path)
+
+    def test_imported_embedding_sorted_exactly_with_rows(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        native = np.arange(source.n_obs * 3, dtype=np.int16).reshape(source.n_obs, 3)
+        source.obsm["spatial"] = native
+        source.write_h5ad(path)
+        table = _read(tmp_path)
+        order = source.obs_names.get_indexer(table.obs_names)
+        np.testing.assert_array_equal(table.obsm["spatial_source"], native[order])
+        assert table.obsm["spatial_source"].dtype == np.int16
+        assert table.obsm["spatial_grid"].dtype == np.int64
+        assert "spatial" not in table.obsm
+        assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial_grid"]["units"] == "grid"
+
     @pytest.mark.parametrize("kind", ["missing", "no_obs", "no_var", "duplicate_obs", "duplicate_var", "empty_var"])
     def test_invalid_table(self, tmp_path: Path, kind: str) -> None:
         _write_layout(tmp_path)

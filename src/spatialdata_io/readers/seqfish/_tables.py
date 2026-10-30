@@ -13,6 +13,7 @@ import pyarrow.compute as pc
 import pyarrow.csv as pacsv
 from scipy import sparse
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     as_csr_array,
@@ -167,8 +168,21 @@ def read_table(counts: ArtifactFile, cells: ArtifactFile) -> ad.AnnData:
     return table
 
 
-def finalize_table(table: ad.AnnData, *, region: str | None, context: ReaderErrorContext) -> ad.AnnData:
+def finalize_table(table: ad.AnnData, *, frame: str, region: str | None, context: ReaderErrorContext) -> ad.AnnData:
     """Finalize owned annotations once and link only to an explicitly included target."""
+    positions: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial": {
+                "axes": ["x", "y"],
+                "units": "micrometer",
+                "frame": frame,
+                "position": "vendor cell centroid",
+                "calibration": {frame: "Spatial Genomics CellCoordinates center_x/center_y in micrometres"},
+            }
+        },
+    }
+    table.uns[POSITIONS_KEY] = positions
     # This reader constructs an eager owned AnnData, never a backed Dataset2D.
     observations = cast("pd.DataFrame", table.obs)
     if region is not None:

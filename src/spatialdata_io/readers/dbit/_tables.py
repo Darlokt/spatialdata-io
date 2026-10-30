@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.table import as_csr_array
 from spatialdata_io.readers.dbit._schemas import (
@@ -64,6 +65,8 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
         raise
 
     _validate_table(table, path)
+    if "spatial" in table.obsm:
+        table.obsm["spatial_source"] = table.obsm.pop("spatial")
     source_linkage_columns = _source_linkage_columns(table, path)
 
     # Export IDs encode B then A; output coordinates are A/x then B/y.
@@ -101,7 +104,19 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
 
     # Eager AnnData row selection preserves the schema-validated pandas frames.
     obs = cast("pd.DataFrame", table.obs)
-    table.obsm["spatial"] = obs[["array_A", "array_B"]].to_numpy(dtype=np.int64)
+    table.obsm["spatial_grid"] = obs[["array_A", "array_B"]].to_numpy(dtype=np.int64)
+    positions: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial_grid": {
+                "axes": ["x", "y"],
+                "units": "grid",
+                "frame": "barcode_grid",
+                "position": "one-based barcode channel ordinals (A, B)",
+            }
+        },
+    }
+    table.uns[POSITIONS_KEY] = positions
 
     # A declared old linkage identifies metadata that the new grid replaces.
     # Unlinked columns with these reserved names remain preserved annotations.

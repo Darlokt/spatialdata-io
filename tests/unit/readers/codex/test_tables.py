@@ -12,7 +12,7 @@ from scipy import sparse
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.codex import _tables, codex
-from spatialdata_io.readers.codex._tables import _read_cell_table
+from spatialdata_io.readers.codex._tables import _read_cell_table, _set_positions
 from tests.integration.readers.codex._fixtures import cell_frame, write_csv, write_fcs
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ class TestReadCellTable:
         path = tmp_path / "cells.csv"
         write_csv(path, frame)
 
-        result = _read_cell_table(ArtifactFile(path))
+        result, _ = _read_cell_table(ArtifactFile(path))
 
         assert result.obs["note"].tolist() == [note] * 3
 
@@ -51,7 +51,7 @@ class TestReadCellTable:
         path = tmp_path / "cells.csv"
         path.write_text(f"cell_id,region,x,y,cyc001_ch001\n1,1,0,0,{spelling}\n", encoding="utf-8")
 
-        result = _read_cell_table(ArtifactFile(path))
+        result, _ = _read_cell_table(ArtifactFile(path))
 
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.dtype == np.dtype(np.int64)
@@ -77,7 +77,7 @@ class TestReadCellTable:
         source = mocker.Mock(data=frame, channels=pd.DataFrame({"PnN": frame.columns}))
         mocker.patch("spatialdata_io.readers.codex._tables.readfcs.ReadFCS", return_value=source)
 
-        result = _read_cell_table(ArtifactFile(path))
+        result, _ = _read_cell_table(ArtifactFile(path))
 
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.dtype == np.dtype(dtype)
@@ -89,11 +89,11 @@ class TestReadCellTable:
         frame = cell_frame()
         path = tmp_path / "cells.csv"
         write_csv(path, frame)
-        whole = _read_cell_table(ArtifactFile(path))
+        whole, _ = _read_cell_table(ArtifactFile(path))
         mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", 2 * 8)
         split = mocker.spy(_tables, "_split_cells")
 
-        bounded = _read_cell_table(ArtifactFile(path))
+        bounded, _ = _read_cell_table(ArtifactFile(path))
 
         assert split.call_count == len(frame)
         assert all(call.args[0].shape[0] == 1 for call in split.call_args_list)
@@ -175,7 +175,7 @@ class TestReadCellTable:
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,region,x,y,cyc001_ch001,note\n1,1,0,0,1,\n", encoding="utf-8")
 
-        result = _read_cell_table(ArtifactFile(path))
+        result, _ = _read_cell_table(ArtifactFile(path))
 
         assert result.obs["note"].isna().all()
 
@@ -189,7 +189,7 @@ class TestReadCellTable:
         path = tmp_path / "cells.fcs"
         write_fcs(path, marker_labels=False)
 
-        table = _read_cell_table(ArtifactFile(path))
+        table, _ = _read_cell_table(ArtifactFile(path))
 
         assert table.var.columns.tolist() == []
         assert table.obs["cell_id"].tolist() == [7, 2, 11]
@@ -286,7 +286,22 @@ class TestReadCellTable:
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,-1\n2,1,0,0,9223372036854775808\n", encoding="utf-8")
         mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
 
-        result = _read_cell_table(ArtifactFile(path))
+        result, _ = _read_cell_table(ArtifactFile(path))
 
         assert isinstance(result.X, sparse.csr_array)
         np.testing.assert_array_equal(result.X.data, [-1.0, float(2**63)])
+
+
+class TestSetPositions:
+    """Physical finalization borrows native XY and preserves owned expression."""
+
+    def test_expression_and_native_buffers_are_unchanged(self, tmp_path: Path) -> None:
+        path = tmp_path / "cells.csv"
+        write_csv(path)
+        table, coordinates = _read_cell_table(ArtifactFile(path))
+        expression = table.X
+        original = coordinates.copy()
+        _set_positions(table, coordinates, pixel_size_um=0.5, calibration="Caller-declared source metric.")
+        assert table.X is expression
+        np.testing.assert_array_equal(coordinates, original)
+        assert not np.shares_memory(table.obsm["spatial"], coordinates)

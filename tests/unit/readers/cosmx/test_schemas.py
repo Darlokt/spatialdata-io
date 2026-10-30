@@ -77,6 +77,10 @@ class TestCountFeatures:
 class TestMetadataColumns:
     """Vendor morphology and intensities are typed; other annotations stay text."""
 
+    def test_frame_column_collision(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="reader-owned frame column"):
+            metadata_columns(["fov", "cell_ID", *_CENTERS, "spatial_pixel_frame"], _path(tmp_path))
+
     def test_roles(self, tmp_path: Path) -> None:
         columns = metadata_columns(
             ["cell", "fov", "cell_ID", *_CENTERS, "Area", "Area.um2", "Mean.DAPI", "Max.G", "Width", "version"],

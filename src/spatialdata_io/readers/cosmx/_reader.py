@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from spatialdata import SpatialData
@@ -24,11 +25,12 @@ if TYPE_CHECKING:
     from xarray import DataArray, DataTree
 
 
-def cosmx(
+def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     path: str | Path,
     *,
     dataset_id: str | None = None,
     include_transcripts: bool = True,
+    pixel_size_um: float | None = None,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
@@ -56,6 +58,11 @@ def cosmx(
         File prefix. None infers it from the single ``*_exprMat_file`` file.
     include_transcripts
         Return the lazy transcript points.
+    pixel_size_um
+        Positive finite micrometres per validated global pixel. The caller
+        establishes the acquisition/export association. This scales the local
+        global metric without establishing stage registration or overriding
+        local-to-global placement. None retains native-only cell positions.
     scale_factors
         Integer factors of at least two, one per generated pyramid level of the
         images and labels; empty for a single scale.
@@ -76,8 +83,14 @@ def cosmx(
         present and row positions otherwise. ``fov`` and ``cell_ID`` are int64;
         ``Area``, ``AspectRatio``, ``Width``, ``Height`` and ``Mean.*``/``Max.*``
         intensities are nullable float64; other metadata stay text.
-        ``obsm['spatial']`` and ``obsm['global']`` hold local and global cell
-        centers in pixels. With labels, ``region`` links each cell to
+        ``obsm['spatial_pixels']`` and ``obsm['global']`` preserve local and
+        global cell centers in pixels. Categorical string
+        ``obs['spatial_pixel_frame']`` identifies each local FOV frame.
+        Without calibration there is no canonical ``spatial``. With
+        ``pixel_size_um``, ``spatial`` is float64 global cell-center XY in
+        micrometres. ``uns['spatialdata_io_positions']`` declares units,
+        meanings and frames; native ``global`` is described as ``global_pixels``.
+        With labels, ``region`` links each cell to
         ``<fov>_labels`` with instance key ``cell_ID``. IDs must fit their
         FOV's inspected integer label dtype, without reading pixels; without a
         ``CellLabels`` directory the table is unlinked.
@@ -103,8 +116,11 @@ def cosmx(
 
     Notes
     -----
-    Coordinate system ``global`` is the export's global pixel frame; each
-    ``<fov>`` system is that FOV's local pixel frame. Local coordinates are
+    Coordinate system ``global`` is the export's global pixel frame without
+    calibration and micrometres with ``pixel_size_um``. Scaling follows the
+    complete local-to-global raster placement and applies to lazy transcript
+    transformations without changing their native columns or partitions.
+    Each ``<fov>`` system remains that FOV's local pixel frame. Local coordinates are
     pixel indices with a reversed vertical axis, so the raster pixel at row
     ``r`` and column ``c`` of an ``H``-row FOV has local coordinates
     ``(c, H - r)``. This convention was measured on the 2021 release and an
@@ -114,6 +130,10 @@ def cosmx(
     when present, must agree. Rasters are supported for exports whose axes
     are not reversed between frames; the raster convention of exports with a
     reversed global axis has not been evidenced, so such rasters fail.
+    AtoMx 3.10.5 pancreas coordinates do not satisfy this translation contract;
+    this distinct source profile remains unsupported even with a supplied scale.
+    Stage-only positions, paired pixel/mm fields and TIFF optical declarations
+    do not select an automatic calibration profile.
 
     Construction reads the transcript CSV header, with small gzip decoder
     read-ahead. Plain CSV partitions contain about 8 MiB of
@@ -135,6 +155,13 @@ def cosmx(
     if not isinstance(include_transcripts, bool):
         message = "include_transcripts must be a boolean."
         raise TypeError(message)
+    if pixel_size_um is not None:
+        if isinstance(pixel_size_um, bool) or not isinstance(pixel_size_um, (int, float)):
+            msg = "pixel_size_um must be a positive finite number or None."
+            raise TypeError(msg)
+        if not math.isfinite(pixel_size_um) or pixel_size_um <= 0:
+            msg = "pixel_size_um must be a positive finite number or None."
+            raise ValueError(msg)
     options = make_raster_options(scale_factors, chunks)
     layout = discover_layout(path, dataset_id=dataset_id, include_transcripts=include_transcripts)
 
@@ -157,12 +184,17 @@ def cosmx(
     grids: dict[int, tuple[int, int]] = {}
     for item in layout.images:
         images[f"{item.fov}_image"], grids[item.fov] = read_image(
-            item.path, fov=item.fov, placement=placements[item.fov], options=options
+            item.path, fov=item.fov, placement=placements[item.fov], options=options, pixel_size_um=pixel_size_um
         )
     labels: dict[str, DataArray | DataTree] = {}
     for item in layout.labels:
         labels[f"{item.fov}_labels"], dtype = read_labels(
-            item.path, fov=item.fov, grid=grids.get(item.fov), placement=placements[item.fov], options=options
+            item.path,
+            fov=item.fov,
+            grid=grids.get(item.fov),
+            placement=placements[item.fov],
+            options=options,
+            pixel_size_um=pixel_size_um,
         )
         validate_label_ids(metadata.cell_ids[metadata.fovs == item.fov], dtype, item.path)
 
@@ -176,12 +208,12 @@ def cosmx(
             found=f"no labels for FOVs {missing}",
             expected="labels for every FOV with cells",
         )
-    table = build_table(counts, metadata, path=layout.metadata, linked=linked)
+    table = build_table(counts, metadata, path=layout.metadata, linked=linked, pixel_size_um=pixel_size_um)
 
     points: dict[str, DataFrame] = {}
     if layout.transcripts is not None:
         points[f"{layout.dataset_id}_transcripts"] = read_transcripts(
-            layout.transcripts, features=counts.features, placements=placements
+            layout.transcripts, features=counts.features, placements=placements, pixel_size_um=pixel_size_um
         )
 
     result = SpatialData(images=images, labels=labels, points=points, tables={"table": table})

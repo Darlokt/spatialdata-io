@@ -12,7 +12,7 @@ from anndata.tests.helpers import assert_equal
 from scipy import sparse
 from spatialdata import SpatialData
 from spatialdata.models import get_table_keys
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Scale, get_transformation
 
 from spatialdata_io import __version__, curio
 from tests.integration.readers.curio._fixtures import write_curio
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 class TestCurio:
     """Verify scientific values, metadata, geometry, and serialization."""
 
-    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
     def test_inherited_slots_and_raw_survive_persistence(self, tmp_path: Path, storage: str) -> None:
         """Keep inherited values aligned, including raw's independent feature vocabulary."""
         write_curio(tmp_path)
@@ -58,6 +58,9 @@ class TestCurio:
         if storage == "h5ad":
             table.write_h5ad(destination)
             restored = ad.read_h5ad(destination)
+        elif storage == "anndata_zarr":
+            table.write_zarr(destination)
+            restored = ad.read_zarr(destination)
         else:
             result.write(destination)
             restored = SpatialData.read(destination).tables["table"]
@@ -74,11 +77,11 @@ class TestCurio:
             for mapping in ("obsm", "varm", "obsp", "varp"):
                 assert_equal(getattr(actual, mapping)["inherited"], getattr(expected, mapping)["inherited"], exact=True)
             assert_equal(actual.raw, expected.raw, exact=True)
-            assert actual.raw is not None
-            assert actual.raw.obs_names.tolist() == expected.obs_names.tolist()
             assert actual.uns["inherited"] == expected.uns["inherited"]
             assert get_table_keys(actual) == get_table_keys(table)
             np.testing.assert_array_equal(actual.obsm["spatial"], table.obsm["spatial"])
+            np.testing.assert_array_equal(actual.obsm["spatial_pixels"], table.obsm["spatial_pixels"])
+            assert_equal(actual.uns["spatialdata_io_positions"], table.uns["spatialdata_io_positions"], exact=True)
         unchanged = ad.read_h5ad(path)
         assert unchanged.obs_names.equals(original.obs_names)
         assert "region" not in unchanged.obs
@@ -126,6 +129,28 @@ class TestCurio:
 
         assert table.uns["QC"] == {"Reads": 100, "Beads": 3}
 
+    def test_primary_single_embedding_and_manufacturer_landmarks(self, tmp_path: Path) -> None:
+        write_curio(tmp_path, duplicate_coordinates=False)
+        path = tmp_path / "sample_anndata.h5ad"
+        source = ad.read_h5ad(path)
+        native = np.array([[-9253.7, 14319.3], [-10400.0, 1860.0], [-8940.7, -14487.1]])
+        source.obsm["X_spatial"] = native
+        source.write_h5ad(path)
+        table = curio(tmp_path).tables["table"]
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], native)
+        physical = table.obsm["spatial"]
+        assert isinstance(physical, np.ndarray)
+        np.testing.assert_allclose(
+            physical,
+            [[-5987.1439, 9264.5871], [-6728.8, 1203.42], [-5784.6329, -9373.1537]],
+            rtol=0,
+            atol=2e-12,
+        )
+        description = table.uns["spatialdata_io_positions"]["coordinates"]
+        assert "Approximate manufacturer calibration: 0.647" in description["spatial"]["calibration"]["global"]
+        assert description["spatial_pixels"]["units"] == "pixel"
+        assert "spatial" not in ad.read_h5ad(path).obsm
+
     def test_complete_export(self, tmp_path: Path) -> None:
         """Verify exact count buffers, linked geometry, metadata, and source ownership."""
         write_curio(tmp_path)
@@ -171,7 +196,7 @@ class TestCurio:
                 }
             ),
         )
-        assert list(table.obsm) == ["spatial"]
+        assert set(table.obsm) == {"spatial_pixels", "spatial"}
         np.testing.assert_array_equal(table.layers["other"], np.ones((3, 3), dtype=np.float32))
 
         shapes = result.shapes["cells"]
@@ -180,8 +205,11 @@ class TestCurio:
         np.testing.assert_array_equal(shapes.geometry.x, [30, 10, 20])
         np.testing.assert_array_equal(shapes.geometry.y, [4, 8, 2])
         np.testing.assert_array_equal(shapes["radius"], [10, 10, 10])
-        np.testing.assert_array_equal(table.obsm["spatial"], np.column_stack((shapes.geometry.x, shapes.geometry.y)))
-        assert isinstance(get_transformation(shapes, to_coordinate_system="global"), Identity)
+        np.testing.assert_array_equal(
+            table.obsm["spatial_pixels"], np.column_stack((shapes.geometry.x, shapes.geometry.y))
+        )
+        np.testing.assert_array_equal(table.obsm["spatial"], table.obsm["spatial_pixels"] * 0.647)
+        assert get_transformation(shapes, to_coordinate_system="global") == Scale([0.647, 0.647], axes=("x", "y"))
 
         assert result.attrs == {
             "spatialdata_io_reader": "curio",
@@ -210,7 +238,7 @@ class TestCurio:
         np.testing.assert_array_equal(loaded.tables["table"].X.data, result.tables["table"].X.data)
         assert loaded.shapes["cells"].index.tolist() == result.shapes["cells"].index.tolist()
 
-    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
     def test_nullable_statistics_roundtrip(self, tmp_path: Path, storage: str) -> None:
         """Persist exact large integers, missing statistics, and nullable uns annotations."""
         write_curio(tmp_path)

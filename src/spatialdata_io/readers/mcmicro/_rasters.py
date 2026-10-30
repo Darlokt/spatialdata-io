@@ -33,6 +33,8 @@ class ImageGrid:
 
     shape: tuple[int, int]
     declared_sizes_um: tuple[float | None, float | None]
+    frame: str
+    calibration: str
 
     def transform(self) -> Identity | Scale:
         """Scale to micrometres only when both source axes are calibrated."""
@@ -103,7 +105,13 @@ def read_image(
 
     # TIFF inspection provides finite integer dimensions; Dask's general Array
     # annotation also permits unknown NaN dimensions.
-    grid = ImageGrid(cast("tuple[int, int]", image.shape[-2:]), _declared_sizes(metadata))
+    sizes = _declared_sizes(metadata)
+    grid = ImageGrid(
+        cast("tuple[int, int]", image.shape[-2:]),
+        sizes,
+        frame,
+        f"Source image OME PhysicalSizeX/PhysicalSizeY with declared source units; XY={sizes!r} micrometer/pixel",
+    )
     element = Image2DModel.parse(
         image,
         dims=_IMAGE_AXES,
@@ -141,7 +149,12 @@ def read_labels(
     declared = _declared_sizes(metadata)
     if grid is None:
         # An independent tissue mask may only use its own complete declaration.
-        grid = ImageGrid(cast("tuple[int, int]", labels.shape), declared)
+        grid = ImageGrid(
+            cast("tuple[int, int]", labels.shape),
+            declared,
+            frame,
+            f"Independent mask OME PhysicalSizeX/PhysicalSizeY in declared units; XY={declared!r} micrometer/pixel",
+        )
     else:
         # Same-grid segmentations inherit missing sizes; present ones must agree.
         for axis, expected, size in zip("XY", grid.declared_sizes_um, declared, strict=True):

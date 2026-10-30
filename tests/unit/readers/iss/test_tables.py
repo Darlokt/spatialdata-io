@@ -21,6 +21,37 @@ if TYPE_CHECKING:
 class TestReadTable:
     """Reject malformed scientific inputs before final linkage."""
 
+    @pytest.mark.parametrize("present", [True, False])
+    def test_unknown_embedding_preserves_shape_dtype_and_has_no_description(
+        self, tmp_path: Path, *, present: bool
+    ) -> None:
+        write_iss_dataset(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        native = np.arange(6, dtype=np.int16).reshape(2, 3)
+        if present:
+            source.obsm["spatial"] = native
+        else:
+            source.obsm.pop("spatial", None)
+        source.write_h5ad(path)
+        table = _read_table(ArtifactFile(path), instance_key=None, label_dtype=np.dtype(np.uint16))
+        assert "spatial" not in table.obsm
+        assert "spatialdata_io_positions" not in table.uns
+        if present:
+            np.testing.assert_array_equal(table.obsm["spatial_source"], native)
+            assert table.obsm["spatial_source"].dtype == np.int16
+        else:
+            assert "spatial_source" not in table.obsm
+
+    def test_imported_destination_collision(self, tmp_path: Path) -> None:
+        write_iss_dataset(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.obsm["spatial_source"] = np.ones((2, 4))
+        source.write_h5ad(path)
+        with pytest.raises(ReaderFormatError, match="spatial_source"):
+            _read_table(ArtifactFile(path), instance_key=None, label_dtype=np.dtype(np.uint16))
+
     def test_read_failure_has_context(self, tmp_path: Path) -> None:
         path = tmp_path / "bad.h5ad"
         path.write_bytes(b"not HDF5")

@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
@@ -307,3 +308,19 @@ def normalize_image_metadata(
                     )
         result[name] = ImageMetadata((height, width), spacing)
     return result
+
+
+def _validate_position_destinations(table: ad.AnnData, *, multiple: bool, path: ArtifactFile) -> None:
+    """Reject occupied destinations before changing imported annotations."""
+    if (
+        POSITIONS_KEY in table.uns
+        or "spatial_pixels" in table.obsm
+        or ("spatial" in table.obsm and "spatial_source" in table.obsm)
+        or (multiple and any(name in table.obs for name in ("spatial_frame", "spatial_pixel_frame")))
+    ):
+        raise ReaderFormatError(
+            context=ReaderErrorContext("steinbock", "positions"),
+            path=path,
+            found="existing position declaration, preservation destination or generated frame column",
+            expected="unoccupied position destinations; numerical equality does not establish source semantics",
+        )

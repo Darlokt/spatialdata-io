@@ -169,9 +169,21 @@ class TestBuildTable:
         assert table.obs_names.tolist() == ["0", "1", "2"]
         assert table.var_names.tolist() == ["B", "HLA-A", "NegPrb1"]
         assert table.obs["region"].tolist() == ["1_labels", "1_labels", "2_labels"]
-        np.testing.assert_array_equal(table.obsm["spatial"], [[2, 5], [6, 2], [2, 5]])
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[2, 5], [6, 2], [2, 5]])
         np.testing.assert_array_equal(table.obsm["global"], [[102, 15], [106, 12], [202, 25]])
         assert get_table_keys(table) == (["1_labels", "2_labels"], "region", "cell_ID")
+
+    def test_calibration_preserves_sparse_and_native_buffers(self, tmp_path: Path) -> None:
+        metadata_path = _write(tmp_path, "m.csv", _METADATA)
+        source = "fov,cell_ID,B,HLA-A,NegPrb1\n1,1,0,0,2\n1,2,4,0,1\n2,1,0,3,0\n"
+        counts = read_counts(_write(tmp_path, "c.csv", source))
+        metadata = read_metadata(metadata_path)
+        table = build_table(counts, metadata, path=metadata_path, linked=False, pixel_size_um=0.5)
+        assert isinstance(table.X, sparse.csr_array)
+        assert np.shares_memory(table.X.data, counts.expression.data)
+        assert table.obsm["spatial_pixels"] is metadata.local
+        assert table.obsm["global"] is metadata.global_
+        assert not np.shares_memory(table.obsm["spatial"], metadata.global_)
 
     def test_unlinked_table(self, tmp_path: Path) -> None:
         metadata_path = _write(tmp_path, "m.csv", _METADATA)

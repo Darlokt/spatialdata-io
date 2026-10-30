@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
         dataset_id: str | None
         include_transcripts: bool
+        pixel_size_um: float | None
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 @click.option(
     "--include-transcripts/--no-include-transcripts", default=True, show_default=True, help="Return lazy transcripts."
 )
+@click.option("--pixel-size-um", type=float, default=None, help="Associated global-pixel size in micrometres.")
 @scale_factors_option
 @chunks_option
 def cosmx_command(input_path: Path, output_path: Path, **options: Unpack[_CosmxOptions]) -> None:
@@ -37,6 +39,7 @@ def cosmx_command(input_path: Path, output_path: Path, **options: Unpack[_CosmxO
         input_path,
         dataset_id=options["dataset_id"],
         include_transcripts=options["include_transcripts"],
+        pixel_size_um=options["pixel_size_um"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
     )

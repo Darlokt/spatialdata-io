@@ -20,14 +20,12 @@ if TYPE_CHECKING:
 class TestReadShapes:
     """Reject invalid coordinates before constructing a spatial element."""
 
-    @pytest.mark.parametrize("kind", ["missing", "missing_duplicate", "shape", "dtype", "nonfinite", "disagree"])
+    @pytest.mark.parametrize("kind", ["missing_duplicate", "shape", "dtype", "nonfinite", "disagree"])
     def test_invalid_spatial_arrays(self, tmp_path: Path, kind: str) -> None:
         write_curio(tmp_path)
         layout = _discover_layout(tmp_path)
         table = ad.read_h5ad(layout.counts)
-        if kind == "missing":
-            del table.obsm["spatial"]
-        elif kind == "missing_duplicate":
+        if kind == "missing_duplicate":
             del table.obsm["X_spatial"]
         elif kind == "shape":
             table.obsm["spatial"] = np.ones((3, 3))
@@ -40,6 +38,31 @@ class TestReadShapes:
 
         with pytest.raises(ReaderFormatError, match="spatial"):
             _read_shapes(table, layout.counts)
+
+    @pytest.mark.parametrize("destination", ["spatial_pixels", "spatialdata_io_positions", "X_SPATIAL"])
+    def test_reserved_destinations_and_unsupported_profile(self, tmp_path: Path, destination: str) -> None:
+        write_curio(tmp_path)
+        layout = _discover_layout(tmp_path)
+        table = ad.read_h5ad(layout.counts)
+        if destination == "spatialdata_io_positions":
+            table.uns[destination] = {"source": "retained"}
+        else:
+            table.obsm[destination] = np.ones((3, 2))
+        with pytest.raises(ReaderFormatError, match=r"destination|profile"):
+            _read_shapes(table, layout.counts)
+
+    def test_native_buffer_and_expression_ownership(self, tmp_path: Path) -> None:
+        write_curio(tmp_path, duplicate_coordinates=False)
+        layout = _discover_layout(tmp_path)
+        table = ad.read_h5ad(layout.counts)
+        native = table.obsm["X_spatial"]
+        expression = table.X
+        _read_shapes(table, layout.counts)
+        assert table.obsm["spatial_pixels"] is native
+        assert table.X is expression
+        np.testing.assert_array_equal(native, [[30, 4], [10, 8], [20, 2]])
+        assert table.obsm["spatial"].dtype == np.float64
+        assert table.obsm["spatial"] is not native
 
     @pytest.mark.parametrize("value", [2**53 + 1, -(2**53 + 1), 2**64 - 1])
     def test_integer_coordinate_precision_loss(self, tmp_path: Path, value: int) -> None:

@@ -68,7 +68,7 @@ def _write_image(path: Path) -> NDArray[np.uint8]:
 class TestDbit:
     """Check the public reader against small format-faithful inputs."""
 
-    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
     def test_inherited_slots_and_raw_survive_persistence(self, tmp_path: Path, storage: str) -> None:
         """Keep inherited values aligned, including raw's independent feature vocabulary."""
         _write_layout(tmp_path)
@@ -102,6 +102,9 @@ class TestDbit:
         if storage == "h5ad":
             table.write_h5ad(destination)
             restored = ad.read_h5ad(destination)
+        elif storage == "anndata_zarr":
+            table.write_zarr(destination)
+            restored = ad.read_zarr(destination)
         else:
             result.write(destination)
             restored = read_zarr(destination).tables["table"]
@@ -122,7 +125,7 @@ class TestDbit:
             assert actual.raw.obs_names.tolist() == expected.obs_names.tolist()
             assert actual.uns["inherited"] == expected.uns["inherited"]
             assert get_table_keys(actual) == get_table_keys(table)
-            np.testing.assert_array_equal(actual.obsm["spatial"], table.obsm["spatial"])
+            np.testing.assert_array_equal(actual.obsm["spatial_grid"], table.obsm["spatial_grid"])
         unchanged = ad.read_h5ad(path)
         assert unchanged.obs_names.equals(original.obs_names)
         assert "region" not in unchanged.obs
@@ -172,7 +175,7 @@ class TestDbit:
         np.testing.assert_allclose(table.obs["quality"], [0.7, 0.2])
         assert table.obs["quality"].dtype == np.float32
         assert table.obs["annotation"].tolist() == ["first", "second"]
-        np.testing.assert_array_equal(table.obsm["spatial"], [[1, 1], [2, 2]])
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], [[1, 1], [2, 2]])
         np.testing.assert_array_equal(table.obsm["embedding"], [[10, 11], [20, 21]])
 
         weights = table.varm["weights"]
@@ -231,7 +234,7 @@ class TestDbit:
 
         inset = 1.25 if border else 0
         np.testing.assert_allclose(result.shapes["sample"].total_bounds, [inset, inset, 10 - inset, 10 - inset])
-        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[1, 1], [2, 2]])
+        np.testing.assert_array_equal(result.tables["table"].obsm["spatial_grid"], [[1, 1], [2, 2]])
 
     def test_image_auto_discovery(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)
@@ -325,7 +328,7 @@ class TestDbit:
 
         expected_names = [f"{name.lower() if lower_names else name}-sample" for name in _ORDERED_NAMES]
         assert result.tables["table"].obs_names.tolist() == expected_names
-        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[1, 1], [2, 2]])
+        np.testing.assert_array_equal(result.tables["table"].obsm["spatial_grid"], [[1, 1], [2, 2]])
 
     def test_case_insensitive_h5ad_suffix_and_multidot_identifier(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)

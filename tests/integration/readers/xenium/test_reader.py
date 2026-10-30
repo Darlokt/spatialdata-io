@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+import anndata as ad
 import h5py
 import numpy as np
 import pandas as pd
 import pytest
 import shapely
+from anndata.tests.helpers import assert_equal
 from click.testing import CliRunner
 from dask.callbacks import Callback
 from scipy import sparse
@@ -408,6 +410,7 @@ class TestXenium:
         assert table.obsm["pca_gene_expression_3_components"].shape == (4, 3)
         assert table.obsm["umap_gene_expression_2_components"].shape == (4, 2)
         assert get_table_keys(table) == ("cell_labels", "region", "label_id")
+        assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["frame"] == "global"
 
     def test_analysis_names_must_not_shadow_annotations(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(analysis="directory"))
@@ -452,6 +455,22 @@ class TestXenium:
         assert labels["scale1"]["image"].shape == (12, 16)
         np.testing.assert_array_equal(labels["scale0"]["image"].data.compute(), bundle.cell_mask)
 
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    def test_position_description_and_values_survive_table_storage(self, tmp_path: Path, storage: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_4_0)
+        result = xenium(bundle.root, include_transcripts=False)
+        table = result.tables["table"]
+        destination = tmp_path / f"table.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            restored = ad.read_h5ad(destination)
+        else:
+            table.write_zarr(destination)
+            restored = ad.read_zarr(destination)
+        assert_equal(restored.uns["spatialdata_io_positions"], table.uns["spatialdata_io_positions"], exact=True)
+        assert_equal(restored.obsm["spatial"], table.obsm["spatial"], exact=True)
+        assert get_table_keys(restored) == get_table_keys(table)
+
     def test_zarr_round_trip_through_the_cli(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_4_0)
         output = tmp_path / "output.zarr"
@@ -465,6 +484,7 @@ class TestXenium:
         assert isinstance(table.X, sparse.csr_array | sparse.csr_matrix)
         np.testing.assert_array_equal(table.X.toarray(), _expected_x(bundle))
         assert get_table_keys(table) == ("cell_labels", "region", "label_id")
+        assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["frame"] == "global"
         assert len(restored.points["transcripts"]) == len(bundle.transcripts.x)
         assert restored.shapes["nucleus_boundaries"].index.tolist() == list(bundle.nucleus_labels)
         assert restored.attrs["xenium"]["protein"] == {"scaling_factor": 10, "metric": "MEAN_PER_CELL_STAIN"}

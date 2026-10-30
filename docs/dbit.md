@@ -48,7 +48,9 @@ Without an image these are barcode-grid units; with an image they use the docume
 
 `invalid_geometries="keep"`, `"drop"` and `"raise"` produce identical supported squares and linkage because this geometry is valid by construction. No topology scan is performed. The option is validated before I/O, and floating-point collapse of a positive square width fails in every mode.
 
-`table.obsm["spatial"]` retains the one-based integer `(array_A, array_B)` coordinates, even when an image scales the polygons. These values are barcode positions, not polygon centers or image-pixel coordinates.
+`table.obsm["spatial_grid"]` retains the one-based integer `(array_A, array_B)` coordinates, even when an image scales the polygons. These values are barcode positions, not polygon centers or image-pixel coordinates.
+
+`uns["spatialdata_io_positions"]` describes `spatial_grid` as grid ordinals in the `barcode_grid` frame. Imported `obsm["spatial"]` moves exactly to `spatial_source` before sorting, preserving dtype and shape; an occupied destination raises. No physical `spatial` is produced. Channel widths and fitting display polygons to an image do not establish physical table calibration.
 
 ## Image options and lazy execution
 

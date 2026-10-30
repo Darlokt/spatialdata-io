@@ -195,3 +195,13 @@ def cell_ids(column: pa.Array | pa.ChunkedArray, label_dtype: np.dtype[np.generi
     if (identifiers <= 0).any() or (identifiers > limit).any() or len(np.unique(identifiers)) != len(identifiers):
         raise schema_error(path, found=f"{CELL_ID!r} values outside the label contract", expected=expected)
     return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(identifiers)), dtype=CELL_ID_DTYPE)
+
+
+def validate_position_columns(columns: QuantificationColumns, *, multiple: bool, path: ArtifactFile) -> None:
+    """Reject imported fields that would collide with generated per-row frames."""
+    if multiple and {"spatial_frame", "spatial_pixel_frame"}.intersection(columns.names):
+        raise schema_error(
+            path,
+            found="existing spatial_frame or spatial_pixel_frame column",
+            expected="unoccupied generated position frame columns",
+        )

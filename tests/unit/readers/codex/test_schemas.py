@@ -15,6 +15,7 @@ from spatialdata_io.readers.codex._schemas import (
     STRING_DTYPE,
     cell_columns,
     cell_ids,
+    csv_column_names,
     expression_dtype,
     normalize_csv_numbers,
     normalize_fcs_metadata,
@@ -156,3 +157,23 @@ class TestRegionName:
         """Reject unsupported region values before element naming and linkage."""
         with pytest.raises(ReaderFormatError, match="region"):
             region_name(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"))
+
+
+class TestCsvColumnNames:
+    """Separate Akoya source field identifiers from their long labels."""
+
+    @pytest.mark.parametrize("columns", [["cell_id", "region", "x", "y", "note:extra"], [], ["cell_id:id", "x"]])
+    def test_plain_or_incomplete_header(self, tmp_path: Path, columns: list[str]) -> None:
+        assert csv_column_names(columns, ArtifactFile(tmp_path / "cells.csv")) == (columns, None)
+
+    def test_first_colon_and_order(self, tmp_path: Path) -> None:
+        names, labels = csv_column_names(
+            ["y:y", "cyc001_ch001:marker:variant", "x:x"], ArtifactFile(tmp_path / "cells.csv")
+        )
+        assert names == ["y", "cyc001_ch001", "x"]
+        assert labels == ["y", "marker:variant", "x"]
+
+    @pytest.mark.parametrize("label", ["", "nul\x00"])
+    def test_invalid_label(self, tmp_path: Path, label: str) -> None:
+        with pytest.raises(ReaderFormatError, match="long label"):
+            csv_column_names([f"x:{label}"], ArtifactFile(tmp_path / "cells.csv"))

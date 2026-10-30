@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import anndata as ad
 import numpy as np
@@ -13,6 +13,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 from scipy import sparse
 
+from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -31,6 +32,7 @@ from spatialdata_io.readers.mcmicro._schemas import (
     optional_float_values,
     quantification_columns,
     schema_error,
+    validate_position_columns,
 )
 
 if TYPE_CHECKING:
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.mcmicro._layout import Quantification
+    from spatialdata_io.readers.mcmicro._rasters import ImageGrid
     from spatialdata_io.readers.mcmicro._schemas import MarkerPanel
 
 _CSV_BLOCK_BYTES = 1024 * 1024
@@ -153,12 +156,14 @@ def read_table(
     quantifications: tuple[Quantification, ...],
     panel: MarkerPanel,
     label_dtypes: Mapping[str, np.dtype[np.generic]],
+    grids: Mapping[str, ImageGrid],
 ) -> ad.AnnData:
     """Concatenate a nonempty sequence of MCQuant tables once and link them to their labels."""
     columns: QuantificationColumns | None = None
     measurements: list[_Measurements] = []
     regions: list[str] = []
     paths: list[ArtifactFile] = []
+    source_grids: list[ImageGrid] = []
     for quantification in quantifications:
         path = quantification.path
         current = quantification_columns(_read_header(path), panel.features, path)
@@ -175,15 +180,84 @@ def read_table(
             measurements.append(measurement)
             regions.append(quantification.target.key)
             paths.append(path)
+            source_grids.append(grids[quantification.target.image_id])
 
     if columns is None or not measurements:
         raise schema_error(quantifications[0].path, found="no quantified cells", expected="at least one MCQuant row")
 
+    validate_position_columns(columns, multiple=len({grid.frame for grid in source_grids}) > 1, path=paths[0])
     context = ReaderErrorContext("mcmicro", "cell table")
 
     obs, spatial = _observations(measurements, regions, columns, paths)
     expression = sparse.vstack([block for measurement in measurements for block in measurement.blocks], format="csr")
-    table = ad.AnnData(X=expression, obs=prepare_anndata_dataframe(obs, context=context, allow_float_nulls=True))
+    table = ad.AnnData(X=expression, obs=obs)
     table.var = prepare_anndata_dataframe(panel.var, context=ReaderErrorContext("mcmicro", "markers"))
-    table.obsm["spatial"] = spatial
+    _set_positions(table, spatial, source_grids, [len(measurement.cell_ids) for measurement in measurements], paths[0])
+    # This reader constructed an eager DataFrame; AnnData also admits backed frames.
+    prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=context, allow_float_nulls=True)
     return parse_linked_table(table, TableLinkage(tuple(regions), REGION_KEY, CELL_ID), context=context)
+
+
+def _set_positions(
+    table: ad.AnnData,
+    native: np.ndarray[tuple[int, int], np.dtype[np.float64]],
+    grids: list[ImageGrid],
+    sizes: list[int],
+    path: ArtifactFile,
+) -> None:
+    """Use each quantification's contiguous row slice and authoritative source image grid."""
+    table.obsm["spatial_pixels"] = native
+    frames = pd.Index(list(dict.fromkeys(grid.frame for grid in grids)))
+    frame_codes = (
+        np.repeat(frames.get_indexer(pd.Index([grid.frame for grid in grids])), sizes) if len(frames) > 1 else None
+    )
+    descriptions: dict[str, FixedFrame | RowFrames] = {}
+    if frame_codes is None:
+        descriptions["spatial_pixels"] = {
+            "axes": ["x", "y"],
+            "units": "pixel",
+            "frame": f"{frames[0]}_regionprops_indices",
+            "position": "source_regionprops_centroid_zero_based_pixel_index_centres",
+        }
+    else:
+        table.obs["spatial_pixel_frame"] = pd.Categorical.from_codes(
+            frame_codes, categories=pd.Index([f"{frame}_regionprops_indices" for frame in frames])
+        )
+        descriptions["spatial_pixels"] = {
+            "axes": ["x", "y"],
+            "units": "pixel",
+            "frame_key": "spatial_pixel_frame",
+            "position": "source_regionprops_centroid_zero_based_pixel_index_centres",
+        }
+    if all(x is not None and y is not None for x, y in (grid.declared_sizes_um for grid in grids)):
+        # MCQuant exports regionprops pixel-index centres. Match the unchanged
+        # raster's half-pixel centre convention before applying its XY spacing.
+        with np.errstate(over="ignore", invalid="ignore"):
+            physical = np.add(native, 0.5, dtype=np.float64)
+            offset = 0
+            for grid, size in zip(grids, sizes, strict=True):
+                physical[offset : offset + size] *= grid.declared_sizes_um
+                offset += size
+        if not np.isfinite(physical).all():
+            raise schema_error(path, found="nonfinite physical positions", expected="finite float64 physical XY")
+        table.obsm["spatial"] = physical
+        evidence = {grid.frame: grid.calibration for grid in grids}
+        if frame_codes is None:
+            descriptions["spatial"] = {
+                "axes": ["x", "y"],
+                "units": "micrometer",
+                "frame": frames[0],
+                "position": "source_regionprops_centroid_in_raster_corner_frame",
+                "calibration": evidence,
+            }
+        else:
+            table.obs["spatial_frame"] = pd.Categorical.from_codes(frame_codes, categories=frames)
+            descriptions["spatial"] = {
+                "axes": ["x", "y"],
+                "units": "micrometer",
+                "frame_key": "spatial_frame",
+                "position": "source_regionprops_centroid_in_raster_corner_frame",
+                "calibration": evidence,
+            }
+    declaration: PositionsMetadata = {"schema_version": 1, "coordinates": descriptions}
+    table.uns[POSITIONS_KEY] = declaration

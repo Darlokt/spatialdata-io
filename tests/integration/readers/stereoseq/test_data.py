@@ -59,7 +59,7 @@ def _assert_native_cells(table: AnnData, source: Path) -> None:
         identity_field = "geneID" if "geneID" in genes.dtype.names else "geneName"
         assert table.var_names.tolist() == [bytes(value).decode("utf-8") for value in genes[identity_field]]
         np.testing.assert_array_equal(table.obs["instance_id"], cells["id"])
-        np.testing.assert_array_equal(table.obsm["spatial"], np.column_stack((cells["x"], cells["y"])))
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], np.column_stack((cells["x"], cells["y"])))
         np.testing.assert_array_equal(table.obs["cellExon"], group["cellExon"][:])
         np.testing.assert_array_equal(table.var["geneExon"], group["geneExon"][:])
         assert (
@@ -123,7 +123,7 @@ def _assert_native_square(table: AnnData, source: Path) -> None:
     assert table.X.dtype == table.layers["exon"].dtype == np.uint64
     assert table.X.has_canonical_format
     counts, exons = csc_array(table.X), csc_array(table.layers["exon"])
-    coordinates = np.asarray(table.obsm["spatial"])
+    coordinates = np.asarray(table.obsm["spatial_grid"])
     assert coordinates.dtype == np.int64
     assert table.shape == (12604918, 45537)
     assert counts.nnz == 18829578
@@ -190,7 +190,7 @@ def _assert_square_prefix(table: AnnData, source: Path) -> None:
     assert table.X.has_canonical_format
     assert table.layers["exon"].has_canonical_format
     counts, exons = csc_array(table.X), csc_array(table.layers["exon"])
-    coordinates = np.asarray(table.obsm["spatial"])
+    coordinates = np.asarray(table.obsm["spatial_grid"])
 
     expected_coordinates: dict[tuple[int, int], None] = {}
     total = exon_total = record_count = 0
@@ -241,7 +241,7 @@ def _assert_layout_equivalent(actual: SpatialData, expected: SpatialData) -> Non
         assert isinstance(reference.var, DataFrame)
         assert_frame_equal(table.obs, reference.obs)
         assert_frame_equal(table.var, reference.var)
-        np.testing.assert_array_equal(table.obsm["spatial"], reference.obsm["spatial"])
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], reference.obsm["spatial_grid"])
         assert table.uns["stereoseq"] == reference.uns["stereoseq"]
         assert table.uns["spatialdata_attrs"] == reference.uns["spatialdata_attrs"]
         # AnnData also exposes X through its None layer key; X is compared below.
@@ -312,7 +312,7 @@ class TestStereoseqData:
         assert int(table.layers["exon"].sum()) == 4667531
         assert len(set(table.var["geneName"])) == table.n_vars - 18
         points = result.points["cells_centroids"].compute()
-        np.testing.assert_array_equal(points[["x", "y"]], result.tables["cells_table"].obsm["spatial"])
+        np.testing.assert_array_equal(points[["x", "y"]], result.tables["cells_table"].obsm["spatial_grid"])
         np.testing.assert_array_equal(points.index, result.tables["cells_table"].obs["instance_id"])
         image = result.images["HE_registered"]
         assert isinstance(image, DataArray)
@@ -352,7 +352,7 @@ class TestStereoseqData:
         assert int(table.layers["exon"].sum()) == 48075283
 
         points = result.points["cells_centroids"].compute()
-        np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial"])
+        np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial_grid"])
         np.testing.assert_array_equal(points.index, table.obs["instance_id"])
         assert set(table.obs["region"]) == {"cells_centroids"}
         assert table.uns["stereoseq"]["origin"] == [0, 0]
@@ -378,7 +378,7 @@ class TestStereoseqData:
         assert int(table.layers["exon"].sum()) == 8243004
 
         points = result.points["adjusted_cells_centroids"].compute()
-        np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial"])
+        np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial_grid"])
         np.testing.assert_array_equal(points.index, table.obs["instance_id"])
         assert set(table.obs["region"]) == {"adjusted_cells_centroids"}
 
@@ -414,7 +414,7 @@ class TestStereoseqData:
         _assert_square_prefix(table, root / filename)
 
         points = result.points["bin1_genes"].compute()
-        np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial"])
+        np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial_grid"])
         np.testing.assert_array_equal(points.index, table.obs["instance_id"])
         assert set(table.obs["region"]) == {"bin1_genes"}
 
@@ -544,5 +544,5 @@ class TestStereoseqData:
         assert not result.shapes
         _assert_native_square(result.tables["bin1_table"], root / "A01785D6.tissue.gef")
         first_points = result.points["bin1_genes"].head(5)
-        np.testing.assert_array_equal(first_points[["x", "y"]], result.tables["bin1_table"].obsm["spatial"][:5])
+        np.testing.assert_array_equal(first_points[["x", "y"]], result.tables["bin1_table"].obsm["spatial_grid"][:5])
         assert "spatialdata_io_format_version" not in result.attrs

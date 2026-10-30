@@ -100,8 +100,22 @@ def mcmicro(
         IDs; ``var`` keeps every ``markers.csv`` column, including the original
         ``marker_name``, as text. Observation names are row positions
         ``"0"``, ``"1"``, ...; ``region`` names the label image and ``CellID``
-        holds its exact int64 label value. ``obsm['spatial']``
-        holds the float64 ``X_centroid``/``Y_centroid`` pixel coordinates.
+        holds its exact int64 label value. ``obsm['spatial_pixels']`` retains
+        float64 source ``X_centroid``/``Y_centroid`` XY in zero-based regionprops
+        pixel-index centres, with native frames
+        ``<source-image-frame>_regionprops_indices``. If every image represented
+        by measured rows has complete calibration, ``obsm['spatial']`` contains
+        float64 micrometre XY, calculated as ``(native_xy + 0.5) * spacing_xy_um``
+        in the unchanged source raster frame. Multiple segmentations share their
+        image frame; TMA cores remain independent. Multiple native/physical
+        frames use categorical ``spatial_pixel_frame``/``spatial_frame`` columns.
+        Missing, partial or mixed calibration omits physical ``spatial`` for
+        the entire aggregate. Unmeasured images and independent tissue masks
+        do not decide table calibration. The version-1
+        ``uns['spatialdata_io_positions']`` declaration records units, position
+        meaning, frames and bounded source calibration evidence. Occupied
+        generated frame columns fail. These arrays are snapshots: ordinary
+        AnnData concatenation and later registration do not update them.
         MCQuant morphology columns are nullable float64 and all other columns
         remain exact text. Area retains pixel squared units, axis lengths and
         centroid annotations retain pixels, and Eccentricity/Solidity/Extent are
@@ -134,17 +148,14 @@ def mcmicro(
     images: dict[str, DataArray | DataTree] = {}
     labels: dict[str, DataArray | DataTree] = {}
     grids: dict[str, ImageGrid] = {}
-    frames: dict[str, str] = {}
 
     if isinstance(layout, WsiLayout):
-        frames[layout.image_id] = "global"
         images[f"{layout.image_id}_image"], grids[layout.image_id] = read_image(
             layout.image, channels=panel.features, frame="global", options=options
         )
     else:
         images["tma_map"], _ = read_image(layout.tma_map, channels=panel.features, frame="global", options=options)
         for core in layout.cores:
-            frames[core.image_id] = core.image_id
             images[f"{core.image_id}_image"], grids[core.image_id] = read_image(
                 core.image, channels=panel.features, frame=core.image_id, options=options
             )
@@ -155,12 +166,15 @@ def mcmicro(
     label_dtypes: dict[str, np.dtype[np.generic]] = {}
     for segmentation in layout.segmentations:
         labels[segmentation.key], label_dtypes[segmentation.key] = read_labels(
-            segmentation.path, grid=grids[segmentation.image_id], frame=frames[segmentation.image_id], options=options
+            segmentation.path,
+            grid=grids[segmentation.image_id],
+            frame=grids[segmentation.image_id].frame,
+            options=options,
         )
 
     tables = {}
     if layout.quantifications:
-        tables[TABLE_KEY] = read_table(layout.quantifications, panel, label_dtypes)
+        tables[TABLE_KEY] = read_table(layout.quantifications, panel, label_dtypes, grids)
 
     result = SpatialData(images=images, labels=labels, tables=tables)
     set_reader_provenance(result.attrs, reader="mcmicro")

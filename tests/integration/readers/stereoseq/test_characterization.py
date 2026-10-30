@@ -134,9 +134,9 @@ class TestStereoseq:
                     transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")) @ [10, 20, 1], [5, 10, 1]
                 )
         if "cells" in products:
-            assert_array_equal(result.tables["cells_table"].obsm["spatial"], [[10, 20], [30, 40]])
+            assert_array_equal(result.tables["cells_table"].obsm["spatial_grid"], [[10, 20], [30, 40]])
         if "square" in products:
-            assert_array_equal(result.tables["bin50_table"].obsm["spatial"], [[5, 6], [1, 2]])
+            assert_array_equal(result.tables["bin50_table"].obsm["spatial_grid"], [[5, 6], [1, 2]])
 
     @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs"])
     @pytest.mark.parametrize("companion", ["square", "cells"])
@@ -230,7 +230,7 @@ class TestStereoseq:
         assert table.var_names.tolist() == source.var_names.tolist()
         assert isinstance(source.X, csr_array | csr_matrix)
         assert_array_equal(_counts(table).toarray(), source.X.toarray())
-        assert_array_equal(table.obsm["spatial"], source.obsm["spatial"])
+        assert_array_equal(table.obsm["spatial_grid"], source.obsm["spatial"])
         assert_array_equal(table.obsm["X_pca"], source.obsm["X_pca"])
         assert_array_equal(table.obs["id"], source.obs["id"])
         points = result.points["cells_analysis_r0_5_points"].compute()
@@ -274,7 +274,7 @@ class TestStereoseq:
         result = stereoseq(fixture.root, cell_bins="adjusted", analysis_files=(fixture.adjusted_analysis,))
         assert set(result.tables) == {"adjusted_cells_table", "adjusted_cells_analysis_r0_5_table"}
         analysis = result.tables["adjusted_cells_analysis_r0_5_table"]
-        assert_array_equal(analysis.obsm["spatial"], [[11, 20], [31, 40]])
+        assert_array_equal(analysis.obsm["spatial_grid"], [[11, 20], [31, 40]])
         assert_array_equal(_counts(analysis).toarray(), [[1.25, 2.5], [3.75, 5]])
 
     @pytest.mark.parametrize("historical", [False, True])

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 def curio(path: str | Path) -> SpatialData:
-    """Read an unversioned Curio Seeker five-artifact analysis export.
+    """Read a Seeker Primary Analysis Pipeline five-artifact export.
 
     The directory must contain exactly one file per suffix, all with the same
     nonempty ``<sample>_`` prefix::
@@ -71,13 +71,17 @@ def curio(path: str | Path) -> SpatialData:
         created string annotations use pandas nullable strings. Defining-feature
         empty fields become missing values; literal identifier strings such as
         ``NA`` remain strings.
-        ``shapes['cells']`` contains points with radius 10 in source coordinate
-        units, indexed by observation ID, and an identity transform to
-        ``global``. Coordinates are ordered ``(x, y)`` and must be losslessly
-        representable as float64 geometry. No physical-unit conversion is inferred.
-        These circles represent beads, despite the historical region name.
-        ``obsm['spatial']`` is retained and its identical ``X_spatial`` duplicate
-        removed. Final linkage uses ``region`` and
+        ``shapes['cells']`` contains bead display points with radius 10 source
+        pixels, indexed by observation ID, scaled by 0.647 to ``global``
+        micrometres. This approximate manufacturer calibration applies to
+        Seeker Primary Analysis Pipeline output; it establishes no image
+        registration. Required ``X_spatial`` is finite XY, losslessly
+        representable in float64. Optional ``spatial`` must agree exactly.
+        Native dtype, orientation and origin remain in ``spatial_pixels``;
+        ``spatial`` is float64 XY micrometres. Both are described in
+        ``uns['spatialdata_io_positions']``. Occupied output destinations fail.
+        Uppercase ``X_SPATIAL``, Trekker, merged and reprocessed coordinate
+        profiles are unsupported. Final linkage uses ``region`` and
         ``instance_id``. No images, labels, or transcript points are returned.
         All I/O is eager. Caller-owned state is not mutated.
 

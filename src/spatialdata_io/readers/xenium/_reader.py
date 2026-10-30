@@ -403,7 +403,9 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
           for official int32 HDF5 and MTX inputs),
           ``obs`` with the cells-table columns, ``label_id`` (uint32) and nucleus
           centroids when ``cells.zarr.zip`` is present, and float64 µm centroids in
-          ``obsm["spatial"]``.
+          ``obsm["spatial"]``, described as unchanged vendor cell-centroid XY
+          micrometres in ``global`` by ``uns["spatialdata_io_positions"]``.
+          Nullable nucleus summaries do not replace canonical cell centres.
 
         Alternate HDF5 numerical dtypes follow Scanpy; protein division requires
         floating storage. Float32 retains its integer precision limits.

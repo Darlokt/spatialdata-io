@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def write_curio(path: Path) -> None:
+def write_curio(path: Path, *, duplicate_coordinates: bool = True) -> None:
     """Write sample-prefixed H5AD and four text enrichments."""
     coordinates = np.asarray([[30.0, 4.0], [10.0, 8.0], [20.0, 2.0]])
     table = ad.AnnData(
@@ -22,7 +22,8 @@ def write_curio(path: Path) -> None:
         var=pd.DataFrame({"symbol": ["B", "A", "C"]}, index=["gene-b", "gene-a", "gene-c"]),
         layers={"other": np.ones((3, 3), dtype=np.float32)},
     )
-    table.obsm["spatial"] = coordinates
+    if duplicate_coordinates:
+        table.obsm["spatial"] = coordinates
     table.obsm["X_spatial"] = coordinates.copy()
     table.write_h5ad(path / "sample_anndata.h5ad")
 

@@ -91,6 +91,8 @@ class MetadataColumns:
 def metadata_columns(columns: Sequence[str], path: ArtifactFile) -> MetadataColumns:
     """Type vendor morphology and intensities; keep every other annotation as text."""
     _require(columns, (FOV, CELL_ID, *CENTERS), path)
+    if "spatial_pixel_frame" in columns:
+        raise schema_error(path, found="source spatial_pixel_frame column", expected="no reader-owned frame column")
     if REGION_KEY in columns:
         raise schema_error(path, found=f"a source {REGION_KEY!r} column", expected="no reader-owned linkage column")
     annotations = [name for name in columns if name not in {FOV, CELL_ID, *CENTERS}]

@@ -168,6 +168,10 @@ as nominal vendor metadata, not used as a replacement for the physical ruler.
 Hires and lowres transforms compose the affine with the supplied inverse scale
 factor; padded short dimensions do not change that scale.
 
+
+
+Each final table describes float64 XY micrometres in `uns["spatialdata_io_positions"]`, distinguishing nominal bin centres, vendor cell centroids and vendor nucleus centroids in the calibrated `global` slide frame. Missing centroid properties yield no canonical array or declaration for that product. Nucleus tables never inherit cell positions; polygon centroids are not substituted.
+
 ## Images, ownership and memory
 
 Full-resolution images are discovered among root `tissue_image` TIFF names and

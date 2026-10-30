@@ -54,7 +54,7 @@ class TestDbit:
         assert table.obs["source_row"].tolist() == [3, 1, 0, 2]
         assert table.obs["array_A"].tolist() == [1, 1, 2, 2]
         assert table.obs["array_B"].tolist() == [1, 2, 1, 2]
-        np.testing.assert_array_equal(table.obsm["spatial"], [[1, 1], [1, 2], [2, 1], [2, 2]])
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], [[1, 1], [1, 2], [2, 1], [2, 2]])
 
         assert isinstance(table.X, sparse.csr_array)
         assert table.X.dtype == np.uint16
@@ -97,7 +97,7 @@ class TestDbit:
 
         table = result.tables["table"]
         assert table.obs_names.tolist() == [source_names[1], source_names[0]]
-        np.testing.assert_array_equal(table.obsm["spatial"], [[1, 50], [50, 1]])
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], [[1, 50], [50, 1]])
 
         assert isinstance(table.X, sparse.csr_array)
         assert table.X.dtype == np.int32

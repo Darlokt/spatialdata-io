@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import anndata as ad
 import numpy as np
@@ -13,20 +14,20 @@ import readfcs
 import tifffile
 from dask.callbacks import Callback
 from scipy import sparse
+from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
-from spatialdata.transformations import BaseTransformation, get_transformation
+from spatialdata.transformations import Affine, BaseTransformation, get_transformation
 from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_tasks
 from spatialdata_io import __version__
 from spatialdata_io import codex as root_codex
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.codex import codex
 from tests.integration.readers.codex._fixtures import cell_frame, write_csv, write_fcs, write_image
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pytest_mock import MockerFixture
 
 
@@ -51,7 +52,10 @@ class TestCodex:
         assert table.obs["cell_id"].tolist() == [7, 2, 11]
         assert isinstance(table.X, sparse.csr_array)
         np.testing.assert_array_equal(table.X.data, [2, 5.5])
-        np.testing.assert_array_equal(table.obsm["spatial"], [[20, 1.5], [2.5, 30], [13, 8]])
+        assert "spatial" not in table.obsm
+        np.testing.assert_array_equal(
+            cast("pd.DataFrame", table.obs)[["x", "y"]].to_numpy(), [[20, 1.5], [2.5, 30], [13, 8]]
+        )
 
     @pytest.mark.parametrize("large", [2**63, 2**64 - 1])
     def test_metadata_types_independent_of_csv_batches(self, tmp_path: Path, mocker: MockerFixture, large: int) -> None:
@@ -164,7 +168,10 @@ class TestCodex:
         assert table.obs["cell_id"].dtype == np.dtype(np.int64)
         assert table.obs["region"].tolist() == ["1"] * 3
         assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
-        np.testing.assert_array_equal(table.obsm["spatial"], [[20, 1.5], [2.5, 30], [13, 8]])
+        assert "spatial" not in table.obsm
+        np.testing.assert_array_equal(
+            cast("pd.DataFrame", table.obs)[["x", "y"]].to_numpy(), [[20, 1.5], [2.5, 30], [13, 8]]
+        )
         assert get_table_keys(table) == ("1", "region", "cell_id")
 
         circles = result.shapes["1"]
@@ -173,7 +180,7 @@ class TestCodex:
         np.testing.assert_array_equal(circles.geometry.y, [1.5, 30, 8])
         np.testing.assert_array_equal(circles["radius"], [1, 1, 1])
 
-        transform = get_transformation(circles, to_coordinate_system="global")
+        transform = get_transformation(circles, to_coordinate_system="table_pixels")
         assert isinstance(transform, BaseTransformation)
         np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.eye(3))
 
@@ -197,7 +204,7 @@ class TestCodex:
         restored = pickle.loads(pickle.dumps(raster.data))  # noqa: S301, RUF100 - Only deserialize this test's own graph.
         np.testing.assert_array_equal(restored[:, 1:3, 2:5].compute(), image[:, 1:3, 2:5])
 
-        transform = get_transformation(raster, to_coordinate_system="global")
+        transform = get_transformation(raster, to_coordinate_system="image_pixels")
         assert isinstance(transform, BaseTransformation)
         np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.eye(3))
 
@@ -343,3 +350,151 @@ class TestCodex:
         result = codex(tmp_path)
 
         assert result.tables["table"].obs["cell_id"].tolist() == [9007199254740993, 2]
+
+
+class TestCodexCalibration:
+    """Calibrate the proved table frame and explicitly register selected images."""
+
+    @pytest.mark.parametrize("source_format", ["csv", "fcs"])
+    @pytest.mark.parametrize("factor", [1, 2])
+    def test_calibrated_landmarks(self, tmp_path: Path, source_format: str, factor: int) -> None:
+        (write_csv if source_format == "csv" else write_fcs)(tmp_path / f"cells.{source_format}")
+        write_image(tmp_path / "stitched.tif")
+        # Explicit caller mapping includes a crop origin and vertical reflection.
+        mapping = Affine(
+            np.asarray([[factor, 0, 10], [0, -factor, 40], [0, 0, 1]], dtype=np.float64),
+            input_axes=("x", "y"),
+            output_axes=("x", "y"),
+        )
+        tasks: list[str] = []
+        with Callback(pretask=lambda key, *_: tasks.append(str(key))):
+            result = codex(tmp_path, pixel_size_um=0.5, image_to_table=mapping)
+        assert not tasks
+        table = result.tables["table"]
+        np.testing.assert_array_equal(table.obsm["spatial"], [[10, 0.75], [1.25, 15], [6.5, 4]])
+        np.testing.assert_array_equal(
+            cast("pd.DataFrame", table.obs)[["x", "y"]].to_numpy(), [[20, 1.5], [2.5, 30], [13, 8]]
+        )
+        assert set(table.obsm) == {"spatial"}
+        assert table.obsm["spatial"].dtype == np.float64
+        circle_transform = get_transformation(result.shapes["1"], to_coordinate_system="global")
+        image_transform = get_transformation(result.images["images"], to_coordinate_system="global")
+        assert isinstance(circle_transform, BaseTransformation)
+        assert isinstance(image_transform, BaseTransformation)
+        np.testing.assert_array_equal(circle_transform.to_affine_matrix(("x", "y"), ("x", "y")), np.diag([0.5, 0.5, 1]))
+        # Raster point (1.5, 2.5) maps independently to table (10+1.5*f, 40-2.5*f).
+        actual = image_transform.to_affine_matrix(("x", "y"), ("x", "y")) @ [1.5, 2.5, 1]
+        np.testing.assert_array_equal(actual, [5 + 0.75 * factor, 20 - 1.25 * factor, 1])
+        assert result.shapes["1"]["radius"].tolist() == [1, 1, 1]
+
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_explicit_experiment_association(self, tmp_path: Path, *, absolute: bool) -> None:
+        write_csv(tmp_path / "cells.csv")
+        sidecar = tmp_path / "experiment.json"
+        sidecar.write_text('{"version":"1.7.0.6","xyResolution":500}')
+        selected = sidecar if absolute else Path("experiment.json")
+        result = codex(tmp_path, experiment_file=selected)
+        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[10, 0.75], [1.25, 15], [6.5, 4]])
+        with pytest.raises(ValueError, match="conflicts"):
+            codex(tmp_path, experiment_file=selected, pixel_size_um=0.6)
+        codex(tmp_path, experiment_file=selected, pixel_size_um=0.5)
+
+    def test_no_automatic_sidecar_or_image_association(self, tmp_path: Path) -> None:
+        write_csv(tmp_path / "cells.csv")
+        write_image(tmp_path / "stitched.tif")
+        (tmp_path / "experiment.json").write_text('{"version":"1.7.0.6","xyResolution":500}')
+        result = codex(tmp_path, pixel_size_um=0.5)
+        frames = get_transformation(result.images["images"], get_all=True)
+        assert isinstance(frames, dict)
+        assert set(frames) == {"image_pixels"}
+        assert "spatial" not in codex(tmp_path).tables["table"].obsm
+
+    def test_mapping_requires_image(self, tmp_path: Path) -> None:
+        write_csv(tmp_path / "cells.csv")
+        with pytest.raises(ValueError, match="requires an image"):
+            codex(tmp_path, image_to_table=Affine(np.eye(3), input_axes=("x", "y"), output_axes=("x", "y")))
+
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr", "spatialdata"])
+    def test_position_persistence(self, tmp_path: Path, storage: str) -> None:
+        source = tmp_path / "source"
+        source.mkdir()
+        write_csv(source / "cells.csv")
+        result = codex(source, pixel_size_um=0.5)
+        table = result.tables["table"]
+        destination = tmp_path / f"positions.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            loaded = ad.read_h5ad(destination)
+        elif storage == "zarr":
+            table.write_zarr(destination)
+            loaded = ad.read_zarr(destination)
+        else:
+            result.write(destination)
+            loaded = read_zarr(destination).tables["table"]
+        np.testing.assert_array_equal(loaded.obsm["spatial"], table.obsm["spatial"])
+        assert loaded.uns[POSITIONS_KEY]["coordinates"]["spatial"]["frame"] == "global"
+        assert set(loaded.uns[POSITIONS_KEY]["coordinates"]["spatial"]["calibration"]) == {"global"}
+        np.testing.assert_array_equal(loaded[[True, False, True]].obsm["spatial"], [[10, 0.75], [6.5, 4]])
+
+    @pytest.mark.parametrize("scale", [None, 0.5])
+    def test_real_akoya_qualified_header(self, tmp_path: Path, scale: float | None) -> None:
+        # Original public Akoya sample, pinned to phenomenalist c35f531d0035ac6ea879bfe1b0340c6b5cc6b09e.
+        # https://github.com/igordot/phenomenalist/blob/c35f531d0035ac6ea879bfe1b0340c6b5cc6b09e/inst/extdata/tonsil-akoya-2018-500.csv
+        source = Path(__file__).parent / "data" / "akoya-tonsil-three-rows.csv"
+        result = codex(tmp_path, cell_table_file=source, pixel_size_um=scale)
+        table = result.tables["table"]
+        assert table.obs["cell_id"].tolist() == [72993, 19306, 77026]
+        assert table.var_names.tolist()[:5] == [
+            "cyc001_ch001",
+            "cyc001_ch002",
+            "cyc001_ch003",
+            "cyc001_ch004",
+            "cyc002_ch001",
+        ]
+        assert table.var["marker"].tolist()[:5] == ["DAPI1", "Blank", "Blank", "Blank", "DAPI2"]
+        assert table.obs.columns.tolist() == [
+            "cell_id",
+            "region",
+            "tile_num",
+            "x",
+            "y",
+            "z",
+            "x_tile",
+            "y_tile",
+            "size",
+            "homogeneity",
+        ]
+        native = np.asarray([[6447, 1556], [2047, 754], [5396, 3917]])
+        np.testing.assert_array_equal(cast("pd.DataFrame", table.obs)[["x", "y"]].to_numpy(), native)
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.shape == (3, 32)
+        expected = np.genfromtxt(source, delimiter=",", skip_header=1, usecols=range(9, 41))
+        np.testing.assert_array_equal(table.X.toarray(), expected)
+        if scale is None:
+            assert "spatial" not in table.obsm
+        else:
+            np.testing.assert_array_equal(table.obsm["spatial"], [[3223.5, 778], [1023.5, 377], [2698, 1958.5]])
+
+    def test_qualified_duplicate_short_names(self, tmp_path: Path) -> None:
+        (tmp_path / "cells.csv").write_text(
+            "cell_id:id,region:region,x:x,y:y,cyc001_ch001:A,cyc001_ch001:B\n1,1,1,1,1,2\n"
+        )
+        with pytest.raises(ReaderFormatError, match="duplicate column"):
+            codex(tmp_path)
+
+    def test_explicit_native_registration(self, tmp_path: Path) -> None:
+        write_csv(tmp_path / "cells.csv")
+        write_image(tmp_path / "stitched.tif")
+        matrix = np.asarray([[2, 0, 10], [0, -2, 40], [0, 0, 1]], dtype=np.float64)
+        mapping = Affine(matrix, input_axes=("x", "y"), output_axes=("x", "y"))
+        result = codex(tmp_path, image_to_table=mapping)
+        transform = get_transformation(result.images["images"], to_coordinate_system="table_pixels")
+        assert isinstance(transform, BaseTransformation)
+        np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), matrix)
+        np.testing.assert_array_equal(mapping.to_affine_matrix(("x", "y"), ("x", "y")), matrix)
+        assert "spatial" not in result.tables["table"].obsm
+
+    def test_physical_overflow(self, tmp_path: Path) -> None:
+        write_csv(tmp_path / "cells.csv")
+        with np.errstate(over="ignore"), pytest.raises(ValueError, match="nonfinite physical"):
+            codex(tmp_path, pixel_size_um=1e308)

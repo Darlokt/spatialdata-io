@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,8 +14,9 @@ from spatialdata.models import get_table_keys
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro._layout import Quantification, Segmentation
+from spatialdata_io.readers.mcmicro._rasters import ImageGrid
 from spatialdata_io.readers.mcmicro._schemas import STRING_DTYPE, MarkerPanel
-from spatialdata_io.readers.mcmicro._tables import read_table
+from spatialdata_io.readers.mcmicro._tables import _set_positions, read_table
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,6 +44,13 @@ def _dtypes(*quantifications: Quantification, dtype: type[np.integer] = np.uint3
     return {table.target.key: np.dtype(dtype) for table in quantifications}
 
 
+def _grids(*quantifications: Quantification) -> dict[str, ImageGrid]:
+    return {
+        table.target.image_id: ImageGrid((10, 10), (None, None), table.target.image_id, "uncalibrated")
+        for table in quantifications
+    }
+
+
 class TestReadTable:
     """Rows, features, IDs, annotations, and coordinates keep their exact source meaning."""
 
@@ -49,7 +58,7 @@ class TestReadTable:
         mocker.patch("spatialdata_io.readers.mcmicro._tables._MAX_BATCH_ROWS", 1)
         first = _quantification(tmp_path, "s1", _HEADER + "7,0,1.25,1.5,2,4,x\n3,0.5,0,3.5,4,,\n")
         second = _quantification(tmp_path, "s2", "B,CellID,A,note,Area,Y_centroid,X_centroid\n0,7,2,y,1,6,5.5\n")
-        table = read_table((first, second), _panel(), _dtypes(first, second))
+        table = read_table((first, second), _panel(), _dtypes(first, second), _grids(first, second))
 
         expression = table.X
         assert isinstance(expression, sparse.csr_array)
@@ -59,19 +68,19 @@ class TestReadTable:
         assert table.obs_names.tolist() == ["0", "1", "2"]
         assert table.var_names.tolist() == ["A", "B"]
         assert table.var["marker_name"].tolist() == ["A", "B"]
-        assert table.obs.columns.tolist() == ["region", "CellID", "Area", "note"]
+        assert table.obs.columns.tolist() == ["region", "CellID", "Area", "note", "spatial_pixel_frame"]
         assert table.obs["region"].tolist() == ["s1_seg_cell", "s1_seg_cell", "s2_seg_cell"]
         assert table.obs["CellID"].tolist() == [7, 3, 7]
         assert table.obs["CellID"].dtype == np.dtype(np.int64)
         np.testing.assert_array_equal(table.obs["Area"].to_numpy(), [4, np.nan, 1])
         assert table.obs["note"].tolist() == ["x", "", "y"]
-        np.testing.assert_array_equal(table.obsm["spatial"], [[1.5, 2], [3.5, 4], [5.5, 6]])
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[1.5, 2], [3.5, 4], [5.5, 6]])
         assert get_table_keys(table) == (["s1_seg_cell", "s2_seg_cell"], "region", "CellID")
 
     def test_label_without_cells_is_not_a_region(self, tmp_path: Path) -> None:
         empty = _quantification(tmp_path, "s1", _HEADER)
         measured = _quantification(tmp_path, "s2", _HEADER + "1,1,2,0,0,1,a\n")
-        table = read_table((empty, measured), _panel(), _dtypes(empty, measured))
+        table = read_table((empty, measured), _panel(), _dtypes(empty, measured), _grids(empty, measured))
         assert get_table_keys(table)[0] == "s2_seg_cell"
 
     def test_wide_marker_blocks_are_never_densified_as_a_whole(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -83,7 +92,7 @@ class TestReadTable:
         panel = MarkerPanel(features, pd.DataFrame(index=pd.Index(features)))
         mocker.patch("spatialdata_io.readers.mcmicro._tables._BATCH_MEMORY_BYTES", 8 * 64 * 4)
         spy = mocker.spy(sparse, "vstack")
-        table = read_table((table_source,), panel, _dtypes(table_source))
+        table = read_table((table_source,), panel, _dtypes(table_source), _grids(table_source))
         assert spy.call_count == 1
         assert len(spy.call_args.args[0]) == 16
         assert isinstance(table.X, sparse.csr_array)
@@ -106,15 +115,46 @@ class TestReadTable:
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:
         source = _quantification(tmp_path, "s", text)
         with pytest.raises(ReaderFormatError, match=match):
-            read_table((source,), _panel(), _dtypes(source, dtype=np.uint8))
+            read_table((source,), _panel(), _dtypes(source, dtype=np.uint8), _grids(source))
 
     def test_tables_share_one_schema(self, tmp_path: Path) -> None:
         first = _quantification(tmp_path, "s1", _HEADER + "1,1,0,0,0,1,a\n")
         second = _quantification(tmp_path, "s2", "CellID,A,B,X_centroid,Y_centroid\n1,1,0,0,0\n")
         with pytest.raises(ReaderFormatError, match="shared MCQuant schema"):
-            read_table((first, second), _panel(), _dtypes(first, second))
+            read_table((first, second), _panel(), _dtypes(first, second), _grids(first, second))
 
     def test_no_quantified_cells_fail(self, tmp_path: Path) -> None:
         source = _quantification(tmp_path, "s", _HEADER)
         with pytest.raises(ReaderFormatError, match="no quantified cells"):
-            read_table((source,), _panel(), _dtypes(source))
+            read_table((source,), _panel(), _dtypes(source), _grids(source))
+
+
+class TestSetPositions:
+    @pytest.mark.parametrize("sizes", [(None, None), (2.0, None), (2.0, 3.0)])
+    def test_complete_source_grid_required_and_native_buffer_preserved(
+        self, tmp_path: Path, sizes: tuple[float | None, float | None]
+    ) -> None:
+        native = np.asarray([[2.0, 1.0], [5.0, 3.5]], dtype=np.float64)
+        table = ad.AnnData(sparse.csr_array([[1], [2]]))
+        expression = table.X
+        grid = ImageGrid((10, 10), sizes, "global", "source OME spacing")
+        _set_positions(table, native, [grid], [2], ArtifactFile(tmp_path / "source.csv"))
+        assert table.obsm["spatial_pixels"] is native
+        np.testing.assert_array_equal(native, [[2, 1], [5, 3.5]])
+        assert table.X is expression
+        if sizes == (2.0, 3.0):
+            np.testing.assert_array_equal(table.obsm["spatial"], [[5, 4.5], [11, 12]])
+            assert not np.shares_memory(table.obsm["spatial"], native)
+        else:
+            assert "spatial" not in table.obsm
+
+    def test_nonfinite_physical_output_fails(self, tmp_path: Path) -> None:
+        table = ad.AnnData(sparse.csr_array([[1]]))
+        with pytest.raises(ReaderFormatError, match="nonfinite physical positions"):
+            _set_positions(
+                table,
+                np.asarray([[2.0, 1.0]]),
+                [ImageGrid((10, 10), (1e308, 3.0), "global", "source OME spacing")],
+                [1],
+                ArtifactFile(tmp_path / "source.csv"),
+            )

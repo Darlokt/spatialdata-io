@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
@@ -95,6 +96,20 @@ def _normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
 def _validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
     """Require nonempty expression and unique nonnull indexes and annotation names."""
     context = ReaderErrorContext("dbit", "expression table")
+    if "spatial_grid" in table.obsm or POSITIONS_KEY in table.uns:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="occupied grid position destination",
+            expected="no spatial_grid embedding or position declaration",
+        )
+    if "spatial" in table.obsm and "spatial_source" in table.obsm:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="occupied obsm[spatial_source]",
+            expected="an unoccupied imported-coordinate destination",
+        )
     if table.X is None or not table.n_obs or not table.n_vars:
         raise ReaderFormatError(
             context=context, path=path, found="empty or absent expression", expected="nonempty observation-by-feature X"

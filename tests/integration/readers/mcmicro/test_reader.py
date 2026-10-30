@@ -107,7 +107,7 @@ class TestMcmicro:
             assert isinstance(transform, Scale)
             np.testing.assert_array_equal(transform.scale, expected)
         np.testing.assert_array_equal(
-            result.tables["table"].obsm["spatial"][:2],
+            result.tables["table"].obsm["spatial_pixels"][:2],
             [[3.5, 3], [35.5, 26]] if mode == "tma" else [[3.5, 3], [75.5, 60]],
         )
 

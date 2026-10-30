@@ -7,10 +7,12 @@ import pickle
 from itertools import product
 from typing import TYPE_CHECKING
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
 import tifffile
+from anndata.tests.helpers import assert_equal
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
 from scipy import sparse
@@ -33,6 +35,17 @@ if TYPE_CHECKING:
 
 class TestSeqfish:
     """Exercise the public transaction using actual on-disk vendor artifacts."""
+
+    @pytest.mark.parametrize("rois", [("Roi1",), ("Roi1", "Roi2")])
+    def test_physical_declarations_follow_selected_roi_frame(self, tmp_path: Path, rois: tuple[str, ...]) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=rois)
+        result = seqfish(root, include_images=False, include_transcripts=False, include_labels=False)
+        for roi in rois:
+            table = result.tables[f"table_{roi}"]
+            description = table.uns["spatialdata_io_positions"]["coordinates"]["spatial"]
+            assert description["frame"] == ("global" if len(rois) == 1 else roi)
+            assert description["units"] == "micrometer"
+            np.testing.assert_array_equal(table.obsm["spatial"], [[1.5, 0.5], [4.5, 1.25]])
 
     def test_preserves_independent_property_ids(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path, rois=("Roi1",), reorder_boundaries=True)
@@ -424,6 +437,26 @@ class TestSeqfish:
         result.write(output)
         restored = read_zarr(output)
         table = restored.tables["table_Roi1"]
+        assert_equal(
+            table.uns["spatialdata_io_positions"],
+            result.tables["table_Roi1"].uns["spatialdata_io_positions"],
+            exact=True,
+        )
+        for storage in ("h5ad", "zarr"):
+            table_path = tmp_path / f"positions_seqfish.{storage}"
+            source_table = result.tables["table_Roi1"]
+            if storage == "h5ad":
+                source_table.write_h5ad(table_path)
+                restored_positions = ad.read_h5ad(table_path)
+            else:
+                source_table.write_zarr(table_path)
+                restored_positions = ad.read_zarr(table_path)
+            assert_equal(
+                restored_positions.uns["spatialdata_io_positions"],
+                source_table.uns["spatialdata_io_positions"],
+                exact=True,
+            )
+            assert_equal(restored_positions.obsm, source_table.obsm, exact=True)
         assert isinstance(table.X, sparse.csr_array | sparse.csr_matrix)
         assert_array_equal(table.X.data, [3, 5])
         assert_array_equal(table.obs["instance_id"], [70000, 2])
@@ -440,6 +473,26 @@ class TestSeqfish:
         restored = read_zarr(output)
         table = restored.tables["table_Roi1"]
         assert table.shape == (62, 12)
+        assert_equal(
+            table.uns["spatialdata_io_positions"],
+            result.tables["table_Roi1"].uns["spatialdata_io_positions"],
+            exact=True,
+        )
+        for storage in ("h5ad", "zarr"):
+            table_path = tmp_path / f"positions_seqfish.{storage}"
+            source_table = result.tables["table_Roi1"]
+            if storage == "h5ad":
+                source_table.write_h5ad(table_path)
+                restored_positions = ad.read_h5ad(table_path)
+            else:
+                source_table.write_zarr(table_path)
+                restored_positions = ad.read_zarr(table_path)
+            assert_equal(
+                restored_positions.uns["spatialdata_io_positions"],
+                source_table.uns["spatialdata_io_positions"],
+                exact=True,
+            )
+            assert_equal(restored_positions.obsm, source_table.obsm, exact=True)
         assert isinstance(table.X, sparse.csr_array | sparse.csr_matrix)
         assert table.var_names.tolist() == [
             "Arg1",

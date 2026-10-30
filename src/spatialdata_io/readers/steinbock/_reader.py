@@ -13,7 +13,7 @@ from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
 from spatialdata_io.readers.steinbock._images import _read_rasters
 from spatialdata_io.readers.steinbock._layout import _discover_layout
 from spatialdata_io.readers.steinbock._metadata import read_image_metadata
-from spatialdata_io.readers.steinbock._tables import _read_table
+from spatialdata_io.readers.steinbock._tables import _read_table, _set_positions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -100,9 +100,24 @@ def steinbock(
         regions but not within a region. Lazy mask pixels are not scanned for
         membership. Region declaration order follows first table occurrence.
 
-        ``obsm['spatial']`` contains XY centroids from ``centroid-1`` and
-        ``centroid-0`` respectively, correcting the export's row/column order.
-        Centroids must be finite and within their sample's pixel frame.
+        ``obsm['spatial_pixels']`` retains exact native XY centroids from
+        ``centroid-1`` and ``centroid-0``, correcting the export's row/column
+        order. These are regionprops zero-based pixel-index centres in native
+        ``<sample>_regionprops_indices`` frames. Centroids must be finite and
+        within their sample's pixel frame. If every sample has resolved XY
+        calibration, ``obsm['spatial']`` is float64 micrometre XY, calculated
+        as ``(native_xy + 0.5) * spacing_xy_um`` in each unchanged raster frame.
+        One calibrated sample uses ``global``; independent samples use
+        categorical ``obs['spatial_frame']``. Multiple native frames use
+        categorical ``obs['spatial_pixel_frame']``. Missing or mixed calibration
+        omits physical ``spatial`` for the entire aggregate, preserving all rows.
+        The version-1 ``uns['spatialdata_io_positions']`` declaration records
+        position meaning, units, frames and bounded calibration evidence.
+        An imported ``spatial`` embedding retains its exact dtype and shape
+        under ``spatial_source`` without invented semantics. Existing position
+        declarations, preservation destinations or generated frame columns fail.
+        These arrays are snapshots: later element registration and ordinary
+        AnnData concatenation do not update or register them.
         Nullable integer columns are supported when they contain no missing
         values; source annotation dtypes are retained. Mixed XY numeric types
         must combine without rounding integer coordinates. An
@@ -147,6 +162,7 @@ def steinbock(
         for sample in layout.samples
     }
     table = _read_table(layout.table, {name: sample.grid for name, sample in samples.items()})
+    _set_positions(table, samples, layout.table)
 
     # _read_table validates eager frames; AnnData also types backed Dataset2D.
     context = ReaderErrorContext("steinbock", "linked cell table")

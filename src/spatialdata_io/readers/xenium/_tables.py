@@ -27,6 +27,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory
@@ -414,6 +415,19 @@ def build_table(cells: Cells, counts: Counts, store: CellStore | None, *, path: 
 
     table = ad.AnnData(X=counts.table.X, obs=obs, var=cast("pd.DataFrame", counts.table.var))
     table.obsm["spatial"] = obs[["x_centroid", "y_centroid"]].to_numpy(dtype=np.float64)
+    positions: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial": {
+                "axes": ["x", "y"],
+                "units": "micrometer",
+                "frame": "global",
+                "position": "vendor cell centroid",
+                "calibration": {"global": "Xenium cells x_centroid/y_centroid in micrometres"},
+            }
+        },
+    }
+    table.uns[POSITIONS_KEY] = positions
     return table
 
 

@@ -38,6 +38,9 @@ class _SampleRasters:
     image: DataArray | DataTree
     labels: DataArray | DataTree
     grid: LabelGrid
+    frame: str
+    spacing_xy_um: tuple[float, float] | None
+    calibration: str
 
 
 def _read_raster(path: ArtifactFile, *, target_axes: tuple[str, ...]) -> tuple[Array, TiffMetadata]:
@@ -195,4 +198,12 @@ def _read_rasters(
             transformations={coordinate_system: transform},
         ),
         grid=LabelGrid((int(labels.shape[0]), int(labels.shape[1])), labels.dtype),
+        frame=coordinate_system,
+        spacing_xy_um=spacing,
+        calibration=(
+            "images.csv acquisition_width_um/width_px and acquisition_height_um/height_px"
+            if metadata is not None and metadata.spacing_um is not None
+            else "Source image OME PhysicalSizeX/PhysicalSizeY with declared source units"
+        )
+        + f"; resolved XY={spacing!r} micrometer/pixel",
     )

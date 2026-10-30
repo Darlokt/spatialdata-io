@@ -68,7 +68,7 @@ class TestMcmicroCharacterization:
         assert table.var["marker_name"].tolist() == ["CD3", "DAPI"]
         assert table.var["cycle"].tolist() == ["1", "1"]
         assert table.obs["CellID"].tolist() == [1, 2]
-        np.testing.assert_array_equal(table.obsm["spatial"], [[3.5, 3], [75.5, 60]])
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[3.5, 3], [75.5, 60]])
         # MCQuant defines no "custom_note", "area" or suffixed intensity fields: they stay exact text.
         assert table.obs["custom_note"].tolist() == ["first", "second"]
         assert table.obs["area"].tolist() == ["12.0", "12.0"]

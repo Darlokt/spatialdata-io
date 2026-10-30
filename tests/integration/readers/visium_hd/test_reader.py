@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Literal
 
+import anndata as ad
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from anndata.tests.helpers import assert_equal
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.sparse import csr_array, csr_matrix, spmatrix
 from spatialdata import read_zarr
@@ -80,6 +82,7 @@ class TestVisiumHD:
             assert table.var["genome"].tolist() == ["mouse", "human", "mouse"]
             assert table.var["feature_types"].tolist() == ["Gene Expression"] * 3
             assert table.obsm["spatial"].dtype == np.float64
+            assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["position"] == "nominal bin centre"
             transforms = get_transformation(result.shapes[f"square_{size:03d}um"], get_all=True)
             assert isinstance(transforms, dict)
             assert set(transforms) == {"global"}
@@ -137,6 +140,24 @@ class TestVisiumHD:
         assert set(restored.tables) == set(result.tables)
         assert set(restored.shapes) == set(result.shapes)
         for name, table in result.tables.items():
+            assert_equal(
+                restored.tables[name].uns["spatialdata_io_positions"], table.uns["spatialdata_io_positions"], exact=True
+            )
+            for storage in ("h5ad", "zarr"):
+                table_path = tmp_path / f"positions{name}.{storage}"
+                source_table = table
+                if storage == "h5ad":
+                    source_table.write_h5ad(table_path)
+                    restored_positions = ad.read_h5ad(table_path)
+                else:
+                    source_table.write_zarr(table_path)
+                    restored_positions = ad.read_zarr(table_path)
+                assert_equal(
+                    restored_positions.uns["spatialdata_io_positions"],
+                    source_table.uns["spatialdata_io_positions"],
+                    exact=True,
+                )
+                assert_equal(restored_positions.obsm, source_table.obsm, exact=True)
             assert isinstance(table.X, csr_array)
             restored_x = restored.tables[name].X
             assert isinstance(restored_x, (csr_array, csr_matrix))
@@ -207,6 +228,19 @@ class TestVisiumHD:
         path.write_text(json.dumps(document))
         with pytest.raises(ReaderFormatError, match="matrix IDs absent from polygons"):
             visium_hd(tmp_path, bin_sizes=(), include_images=False)
+
+    def test_nucleus_without_centroid_does_not_inherit_cell_positions(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path)
+        path = tmp_path / "segmented_outputs/nucleus_segmentations.geojson"
+        document = json.loads(path.read_text())
+        for feature in document["features"]:
+            feature["properties"].pop("nucleus_centroid")
+        path.write_text(json.dumps(document))
+        result = visium_hd(tmp_path, bin_sizes=(), include_images=False, include_nucleus_table=True)
+        assert "spatial" in result.tables["cell_table"].obsm
+        assert "spatialdata_io_positions" in result.tables["cell_table"].uns
+        assert "spatial" not in result.tables["nucleus_table"].obsm
+        assert "spatialdata_io_positions" not in result.tables["nucleus_table"].uns
 
     def test_nuclei_only_and_older_centroid_absence(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, version="4.0.1")

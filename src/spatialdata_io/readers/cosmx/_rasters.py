@@ -6,6 +6,7 @@ from math import prod
 from typing import TYPE_CHECKING, cast
 
 from spatialdata.models import Image2DModel, Labels2DModel
+from spatialdata.transformations import Scale
 from spatialdata.transformations import Sequence as TransformSequence
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
@@ -63,10 +64,13 @@ def _normalize(raster: LazyRaster, path: ArtifactFile, artifact: str, target: tu
         ) from error
 
 
-def _frames(fov: int, height: int, placement: Placement) -> dict[str, BaseTransformation]:
+def _frames(fov: int, height: int, placement: Placement, pixel_size_um: float | None) -> dict[str, BaseTransformation]:
     """Map pixel centers to the FOV's local frame, then to global pixels."""
     local = raster_to_local(height)
-    return {str(fov): local, "global": TransformSequence([local, placement.local_to_global()])}
+    steps: list[BaseTransformation] = [local, placement.local_to_global()]
+    if pixel_size_um is not None:
+        steps.append(Scale([pixel_size_um, pixel_size_um], axes=("x", "y")))
+    return {str(fov): local, "global": TransformSequence(steps)}
 
 
 def _check_pyramid(array: Array, options: RasterOptions) -> None:
@@ -77,7 +81,7 @@ def _check_pyramid(array: Array, options: RasterOptions) -> None:
 
 
 def read_image(
-    path: ArtifactFile, *, fov: int, placement: Placement, options: RasterOptions
+    path: ArtifactFile, *, fov: int, placement: Placement, options: RasterOptions, pixel_size_um: float | None = None
 ) -> tuple[DataArray | DataTree, tuple[int, int]]:
     """Return a lazy CYX FOV image and its trusted YX grid."""
     image = _normalize(_source(path, "image"), path, "image", _IMAGE_AXES)
@@ -91,13 +95,19 @@ def read_image(
         rgb=False,
         scale_factors=options.model_scale_factors,
         chunks=options.image_chunks(),
-        transformations=_frames(fov, grid[0], placement),
+        transformations=_frames(fov, grid[0], placement, pixel_size_um),
     )
     return element, grid
 
 
-def read_labels(
-    path: ArtifactFile, *, fov: int, grid: tuple[int, int] | None, placement: Placement, options: RasterOptions
+def read_labels(  # noqa: PLR0913, RUF100 - Independent raster/grid/placement state.
+    path: ArtifactFile,
+    *,
+    fov: int,
+    grid: tuple[int, int] | None,
+    placement: Placement,
+    options: RasterOptions,
+    pixel_size_um: float | None = None,
 ) -> tuple[DataArray | DataTree, np.dtype[np.generic]]:
     """Return lazy integer YX labels on the same grid as their FOV image."""
     labels = _normalize(_source(path, "labels"), path, "labels", _LABEL_AXES)
@@ -120,6 +130,6 @@ def read_labels(
         dims=_LABEL_AXES,
         scale_factors=options.model_scale_factors,
         chunks=options.label_chunks(),
-        transformations=_frames(fov, int(labels.shape[0]), placement),
+        transformations=_frames(fov, int(labels.shape[0]), placement, pixel_size_um),
     )
     return element, labels.dtype

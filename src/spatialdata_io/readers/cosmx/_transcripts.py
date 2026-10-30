@@ -15,7 +15,7 @@ import pyarrow.csv as pacsv
 from dask import delayed
 from dask.bytes import read_bytes
 from spatialdata.models import PointsModel
-from spatialdata.transformations import Identity
+from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io.readers.cosmx._schemas import (
     CELL,
@@ -188,7 +188,11 @@ def _partitions(projection: _Projection) -> list[Delayed]:
 
 
 def read_transcripts(
-    path: ArtifactFile, *, features: tuple[str, ...], placements: Mapping[int, Placement]
+    path: ArtifactFile,
+    *,
+    features: tuple[str, ...],
+    placements: Mapping[int, Placement],
+    pixel_size_um: float | None = None,
 ) -> dd.DataFrame:
     """Return lazy global XY points and every FOV frame after header inspection.
 
@@ -201,7 +205,9 @@ def read_transcripts(
     meta = _normalize(empty, features=features, path=path)
     frame = dd.from_delayed(_partitions(_Projection(names, columns, features, path)), meta=meta)
 
-    transformations: dict[str, BaseTransformation] = {"global": Identity()}
+    transformations: dict[str, BaseTransformation] = {
+        "global": Identity() if pixel_size_um is None else Scale([pixel_size_um, pixel_size_um], axes=("x", "y"))
+    }
     transformations.update({str(fov): placement.global_to_local() for fov, placement in placements.items()})
     # Partitions are deliberately unsorted. Known target categories and
     # sort=False avoid the public model's eager category and index scans.

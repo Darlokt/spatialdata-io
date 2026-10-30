@@ -15,6 +15,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 from scipy import sparse
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -220,7 +221,9 @@ def read_fov_positions(path: ArtifactFile) -> dict[int, FovPosition]:
     }
 
 
-def build_table(counts: Counts, metadata: CellMetadata, *, path: ArtifactFile, linked: bool) -> ad.AnnData:
+def build_table(
+    counts: Counts, metadata: CellMetadata, *, path: ArtifactFile, linked: bool, pixel_size_um: float | None = None
+) -> ad.AnnData:
     """Align counts to metadata order by exact keys and link once to per-FOV labels.
 
     ``path`` identifies the metadata artifact in population errors.
@@ -245,14 +248,50 @@ def build_table(counts: Counts, metadata: CellMetadata, *, path: ArtifactFile, l
     codes = np.searchsorted(fovs, metadata.fovs)
     obs.insert(0, REGION_KEY, pd.Series(pd.Categorical.from_codes(codes, pd.Index(regions)), index=obs.index))
 
+    obs["spatial_pixel_frame"] = pd.Categorical(metadata.fovs.astype(str))
     context = ReaderErrorContext("cosmx", "cell table")
     table = ad.AnnData(
         X=expression,
         obs=prepare_anndata_dataframe(obs, context=context, allow_float_nulls=True),
         var=pd.DataFrame(index=pd.Index(counts.features)),
     )
-    table.obsm["spatial"] = metadata.local
+    table.obsm["spatial_pixels"] = metadata.local
     table.obsm["global"] = metadata.global_
+    descriptions: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial_pixels": {
+                "axes": ["x", "y"],
+                "units": "pixel",
+                "position": "cell center",
+                "frame_key": "spatial_pixel_frame",
+            },
+            "global": {
+                "axes": ["x", "y"],
+                "units": "pixel",
+                "position": "cell center",
+                "frame": "global_pixels",
+            },
+        },
+    }
+    if pixel_size_um is not None:
+        physical = metadata.global_ * pixel_size_um
+        if not np.isfinite(physical).all():
+            msg = "pixel_size_um produces nonfinite physical cell coordinates."
+            raise ValueError(msg)
+        table.obsm["spatial"] = physical
+        descriptions["coordinates"]["spatial"] = {
+            "axes": ["x", "y"],
+            "units": "micrometer",
+            "position": "cell center",
+            "frame": "global",
+            "calibration": {
+                "global": (
+                    f"Caller-declared {pixel_size_um} micrometres per validated global pixel; no stage registration."
+                )
+            },
+        }
+    table.uns[POSITIONS_KEY] = descriptions
     if linked:
         return parse_linked_table(table, TableLinkage(tuple(regions), REGION_KEY, CELL_ID), context=context)
     normalize_owned_anndata(table)

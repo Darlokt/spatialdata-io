@@ -60,6 +60,9 @@ class TestCodexCommand:
             tmp_path,
             cell_table_file=Path("cells.fcs"),
             image_file=Path("stitched.tif"),
+            pixel_size_um=None,
+            experiment_file=None,
+            image_to_table=None,
             data_axes="CYX",
             tiff_series=1,
             scale_factors=(2, 4),
@@ -77,6 +80,9 @@ class TestCodexCommand:
             tmp_path,
             cell_table_file=None,
             image_file=None,
+            pixel_size_um=None,
+            experiment_file=None,
+            image_to_table=None,
             data_axes=None,
             tiff_series=None,
             scale_factors=DEFAULT_SCALE_FACTORS,
@@ -122,6 +128,9 @@ class TestCodexCommand:
             "output_path",
             "cell_table_file",
             "image_file",
+            "pixel_size_um",
+            "experiment_file",
+            "image_to_table",
             "data_axes",
             "tiff_series",
             "scale_factors",
@@ -136,3 +145,56 @@ class TestCodexCommand:
         assert options["tiff_series"].default is None
         assert options["scale_factors"].default == DEFAULT_SCALE_FACTORS
         assert options["chunks"].default == DEFAULT_CHUNKS
+
+    def test_explicit_calibration_options(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
+        reader = mocker.patch("spatialdata_io.readers.codex.codex")
+        result = runner.invoke(
+            codex_command,
+            [
+                "--input",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "out"),
+                "--pixel-size-um",
+                "0.5",
+                "--experiment-file",
+                "experiment.json",
+                "--image-to-table",
+                "[[2,0,10],[0,-2,20],[0,0,1]]",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert reader.call_args.kwargs["pixel_size_um"] == 0.5
+        assert reader.call_args.kwargs["experiment_file"] == Path("experiment.json")
+        matrix = reader.call_args.kwargs["image_to_table"].to_affine_matrix(("x", "y"), ("x", "y"))
+        assert matrix.tolist() == [[2, 0, 10], [0, -2, 20], [0, 0, 1]]
+
+    @pytest.mark.parametrize(
+        "matrix",
+        [
+            "invalid",
+            "{}",
+            "[[1,0],[0,1]]",
+            "[[1,0,0],[0,1,0],[0,0,true]]",
+            "[[1,0,0],[0,1,0],[0,0,2]]",
+            "[[1,0,0],[0,1,0],[1e-9,0,1]]",
+            "[[1,0,NaN],[0,1,0],[0,0,1]]",
+            "[[1,0,1e400],[0,1,0],[0,0,1]]",
+            "[[1,0," + "1" + "0" * 400 + "],[0,1,0],[0,0,1]]",
+        ],
+    )
+    def test_invalid_matrix_json(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, matrix: str) -> None:
+        reader = mocker.patch("spatialdata_io.readers.codex.codex")
+        result = runner.invoke(
+            codex_command,
+            [
+                "--input",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "out"),
+                "--image-to-table",
+                matrix,
+            ],
+        )
+        assert result.exit_code == 2, result.output
+        reader.assert_not_called()

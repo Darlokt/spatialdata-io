@@ -110,7 +110,7 @@ class TestDbitDataset:
 
         original_coordinates = source.obsm["source_spatial"]
         assert isinstance(original_coordinates, np.ndarray)
-        np.testing.assert_array_equal(table.obsm["spatial"], original_coordinates[order, ::-1])
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], original_coordinates[order, ::-1])
         assert table.obs["source_coordinate_id"].tolist() == source.obs["source_coordinate_id"].iloc[order].tolist()
 
         assert set(table.obs["pixel_id"]) == set(result.shapes["mouse_e10"].index)

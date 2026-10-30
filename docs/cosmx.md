@@ -20,7 +20,7 @@ Every flat file may instead be gzip-compressed (`.csv.gz`); one artifact cannot 
 
 The count matrix needs `fov` and `cell_ID` columns. Every other column is an expression feature in source order, including negative probes and system controls, so source spellings such as `HLA-A` are kept. Counts become eager, canonical CSR int64 arrays. The rows with `cell_ID` 0 are per-FOV background and are removed. The remaining `(fov, cell_ID)` population must equal the metadata population exactly; a mismatch fails rather than being intersected.
 
-Table rows follow metadata order. Observation names are the vendor `cell` IDs when the metadata provides them (AtoMx) and row positions `"0"`, `"1"`, ... otherwise. AtoMx's `cell_id` column is an exact copy of `cell` and a case variant of `cell_ID`, so it is dropped; any other case-variant column names fail. `fov` and `cell_ID` are int64. `Area`, `Area.um2`, `AspectRatio`, `Width`, `Height` and every `Mean.*`/`Max.*` intensity are float64, with empty fields and `NA` as missing values. All other metadata columns stay exact text. `obsm["spatial"]` and `obsm["global"]` hold the local and global cell centers in pixels.
+Table rows follow metadata order. Observation names are the vendor `cell` IDs when the metadata provides them (AtoMx) and row positions `"0"`, `"1"`, ... otherwise. AtoMx's `cell_id` column is an exact copy of `cell` and a case variant of `cell_ID`, so it is dropped; any other case-variant column names fail. `fov` and `cell_ID` are int64. `Area`, `Area.um2`, `AspectRatio`, `Width`, `Height` and every `Mean.*`/`Max.*` intensity are float64, with empty fields and `NA` as missing values. All other metadata columns stay exact text. `obsm["spatial_pixels"]` and `obsm["global"]` preserve the local and global cell centers in pixels. Categorical string `obs["spatial_pixel_frame"]` identifies each local FOV frame. Without calibration, no canonical `obsm["spatial"]` is returned. With explicit `pixel_size_um`, canonical `spatial` is float64 global cell-center XY in micrometres. `uns["spatialdata_io_positions"]` describes the units, position meaning and frames; the preserved native `global` array has the descriptive frame `global_pixels`.
 
 With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with instance key `cell_ID`, and every FOV with cells must have labels. Cell IDs must fit their own FOV's inspected integer label dtype; this check does not read label pixels or establish full pixel membership. Without that directory the table is returned unlinked.
 
@@ -37,6 +37,10 @@ CosMx local coordinates are pixel indices with a reversed vertical axis: the ras
 Each FOV's local-to-global map is a translation per axis, possibly with a reversed axis: `global = ±local + offset`. Exports differ in the sign of the y axis. The sign and offset are derived from every metadata cell and accepted only when one offset lies within the printed rounding interval of all of them; no affine is fitted. A pixel FOV-position file (`fov,x_px,y_px` or `FOV,x_global_px,y_global_px,...`) must agree with the cells and places FOVs without cells; millimetre-only position files are accepted but not used. Stage positions alone do not establish stage-to-pixel calibration; no universal micrometre-per-pixel constant or scale fitted from a single FOV is applied. A FOV with rasters but no cells and no pixel position fails.
 
 The raster convention has only been evidenced for exports whose global axes run in the same direction as the local axes. Rasters in an export with a reversed global axis therefore fail, while its table and transcripts are read.
+
+`pixel_size_um` supplies a positive finite micrometre-per-global-pixel scale from the caller's associated acquisition/export evidence. It changes the registered `global` frame to micrometres and scales canonical table positions, images, labels and lazy point transformations consistently. The existing local FOV frames remain pixels. Scaling follows the complete signed placement and raster-centre mapping. It establishes a local metric, not stage registration. No expression or transcript coordinates are resampled, and morphology summaries retain their source values.
+
+No scale is inferred automatically from headers, stage-only positions, paired pixel/mm fields, image dimensions or instrument guesses. Releases documenting 0.18, 0.12 and 0.12028 µm/pixel remain distinct. The current AtoMx 3.10.5 pancreas cell coordinates violate the supported signed unit-translation contract; supplying a scale does not make that profile supported. Automatic paired-FOV and TIFF optical-metadata profiles require associated source evidence and their own coordinate contracts.
 
 ## Transcripts
 
@@ -57,7 +61,8 @@ One task owns members beginning in about 8 MiB of compressed data, including the
 ```python
 from spatialdata_io import cosmx
 
-sdata = cosmx("Lung5_Rep2", chunks=(3, 1024, 1024))
+# Supply pixel_size_um only from associated export/acquisition evidence.
+sdata = cosmx("Lung5_Rep2", chunks=(3, 1024, 1024), pixel_size_um=0.18)
 sdata.write("Lung5_Rep2.zarr")
 ```
 

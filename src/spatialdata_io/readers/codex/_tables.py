@@ -12,6 +12,7 @@ import pyarrow as pa
 import readfcs
 from scipy import sparse
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.table import as_csr_array
 from spatialdata_io.readers.codex._schemas import (
@@ -19,6 +20,7 @@ from spatialdata_io.readers.codex._schemas import (
     cell_columns,
     cell_ids,
     check_integer_promotion,
+    csv_column_names,
     expression_dtype,
     normalize_csv_numbers,
     normalize_fcs_metadata,
@@ -30,6 +32,8 @@ from spatialdata_io.readers.codex._schemas import (
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import BinaryIO
+
+    import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -62,7 +66,7 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
     with path.open(encoding="utf-8-sig", newline="") as source:
         header = source.readline()
 
-        columns = next(csv.reader([header], strict=True), [])
+        columns, labels = csv_column_names(next(csv.reader([header], strict=True), []), path)
         features, metadata = cell_columns(columns, path)
         # Bound numerical materialization by width as well as row count. The
         # lexical parser buffers and retained sparse/annotation outputs are separate.
@@ -118,7 +122,10 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
     obs = pd.concat(observations)
     normalize_csv_numbers(obs, metadata, path)
 
-    return ad.AnnData(X=expression, obs=obs, var=pd.DataFrame(index=features))
+    var = pd.DataFrame(index=features)
+    if labels is not None:
+        var["marker"] = pd.Series(labels, index=columns, dtype=STRING_DTYPE).reindex(features)
+    return ad.AnnData(X=expression, obs=obs, var=var)
 
 
 def _read_fcs(path: ArtifactFile) -> ad.AnnData:
@@ -153,7 +160,7 @@ def _read_fcs(path: ArtifactFile) -> ad.AnnData:
     return table
 
 
-def _read_cell_table(path: ArtifactFile) -> ad.AnnData:
+def _read_cell_table(path: ArtifactFile) -> tuple[ad.AnnData, npt.NDArray[np.number]]:
     """Validate one cell population and normalize its final IDs and pixel frame."""
     try:
         table = _read_fcs(path) if path.suffix.lower() == ".fcs" else _read_csv(path)
@@ -178,5 +185,28 @@ def _read_cell_table(path: ArtifactFile) -> ad.AnnData:
     coordinates = validate_observations(obs, path)
 
     table.obs["region"] = pd.Categorical([region_name(obs["region"], path)] * table.n_obs)
-    table.obsm["spatial"] = coordinates
-    return table
+    return table, coordinates
+
+
+def _set_positions(
+    table: ad.AnnData, coordinates: npt.NDArray[np.number], *, pixel_size_um: float, calibration: str
+) -> None:
+    """Finalize physical source positions on the owned table before linkage."""
+    physical = np.multiply(coordinates, pixel_size_um, dtype=np.float64)
+    if not np.isfinite(physical).all():
+        message = "pixel_size_um produces nonfinite physical cell coordinates."
+        raise ValueError(message)
+    table.obsm["spatial"] = physical
+    descriptions: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial": {
+                "axes": ["x", "y"],
+                "units": "micrometer",
+                "position": "source cell position",
+                "frame": "global",
+                "calibration": {"global": f"{calibration} Resolved pixel size: {pixel_size_um} micrometres."},
+            }
+        },
+    }
+    table.uns[POSITIONS_KEY] = descriptions

@@ -8,26 +8,20 @@ from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
 import h5py
-import numpy as np
-import pandas as pd
 import pytest
 from numpy.testing import assert_array_equal
-from scipy.sparse import csr_array
 from spatialdata.transformations import get_transformation
 
 import spatialdata_io
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.table import _linkage
 from spatialdata_io.readers.stereoseq import stereoseq
-from spatialdata_io.readers.stereoseq._reader import _bin_selection, _link, _sequence, _validate_options
+from spatialdata_io.readers.stereoseq._reader import _bin_selection, _sequence, _validate_options
 from tests.integration.readers.stereoseq._fixtures import write_analysis, write_dataset
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
-
-    from pytest_mock import MockerFixture
 
 
 class TestBinSelection:
@@ -90,34 +84,6 @@ class TestValidateOptions:
             _validate_options(sample_id=None, cell_bins="none", cell_geometry="centroids", roles=(), analyses=(value,))
 
 
-class TestLink:
-    """Final linkage preserves the owned table and validates independent targets."""
-
-    def test_exact_membership_and_single_linkage(self, mocker: MockerFixture) -> None:
-        table = ad.AnnData(csr_array([[1, 0], [0, 2]]), obs=pd.DataFrame(index=["a", "b"]))
-        target = pd.Index([200, 100], dtype=np.uint64)
-        parse = mocker.spy(_linkage.TableModel, "parse")
-        result = _link(table, "cells_centroids", target)
-
-        assert result is table
-        assert result.obs["instance_id"].tolist() == [200, 100]
-        assert result.obs["instance_id"].dtype == np.uint64
-        assert result.obs["region"].cat.categories.tolist() == ["cells_centroids"]
-        parse.assert_called_once()
-
-    @pytest.mark.parametrize("column", ["region", "instance_id"])
-    def test_conflicting_reserved_annotations(self, column: str) -> None:
-        table = ad.AnnData(csr_array([[1]]), obs=pd.DataFrame({column: ["wrong"]}, index=["a"]))
-
-        with pytest.raises(ReaderFormatError, match="reserved"):
-            _link(table, "cells_centroids", pd.Index([1]))
-
-    def test_matching_reserved_annotations(self) -> None:
-        table = ad.AnnData(csr_array([[1]]), obs=pd.DataFrame({"region": ["cells"], "instance_id": [1]}, index=["a"]))
-
-        assert _link(table, "cells", pd.Index([1])) is table
-
-
 class TestStereoseq:
     """Enforce transaction boundaries not owned by individual product parsers."""
 
@@ -174,8 +140,10 @@ class TestStereoseq:
             handle["geneExp/bin1/expression"].attrs["minX"] = 100
             handle["geneExp/bin1/expression"].attrs["minY"] = 200
         result = stereoseq(tmp_path, bin_sizes=(1,), cell_bins="unadjusted", image_roles=("registered",))
-        assert_array_equal(result.tables["cells_table"].obsm["spatial"], [[10, 20], [30, 40]])
-        assert_array_equal(result.tables["bin1_table"].obsm["spatial"], [[5, 6], [1, 2]])
+        assert_array_equal(result.tables["cells_table"].obsm["spatial_grid"], [[10, 20], [30, 40]])
+        assert_array_equal(result.tables["cells_table"].obsm["spatial"], [[5, 10], [15, 20]])
+        assert_array_equal(result.tables["bin1_table"].obsm["spatial_grid"], [[5, 6], [1, 2]])
+        assert_array_equal(result.tables["bin1_table"].obsm["spatial"], [[2.5, 3], [0.5, 1]])
 
         assert result.tables["cells_table"].uns["stereoseq"]["origin"] == [100, 200]
         for element in (*result.images.values(), *result.points.values()):

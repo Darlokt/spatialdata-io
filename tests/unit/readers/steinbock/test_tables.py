@@ -81,7 +81,7 @@ class TestReadTable:
         assert table.obs["cell_id"].tolist() == [2, 7, 7, 2]
         assert table.obs["region"].tolist() == ["sample-b_labels", "sample-a_labels"] * 2
         assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
-        np.testing.assert_array_equal(table.obsm["spatial"], [[3, 1.5], [8.5, 5], [8.5, 5], [3, 1.5]])
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[3, 1.5], [8.5, 5], [8.5, 5], [3, 1.5]])
         assert table.obs["cell_type"].tolist() == ["B", "T", "T", "B"]
         assert "Image" not in table.obs
         assert table.var.columns.tolist() == ["Channel_Name"]

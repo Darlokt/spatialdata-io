@@ -23,6 +23,7 @@ from spatialdata_io.readers.mcmicro._schemas import (
     optional_float_values,
     quantification_columns,
     validate_columns,
+    validate_position_columns,
 )
 
 if TYPE_CHECKING:
@@ -194,3 +195,12 @@ class TestCellIds:
     def test_rejects(self, tmp_path: Path, tokens: list[str | None], dtype: type[np.integer], match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match):
             cell_ids(pa.array(tokens, pa.string()), np.dtype(dtype), _path(tmp_path))
+
+
+class TestValidatePositionColumns:
+    @pytest.mark.parametrize("name", ["spatial_frame", "spatial_pixel_frame"])
+    def test_generated_frame_collisions(self, tmp_path: Path, name: str) -> None:
+        columns = quantification_columns(["CellID", "A", "X_centroid", "Y_centroid", name], ("A",), _path(tmp_path))
+        with pytest.raises(ReaderFormatError, match="existing spatial_frame"):
+            validate_position_columns(columns, multiple=True, path=_path(tmp_path))
+        validate_position_columns(columns, multiple=False, path=_path(tmp_path))

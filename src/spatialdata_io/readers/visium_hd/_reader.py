@@ -172,7 +172,7 @@ def _segmentations(
 
         if boundaries.centroids is not None:
             table.obsm["spatial"] = boundaries.centroids[boundaries.shapes.index.get_indexer(geometry.index)]
-        tables[f"{kind}_table"] = link_table(table, name, geometry.index)
+        tables[f"{kind}_table"] = link_table(table, name, geometry.index, position=f"vendor {kind} centroid")
 
     return shapes, tables
 
@@ -289,6 +289,10 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         full_image, hires_image, lowres_image, cytassist_image. All use global
         physical micrometres oriented like the microscope image. Vectors and
         float64 obsm['spatial'] are stored in that frame with identity transforms.
+        Position descriptions in uns['spatialdata_io_positions'] distinguish
+        nominal bin centres, vendor cell centroids and vendor nucleus centroids.
+        Missing centroid properties yield no canonical positions or description
+        for that product; polygon centroids are never substituted.
         Source pixel positions remain in bin obs. Labels use exact rigid grid
         transforms. Images have (c, y, x) axes, source dtype/channel order and
         a fitted affine, whose maximum residual in µm is recorded in attrs.
@@ -372,7 +376,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
                 frame, rows.astype(np.uint32), cols.astype(np.uint32), grid, size, options=raster
             )
 
-        tables[f"{name}_table"] = link_table(table, name, ids)
+        tables[f"{name}_table"] = link_table(table, name, ids, position="nominal bin centre")
 
     images: dict[str, DataArray | DataTree] = (
         {} if layout.images is None else read_images(layout.images, frame, scales, metadata, image_options)

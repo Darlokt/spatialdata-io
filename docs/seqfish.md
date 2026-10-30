@@ -42,6 +42,10 @@ DAPI OME metadata calibrates pixel X and Y independently into the ROI physical c
 
 Transcript `z` is retained as integer `z_raw`. The export does not establish a physical calibration for this slice index, so transcript points have two spatial coordinates, X and Y. Optional `cell` values preserve source assignments, including unassigned zero values. The complete CellxGene feature header supplies the transcript feature vocabulary; unknown transcript names fail when their partition is computed. Transcript name categories follow the CellxGene feature header order, including zero-count features.
 
+
+
+Table `uns["spatialdata_io_positions"]` describes unchanged float64 vendor cell-centroid XY micrometres: `global` for one ROI and each ROI name for multiple independent ROIs. These positions do not derive from polygon centroids.
+
 ## Options and execution
 
 `include_images`, `include_labels`, `include_transcripts` and `include_shapes` default to `True`. `shape_geometry="polygons"` is the default; `"circles"` or `"both"` selects centroid circles or both geometry types. `include_shapes=False` excludes both.

@@ -122,7 +122,7 @@ class TestSteinbock:
             assert actual.raw.obs_names.tolist() == expected.obs_names.tolist()
             assert actual.uns["inherited"] == expected.uns["inherited"]
             assert get_table_keys(actual) == get_table_keys(table)
-            np.testing.assert_array_equal(actual.obsm["spatial"], table.obsm["spatial"])
+            np.testing.assert_array_equal(actual.obsm["spatial_pixels"], table.obsm["spatial_pixels"])
         unchanged = ad.read_h5ad(path)
         assert unchanged.obs_names.equals(original.obs_names)
         assert "region" not in unchanged.obs
@@ -150,7 +150,9 @@ class TestSteinbock:
             assert isinstance(transform, Scale)
             np.testing.assert_array_equal(transform.scale, [0.5, 2.5])
         assert get_transformation(result.images["sample-b_image"], to_coordinate_system="sample-b") == Identity()
-        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[3, 1.5], [8.5, 5], [8.5, 5], [3, 1.5]])
+        np.testing.assert_array_equal(
+            result.tables["table"].obsm["spatial_pixels"], [[3, 1.5], [8.5, 5], [8.5, 5], [3, 1.5]]
+        )
         np.testing.assert_array_equal(
             result.images["sample-a_image"].data.compute(), steinbock_dataset.images["sample-a"]
         )
@@ -291,7 +293,7 @@ class TestSteinbock:
         assert table.obs_names.tolist() == ["Object 1 in sample.tiff", "Object 2 in sample.tiff"]
         assert table.obs["cell_id"].tolist() == [1, 2]
         assert table.obs["region"].tolist() == ["sample_labels", "sample_labels"]
-        np.testing.assert_array_equal(table.obsm["spatial"], np.asarray([[1.5, 1.0], [2.5, 3.0]]))
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], np.asarray([[1.5, 1.0], [2.5, 3.0]]))
         assert table.var.columns.tolist() == ["Channel_Name"]
         assert get_table_keys(table) == ("sample_labels", "region", "cell_id")
 
@@ -350,7 +352,7 @@ class TestSteinbock:
         expected_centroids = np.asarray([[3.0, 1.5], [8.5, 5.0], [8.5, 5.0], [3.0, 1.5]])
         if labels_kind == "ilastik":
             expected_centroids[:, 1] += 1
-        np.testing.assert_array_equal(table.obsm["spatial"], expected_centroids)
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], expected_centroids)
         assert get_table_keys(table) == (["sample-b_labels", "sample-a_labels"], "region", "cell_id")
 
     def test_unmatched_image_fails(self, steinbock_dataset: SteinbockDataset) -> None:
@@ -573,7 +575,7 @@ class TestSteinbock:
 
         assert isinstance(table.obs, pd.DataFrame)
         assert isinstance(original.obs, pd.DataFrame)
-        np.testing.assert_array_equal(table.obsm["spatial"], [[2, 1], [4, 3]])
-        assert table.obsm["spatial"].dtype == np.dtype(dtype.lower())
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[2, 1], [4, 3]])
+        assert table.obsm["spatial_pixels"].dtype == np.dtype(dtype.lower())
         for column in ("centroid-0", "centroid-1"):
             pd.testing.assert_series_equal(table.obs[column], original.obs[column], check_exact=True)

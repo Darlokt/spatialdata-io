@@ -31,10 +31,15 @@ class _CodexLayout:
     root: DatasetRoot
     cell_table: ArtifactFile
     image: ArtifactFile | None
+    experiment: ArtifactFile | None
 
 
 def _discover_layout(
-    path: str | Path, *, cell_table_file: str | Path | None, image_file: str | Path | None
+    path: str | Path,
+    *,
+    cell_table_file: str | Path | None,
+    image_file: str | Path | None,
+    experiment_file: str | Path | None = None,
 ) -> _CodexLayout:
     """Resolve exactly one selected cell table and zero or one stitched image."""
     root = normalize_dataset_root(path, context=ReaderErrorContext("codex", "dataset layout"))
@@ -70,4 +75,9 @@ def _discover_layout(
             context=image_context, path=image, found=image.suffix, expected="a TIFF, OME-TIFF, BigTIFF, or BTF image"
         )
 
-    return _CodexLayout(root, cell_table, image)
+    experiment = (
+        None
+        if experiment_file is None
+        else require_caller_file(root, experiment_file, context=ReaderErrorContext("codex", "experiment calibration"))
+    )
+    return _CodexLayout(root, cell_table, image, experiment)

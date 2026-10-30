@@ -126,7 +126,13 @@ class TestFinalizeTable:
     @pytest.mark.parametrize("region", [None, "Roi1_Segmentation"])
     def test_linkage_and_serialization(self, tmp_path: Path, region: str | None) -> None:
         table = read_table(*_sources(tmp_path))
-        result = finalize_table(table, region=region, context=ReaderErrorContext("seqfish", "table"))
+        native = table.obsm["spatial"]
+        expression = table.X
+        result = finalize_table(table, frame="global", region=region, context=ReaderErrorContext("seqfish", "table"))
+        assert result is table
+        assert result.obsm["spatial"] is native
+        assert result.X is expression
+        assert result.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["frame"] == "global"
         assert result.obs["instance_id"].tolist() == [2, 1]
         assert isinstance(result.X, sparse.csr_array)
         if region is None:

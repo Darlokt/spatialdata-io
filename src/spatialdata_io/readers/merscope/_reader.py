@@ -117,8 +117,10 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     micron-to-mosaic affine. Physical-only reads need no images or affine.
     With absent calibration, images alone retain global mosaic pixels; mixed
     images/vectors use distinct ``mosaic_pixels`` and ``microns`` frames.
-    Table ``obsm['spatial']`` retains micron XY
-    centroids. Image layers and transcript ``z_raw`` are stack indices, not
+    Table ``obsm['spatial']`` retains float64 micron XY vendor cell centroids,
+    described in ``uns['spatialdata_io_positions']`` in the resolved vector frame.
+    Tables also require separation from unregistered mosaic images.
+    Image layers and transcript ``z_raw`` are stack indices, not
     physical Z coordinates. Footprints discard z occupancy and are independent
     of image-layer selection; they are not a 3D segmentation.
 
@@ -164,7 +166,9 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     vector_frame = "global"
     if layout.images is not None:
         transform = None if layout.images.transform is None else read_transform(layout.images.transform)
-        unregistered = transform is None and (layout.boundaries is not None or layout.transcripts is not None)
+        unregistered = transform is None and (
+            layout.boundaries is not None or layout.transcripts is not None or layout.tables is not None
+        )
         vector_frame = "microns" if unregistered else "global"
         images = read_images(
             layout.images.layers,
@@ -208,6 +212,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     if table_data is not None:
         tables["table"] = finalize_table(
             table_data[0],
+            frame=vector_frame,
             region_name=layout.names.region,
             slide_name=layout.names.slide,
             dataset_id=dataset_id,

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
@@ -27,6 +28,10 @@ def _validate_table(table: ad.AnnData, *, path: ArtifactFile, instance_key: str 
     before the reader's documented uniquification. Imported metadata dtypes and
     missingness remain unchanged. Final linkage rejects empty linked tables.
     """
+    if POSITIONS_KEY in table.uns:
+        raise _schema_error(path, "occupied spatialdata_io_positions declaration", "an unannotated source embedding")
+    if "spatial" in table.obsm and "spatial_source" in table.obsm:
+        raise _schema_error(path, "occupied obsm[spatial_source]", "an unoccupied imported-coordinate destination")
     if table.X is None:
         raise _schema_error(path, "missing expression X", "an observation-by-feature expression array")
     if not isinstance(table.obs, pd.DataFrame) or not isinstance(table.var, pd.DataFrame):

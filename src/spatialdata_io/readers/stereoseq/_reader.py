@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
-import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
 from spatialdata.transformations import Scale, set_transformation
@@ -15,7 +14,6 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.stereoseq._analysis import read_analyses
 from spatialdata_io.readers.stereoseq._cells import read_cells
 from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygons
@@ -23,6 +21,7 @@ from spatialdata_io.readers.stereoseq._layout import discover_layout
 from spatialdata_io.readers.stereoseq._metadata import read_image_pitch
 from spatialdata_io.readers.stereoseq._rasters import read_image, read_mask
 from spatialdata_io.readers.stereoseq._square import read_square
+from spatialdata_io.readers.stereoseq._tables import finalize_positions, link_table
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -123,38 +122,6 @@ def _validate_frames(products: Sequence[SquareCounts | CellCounts], sample: str 
         )
 
 
-def _link(table: ad.AnnData, target: str, index: pd.Index) -> ad.AnnData:
-    """Complete owned annotations once, then validate exact target membership."""
-    context = ReaderErrorContext("stereoseq", target)
-    obs = cast("pd.DataFrame", table.obs)
-    instances = pd.Series(index.to_numpy(), index=obs.index)
-
-    # Imported analysis may already contain linkage columns. Preserve matching
-    # values, but never replace a conflicting annotation with an invented link.
-    for column, expected in (("region", target), ("instance_id", instances)):
-        if column in obs and not obs[column].eq(expected).fillna(value=False).all():
-            raise ReaderFormatError(
-                context=context,
-                found=f"conflicting reserved column {column!r}",
-                expected="absent or matching linkage metadata",
-            )
-
-    obs["region"] = pd.Categorical.from_codes(np.zeros(len(obs), dtype=np.int8), categories=pd.Index([target]))
-    obs["instance_id"] = instances
-
-    # Convert owned annotations only after their final mutation, immediately
-    # before the shared AnnData/SpatialData compatibility and linkage boundary.
-    prepare_anndata_dataframe(obs, context=context)
-    prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
-    return parse_linked_table(
-        table,
-        TableLinkage((target,), "region", "instance_id"),
-        context=context,
-        expression_layers=tuple(name for name in ("exon", "counts", "log1p") if name in table.layers),
-        expected_instance_ids={target: index},
-    )
-
-
 def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain one explicit transaction outline.
     path: str | Path,
     *,
@@ -250,8 +217,13 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         values; generated levels downsample by nearest neighbour.
 
         All elements map to ``global`` in micrometres using the common source
-        pitch in nm divided by 1000. Native values and table embeddings remain
-        in the matching normalized expression grid (XY in tables/points).
+        pitch in nm divided by 1000. Tables expose finite float64 XY micrometres
+        in ``obsm["spatial"]``, with frame, position meaning and calibration in
+        ``uns["spatialdata_io_positions"]``. Exact native embeddings, including
+        imported storage dtype, are retained in ``obsm["spatial_grid"]``.
+        Bins retain source reference positions; cells retain vendor centres.
+        These arrays are snapshots and are not updated by later registration.
+        Native point values remain in the matching normalized expression grid.
         Image-only reads use associated GEF metadata when available, otherwise
         retain the source grid. Stored square coordinates are
         already in that grid and are not multiplied by bin size. Common chip
@@ -317,15 +289,34 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
     points: dict[str, dd.DataFrame] = {}
     shapes: dict[str, gpd.GeoDataFrame] = {}
     tables: dict[str, ad.AnnData] = {}
-    counts_by_population: dict[str, SquareCounts | CellCounts] = {}
+    counts_by_population: dict[str, SquareCounts | CellCounts] = {
+        f"bin{square.bin_size}": square for square in square_counts
+    }
+    counts_by_population.update(
+        ("cells" if source.kind == "unadjusted" else "adjusted_cells", cells)
+        for source, cells in zip(layout.cells, cell_counts, strict=True)
+    )
+    analyses, pitch = read_analyses(
+        layout.analyses,
+        counts=counts_by_population,
+        resolution=products[0].resolution if products else None,
+    )
+    pitch = pitch if pitch is not None else read_image_pitch(layout.calibration, sample_id=layout.sample_id)
 
     for square in square_counts:
         name = f"bin{square.bin_size}"
         target = f"{name}_genes"
         square_index = pd.RangeIndex(len(square.coordinates))
         points[target] = make_points(square.coordinates, square_index)
-        counts_by_population[name] = square
-        tables[f"{name}_table"] = _link(square.table, target, square_index)
+        finalize_positions(
+            square.table,
+            square.resolution,
+            "source_bin_reference_position",
+            calibration=(
+                f"GEF geneExp/bin{square.bin_size}/expression@resolution = {square.resolution} nm per grid unit"
+            ),
+        )
+        tables[f"{name}_table"] = link_table(square.table, target, square_index)
 
     for cell_source, cells in zip(layout.cells, cell_counts, strict=True):
         name = "cells" if cell_source.kind == "unadjusted" else "adjusted_cells"
@@ -339,23 +330,35 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
             )
             # Dropped contours remove their count rows; analyses still match the full raw population.
             index = shapes[target].index
-        table = (
-            cells.table if len(index) == cells.table.n_obs else cells.table[pd.Index(cells.cell_ids).isin(index)].copy()
+        table = cells.table
+        if len(index) != table.n_obs:
+            retained = pd.Index(cells.cell_ids).isin(index)
+            table = table[retained].copy()
+        finalize_positions(
+            table,
+            cells.resolution,
+            "vendor_cell_center",
+            calibration=f"GEF root@resolution = {cells.resolution} nm per grid unit",
         )
-        counts_by_population[name] = cells
-        tables[f"{name}_table"] = _link(table, target, index)
+        tables[f"{name}_table"] = link_table(table, target, index)
 
-    analyses, pitch = read_analyses(
-        layout.analyses,
-        counts=counts_by_population,
-        resolution=next((product.resolution for product in products), None),
-    )
     for source, analysis in zip(layout.analyses, analyses, strict=True):
         name = f"{analysis.name}_table"
         target = f"{analysis.name}_points"
         points[target] = make_points(analysis.coordinates, analysis.instance_ids)
         try:
-            tables[name] = _link(analysis.table, target, analysis.instance_ids)
+            population = analysis.population
+            finalize_positions(
+                analysis.table,
+                analysis.resolution,
+                "vendor_cell_center" if population in ("cells", "adjusted_cells") else "source_bin_reference_position",
+                calibration=(
+                    f"Matching raw GEF {population} resolution = {analysis.resolution} nm per grid unit"
+                    if population in counts_by_population
+                    else f"H5AD uns/resolution = {analysis.resolution} nm per grid unit"
+                ),
+            )
+            tables[name] = link_table(analysis.table, target, analysis.instance_ids)
         except (TypeError, ValueError) as error:
             add_reader_context(error, context=ReaderErrorContext("stereoseq", "analysis table"), path=source.file)
             raise
@@ -367,9 +370,6 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         shapes=shapes,
         tables=tables,
     )
-    # Image-only selections take the pitch from associated GEF companions, if any.
-    if pitch is None:
-        pitch = read_image_pitch(layout.calibration, sample_id=layout.sample_id)
     if pitch is not None:
         _set_grid_pitch(result, pitch)
     set_reader_provenance(result.attrs, reader="stereoseq")

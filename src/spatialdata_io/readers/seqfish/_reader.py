@@ -109,6 +109,10 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
 
     Notes
     -----
+    Position descriptions in ``uns["spatialdata_io_positions"]`` retain unchanged
+    float64 vendor cell-centroid XY micrometres in ``global`` for one ROI and
+    each independent ROI name for multiple ROIs.
+
     One selected ROI uses ``global`` in micrometers. Multiple independent ROIs
     retain their distinct ROI frame names. OME X/Y physical
     sizes calibrate pixels without exchanging axes. Cell and transcript XY
@@ -187,6 +191,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
 
         tables[f"table_{roi.name}"] = finalize_table(
             table,
+            frame=frame,
             region=f"{roi.name}_Segmentation" if selection.labels else None,
             context=ReaderErrorContext("seqfish", f"{roi.name} table"),
         )

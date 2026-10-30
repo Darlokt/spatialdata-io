@@ -54,6 +54,19 @@ class TestNormalizeBarcodes:
 class TestValidateTable:
     """Preserve imported extensions and reject ambiguous column/index names."""
 
+    @pytest.mark.parametrize("destination", ["spatial_source", "spatialdata_io_positions", "spatial_grid"])
+    def test_reserved_coordinate_destinations(self, tmp_path: Path, destination: str) -> None:
+        table = ad.AnnData(np.ones((2, 2)))
+        native = np.arange(6, dtype=np.int16).reshape(2, 3)
+        table.obsm["spatial"] = native
+        if destination == "spatialdata_io_positions":
+            table.uns[destination] = {"coordinates": {"spatial": {"units": "micrometer"}}}
+        else:
+            table.obsm[destination] = native
+        with pytest.raises(ReaderFormatError, match="occupied"):
+            _validate_table(table, ArtifactFile(tmp_path / "source.h5ad"))
+        assert table.obsm["spatial"] is native
+
     @pytest.mark.parametrize("axis", ["obs", "var"])
     def test_duplicate_names(self, tmp_path: Path, axis: str) -> None:
         """Reject duplicate annotations before named access."""

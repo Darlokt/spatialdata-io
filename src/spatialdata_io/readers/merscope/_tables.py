@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 from scipy import sparse
 
+from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -161,6 +162,7 @@ def read_table(counts: ArtifactFile, metadata: ArtifactFile) -> tuple[ad.AnnData
 def finalize_table(  # noqa: PLR0913, RUF100 - Final reader-owned annotations and linkage have distinct meanings.
     table: ad.AnnData,
     *,
+    frame: str,
     region_name: str,
     slide_name: str,
     dataset_id: str,
@@ -191,6 +193,19 @@ def finalize_table(  # noqa: PLR0913, RUF100 - Final reader-owned annotations an
         if not keep.all():
             table = table[keep].copy()
             observations = cast("pd.DataFrame", table.obs)
+    positions: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial": {
+                "axes": ["x", "y"],
+                "units": "micrometer",
+                "frame": frame,
+                "position": "vendor cell centroid",
+                "calibration": {frame: "Vizgen cell_metadata center_x/center_y in micrometres"},
+            }
+        },
+    }
+    table.uns[POSITIONS_KEY] = positions
     for name, value in (("region", region_name), ("slide", slide_name), ("dataset_id", dataset_id)):
         observations[name] = pd.Series(value, index=observations.index, dtype="category")
     if target is not None:

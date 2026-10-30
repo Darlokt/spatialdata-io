@@ -132,7 +132,7 @@ class TestPrepareTable:
         assert result.positions.index.tolist() == ["a", "b"]
         assert result.adata.obs["spot_id"].tolist() == ["a", "b"]
         assert result.adata.obs["region"].tolist() == ["sample", "sample"]
-        np.testing.assert_array_equal(result.adata.obsm["spatial"], np.asarray([[20.0, 10.0], [40.5, 30.5]]))
+        np.testing.assert_array_equal(result.adata.obsm["spatial_pixels"], np.asarray([[20.0, 10.0], [40.5, 30.5]]))
 
         assert result.adata.uns["spatial"] == {
             "sample": {
