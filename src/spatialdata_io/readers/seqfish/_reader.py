@@ -9,6 +9,7 @@ import pandas as pd
 from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.seqfish._geometry import make_circles, read_boundaries
@@ -35,6 +36,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     include_transcripts: bool = True,
     include_shapes: bool = True,
     shape_geometry: Literal["polygons", "circles", "both"] = "polygons",
+    invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
     rois: Sequence[str] | None = None,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
@@ -67,6 +69,11 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         ``"polygons"`` uses explicit GeoJSON feature IDs in pixel coordinates;
         ``"circles"`` uses cell centroids and ``sqrt(area/pi)`` physical radii;
         ``"both"`` returns both. Ignored when shapes are excluded.
+    invalid_geometries
+        Keep invalid polygon topology unchanged, drop its cell's polygon,
+        requested circle and table row, or raise. Source identity relationships
+        are validated before dropping. Labels and transcripts remain unchanged.
+        Circles-only or shapes-disabled reads never inspect polygons or drop cells.
     rois
         Unique ROI filename prefixes in desired order. None selects all in
         lexical order; an empty sequence is invalid.
@@ -100,7 +107,8 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
 
     Notes
     -----
-    Each ROI has its own coordinate system in micrometers. OME X/Y physical
+    One selected ROI uses ``global`` in micrometers. Multiple independent ROIs
+    retain their distinct ROI frame names. OME X/Y physical
     sizes calibrate pixels without exchanging axes. Cell and transcript XY
     coordinates are already physical; cell area is square micrometers. Source
     transcript z has no established physical calibration and is retained as
@@ -118,6 +126,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     selections are never mutated. See the seqFISH guide for the complete
     schemas, identifier policy and deliberate API changes.
     """
+    policy = validate_invalid_geometry_policy(invalid_geometries)
     selection = make_selection(
         include_images=include_images,
         include_labels=include_labels,
@@ -135,6 +144,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     tables: dict[str, AnnData] = {}
 
     for roi in layout.rois:
+        frame = "global" if len(layout.rois) == 1 else roi.name
         table = read_table(roi.counts, roi.cells)
         # read_table owns an eager AnnData; Dataset2D is only a backed alternative.
         obs = cast("pd.DataFrame", table.obs)
@@ -142,9 +152,9 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         if roi.pixels is not None:
             dapi = read_dapi(roi.pixels.dapi)
             if selection.images:
-                images[f"{roi.name}_DAPI"] = read_image(dapi, roi=roi.name, options=options)
+                images[f"{roi.name}_DAPI"] = read_image(dapi, roi=frame, options=options)
             if roi.pixels.labels is not None:
-                element, dtype = read_labels(roi.pixels.labels, reference=dapi, roi=roi.name, options=options)
+                element, dtype = read_labels(roi.pixels.labels, reference=dapi, roi=frame, options=options)
                 if int(obs["instance_id"].max()) > np.iinfo(dtype.str).max:
                     raise ReaderFormatError(
                         context=ReaderErrorContext("seqfish", "label identity"),
@@ -154,16 +164,23 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
                     )
                 labels[f"{roi.name}_Segmentation"] = element
             if roi.pixels.boundaries is not None:
-                shapes[f"{roi.name}_Boundaries"] = read_boundaries(
-                    roi.pixels.boundaries, instance_ids=pd.Index(obs["instance_id"]), roi=roi.name, scale=dapi.scale
+                boundaries = read_boundaries(
+                    roi.pixels.boundaries,
+                    instance_ids=pd.Index(obs["instance_id"]),
+                    roi=frame,
+                    scale=dapi.scale,
+                    policy=policy,
                 )
+                shapes[f"{roi.name}_Boundaries"] = boundaries
+                if len(boundaries) != table.n_obs:
+                    table = table[obs["instance_id"].isin(boundaries.index).to_numpy()].copy()
 
         if selection.shapes in {"circles", "both"}:
-            shapes[f"{roi.name}_CellCoordinates"] = make_circles(table, roi=roi.name)
+            shapes[f"{roi.name}_CellCoordinates"] = make_circles(table, roi=frame)
 
         if roi.transcripts is not None:
             points[f"{roi.name}_TranscriptList"] = read_transcripts(
-                roi.transcripts, features=tuple(table.var_names), roi=roi.name
+                roi.transcripts, features=tuple(table.var_names), roi=frame
             )
 
         tables[f"table_{roi.name}"] = finalize_table(

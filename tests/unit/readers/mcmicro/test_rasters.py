@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 import tifffile
 from dask.callbacks import Callback
-from spatialdata.transformations import BaseTransformation, Identity, get_transformation
+from spatialdata.transformations import BaseTransformation, Identity, Scale, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.mcmicro._rasters import read_image, read_labels
+from spatialdata_io.readers.mcmicro._rasters import ImageGrid, read_image, read_labels
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -57,7 +57,7 @@ class TestReadImage:
             element, grid = read_image(path, channels=("CD3", "DAPI"), frame="core_2", options=_DEFAULT)
         assert not tasks
         assert isinstance(element, DataArray)
-        assert grid == (20, 12)
+        assert grid.shape == (20, 12)
         assert element.dims == ("c", "y", "x")
         assert element.coords["c"].to_numpy().tolist() == ["CD3", "DAPI"]
         assert element.dtype == np.dtype(np.uint16)
@@ -70,7 +70,7 @@ class TestReadImage:
     def test_single_plane_gets_channel_axis(self, tmp_path: Path) -> None:
         path = _write(tmp_path / "image.tif", np.ones((4, 5), dtype=np.uint8), "YX")
         element, grid = read_image(path, channels=("DAPI",), frame="global", options=_DEFAULT)
-        assert grid == (4, 5)
+        assert grid.shape == (4, 5)
         assert element.shape == (1, 4, 5)
 
     def test_pyramid_and_chunks(self, tmp_path: Path) -> None:
@@ -117,7 +117,9 @@ class TestReadLabels:
         values = np.arange(20, dtype=np.uint32).reshape(1, 4, 5)
         path = _write(tmp_path / "cell.ome.tif", values, "CYX")
         decoder = mocker.spy(tifffile.TiffPage, "asarray")
-        element, dtype = read_labels(path, grid=(4, 5), frame="global", options=make_raster_options(chunks=(1, 2, 3)))
+        element, dtype = read_labels(
+            path, grid=ImageGrid((4, 5), (None, None)), frame="global", options=make_raster_options(chunks=(1, 2, 3))
+        )
         decoder.assert_not_called()
         assert dtype == np.dtype(np.uint32)
         assert element.dims == ("y", "x")
@@ -132,15 +134,45 @@ class TestReadLabels:
     @pytest.mark.parametrize(
         ("dtype", "grid", "options", "match"),
         [
-            (np.uint16, (4, 6), _DEFAULT, "image grid"),
+            (np.uint16, ImageGrid((4, 6), (None, None)), _DEFAULT, "image grid"),
             (np.float32, None, _DEFAULT, "integer labels"),
             (np.uint64, None, make_raster_options((2,)), "<=32-bit"),
             (np.uint16, None, make_raster_options((8,)), "exceed"),
         ],
     )
     def test_rejects(
-        self, tmp_path: Path, dtype: type[np.number], grid: tuple[int, int] | None, options: RasterOptions, match: str
+        self, tmp_path: Path, dtype: type[np.number], grid: ImageGrid | None, options: RasterOptions, match: str
     ) -> None:
         path = _write(tmp_path / "labels.tif", np.ones((4, 5), dtype), "YX")
         with pytest.raises(ValueError, match=match):
             read_labels(path, grid=grid, frame="global", options=options)
+
+
+class TestImageGrid:
+    """Reconcile partial metadata without manufacturing a complete physical frame."""
+
+    def test_partial_sizes_retained_for_linked_grid_validation(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.ome.tif"
+        tifffile.imwrite(path, np.ones((4, 5), dtype=np.uint8), ome=True, metadata={"axes": "YX", "PhysicalSizeX": 0.3})
+        _, grid = read_image(ArtifactFile(path), channels=("DAPI",), frame="global", options=_DEFAULT)
+        assert grid.declared_sizes_um == (0.3, None)
+        assert grid.transform() == Identity()
+        labels = tmp_path / "labels.ome.tif"
+        tifffile.imwrite(
+            labels, np.ones((4, 5), dtype=np.uint8), ome=True, metadata={"axes": "YX", "PhysicalSizeX": 0.4}
+        )
+        with pytest.raises(ReaderFormatError, match="calibration"):
+            read_labels(ArtifactFile(labels), grid=grid, frame="global", options=_DEFAULT)
+
+    def test_independent_calibrated_mask_uses_own_scale(self, tmp_path: Path) -> None:
+        path = tmp_path / "mask.ome.tif"
+        tifffile.imwrite(
+            path,
+            np.ones((4, 5), dtype=np.uint8),
+            ome=True,
+            metadata={"axes": "YX", "PhysicalSizeX": 2, "PhysicalSizeY": 3},
+        )
+        element, _ = read_labels(ArtifactFile(path), grid=None, frame="mask", options=_DEFAULT)
+        transform = get_transformation(element, to_coordinate_system="mask")
+        assert isinstance(transform, Scale)
+        np.testing.assert_array_equal(transform.scale, [2, 3])

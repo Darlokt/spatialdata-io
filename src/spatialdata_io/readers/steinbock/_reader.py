@@ -12,6 +12,7 @@ from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.steinbock._images import _read_rasters
 from spatialdata_io.readers.steinbock._layout import _discover_layout
+from spatialdata_io.readers.steinbock._metadata import read_image_metadata
 from spatialdata_io.readers.steinbock._tables import _read_table
 
 if TYPE_CHECKING:
@@ -74,9 +75,19 @@ def steinbock(
         values are retained. OME channel names are used when nonempty and unique.
         Otherwise OME IDs identify channels. Scientific three/four-channel
         images are never guessed to be RGB. Singleton spatial axes are retained.
-        Extra axes must be singleton. Each pair has an identity transformation
-        to its own sample coordinate system, measured in full-resolution pixels.
-        There is no inferred alignment between samples or physical-unit scaling.
+        Extra axes must be singleton. Optional root ``images.csv`` matches exact
+        ``<sample>.tiff`` identities using ``image``, ``width_px``, ``height_px``
+        and optional paired ``acquisition_width_um``/``acquisition_height_um``.
+        Positive acquisition extents divided by exact matching raster dimensions
+        calibrate XY in micrometres. The bounded 8 MiB CSV accepts reordered and
+        additional columns; duplicate names, malformed pairs, stale dimensions
+        and conflicting OME sizes fail. Missing rows or empty physical pairs
+        supply no IMC calibration. Complete source OME sizes in µm, nm or mm
+        also calibrate unchanged grids, with agreement required across sources.
+        Missing/incomplete calibration retains source pixels. One calibrated
+        sample uses ``global``; multiple samples retain independent sample
+        frames, including mixed physical and pixel groups. Native origins remain
+        unchanged and no stage registration between samples is inferred.
 
         ``tables['table']`` contains owned, eager, finite canonical CSR
         sparse-array expression in source row/feature order and dtype. The
@@ -121,7 +132,20 @@ def steinbock(
     raster = make_raster_options(scale_factors, chunks)
 
     layout = _discover_layout(path, labels_kind=labels_kind)
-    samples = {sample.name: _read_rasters(sample, raster) for sample in layout.samples}
+    metadata = (
+        read_image_metadata(layout.image_metadata, {f"{sample.name}.tiff" for sample in layout.samples})
+        if layout.image_metadata is not None
+        else {}
+    )
+    samples = {
+        sample.name: _read_rasters(
+            sample,
+            raster,
+            metadata=metadata.get(f"{sample.name}.tiff"),
+            calibrated_frame="global" if len(layout.samples) == 1 else sample.name,
+        )
+        for sample in layout.samples
+    }
     table = _read_table(layout.table, samples)
 
     # _read_table validates eager frames; AnnData also types backed Dataset2D.

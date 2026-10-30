@@ -11,7 +11,7 @@ from spatialdata_io._cli._common import scale_factors_option
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS
 
 if TYPE_CHECKING:
-    from typing import TypedDict, Unpack
+    from typing import Literal, TypedDict, Unpack
 
     class _GenericOptions(TypedDict):
         element_name: str | None
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         scale_factors: tuple[int, ...]
         chunks: tuple[int, ...]
         coordinate_system: str | None
+        invalid_geometries: Literal["keep", "drop", "raise"]
 
 
 @click.command(name="generic")
@@ -69,6 +70,13 @@ if TYPE_CHECKING:
     ),
 )
 @click.option("--coordinate-system", "-c", type=str, help="Target coordinate system.")
+@click.option(
+    "--invalid-geometries",
+    type=click.Choice(["keep", "drop", "raise"]),
+    default="keep",
+    show_default=True,
+    help="GeoJSON: keep invalid topology, drop invalid features, or fail.",
+)
 def generic_command(
     input_path: Path,
     output_path: Path,
@@ -98,6 +106,7 @@ def generic_command(
         tiff_level=options["tiff_level"],
         scale_factors=options["scale_factors"],
         chunks=normalized_chunks,
+        invalid_geometries=options["invalid_geometries"],
     )
 
     element_name = options["element_name"]

@@ -176,6 +176,7 @@ class TestFinalizeTable:
             dataset_id="slide_region",
             target=target,
             expected_instances=pd.Index(["a", "b"]) if target else None,
+            source_instances=None,
         )
         assert result is table
         assert result.obs["EntityID"].tolist() == ["b", "a"]
@@ -203,6 +204,7 @@ class TestFinalizeTable:
                 dataset_id="slide_region",
                 target="cells",
                 expected_instances=pd.Index(["a", "different"]),
+                source_instances=None,
             )
 
     def test_conflicting_source_annotations_fail(self, tmp_path: Path) -> None:
@@ -216,6 +218,7 @@ class TestFinalizeTable:
                 dataset_id="slide_region",
                 target="cells",
                 expected_instances=pd.Index(["a", "b"]),
+                source_instances=None,
             )
 
     def test_matching_annotations_are_preserved_as_declared_categories(self, tmp_path: Path) -> None:
@@ -230,6 +233,7 @@ class TestFinalizeTable:
             dataset_id="slide_region",
             target="cells",
             expected_instances=pd.Index(["a", "b"]),
+            source_instances=None,
         )
         for column, value in expected.items():
             assert result.obs[column].tolist() == [value, value]
@@ -246,4 +250,5 @@ class TestFinalizeTable:
                 dataset_id="slide_region",
                 target=None,
                 expected_instances=None,
+                source_instances=None,
             )

@@ -19,6 +19,7 @@ class TestImagePackage:
             "inspect_tiff",
             "make_raster_options",
             "normalize_raster_axes",
+            "ome_pixel_sizes_um",
             "read_jpeg",
             "read_png",
             "read_tiff",

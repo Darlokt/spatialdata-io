@@ -15,8 +15,10 @@ import tifffile
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
 from scipy import sparse
+from shapely.geometry import MultiPolygon, Polygon
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.transformations import Identity, get_transformation
 
 from spatialdata_io import __version__
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -32,6 +34,137 @@ if TYPE_CHECKING:
 
 class TestMerscope:
     """Read actual CSV, GeoParquet and TIFF artifacts through the public API."""
+
+    @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
+    @pytest.mark.parametrize("current", [False, True])
+    def test_drop_whole_cell_keeps_original_transcript_population(
+        self, tmp_path: Path, profile: Literal["standard", "cellpose", "watershed"], *, current: bool
+    ) -> None:
+        fixture = write_merscope_dataset(
+            tmp_path, profile=profile, invalid_first_cell=True, reassigned_transcripts=current
+        )
+        result = merscope(
+            fixture.root, vpt_directory=None if profile == "standard" else fixture.analysis, invalid_geometries="drop"
+        )
+
+        shapes = result.shapes["slide_region_polygons"]
+        table = result.tables["table"]
+        assert shapes.index.tolist() == list(fixture.cell_ids[1:])
+        assert table.obs_names.tolist() == list(fixture.cell_ids[1:])
+        assert isinstance(table.X, sparse.csr_array)
+        increment = 0 if profile == "standard" else 100
+        assert_array_equal(table.X.data, [4 + increment, 3 + increment, 1 + increment])
+        blank = table.obsm["blank"]
+        assert isinstance(blank, sparse.csr_array)
+        assert_array_equal(blank.data, [5 + increment])
+        events = result.points["slide_region_transcripts"].compute()
+        column = "cell_id" if profile == "standard" or current else "original_cell_id"
+        assert events[column].tolist() == (
+            [*fixture.cell_ids, "-1"] if column == "cell_id" else ["1001", "2002", "3003", "-1"]
+        )
+
+    @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
+    def test_keep_marks_invalid_cell_source_components(
+        self, tmp_path: Path, profile: Literal["standard", "cellpose", "watershed"]
+    ) -> None:
+        fixture = write_merscope_dataset(tmp_path, profile=profile, invalid_first_cell=True)
+        result = merscope(fixture.root, vpt_directory=None if profile == "standard" else fixture.analysis)
+
+        shapes = result.shapes["slide_region_polygons"]
+        assert shapes.index.tolist() == list(fixture.cell_ids)
+        assert shapes["geometry_representation"].tolist() == ["source_components", "union_footprint", "union_footprint"]
+        geometry = shapes.geometry.iloc[0]
+        assert isinstance(geometry, MultiPolygon)
+        assert len(geometry.geoms) == 3
+
+    def test_invalid_geometry_drop_does_not_hide_original_foreign_identity(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path, invalid_first_cell=True)
+        path = fixture.root / "cell_boundaries.parquet"
+        frame = gpd.read_parquet(path)
+        frame.loc[frame["EntityID"] == 1001, "EntityID"] = 9999
+        frame.to_parquet(path)
+        with pytest.raises(ReaderFormatError, match=r"original.*populations"):
+            merscope(fixture.root, invalid_geometries="drop")
+
+    def test_drop_cannot_hide_extra_invalid_foreign_boundary(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        path = fixture.root / "cell_boundaries.parquet"
+        frame = gpd.read_parquet(path)
+        extra = frame.iloc[:1].copy()
+        extra["EntityID"] = 9999
+        extra.geometry = gpd.GeoSeries([Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])], index=extra.index)
+        gpd.GeoDataFrame(pd.concat([frame, extra], ignore_index=True)).to_parquet(path)
+        with pytest.raises(ReaderFormatError, match=r"original.*populations"):
+            merscope(fixture.root, invalid_geometries="drop")
+
+    def test_invalid_components_and_marker_survive_zarr(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path / "source", invalid_first_cell=True)
+        result = merscope(fixture.root)
+        output = tmp_path / "output.zarr"
+        result.write(output)
+        restored = read_zarr(output).shapes["slide_region_polygons"]
+        expected = result.shapes["slide_region_polygons"]
+        assert restored.geometry.to_wkb().tolist() == expected.geometry.to_wkb().tolist()
+        # Zarr restores the Arrow-backed string index with pandas' default string dtype.
+        pd.testing.assert_series_equal(
+            restored["geometry_representation"], expected["geometry_representation"], check_index_type=False
+        )
+
+    def test_geometry_drop_does_not_hide_conflicting_source_annotations(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path, invalid_first_cell=True)
+        path = fixture.root / "cell_metadata.csv"
+        frame = pd.read_csv(path, index_col=0)
+        frame["dataset_id"] = ["other", "slide_region", "slide_region"]
+        frame.to_csv(path)
+        with pytest.raises(ReaderFormatError, match=r"conflicting source.*dataset_id"):
+            merscope(fixture.root, invalid_geometries="drop")
+
+    def test_geometry_disabled_does_not_filter_or_require_polygons(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path, invalid_first_cell=True)
+        (fixture.root / "cell_boundaries.parquet").unlink()
+        result = merscope(fixture.root, include_cell_boundaries=False, invalid_geometries="drop")
+        assert result.tables["table"].obs_names.tolist() == list(fixture.cell_ids)
+        assert not result.shapes
+
+    def test_all_cells_dropped_fails_as_requested_element(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        path = fixture.root / "cell_boundaries.parquet"
+        frame = gpd.read_parquet(path)
+        invalid = MultiPolygon([Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])])
+        frame.geometry = gpd.GeoSeries([invalid] * len(frame), index=frame.index)
+        frame.to_parquet(path)
+        with pytest.raises(ReaderFormatError, match="all cell boundaries dropped"):
+            merscope(fixture.root, invalid_geometries="drop")
+
+    def test_native_vectors_do_not_require_images_or_pixel_transform(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        shutil.rmtree(fixture.root / "images")
+        result = merscope(fixture.root, include_images=False)
+        for element in (result.shapes["slide_region_polygons"], result.points["slide_region_transcripts"]):
+            assert get_transformation(element, to_coordinate_system="global") == Identity()
+
+    def test_image_only_uses_full_inverse_affine(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        result = merscope(fixture.root, include_table=False, include_transcripts=False, include_cell_boundaries=False)
+        transform = get_transformation(result.images["slide_region_z0"], to_coordinate_system="global")
+        assert not isinstance(transform, dict)
+        inverse = transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
+        np.testing.assert_allclose(inverse @ [14.5, -1, 1], [2, 2, 1], rtol=1e-15, atol=1e-15)
+
+    def test_uncalibrated_images_and_native_vectors_use_distinct_frames(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        (fixture.root / "images" / "micron_to_mosaic_pixel_transform.csv").unlink()
+        result = merscope(fixture.root)
+        image_frames = get_transformation(result.images["slide_region_z0"], get_all=True)
+        vector_frames = get_transformation(result.shapes["slide_region_polygons"], get_all=True)
+        assert isinstance(image_frames, dict)
+        assert isinstance(vector_frames, dict)
+        assert set(image_frames) == {"mosaic_pixels"}
+        assert set(vector_frames) == {"microns"}
+
+    def test_invalid_polygon_policy_precedes_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="invalid_geometries"):
+            merscope(tmp_path / "missing", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
     def test_provenance_and_default_image_order(self, tmp_path: Path) -> None:
         fixture = write_merscope_dataset(tmp_path)

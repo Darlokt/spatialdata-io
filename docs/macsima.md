@@ -62,7 +62,7 @@ When a stack contains more stain channels named exactly `nuclei_channel_name` th
 
 The channels of a stack must share one dtype, one pixel size, one software major, and one well and ROI where these are recorded. Each channel is placed on a common pixel grid by its OME plane position, which must be an integral number of pixels; absent positions mean the origin. The canvas starts at the smallest plane position and spans every channel; uncovered pixels are zero, and padding emits a warning. A position shared by all channels is therefore not represented in the transformation.
 
-Each stack has its own coordinate system `<stack>`. With `include_transformations=True` it is in micrometers, through a scale by the isotropic OME pixel size (micrometers or nanometers). With `False` the transformation is the identity, so the same coordinate system is the pixel grid.
+One selected stack uses `global` in micrometres through the validated isotropic OME pixel size (micrometres or nanometres). Multiple independent stacks retain separate `<stack>` coordinate systems. A split nuclei stack shares its parent frame. Excluding folders can leave one group, which then uses `global`.
 
 ## Table
 
@@ -109,7 +109,7 @@ Renamed and removed options:
 
 - `filter_folder_names` is now `exclude_folder_names` and matches exact folder names.
 - `skip_rounds` is now `exclude_cycles`, and `include_cycle_in_channel_name` is now `include_cycle_in_channel_names`.
-- `transformations` is now `include_transformations`. Without transformations, the stack keeps its own coordinate system instead of `global`.
+- The `transformations` and `include_transformations` switches are removed. Calibrated physical coordinates are always attached; source pixel arrays remain unchanged.
 - `max_chunk_size` and `c_chunks_size` are replaced by `chunks`.
 - `multiscale` and `default_scale_factor` are replaced by `scale_factors`, which no longer defaults to an automatic pyramid.
 - `scale_factors` defaults to `()` instead of `None` for a single scale; `None` is no longer accepted.

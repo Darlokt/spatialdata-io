@@ -213,3 +213,18 @@ Reader modules must not:
   `squeeze()`;
 - pass arbitrary decoder keyword mappings through public reader APIs;
 - introduce alternate TIFF backends or compatibility paths.
+
+## OME physical pixel sizes
+
+`ome_pixel_sizes_um(metadata, series=..., axes=..., context=...)` returns one
+entry per requested axis: the declared OME length converted from µm, nm or mm
+to finite positive micrometres, or `None` when that size is absent. Every entry
+is `None` without OME metadata. A malformed present value or unsupported unit
+fails even when other sizes are absent, so partial declarations can still be
+compared between linked artifacts.
+
+Generic base images, ISS aligned pairs, MCMICRO local grids and Steinbock
+exports share this normalization. Readers decide whether an incomplete set
+calibrates anything and continue to own axis association, selected
+series/levels, dimensions, cross-artifact agreement, registration and
+transformations. The helper assigns no frame and reads no pixels.

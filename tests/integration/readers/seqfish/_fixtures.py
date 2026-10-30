@@ -25,6 +25,7 @@ def write_seqfish_dataset(  # noqa: PLR0913, RUF100 - Fixture source variations 
     reorder_cells: bool = False,
     reorder_boundaries: bool = False,
     singleton_axes: bool = False,
+    invalid_cell_ids: tuple[int, ...] = (),
 ) -> Path:
     """Write two-cell ROI layouts using the evidenced source headers and IDs.
 
@@ -71,7 +72,12 @@ def write_seqfish_dataset(  # noqa: PLR0913, RUF100 - Fixture source variations 
             {
                 "type": "Feature",
                 "id": str(identifier),
-                "geometry": {"type": "Polygon", "coordinates": [ring]},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[2, 1], [5, 3], [5, 1], [2, 3], [2, 1]] if identifier in invalid_cell_ids else ring
+                    ],
+                },
                 "properties": {"objectType": "cell"},
             }
             for identifier, ring in zip(

@@ -118,16 +118,19 @@ class TestDiscoverLayout:
         assert inferred.kind == "instrument"
         assert inferred.root == tmp_path.resolve()
         assert inferred.names.dataset_id == f"{tmp_path.parent.name}_{tmp_path.name}"
-        assert [layer.z for layer in inferred.images] == [0, 2]
-        assert [[channel.stain for channel in layer.channels] for layer in inferred.images] == [["Cyto", "DAPI"]] * 2
+        assert inferred.images is not None
+        assert [layer.z for layer in inferred.images.layers] == [0, 2]
+        assert [[channel.stain for channel in layer.channels] for layer in inferred.images.layers] == [
+            ["Cyto", "DAPI"]
+        ] * 2
         assert inferred.tables is not None
-        assert inferred.physical is not None
-        assert inferred.physical.transcripts is not None
-        assert inferred.physical.transcripts.assignment == "current"
+        assert inferred.transcripts is not None
+        assert inferred.transcripts.assignment == "current"
         selected = discover_layout(
             tmp_path, replace(_selection(), z_layers=(2, 0)), region_name="ROI", slide_name="slide"
         )
-        assert [layer.z for layer in selected.images] == [2, 0]
+        assert selected.images is not None
+        assert [layer.z for layer in selected.images.layers] == [2, 0]
         assert selected.names.dataset_id == "slide_ROI"
 
     @pytest.mark.parametrize("profile", ["cellpose", "watershed"])
@@ -145,8 +148,7 @@ class TestDiscoverLayout:
         assert layout.vpt_root == analysis
         assert layout.tables is not None
         assert layout.tables.counts.parent == analysis
-        assert layout.physical is not None
-        boundaries, transcripts = layout.physical.boundaries, layout.physical.transcripts
+        boundaries, transcripts = layout.boundaries, layout.transcripts
         assert boundaries is not None
         assert boundaries.kind == profile
         assert transcripts is not None
@@ -167,7 +169,6 @@ class TestDiscoverLayout:
             "cell_metadata.csv",
             "cell_boundaries.parquet",
             "detected_transcripts.csv",
-            "images/micron_to_mosaic_pixel_transform.csv",
         ],
     )
     @pytest.mark.parametrize("wrong_kind", [False, True])
@@ -183,22 +184,27 @@ class TestDiscoverLayout:
     def test_all_excluded_products_need_no_artifacts(self, tmp_path: Path) -> None:
         selected = replace(_selection(), images=False, boundaries=False, table=False, transcripts=False)
         layout = discover_layout(tmp_path, selected)
-        assert layout.images == ()
-        assert layout.physical is None
+        assert layout.images is None
+        assert layout.boundaries is None
+        assert layout.transcripts is None
         assert layout.tables is None
 
     def test_images_only_do_not_require_physical_calibration(self, tmp_path: Path) -> None:
         _files(tmp_path, "images/mosaic_DAPI_z0.tif")
         layout = discover_layout(tmp_path, replace(_selection(), boundaries=False, table=False, transcripts=False))
-        assert len(layout.images) == 1
-        assert layout.physical is None
+        assert layout.images is not None
+        assert len(layout.images.layers) == 1
+        assert layout.images.transform is None
+        assert layout.boundaries is None
+        assert layout.transcripts is None
 
     def test_table_only_needs_no_images(self, tmp_path: Path) -> None:
         _files(tmp_path, "cell_by_gene.csv", "cell_metadata.csv")
         layout = discover_layout(tmp_path, replace(_selection(), images=False, boundaries=False, transcripts=False))
         assert layout.tables is not None
-        assert layout.physical is None
-        assert not layout.images
+        assert layout.boundaries is None
+        assert layout.transcripts is None
+        assert layout.images is None
 
     @pytest.mark.parametrize("bad", ["missing", "ambiguous", "wrong_kind", "missing_raw_vocabulary"])
     def test_vpt_boundary_and_fallback_failures(self, tmp_path: Path, bad: str) -> None:
@@ -215,6 +221,12 @@ class TestDiscoverLayout:
             (tmp_path / "cell_by_gene.csv").unlink()
         with pytest.raises((ReaderFormatError, FileNotFoundError, IsADirectoryError)):
             discover_layout(tmp_path, _selection(), vpt_directory="vpt")
+
+    def test_image_transform_wrong_kind(self, tmp_path: Path) -> None:
+        _files(tmp_path, "images/mosaic_DAPI_z0.tif")
+        (tmp_path / "images" / "micron_to_mosaic_pixel_transform.csv").mkdir()
+        with pytest.raises(IsADirectoryError):
+            discover_layout(tmp_path, replace(_selection(), boundaries=False, table=False, transcripts=False))
 
     @pytest.mark.parametrize("bad", ["empty", "incomplete", "unknown", "alias", "wrong_kind"])
     def test_invalid_mosaic_grid(self, tmp_path: Path, bad: str) -> None:

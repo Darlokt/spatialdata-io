@@ -9,10 +9,11 @@ import numpy as np
 import pandas as pd
 import pytest
 import tifffile
+from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io import __version__
@@ -28,6 +29,78 @@ if TYPE_CHECKING:
 
 class TestIss:
     """Read genuine artifacts without compatibility shims or mocked parsers."""
+
+    @pytest.mark.parametrize("label_spacing", [None, (0.3, 0.7)])
+    def test_calibrated_pair_preserves_native_table_and_lazy_pixels(
+        self, iss_dataset: IssDataset, label_spacing: tuple[float, float] | None
+    ) -> None:
+        root = iss_dataset.root
+        tifffile.imwrite(
+            root / "raw.tiff",
+            iss_dataset.raw,
+            ome=True,
+            photometric="minisblack",
+            metadata={
+                "axes": "CYX",
+                "PhysicalSizeX": 300,
+                "PhysicalSizeXUnit": "nm",
+                "PhysicalSizeY": 0.0007,
+                "PhysicalSizeYUnit": "mm",
+            },
+        )
+        if label_spacing is not None:
+            tifffile.imwrite(
+                root / "labels.tiff",
+                iss_dataset.labels,
+                ome=True,
+                photometric="minisblack",
+                metadata={"axes": "YX", "PhysicalSizeX": label_spacing[0], "PhysicalSizeY": label_spacing[1]},
+            )
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            result = iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+        assert not tasks
+        for element in (result.images["region_raw_image"], result.labels["region_labels_image"]):
+            transform = get_transformation(element, to_coordinate_system="global")
+            assert isinstance(transform, Scale)
+            np.testing.assert_allclose(
+                transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")) @ [4, 3, 1], [1.2, 2.1, 1]
+            )
+        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[2, 4], [26, 9]])
+        np.testing.assert_array_equal(result.images["region_raw_image"].data.compute(), iss_dataset.raw)
+
+    @pytest.mark.parametrize("label_x", [0.4, 0.3])
+    def test_conflicting_label_declaration_including_partial(self, iss_dataset: IssDataset, label_x: float) -> None:
+        root = iss_dataset.root
+        tifffile.imwrite(
+            root / "raw.tiff",
+            iss_dataset.raw,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "PhysicalSizeX": 0.3, "PhysicalSizeY": 0.7},
+        )
+        tifffile.imwrite(
+            root / "labels.tiff",
+            iss_dataset.labels,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "YX", "PhysicalSizeX": label_x, "PhysicalSizeY": 0.8},
+        )
+        with pytest.raises(ReaderFormatError, match="calibration"):
+            iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+
+    def test_partial_image_calibration_keeps_pair_in_pixels(self, iss_dataset: IssDataset) -> None:
+        root = iss_dataset.root
+        tifffile.imwrite(
+            root / "raw.tiff",
+            iss_dataset.raw,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "PhysicalSizeX": 0.3},
+        )
+        result = iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+        assert get_transformation(result.images["region_raw_image"], to_coordinate_system="global") == Identity()
+        assert get_transformation(result.labels["region_labels_image"], to_coordinate_system="global") == Identity()
 
     @pytest.mark.parametrize("instance_key", [None, "segmentation_id"])
     def test_artifacts_preserve_values_order_transforms_and_linkage(

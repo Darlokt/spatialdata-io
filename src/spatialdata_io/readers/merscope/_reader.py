@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from spatialdata import SpatialData
 
+from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.merscope._geometry import read_boundaries
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from anndata import AnnData
     from dask.dataframe import DataFrame
     from geopandas import GeoDataFrame
+    from xarray import DataArray, DataTree
 
 
 def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public boundary typed.
@@ -35,6 +37,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     include_cell_boundaries: bool = True,
     include_table: bool = True,
     include_images: bool = True,
+    invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
@@ -65,14 +68,20 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     include_transcripts
         Return projected lazy transcript points with known feature categories.
     include_cell_boundaries
-        Return each cell's eager 2D XY footprint, the union of every valid
-        source z-slice component. Holes and disconnected components survive.
+        Return each cell's eager XY geometry. Valid source slices form a union
+        footprint; kept invalid cells retain marked literal components. Holes
+        and disconnected components survive.
     include_table
         Return eager canonical CSR expression and sparse blank measurements.
         Tables link to returned boundaries; excluding boundaries yields an
         explicitly unlinked table.
     include_images
         Return one lazy CYX image per selected z index, preserving source dtype.
+    invalid_geometries
+        Keep invalid cells as marked literal source components, drop all
+        their slices and table rows, or raise. Cells with valid slices retain
+        their ordinary union footprint. Missing/empty or malformed slices fail
+        in every mode; requested all-dropped boundaries fail.
     scale_factors
         Integer factors of at least two, one per generated pyramid level of the
         images; empty for a single scale.
@@ -103,12 +112,20 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
 
     Notes
     -----
-    The ``global`` coordinate system is mosaic pixels. Images use identity;
-    source micron XY coordinates on shapes and points carry the forward
-    micron-to-mosaic affine. Table ``obsm['spatial']`` retains micron XY
+    The calibrated ``global`` coordinate system uses source micrometres.
+    Shapes and points use identity; mosaics carry the full inverse of their
+    micron-to-mosaic affine. Physical-only reads need no images or affine.
+    With absent calibration, images alone retain global mosaic pixels; mixed
+    images/vectors use distinct ``mosaic_pixels`` and ``microns`` frames.
+    Table ``obsm['spatial']`` retains micron XY
     centroids. Image layers and transcript ``z_raw`` are stack indices, not
     physical Z coordinates. Footprints discard z occupancy and are independent
     of image-layer selection; they are not a 3D segmentation.
+
+    ``geometry_representation`` is categorical: ``union_footprint`` promises a
+    projected union, while ``source_components`` preserves every component of
+    cells with invalid slices. Overlaps may remain invalid and summed component
+    area does not represent projected cell area. No topology repair is applied.
 
     VPT's reassigned transcript CSV, when present, uses its count header and
     ``cell_id`` annotations. Otherwise the original instrument transcript CSV
@@ -124,6 +141,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     mutated, and construction executes no raster or transcript tasks. See the
     MERSCOPE guide for complete schemas and deliberate API changes.
     """
+    policy = validate_invalid_geometry_policy(invalid_geometries)
     selection = make_selection(
         include_images=include_images,
         include_cell_boundaries=include_cell_boundaries,
@@ -137,7 +155,21 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     )
     dataset_id = layout.names.dataset_id
 
-    images = read_images(layout.images, dataset_id=dataset_id, options=options)
+    # Native vectors are micrometres. Mosaics join them in ``global`` only through
+    # the vendor calibration; otherwise both keep explicitly distinct frames.
+    images: dict[str, DataArray | DataTree] = {}
+    vector_frame = "global"
+    if layout.images is not None:
+        transform = None if layout.images.transform is None else read_transform(layout.images.transform)
+        unregistered = transform is None and (layout.boundaries is not None or layout.transcripts is not None)
+        vector_frame = "microns" if unregistered else "global"
+        images = read_images(
+            layout.images.layers,
+            dataset_id=dataset_id,
+            options=options,
+            transform=transform,
+            frame="mosaic_pixels" if unregistered else "global",
+        )
 
     table_data = None if layout.tables is None else read_table(layout.tables.counts, layout.tables.metadata)
 
@@ -146,31 +178,29 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     tables: dict[str, AnnData] = {}
     boundaries = None
 
-    if layout.physical is not None:
-        transform = read_transform(layout.physical.transform)
-        if layout.physical.boundaries is not None:
-            boundaries = read_boundaries(layout.physical.boundaries.path, transform=transform)
-            shapes[f"{dataset_id}_polygons"] = boundaries
+    if layout.boundaries is not None:
+        boundaries = read_boundaries(layout.boundaries.path, policy=policy, frame=vector_frame)
+        shapes[f"{dataset_id}_polygons"] = boundaries.shapes
 
-        if layout.physical.transcripts is not None:
-            source = layout.physical.transcripts
-            if table_data is not None and layout.tables is not None and layout.tables.counts == source.vocabulary:
-                features = table_data[1]
-            else:
-                features = read_feature_names(source.vocabulary)
+    if layout.transcripts is not None:
+        source = layout.transcripts
+        if table_data is not None and layout.tables is not None and layout.tables.counts == source.vocabulary:
+            features = table_data[1]
+        else:
+            features = read_feature_names(source.vocabulary)
 
-            # Both private producers establish exact textual identities. Freeze
-            # the available population once for deferred assignment validation.
-            allowed_ids: tuple[str, ...] | None = None
-            if source.assignment == "current":
-                if boundaries is not None:
-                    allowed_ids = cast("tuple[str, ...]", tuple(boundaries.index))
-                elif table_data is not None:
-                    allowed_ids = tuple(table_data[0].obs_names)
+        # Both private producers establish exact textual identities. Freeze
+        # the available population once for deferred assignment validation.
+        allowed_ids: tuple[str, ...] | None = None
+        if source.assignment == "current":
+            if boundaries is not None:
+                allowed_ids = cast("tuple[str, ...]", tuple(boundaries.source_ids))
+            elif table_data is not None:
+                allowed_ids = tuple(table_data[0].obs_names)
 
-            points[f"{dataset_id}_transcripts"] = read_transcripts(
-                source, features=features, transform=transform, allowed_cell_ids=allowed_ids
-            )
+        points[f"{dataset_id}_transcripts"] = read_transcripts(
+            source, features=features, frame=vector_frame, allowed_cell_ids=allowed_ids
+        )
 
     if table_data is not None:
         tables["table"] = finalize_table(
@@ -179,7 +209,8 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
             slide_name=layout.names.slide,
             dataset_id=dataset_id,
             target=f"{dataset_id}_polygons" if boundaries is not None else None,
-            expected_instances=None if boundaries is None else boundaries.index,
+            expected_instances=None if boundaries is None else boundaries.shapes.index,
+            source_instances=None if boundaries is None else boundaries.source_ids,
         )
 
     result = SpatialData(images=images, points=points, shapes=shapes, tables=tables)

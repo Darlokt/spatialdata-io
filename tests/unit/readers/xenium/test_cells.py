@@ -138,6 +138,113 @@ class TestReadCellsStore:
         expected = [(columns.mean() + 0.5) * fx.PIXEL_SIZE, (rows.mean() + 0.5) * fx.PIXEL_SIZE]
         np.testing.assert_allclose(store.nucleus_centroids[2], expected, rtol=1e-15)
 
+    @pytest.mark.parametrize("key", ["polygon_sets/1/cell_index", "polygon_sets/1/method", "polygon_sets/0/cell_index"])
+    @pytest.mark.parametrize("value", [-1, 2**63, 2**64 - 1], ids=["negative", "int64-overflow", "uint64-maximum"])
+    def test_rejects_indexes_before_narrowing(
+        self, tmp_path: Path, mocker: MockerFixture, key: str, value: int
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+
+        def mutate(group: zarr.Group) -> None:
+            source = group[key]
+            assert isinstance(source, zarr.Array)
+            values = np.asarray(source[...], dtype=np.int64 if value < 0 else np.uint64)
+            values[0] = value
+            del group[key]
+            group.create_array(key, data=values)
+
+        _rewrite(bundle.root / "cells.zarr.zip", mutate)
+        close = mocker.spy(_cells.ZipStore, "close")
+
+        with pytest.raises(ReaderFormatError):
+            _read(bundle)
+
+        assert close.call_count >= 1
+
+    @pytest.mark.parametrize(
+        ("key", "bound"),
+        [
+            ("polygon_sets/1/cell_index", len(fx.CELL_METHODS)),
+            ("polygon_sets/1/method", len(fx.SEGMENTATION_METHODS)),
+            ("polygon_sets/0/cell_index", len(fx.CELL_METHODS)),
+        ],
+    )
+    def test_rejects_index_at_exclusive_bound(self, tmp_path: Path, key: str, bound: int) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+        _rewrite(bundle.root / "cells.zarr.zip", _assign(key, 0, bound))
+
+        with pytest.raises(ReaderFormatError):
+            _read(bundle)
+
+    def test_reordered_cell_polygon_mapping(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+
+        def mutate(group: zarr.Group) -> None:
+            indexes = group["polygon_sets/1/cell_index"]
+            methods = group["polygon_sets/1/method"]
+            assert isinstance(indexes, zarr.Array)
+            assert isinstance(methods, zarr.Array)
+            indexes[:] = [2, 0, 3, 1]
+            methods[:] = [4, 3, 2, 1]
+
+        _rewrite(bundle.root / "cells.zarr.zip", mutate)
+
+        store = _read(bundle)
+
+        np.testing.assert_array_equal(store.cell_labels, [2, 4, 1, 3])
+        assert store.cell_methods is not None
+        assert store.cell_methods.tolist() == [fx.SEGMENTATION_METHODS[index] for index in (3, 1, 4, 2)]
+
+    @pytest.mark.parametrize("size", [0, 1])
+    def test_empty_and_single_cell_polygon_populations(self, tmp_path: Path, size: int) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+
+        def mutate(group: zarr.Group) -> None:
+            for key in (
+                "cell_id",
+                "cell_summary",
+                "polygon_sets/1/cell_index",
+                "polygon_sets/1/method",
+                "polygon_sets/0/cell_index",
+            ):
+                source = group[key]
+                assert isinstance(source, zarr.Array)
+                values = np.asarray(source[:size])
+                attributes = dict(source.attrs)
+                del group[key]
+                target = group.create_array(key, data=values)
+                target.attrs.update(attributes)
+
+        _rewrite(bundle.root / "cells.zarr.zip", mutate)
+
+        store = _read(bundle)
+
+        np.testing.assert_array_equal(store.cell_labels, np.arange(1, size + 1, dtype=np.uint32))
+        assert store.cell_methods is not None
+        assert store.cell_methods.tolist() == list(fx.SEGMENTATION_METHODS[:size])
+        assert store.nuclei is not None
+        np.testing.assert_array_equal(store.nuclei.cells, np.zeros(size, dtype=np.int64))
+        assert store.nucleus_centroids.shape == (size, 2)
+
+    @pytest.mark.parametrize("value", [float(2**63), np.finfo(np.float64).max], ids=["int64-bound", "float64-maximum"])
+    def test_rejects_nucleus_count_overflow(self, tmp_path: Path, value: float) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+        _rewrite(bundle.root / "cells.zarr.zip", _assign("cell_summary", (0, 7), value))
+
+        with pytest.raises(ReaderFormatError, match="nucleus_count"):
+            _read(bundle)
+
+    def test_nucleus_count_last_representable_float64_below_int64_bound(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+        value = float(np.nextafter(float(2**63), 0))
+        _rewrite(bundle.root / "cells.zarr.zip", _assign("cell_summary", (0, 7), value))
+
+        store = _read(bundle)
+
+        assert store.nucleus_counts is not None
+        assert store.nucleus_counts[0] == int(value)
+        assert store.nucleus_counts.dtype == np.int64
+
     def test_transcript_assignment_import_has_no_nuclei_or_labels(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(import_kind="transcripts"))
 

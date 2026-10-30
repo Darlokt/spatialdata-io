@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
-from spatialdata.transformations import Affine, get_transformation
+from spatialdata.transformations import Identity, get_transformation
 
 import spatialdata_io.readers.merscope._transcripts as transcript_module
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -24,11 +24,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 _FEATURES = ("GeneB", "Gene,A", "Undetected")
-_TRANSFORM = Affine(
-    np.array([[2, 0.25, 10], [0, 3, -7], [0, 0, 1]], dtype=np.float64),
-    input_axes=("x", "y"),
-    output_axes=("x", "y"),
-)
+_FRAME = "microns"
 
 
 def _write_source(
@@ -59,9 +55,7 @@ class TestReadTranscripts:
         tasks = mocker.Mock()
         initial_filters = list(warnings.filters)
         with Callback(posttask=tasks):
-            points = read_transcripts(
-                source, features=_FEATURES, transform=_TRANSFORM, allowed_cell_ids=("9007199254740993",)
-            )
+            points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=("9007199254740993",))
 
         tasks.assert_not_called()
         assert warnings.filters == initial_filters
@@ -71,7 +65,7 @@ class TestReadTranscripts:
         assert points.dtypes["x"] == np.dtype(np.float64)
         assert points.dtypes["y"] == np.dtype(np.float64)
         assert set(points.columns) == {"gene", "x", "y", "z_raw", "cell_id", "fov", "barcode_id", "transcript_id"}
-        assert get_transformation(points, to_coordinate_system="global") == _TRANSFORM
+        assert get_transformation(points, to_coordinate_system=_FRAME) == Identity()
 
         restored = pickle.loads(pickle.dumps(points))  # noqa: S301, RUF100 - Test-owned path-backed graph.
         result = restored.compute()
@@ -83,7 +77,7 @@ class TestReadTranscripts:
 
     def test_original_assignments_are_explicit_annotations(self, tmp_path: Path) -> None:
         source = _write_source(tmp_path / "transcripts.csv", assignment="original")
-        points = read_transcripts(source, features=_FEATURES, transform=_TRANSFORM)
+        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         result = points.compute()
         assert "cell_id" not in result
         assert result["original_cell_id"].tolist() == ["9007199254740993"] * 39 + ["-1"]
@@ -91,7 +85,7 @@ class TestReadTranscripts:
     def test_header_only_input_has_typed_empty_points_without_optional_annotations(self, tmp_path: Path) -> None:
         source = _write_source(tmp_path / "transcripts.csv")
         source.path.write_text("gene,global_x,global_y\n", encoding="utf-8")
-        points = read_transcripts(source, features=_FEATURES, transform=_TRANSFORM)
+        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         assert set(points.columns) == {"gene", "x", "y"}
         assert points.compute().empty
 
@@ -103,9 +97,7 @@ class TestReadTranscripts:
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv", last_gene=gene, last_cell=cell)
         mocker.patch.object(transcript_module, "_BLOCK_BYTES", 256)
-        points = read_transcripts(
-            source, features=_FEATURES, transform=_TRANSFORM, allowed_cell_ids=("9007199254740993",)
-        )
+        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=("9007199254740993",))
         assert points.npartitions > 1
         first = points.partitions[0].compute()
         assert set(first["gene"]) == {"GeneB"}
@@ -121,7 +113,7 @@ class TestReadTranscripts:
         source.path.write_bytes(content)
         parser = mocker.spy(transcript_module, "read_bytes")
         with pytest.raises(ReaderFormatError, match="malformed CSV header"):
-            read_transcripts(source, features=_FEATURES, transform=_TRANSFORM)
+            read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         parser.assert_not_called()
 
     def test_bounds_header_read(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -129,7 +121,7 @@ class TestReadTranscripts:
         mocker.patch.object(transcript_module, "_HEADER_BYTES", 32)
         parser = mocker.spy(transcript_module, "read_bytes")
         with pytest.raises(ReaderFormatError, match="oversized CSV header"):
-            read_transcripts(source, features=_FEATURES, transform=_TRANSFORM)
+            read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         parser.assert_not_called()
 
     @pytest.mark.parametrize("record", ["40,GeneB,1,2\n", "40,GeneB,1,2,0,-1,0,1,t,9,8,annotation,excess\n"])
@@ -138,7 +130,7 @@ class TestReadTranscripts:
         with source.path.open("a", encoding="utf-8") as output:
             output.write(record)
         mocker.patch.object(transcript_module, "_BLOCK_BYTES", 256)
-        points = read_transcripts(source, features=_FEATURES, transform=_TRANSFORM)
+        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         assert not points.partitions[0].compute().empty
         with pytest.raises(ReaderFormatError, match="malformed transcript CSV"):
             points.partitions[-1].compute()
@@ -148,7 +140,7 @@ class TestReadTranscripts:
         parser = mocker.patch.object(transcript_module.PointsModel, "parse", side_effect=RuntimeError("injected"))
         initial = list(warnings.filters)
         with pytest.raises(RuntimeError, match="injected"):
-            read_transcripts(source, features=_FEATURES, transform=_TRANSFORM)
+            read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         assert warnings.filters == initial
         parser.assert_called_once()
         assert parser.call_args.kwargs["sort"] is False
@@ -161,7 +153,7 @@ class TestReadTranscripts:
         )
         storage = mocker.spy(transcript_module, "read_bytes")
         parser = mocker.spy(transcript_module, "_read_partition")
-        points = read_transcripts(source, features=_FEATURES, transform=_TRANSFORM)
+        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         parser.assert_not_called()
         assert storage.call_args.kwargs["sample"] is False
         result = points.compute()
@@ -172,5 +164,5 @@ class TestReadTranscripts:
         root = tmp_path / "[region]*?"
         root.mkdir()
         source = _write_source(root / "transcripts.csv")
-        result = read_transcripts(source, features=_FEATURES, transform=_TRANSFORM).compute()
+        result = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None).compute()
         assert len(result) == 40

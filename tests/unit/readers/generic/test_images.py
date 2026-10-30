@@ -42,7 +42,7 @@ class TestImage:
         data = da.zeros(shape, chunks=shape, dtype=np.uint16)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
-            return_value=LazyRaster(data=data, axes=tuple(source_axes)),
+            return_value=(LazyRaster(data=data, axes=tuple(source_axes)), None),
         )
 
         result = image("image.tif", source_axes.upper(), "global")
@@ -54,7 +54,7 @@ class TestImage:
         data = da.zeros((7, 5, 3), chunks=(7, 5, 3), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
-            return_value=LazyRaster(data=data, axes=("y", "x", "c")),
+            return_value=(LazyRaster(data=data, axes=("y", "x", "c")), None),
         )
         parse = mocker.patch(
             "spatialdata_io.readers.generic._images.Image2DModel.parse",
@@ -72,7 +72,7 @@ class TestImage:
         data = da.zeros((3, 2, 11, 13), chunks=(3, 2, 11, 13), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
-            return_value=LazyRaster(data=data, axes=("c", "z", "y", "x")),
+            return_value=(LazyRaster(data=data, axes=("c", "z", "y", "x")), None),
         )
         parse = mocker.patch(
             "spatialdata_io.readers.generic._images.Image3DModel.parse",
@@ -101,7 +101,7 @@ class TestImage:
         data = da.zeros((2, 11, 13, 3), chunks=(2, 11, 13, 3), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
-            return_value=LazyRaster(data=data, axes=("z", "y", "x", "c")),
+            return_value=(LazyRaster(data=data, axes=("z", "y", "x", "c")), None),
         )
         parse = mocker.patch(
             "spatialdata_io.readers.generic._images.Image3DModel.parse",
@@ -118,7 +118,7 @@ class TestImage:
         data = da.zeros((5, 7), chunks=(5, 7), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
-            return_value=LazyRaster(data=data, axes=("y", "x")),
+            return_value=(LazyRaster(data=data, axes=("y", "x")), None),
         )
         parse = mocker.patch(
             "spatialdata_io.readers.generic._images.Image2DModel.parse",
@@ -233,7 +233,7 @@ class TestImage:
         data = da.zeros((3, 5, 7), chunks=(3, 5, 7), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
-            return_value=LazyRaster(data=data, axes=("c", "y", "x")),
+            return_value=(LazyRaster(data=data, axes=("c", "y", "x")), None),
         )
 
         with pytest.raises(ValueError, match="chunks keys must match canonical axes"):
@@ -262,7 +262,9 @@ class TestImageArchitecture:
             calls = {
                 node.func.attr
                 for node in ast.walk(tree)
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and not (isinstance(node.func.value, ast.Name) and node.func.value.id == "json")
             }
 
             assert imports.isdisjoint(forbidden_imports), path

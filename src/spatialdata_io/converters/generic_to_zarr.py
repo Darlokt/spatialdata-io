@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
 from spatialdata._docs import docstring_parameter
@@ -39,6 +39,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     tiff_level: int = 0,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
+    invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
 ) -> None:
     """Read a generic element and persist it in a SpatialData Zarr store.
 
@@ -55,7 +56,11 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     data_axes
         Explicit image axes. Required for images and invalid for GeoJSON.
     coordinate_system
-        Coordinate system for the element. Defaults to ``"global"``.
+        Target frame name, defaulting to ``"global"`` for a new store. An
+        explicit name is required when appending: it asserts the intended
+        correspondence to an existing frame, or names a separate frame.
+        Calibrated images use micrometres; GeoJSON retains source units.
+        Naming a shared frame does not convert or register GeoJSON coordinates.
     tiff_series
         Zero-based TIFF series. Must remain zero for non-TIFF inputs.
     tiff_level
@@ -69,6 +74,9 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         or a mapping keyed by exactly the canonical axes. ``None`` selects
         ``(1, 1024, 1024)`` for ``CYX`` and ``(1, 1, 1024, 1024)`` for
         ``CZYX``. Invalid for GeoJSON inputs.
+    invalid_geometries
+        GeoJSON topology policy, forwarded to :func:`generic`. Defaults to
+        preserving source polygons; malformed geometry fails in every mode.
 
     Raises
     ------
@@ -95,6 +103,9 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
                 "name or delete the existing element."
             )
             raise ValueError(message)
+        if coordinate_system is None:
+            message = "Appending requires an explicit coordinate_system to establish a shared or independent frame."
+            raise ValueError(message)
 
     element = generic(
         path=input_path,
@@ -104,6 +115,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         tiff_level=tiff_level,
         scale_factors=scale_factors,
         chunks=chunks,
+        invalid_geometries=invalid_geometries,
     )
 
     if spatial_data is not None:

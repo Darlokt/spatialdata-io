@@ -43,8 +43,9 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         cells.h5ad  # expression and observation metadata
 
     Each TIFF must contain exactly one series. Its full-resolution level zero
-    is used, and raw/labels must have the same YX pixel extent. No alignment or
-    physical-unit conversion is inferred.
+    is used. The caller must select images and labels registered on the same
+    base pixel grid; equal YX extents are required but do not prove alignment.
+    Complete raw-image OME XY spacing calibrates this pair in micrometres.
 
     Parameters
     ----------
@@ -85,15 +86,21 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         ``images['<dataset_id>_raw_image']`` is lazy CYX with source dtype,
         channel order, and unique available OME channel names or IDs. Channels
         without OME metadata use positions. ``labels['<dataset_id>_labels_image']`` is lazy YX with
-        source integer dtype and instance values. Both have identity transforms
-        to ``global`` in shared pixel coordinates. Construction executes zero
+        source integer dtype and instance values. Both use ``global`` in micrometres
+        when the base raw image declares complete OME XY sizes in µm, nm or mm;
+        labels inherit missing calibration and conflicting declarations fail.
+        Otherwise both retain shared source pixels. Explicit reinterpretation
+        of spatial axes retains pixels. The source origin is unchanged; stage
+        placement is not inferred. Construction executes zero
         pixel tasks. Computing a selection decodes only the TIFF tiles or strips
         of the output chunks it intersects. TIFF resources close after inspection and inside each lazy task.
         ``tables['table']`` is owned, eager, finite canonical CSR sparse-array
         expression with source dtype and row/feature order. Duplicate feature
         names become unique. The optional ``counts`` layer is normalized in the
         same way. Other layers, additional H5AD annotation fields and their
-        dtypes/missingness, and existing spatial metadata are retained. Annotation
+        dtypes/missingness, and existing spatial metadata are retained. Imported
+        H5AD embeddings keep their source values and units; label linkage does
+        not establish their calibration. Annotation
         columns may be reordered; duplicate column names are rejected. Existing
         reserved output columns must be semantically equal to generated values.
         Final linkage uses categorical ``region`` and the selected integer

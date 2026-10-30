@@ -32,7 +32,7 @@ combined = stereoseq(
 | --- | --- |
 | `bin_sizes=()` | No square counts. Pass distinct positive stored sizes, or `"all"` to read every stored bin in numeric order. |
 | `cell_bins="none"` | No raw cells. Choose `"unadjusted"`, `"adjusted"` or `"both"`. |
-| `cell_geometry="centroids"` | Return source cell centers as points. Choose `"polygons"` for strictly validated stored contours. |
+| `cell_geometry="centroids"` | Return source cell centers as points. Choose `"polygons"` for literal stored contours under `invalid_geometries`. |
 | `analysis_files=()` | No analysis. Pass exact H5AD paths; clustering resolutions are never all loaded implicitly. |
 | `image_roles=()` | No images or masks. Select `"registered"`, `"mask"`, `"tissue_cut"`, `"distance_mask"` or `"expression"`; all matching stains are included. Mask roles return labels. |
 | `sample_id=None` | Infer a unique source sample; supply its full identifier when several samples are present. Dots in identifiers are retained. |
@@ -191,11 +191,11 @@ The analysis base name is `cells_analysis`, `adjusted_cells_analysis` or `bin<N>
 
 ## Coordinates and geometry
 
-Every target and image maps by identity to the coordinate system `global`, in its matching normalized expression grid. Registered images are already resampled to that grid. Square coordinates are used as stored, without multiplication by bin size. Physical spot pitch is metadata in nanometers, not a square side length or an applied transformation.
+Every target and image maps to `global` in micrometres using the common source pitch in nanometres divided by 1000. Registered images are already resampled to the matching normalized expression grid. Source point/polygon coordinates and image pixels are unchanged, and table `obsm["spatial"]` retains exact native grid values. Square coordinates are used as stored, without multiplication by bin size. Pitch is not a capture-square side length. Analysis-only inputs use their native `uns["resolution"]` calibration. Image-only reads inspect scalar pitch attributes from exact-sample GEF companions in supported producer directories, without reading count or coordinate arrays. Missing companions and unassociated flat image exports retain the documented source grid. Ambiguous companions or conflicting declared pitches fail.
 
 Raw tables retain `uns["stereoseq"]["origin"]` and `["resolution"]`. A common chip origin is not added to only one element. All selected count and analysis products must agree on physical pitch. Selected raw products with conflicting origins fail; corresponding analysis must agree with its GEF. Analysis-only input does not establish a chip origin and preserves its local coordinates. Separately cropped or recentered artifacts require an established common-frame contract rather than an assumed offset.
 
-Centroid mode is the default and never reads or validates unselected borders. Polygon mode adds signed centroid-relative offsets after widening, removes only paired terminal padding, and requires simple nondegenerate contours. Mismatched/interior padding, invalid rings and self-intersections fail without repair, omitted cells or fallback. Some vendor cell contours are nonsimple even with the documented decoding; choose centroid mode explicitly when their exact counts and centers are the desired product. Source area remains a measurement, independent of the polygon's geometric area.
+Centroid mode is the default and never reads unselected borders under any polygon policy. Polygon mode widens signed centroid-relative offsets before addition and removes only paired terminal padding. `invalid_geometries="keep"` preserves buildable invalid topology by default; `"raise"` reports invalid cell IDs, while `"drop"` removes each affected contour and its matching count-table row, layers and annotations. Adjusted and unadjusted populations are filtered independently. Analysis products are validated against the original raw population and retain their independent rows and point targets; masks remain unchanged. Missing/mismatched/interior padding and short contours fail in every policy. A requested all-dropped polygon element fails. No topology repair or extra area threshold is applied. Source area remains an independent source measurement.
 
 ## Images, labels, execution and ownership
 

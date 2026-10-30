@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import prod
+from math import isclose, prod
 from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel, Labels2DModel
-from spatialdata.transformations import Identity
+from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
+from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_pixel_sizes_um, read_tiff
 
 if TYPE_CHECKING:
     import numpy as np
@@ -91,13 +91,36 @@ def _read_raster(
     return array, metadata
 
 
+def _physical_transform(image: TiffMetadata, labels: TiffMetadata, data_axes: str | None) -> Identity | Scale:
+    """Calibrate a caller-registered pair from the base image's semantic XY axes."""
+    declared_axes = tuple(axis.lower() for axis in image.series[0].levels[0].axes)
+    if data_axes is not None and tuple(axis if axis in "xy" else "" for axis in data_axes) != tuple(
+        axis if axis in "xy" else "" for axis in declared_axes
+    ):
+        return Identity()
+
+    context = ReaderErrorContext("iss", "OME calibration")
+    x, y = ome_pixel_sizes_um(image, series=0, axes=("x", "y"), context=context)
+    label_sizes = ome_pixel_sizes_um(labels, series=0, axes=("x", "y"), context=context)
+    # Labels inherit missing sizes; only two present declarations can conflict.
+    for axis, expected, declared in zip("XY", (x, y), label_sizes, strict=True):
+        if expected is not None and declared is not None and not isclose(declared, expected, rel_tol=1e-12):
+            raise ReaderFormatError(
+                context=context,
+                path=labels.path,
+                found=f"{axis} spacing {declared} versus {expected} µm",
+                expected="label calibration agreeing with the caller-aligned raw image",
+            )
+    return Scale([x, y], axes=("x", "y")) if x is not None and y is not None else Identity()
+
+
 def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOptions) -> _IssRasters:
     """Construct pixel-aligned raw and labels models without executing pixel tasks.
 
     One pyramid applies to the raw image and its labels, which share a pixel grid.
     """
     image, metadata = _read_raster(layout.raw_image, name="raw image", target_axes=_IMAGE_AXES, data_axes=data_axes)
-    labels, _ = _read_raster(layout.labels, name="labels", target_axes=_LABEL_AXES)
+    labels, label_metadata = _read_raster(layout.labels, name="labels", target_axes=_LABEL_AXES)
 
     if image.shape[-2:] != labels.shape:
         raise ReaderFormatError(
@@ -150,6 +173,7 @@ def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOp
                 expected="unique channel names or OME IDs",
             )
 
+    transform = _physical_transform(metadata, label_metadata, data_axes)
     return _IssRasters(
         Image2DModel.parse(
             image,
@@ -158,14 +182,14 @@ def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOp
             rgb=False,
             chunks=raster.image_chunks(),
             scale_factors=raster.model_scale_factors,
-            transformations={"global": Identity()},
+            transformations={"global": transform},
         ),
         Labels2DModel.parse(
             labels,
             dims=_LABEL_AXES,
             chunks=raster.label_chunks(),
             scale_factors=raster.model_scale_factors,
-            transformations={"global": Identity()},
+            transformations={"global": transform},
         ),
         labels.dtype,
     )

@@ -79,7 +79,6 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     include_cycle_in_channel_names: bool = False,
     nuclei_channel_name: str = "DAPI",
     split_threshold_nuclei_channel: int | None = 2,
-    include_transformations: bool = True,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
@@ -126,9 +125,6 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
         than this number, all of them also form the separate nuclei stack and
         the main stack keeps only the first and the last (the registration
         reference and the end-of-run image). None never splits.
-    include_transformations
-        Scale pixels to micrometers in the stack's coordinate system. False
-        uses the identity, so the coordinate system is the pixel grid.
     scale_factors
         Integer factors of at least two, one per generated pyramid level of the
         images; empty for a single scale.
@@ -158,9 +154,10 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
           nuclei stack is split off. A channel has the same name in both
           images.
 
-        Each stack has its own coordinate system ``<stack>``. With
-        transformations, it is in micrometers through the isotropic OME pixel
-        size (µm or nm). Channels are placed on one canvas by their integral
+        One selected stack uses ``global`` in micrometers through the isotropic
+        OME pixel size (µm or nm). Multiple independent stacks use their own
+        ``<stack>`` frames; each nuclei stack shares its parent frame. Channels
+        are placed on one canvas by their integral
         OME plane position in pixels (absent positions are the origin). The
         canvas starts at the smallest position and spans every channel;
         uncovered pixels are zero, with a warning. A position shared by all
@@ -191,9 +188,6 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     region decodes only the intersecting bands. Source files must remain
     available. Vendor-written pyramid levels are not used.
     """
-    if not isinstance(include_transformations, bool):
-        message = "include_transformations must be a boolean."
-        raise TypeError(message)
     raster = make_raster_options(scale_factors, chunks)
     channel_options = make_channel_options(
         exclude_cycles=exclude_cycles,
@@ -218,9 +212,8 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
         for suffix, channels in selections.items():
             image = make_image(
                 channels,
-                frame=plan.name,
+                frame="global" if len(layout.stacks) == 1 else plan.name,
                 pixel_size_um=plan.pixel_size_um,
-                include_transformations=include_transformations,
                 raster=raster,
             )
             _insert_unique(images, f"{plan.name}{suffix}_image", image, stack=stack)

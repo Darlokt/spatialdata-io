@@ -68,6 +68,7 @@ class TestGenericCommand:
             tiff_level=1,
             scale_factors=(2, 4),
             chunks=(1, 8, 9),
+            invalid_geometries="keep",
         )
         assert result.output == f"Data written to {output}\n"
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,19 +13,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _IMAGE_RANK = 3
-
-
-def parse_json_object(value: str, *, parameter: str) -> dict[str, object]:
-    """Decode one legacy JSON object option pending its reader cleanup."""
-    try:
-        decoded = json.loads(value)
-    except json.JSONDecodeError as error:
-        message = f"Invalid JSON for {parameter!r}: {error}"
-        raise click.BadParameter(message) from error
-    if not isinstance(decoded, dict):
-        message = f"Invalid JSON for {parameter!r}: expected an object."
-        raise click.BadParameter(message)
-    return decoded
 
 
 def dataset_io_options[**P](function: Callable[P, None]) -> Callable[P, None]:
@@ -49,10 +35,6 @@ def dataset_io_options[**P](function: Callable[P, None]) -> Callable[P, None]:
     )(with_output)
 
 
-def _scale_factors(_context: click.Context, _parameter: click.Parameter, values: tuple[int, ...]) -> tuple[int, ...]:
-    return tuple(values)
-
-
 def _chunks(
     _context: click.Context, _parameter: click.Parameter, values: tuple[int, ...]
 ) -> int | tuple[int, int, int]:
@@ -72,7 +54,6 @@ def scale_factors_option[**P](function: Callable[P, None]) -> Callable[P, None]:
         type=click.IntRange(min=2),
         multiple=True,
         default=DEFAULT_SCALE_FACTORS,
-        callback=_scale_factors,
         help="Repeat once per generated pyramid level; omitted keeps a single scale.",
     )(function)
 

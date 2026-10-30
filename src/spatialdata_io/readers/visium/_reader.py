@@ -149,6 +149,10 @@ def visium(  # noqa: PLR0913, RUF100
     pixels remain path-backed and lazy. Coordinates are full-resolution pixels
     with ``x=pxl_col_in_fullres`` and ``y=pxl_row_in_fullres``. The scale-factor
     value ``spot_diameter_fullres`` is divided by two to construct circle radii.
+    This is a visualization diameter, distinct from the physical capture spot;
+    it is not used as a micrometre ruler. Arbitrary selected full-resolution
+    images do not prove original acquisition calibration, so coordinates retain
+    the source full-resolution pixel frame.
     Position processing uses explicit Arrow-backed columns. Final observation
     fields ``in_tissue``, ``array_row``, and ``array_col`` are NumPy int64;
     ``spot_id`` is a pandas string and ``region`` is categorical. Coordinates

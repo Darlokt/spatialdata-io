@@ -103,7 +103,9 @@ def write_square_gef(
     return path
 
 
-def write_cell_gef(path: Path, *, profile: Profile = "name_only", adjusted: bool = False) -> Path:
+def write_cell_gef(
+    path: Path, *, profile: Profile = "name_only", adjusted: bool = False, invalid_ids: tuple[int, ...] = ()
+) -> Path:
     """Write native cell spans, noncontiguous source IDs and paired borders."""
     path.parent.mkdir(parents=True, exist_ok=True)
     shift = 1 if adjusted else 0
@@ -152,6 +154,9 @@ def write_cell_gef(path: Path, *, profile: Profile = "name_only", adjusted: bool
         group["cellTypeList"] = np.array([b"unknown", b"cell"], dtype="S16")
         borders = np.full((2, 32, 2), 32767, dtype="i2")
         borders[:, :4, :] = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]], dtype="i2")
+        for position, identifier in enumerate(CELL_IDS):
+            if identifier in invalid_ids:
+                borders[position, :4] = [[0, 0], [1, 1], [1, 0], [0, 1]]
         group["cellBorder"] = borders
     return path
 
@@ -216,6 +221,8 @@ def write_dataset(  # noqa: PLR0913, RUF100 - explicit fixture variants.
     products: tuple[Product, ...] = ("square", "cells", "analysis"),
     bins: tuple[int, ...] = (1, 50),
     overflow: bool = False,
+    invalid_cell_ids: tuple[int, ...] = (),
+    invalid_adjusted_cell_ids: tuple[int, ...] = (),
 ) -> DatasetFixture:
     """Create only selected products in one documented structural family."""
     if family == "compact_numbered":
@@ -252,9 +259,9 @@ def write_dataset(  # noqa: PLR0913, RUF100 - explicit fixture variants.
     if "square" in products:
         write_square_gef(result.square, profile=profile, bins=bins, overflow=overflow)
     if "cells" in products:
-        write_cell_gef(result.cells, profile=profile)
+        write_cell_gef(result.cells, profile=profile, invalid_ids=invalid_cell_ids)
     if "adjusted_cells" in products:
-        write_cell_gef(result.adjusted_cells, profile=profile, adjusted=True)
+        write_cell_gef(result.adjusted_cells, profile=profile, adjusted=True, invalid_ids=invalid_adjusted_cell_ids)
     if "analysis" in products:
         write_analysis(result.analysis, profile=profile, sample_id=sample_id)
     if "adjusted_analysis" in products:

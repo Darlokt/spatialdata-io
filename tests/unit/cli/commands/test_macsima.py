@@ -36,7 +36,6 @@ class TestMacsimaCommand:
                 "--include-cycle-in-channel-names",
                 *("--nuclei-channel-name", "Hoechst"),
                 *("--split-threshold-nuclei-channel", "4"),
-                "--no-include-transformations",
                 *("--scale-factors", "2", "--scale-factors", "4"),
                 *("--chunks", "1", "--chunks", "256", "--chunks", "512"),
             ],
@@ -51,7 +50,6 @@ class TestMacsimaCommand:
             include_cycle_in_channel_names=True,
             nuclei_channel_name="Hoechst",
             split_threshold_nuclei_channel=4,
-            include_transformations=False,
             scale_factors=(2, 4),
             chunks=(1, 256, 512),
         )
@@ -73,7 +71,6 @@ class TestMacsimaCommand:
             include_cycle_in_channel_names=False,
             nuclei_channel_name="DAPI",
             split_threshold_nuclei_channel=2,
-            include_transformations=True,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
         )

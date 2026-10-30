@@ -158,20 +158,7 @@ class TestNormalizeTranscriptPartition:
 
 
 class TestBoundaryFeatures:
-    """Validate authoritative Feature IDs and closed planar GeoJSON rings."""
-
-    @pytest.mark.parametrize("x", [2**53, 2**53 + 1, 2**53 + 2, -(2**53 + 1)])
-    def test_integral_vertices_cannot_round_silently(self, tmp_path: Path, x: int) -> None:
-        document = _boundary_document()
-        features = document["features"]
-        assert isinstance(features, list)
-        features[0]["geometry"]["coordinates"] = [[[x, 0], [x + 4, 0], [x + 4, 4], [x, 4], [x, 0]]]
-        path = ArtifactFile(tmp_path / "boundaries.geojson")
-        if x != float(x):
-            with pytest.raises(ReaderFormatError, match="integer precision loss"):
-                boundary_features(document, path)
-        else:
-            assert boundary_features(document, path)[1].tolist() == [1]
+    """Validate authoritative Feature IDs and properties; geometry is validated by the shared boundary."""
 
     def test_exact_large_ids_annotations_and_semantic_property_id(self, tmp_path: Path) -> None:
         document = _boundary_document()
@@ -233,48 +220,6 @@ class TestBoundaryFeatures:
             feature["properties"] = {"geometry": None}
         else:
             feature["properties"] = {"id": "2"}
-        with pytest.raises(ReaderFormatError):
-            boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))
-
-    @pytest.mark.parametrize(
-        "geometry",
-        [
-            None,
-            [],
-            {"type": []},
-            {"type": "Point"},
-            {"type": "Polygon"},
-            {"type": "Polygon", "coordinates": []},
-            {"type": "MultiPolygon", "coordinates": []},
-            {"type": "MultiPolygon", "coordinates": 1},
-        ],
-    )
-    def test_invalid_geometry_schema(self, tmp_path: Path, geometry: object) -> None:
-        document = _boundary_document()
-        features = document["features"]
-        assert isinstance(features, list)
-        features[0]["geometry"] = geometry
-        with pytest.raises(ReaderFormatError):
-            boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))
-
-    @pytest.mark.parametrize(
-        "ring",
-        [
-            1,
-            [[0, 0], [1, 0], [0, 0]],
-            [[0, 0], [1, 0], [1, 1], [3, 3]],
-            [[0, 0], [1, 0, 0], [1, 1], [0, 0]],
-            [[0, 0], [True, 0], [1, 1], [0, 0]],
-            [[0, 0], ["1", 0], [1, 1], [0, 0]],
-            [[0, 0], [float("inf"), 0], [1, 1], [0, 0]],
-            [[0, 0], [10**400, 0], [1, 1], [0, 0]],
-        ],
-    )
-    def test_invalid_ring_structure(self, tmp_path: Path, ring: object) -> None:
-        document = _boundary_document()
-        features = document["features"]
-        assert isinstance(features, list)
-        features[0]["geometry"]["coordinates"] = [ring]
         with pytest.raises(ReaderFormatError):
             boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))
 

@@ -52,7 +52,7 @@ def _write_tables(path: Path, ids: tuple[str, ...], *, vpt: bool, extra_gene: bo
     ).to_csv(path / "cell_metadata.csv")
 
 
-def _write_boundaries(path: Path, ids: tuple[str, ...], *, incomplete_z0: bool) -> None:
+def _write_boundaries(path: Path, ids: tuple[str, ...], *, incomplete_z0: bool, invalid_first_cell: bool) -> None:
     """Exercise holes, discontinuous shapes, and cells absent from the first z plane."""
     outer = [(0, 0), (4, 0), (4, 4), (0, 4)]
     hole = [(1, 1), (1, 3), (3, 3), (3, 1)]
@@ -63,6 +63,8 @@ def _write_boundaries(path: Path, ids: tuple[str, ...], *, incomplete_z0: bool) 
         MultiPolygon([Polygon([(9, 0), (11, 0), (11, 2), (9, 2)])]),
         MultiPolygon([Polygon([(20, 0), (22, 0), (22, 2), (20, 2)])]),
     ]
+    if invalid_first_cell:
+        geometries[1] = MultiPolygon([Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])])
     frame = gpd.GeoDataFrame(
         {
             "ID": [0, 1, 2, 3],
@@ -78,13 +80,14 @@ def _write_boundaries(path: Path, ids: tuple[str, ...], *, incomplete_z0: bool) 
     frame.to_parquet(path)
 
 
-def write_merscope_dataset(
+def write_merscope_dataset(  # noqa: PLR0913, RUF100 - Independent source layout and geometry variations.
     path: Path,
     *,
     profile: Literal["standard", "cellpose", "watershed"] = "standard",
     incomplete_z0: bool = False,
     extra_gene: bool = False,
     reassigned_transcripts: bool = False,
+    invalid_first_cell: bool = False,
 ) -> MerscopeFixture:
     """Write a complete standard root and optional distinct VPT analysis."""
     root = path / "slide" / "region"
@@ -105,7 +108,12 @@ def write_merscope_dataset(
             )
     original_ids = ("1001", "2002", "3003")
     _write_tables(root, original_ids, vpt=False, extra_gene=extra_gene)
-    _write_boundaries(root / "cell_boundaries.parquet", original_ids, incomplete_z0=incomplete_z0)
+    _write_boundaries(
+        root / "cell_boundaries.parquet",
+        original_ids,
+        incomplete_z0=incomplete_z0,
+        invalid_first_cell=invalid_first_cell,
+    )
     pd.DataFrame(
         {
             "barcode_id": [0, 1, 2, 3],
@@ -127,7 +135,12 @@ def write_merscope_dataset(
     analysis.mkdir()
     ids = ("9001", "9002", "9003")
     _write_tables(analysis, ids, vpt=True, extra_gene=extra_gene)
-    _write_boundaries(analysis / f"{profile}_micron_space.parquet", ids, incomplete_z0=incomplete_z0)
+    _write_boundaries(
+        analysis / f"{profile}_micron_space.parquet",
+        ids,
+        incomplete_z0=incomplete_z0,
+        invalid_first_cell=invalid_first_cell,
+    )
     if reassigned_transcripts:
         transcripts = pd.read_csv(root / "detected_transcripts.csv", index_col=0)
         transcripts["cell_id"] = [9001, 9002, 9003, -1]

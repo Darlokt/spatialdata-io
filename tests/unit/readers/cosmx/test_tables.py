@@ -15,7 +15,6 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.cosmx._tables import (
     build_table,
     read_counts,
-    read_features,
     read_fov_positions,
     read_header,
     read_metadata,
@@ -47,7 +46,6 @@ class TestReadHeader:
     def test_quoted_header(self, tmp_path: Path, *, compressed: bool) -> None:
         path = _write(tmp_path, "c.csv", _COUNTS, compressed=compressed)
         assert read_header(path) == ["fov", "cell_ID", "B", "HLA-A", "NegPrb1"]
-        assert read_features(path) == ("B", "HLA-A", "NegPrb1")
 
     def test_bound(self, tmp_path: Path, mocker: MockerFixture) -> None:
         mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_HEADER_BYTES", 4)

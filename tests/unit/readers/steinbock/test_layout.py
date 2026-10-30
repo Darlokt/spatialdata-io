@@ -46,6 +46,26 @@ class TestDiscoverLayout:
             assert sample.labels == tmp_path / f"masks_{kind}" / f"{sample.name}.tiff"
             assert not hasattr(sample, "__dict__")
 
+    @pytest.mark.parametrize("kind", ["file", "directory", "escape"])
+    def test_optional_image_metadata_artifact(self, tmp_path: Path, kind: str) -> None:
+        root = tmp_path / "dataset"
+        root.mkdir()
+        _write_paths(root)
+        path = root / "images.csv"
+        if kind == "directory":
+            path.mkdir()
+            with pytest.raises(IsADirectoryError):
+                _discover_layout(root, labels_kind="deepcell")
+        elif kind == "escape":
+            outside = tmp_path / "outside.csv"
+            outside.touch()
+            path.symlink_to(outside)
+            with pytest.raises(ReaderFormatError, match="root"):
+                _discover_layout(root, labels_kind="deepcell")
+        else:
+            path.touch()
+            assert _discover_layout(root, labels_kind="deepcell").image_metadata == path
+
     def test_embedded_suffix_and_hyphens_preserved(self, tmp_path: Path) -> None:
         _write_paths(tmp_path)
         name = "sample.tiff-in-tissue"

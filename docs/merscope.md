@@ -19,7 +19,7 @@ slide/
         └── mosaic_DAPI_z2.tif
 ```
 
-Each product and its dependencies are required only when selected. Image-only loading requires mosaics and no physical calibration. Transcript points and cell footprints require the micron-to-mosaic affine in `images/`. Table-only loading requires the count and metadata CSVs. Boundary-only loading requires no count or metadata file. All four inclusion flags default to `True`; selecting no products returns an empty SpatialData container with reader provenance.
+Each product and its dependencies are required only when selected. Image-only loading requires mosaics and uses the optional micron-to-mosaic affine in `images/` when present. Native micron transcript points and cell boundaries require neither the affine nor an images directory. Table-only loading requires the count and metadata CSVs. Boundary-only loading requires no count or metadata file. All four inclusion flags default to `True`; selecting no products returns an empty SpatialData container with reader provenance.
 
 `z_layers=None` selects every discovered image layer in ascending order. A nonempty sequence such as `(2, 0)` selects layers in the caller's order. Repeated, negative or noninteger indices fail; a scalar is not accepted. Stains are ordered lexically within each image. Every selected layer must have one file for every discovered stain, and all selected source planes must agree in spatial shape and dtype. Missing or duplicate stain/layer pairs fail.
 
@@ -29,7 +29,7 @@ Each product and its dependencies are required only when selected. Image-only lo
 | --- | --- |
 | `images["<slide>_<region>_z<index>"]` | Lazy `(c, y, x)` mosaic with source pixel dtype, lexical stain channels and source spatial shape. |
 | `points["<slide>_<region>_transcripts"]` | Lazy projected XY transcript events. |
-| `shapes["<slide>_<region>_polygons"]` | Eager complete cell footprints indexed by exact textual EntityID. |
+| `shapes["<slide>_<region>_polygons"]` | Eager cell boundaries indexed by exact textual EntityID, with a categorical geometry representation. |
 | `tables["table"]` | Eager owned sparse expression, sparse control measurements and aligned cell annotations. |
 
 ## VPT layouts and transcript provenance
@@ -63,7 +63,7 @@ Exactly one supported boundary candidate is required when boundaries are include
 
 An analysis-local `detected_transcripts.csv`, when present, supplies current assignments and uses the analysis-local count header as its feature vocabulary. Otherwise the reader uses the original instrument transcript CSV and requires the original instrument count header. The selected VPT count header cannot establish the vocabulary of an unrelated original event file. Missing required vocabulary files fail; the reader does not scan all transcript rows or substitute another vocabulary.
 
-When original events accompany VPT cell replacements, their assignments become `original_cell_id` annotations. They have no current instance key and do not claim correspondence to replacement boundaries. Reassigned VPT events and standard instrument events retain `cell_id` as current assignment when that column exists. The `-1` unassigned sentinel is preserved. Current assignments are validated against returned table or footprint IDs when that independent population is already available; original assignments are not validated against replacement IDs.
+When original events accompany VPT cell replacements, their assignments become `original_cell_id` annotations. They have no current instance key and do not claim correspondence to replacement boundaries. Reassigned VPT events and standard instrument events retain `cell_id` as current assignment when that column exists. The `-1` unassigned sentinel is preserved. Current assignments are validated against the original complete table or boundary population when that independent population is available, including cells removed by the polygon policy; original assignments are not validated against replacement IDs.
 
 ## Tables and identities
 
@@ -75,13 +75,42 @@ Expression is a finite canonical SciPy CSR sparse array in `table.X`. Only case-
 
 With footprints included, the table links through categorical `cells_region` and exact textual `EntityID` to the independent footprint index. With footprints excluded, the table is normalized and unlinked; it has no stale SpatialData linkage metadata. Source annotations named `region`, `slide`, `dataset_id` or `cells_region` must agree exactly with the corresponding reader-created value; conflicting or null values fail. A source `cells_region` field is rejected when boundaries are excluded because the output table is unlinked. Equal values are preserved and normalized to the documented categorical representation. The reader owns newly created tables and does not mutate source files or caller selections.
 
-## Footprints and coordinates
+## Cell boundaries and coordinates
 
-Boundary GeoParquet requires `EntityID`, `ZIndex` and WKB `Geometry`; an optional `Type` must identify cells (`Cell` or `cell`). Geometries must be valid, nonempty, finite two-dimensional Polygon or MultiPolygon slices. Plane indices are nonnegative integers. Invalid slices fail instead of being repaired or dropped.
+Boundary Parquet requires `EntityID`, `ZIndex` and WKB `Geometry`, with optional
+`Type` restricted to Cell/cell. Required columns are projected. Geometry must
+be nonempty finite planar Polygon or MultiPolygon, and source IDs and plane
+annotations must be valid under every policy. No geometry is repaired.
 
-The output is one XY footprint per cell, formed by the union of all its validated z slices. This retains cells absent from z0 and preserves holes and disconnected components in the resulting union. Per-slice annotations and z occupancy are not aggregated into a false cell-wide value. Footprints are independent of selected image layers and represent a two-dimensional projection rather than a three-dimensional segmentation. [Vizgen's geometry schema](https://vizgen.github.io/vizgen-postprocessing/output_data_formats/geometry_file_format.html) describes the source representation as one entity geometry per z slice.
+`invalid_geometries="keep"` retains ordinary all-z union footprints for cells
+whose source slices are valid. If any slice is invalid, that cell instead
+retains every literal Polygon component from all of its slices, flattening
+MultiPolygons in source row/component order without changing vertices or holes.
+The categorical `geometry_representation` column distinguishes `union_footprint`
+from `source_components`. Literal components may overlap or remain invalid;
+their summed area does not represent projected cell area. A failed or invalid
+union of valid source slices raises rather than switching representations.
 
-The returned coordinate system is `global`, in mosaic pixels. Mosaics use identity transformations. Footprints and transcript XY values remain in source micrometers and carry the **forward** micron-to-mosaic affine. Its UTF-8 file is bounded to 64 KiB and supplies a finite invertible 3×3 whitespace-delimited matrix with homogeneous last row `[0, 0, 1]`. Calibration must retain a finite inverse and must not lose required coefficient precision through overflow or underflow. For example:
+`"raise"` reports invalid cell IDs. `"drop"` removes every slice of affected
+cells and their complete table rows, including aligned sparse blank measurements.
+Original count/boundary identity agreement and reserved source annotations are
+validated before filtering. Surviving IDs and row order are preserved. Lazy
+transcripts retain their original assignments and population checks; their
+assignments are not rewritten. Requested all-dropped boundaries fail. With
+boundaries disabled no polygons are read and no cells are dropped.
+
+Missing geometry and empty slices remain unsupported structural input, even
+when another slice supplies a valid complete cell footprint. Empty occupancy
+is a separate source-format decision from invalid topology; it is not silently
+ignored or treated as an invalid polygon. Valid-cell union footprints retain
+cells absent from z0, holes and disconnected components. Z occupancy and
+per-slice annotations are not aggregated into false cell-wide values. Boundaries
+remain two-dimensional projections, independent of selected image layers.
+
+The calibrated `global` frame is source micrometres. Native vector coordinates
+and table `obsm["spatial"]` remain unchanged; vectors carry identity. Mosaic
+images use the full **inverse** of the micron-to-mosaic affine. Its bounded
+64 KiB UTF-8 file contains a finite invertible homogeneous 3×3 matrix. For example:
 
 ```text
 2  0.25  10
@@ -89,7 +118,17 @@ The returned coordinate system is `global`, in mosaic pixels. Mosaics use identi
 0  0      1
 ```
 
-This maps micron position `(2, 2)` to mosaic-pixel position `(14.5, -1)`. Table `obsm["spatial"]` keeps `(2, 2)` in micrometers. Anisotropy, shear and translation are preserved; images are not scaled a second time.
+This source matrix maps micron position `(2, 2)` to mosaic pixel `(14.5, -1)`;
+the image's inverse maps that pixel back to `(2, 2)` in `global`. Anisotropy,
+shear, reflection and translation are retained without resampling pixels.
+Physical-only reads never inspect the pixel transform. Present malformed
+calibration fails when images require it.
+
+Without calibration, images alone retain the documented `global` mosaic-pixel
+frame. If native vectors are also selected, images instead use `mosaic_pixels`
+and vectors use `microns`, keeping unresolved registration explicit. A shared
+frame is never inferred from dimensions. Source slice indices remain `z_raw`
+annotations rather than physical Z.
 
 ## Transcript schema and lazy execution
 

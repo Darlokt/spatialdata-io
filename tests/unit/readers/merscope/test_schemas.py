@@ -13,6 +13,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.merscope._schemas import (
     FLOAT_DTYPE,
+    GEOMETRY_REPRESENTATION_DTYPE,
     STRING_DTYPE,
     blank_columns,
     boundary_columns,
@@ -30,6 +31,14 @@ from spatialdata_io.readers.merscope._schemas import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class TestGeometryRepresentation:
+    """Keep literal-component and union semantics explicit in categorical output."""
+
+    def test_categories_are_stable_and_unordered(self) -> None:
+        assert GEOMETRY_REPRESENTATION_DTYPE.categories.tolist() == ["union_footprint", "source_components"]
+        assert not GEOMETRY_REPRESENTATION_DTYPE.ordered
 
 
 class TestCountColumns:

@@ -6,7 +6,7 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from spatialdata_io._cli._common import chunks_option, parse_json_object, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, scale_factors_option
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS
 
 
@@ -15,22 +15,6 @@ from spatialdata_io._raster_defaults import DEFAULT_CHUNKS
 @chunks_option
 def _probe(scale_factors: tuple[int, ...], chunks: int | tuple[int, int, int]) -> None:
     click.echo(repr((scale_factors, chunks)))
-
-
-class TestParseJsonObject:
-    """Test the temporary structured-option parser used by legacy commands."""
-
-    def test_returns_decoded_object(self) -> None:
-        assert parse_json_object('{"chunks": [1, 2]}', parameter="options") == {"chunks": [1, 2]}
-
-    def test_reports_parameter_and_decoder_failure(self) -> None:
-        with pytest.raises(click.BadParameter, match=r"options.*Expecting property name"):
-            parse_json_object("{invalid}", parameter="options")
-
-    @pytest.mark.parametrize("value", ["[]", "null", "1", '"text"', "true"])
-    def test_rejects_valid_non_object_json(self, value: str) -> None:
-        with pytest.raises(click.BadParameter, match=r"options.*expected an object"):
-            parse_json_object(value, parameter="options")
 
 
 class TestRasterOptions:

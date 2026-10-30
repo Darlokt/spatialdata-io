@@ -38,6 +38,18 @@ _DIRECTORIES: dict[Family, tuple[str, ...]] = {
     "outs": ("feature_expression", "analysis", "image"),
     "flat": (),
 }
+_SQUARE_DIRECTORIES: dict[Family, tuple[str, ...]] = {
+    "compact_numbered": ("02.count", "04.tissuecut"),
+    "numbered": ("03.count", "05.tissuecut"),
+    "outs": ("feature_expression",),
+    "flat": (),
+}
+_CELL_DIRECTORIES: dict[Family, tuple[str, ...]] = {
+    "compact_numbered": ("041.cellcut",),
+    "numbered": ("051.cellcut",),
+    "outs": ("feature_expression",),
+    "flat": (),
+}
 _DECIMAL = r"[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
 _BIN_ANALYSIS = re.compile(
     rf"(?P<sample>.+)\.bin(?P<bin>[1-9][0-9]*)_(?P<resolution>{_DECIMAL})(?:\.spatial\.cluster)?\.h5ad"
@@ -147,6 +159,7 @@ class StereoseqLayout:
     cells: tuple[CellSource, ...]
     analyses: tuple[AnalysisSource, ...]
     images: tuple[ImageSource, ...]
+    calibration: tuple[SquareSource | CellSource, ...]
 
 
 def _error(path: Path, found: str, expected: str) -> ReaderFormatError:
@@ -301,6 +314,16 @@ def _select_sample(
     return next(iter(samples), None)
 
 
+def _count_paths(
+    files: tuple[Path, ...], sample: str | None, suffixes: tuple[str, ...], directories: tuple[str, ...]
+) -> tuple[Path, ...]:
+    return tuple(
+        path
+        for path in files
+        if path.parent.name in directories and any(path.name == f"{sample}{suffix}" for suffix in suffixes)
+    )
+
+
 def _count_file(  # noqa: PLR0913, RUF100 - one resolver for every count role keeps selection explicit.
     root: DatasetRoot,
     files: tuple[Path, ...],
@@ -318,26 +341,33 @@ def _count_file(  # noqa: PLR0913, RUF100 - one resolver for every count role ke
     if family == "flat":
         raise _error(root, f"flat {artifact} without explicit path", f"an explicit {artifact} source override")
 
-    square_directories = {
-        "compact_numbered": ("02.count", "04.tissuecut"),
-        "numbered": ("03.count", "05.tissuecut"),
-        "outs": ("feature_expression",),
-    }
-    cell_directories = {
-        "compact_numbered": ("041.cellcut",),
-        "numbered": ("051.cellcut",),
-        "outs": ("feature_expression",),
-    }
-    directories = square_directories[family] if artifact == "square_counts_file" else cell_directories[family]
-
-    candidates = [
-        path
-        for path in files
-        if path.parent.name in directories and any(path.name == f"{sample}{suffix}" for suffix in suffixes)
-    ]
+    directories = _SQUARE_DIRECTORIES[family] if artifact == "square_counts_file" else _CELL_DIRECTORIES[family]
+    candidates = _count_paths(files, sample, suffixes, directories)
 
     selected = require_unique_path(candidates, context=context, search_path=root)
     return require_metadata_file(root, selected, context=context)
+
+
+def _calibration_sources(
+    root: DatasetRoot, family: Family, files: tuple[Path, ...], sample: str | None
+) -> tuple[SquareSource | CellSource, ...]:
+    """Resolve optional exact-sample GEF companions from the existing inventory."""
+    sources: list[SquareSource | CellSource] = []
+    choices: tuple[tuple[tuple[str, ...], Literal["square", "unadjusted", "adjusted"]], ...] = (
+        ((".tissue.gef", ".gef"), "square"),
+        ((".cellbin.gef",), "unadjusted"),
+        ((".adjusted.cellbin.gef",), "adjusted"),
+    )
+    context = ReaderErrorContext("stereoseq", "image calibration companion")
+    for suffixes, kind in choices:
+        directories = _SQUARE_DIRECTORIES[family] if kind == "square" else _CELL_DIRECTORIES[family]
+        candidates = _count_paths(files, sample, suffixes, directories)
+        if candidates:
+            file = require_metadata_file(
+                root, require_unique_path(candidates, context=context, search_path=root), context=context
+            )
+            sources.append(SquareSource(file, "all") if kind == "square" else CellSource(file, kind))
+    return tuple(sources)
 
 
 def _image_directories(family: Literal["compact_numbered", "numbered", "outs"], role: ImageRole) -> tuple[str, ...]:
@@ -481,4 +511,7 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selec
             cells.append(CellSource(file, kind))
 
     images = _images(root, family, files, sample, image_roles)
-    return StereoseqLayout(root, family, sample, squares, tuple(cells), analyses, images)
+    calibration = (
+        _calibration_sources(root, family, files, sample) if images and not (squares or cells or analyses) else ()
+    )
+    return StereoseqLayout(root, family, sample, squares, tuple(cells), analyses, images, calibration)

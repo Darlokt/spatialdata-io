@@ -34,6 +34,67 @@ if TYPE_CHECKING:
 class TestSeqfish:
     """Exercise the public transaction using actual on-disk vendor artifacts."""
 
+    @pytest.mark.parametrize("labels", [False, True])
+    @pytest.mark.parametrize("shapes", [False, True])
+    @pytest.mark.parametrize("geometry", ["polygons", "circles", "both"])
+    def test_drop_filters_only_selected_polygon_entities(
+        self, tmp_path: Path, *, labels: bool, shapes: bool, geometry: Literal["polygons", "circles", "both"]
+    ) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",), reorder_boundaries=True, invalid_cell_ids=(9,))
+        completed: list[object] = []
+        with Callback(pretask=lambda key, *_: completed.append(key)):
+            result = seqfish(
+                root, include_labels=labels, include_shapes=shapes, shape_geometry=geometry, invalid_geometries="drop"
+            )
+        assert not completed
+        filtered = shapes and geometry in {"polygons", "both"}
+        table = result.tables["table_Roi1"]
+        assert table.obs["instance_id"].tolist() == ([2] if filtered else [9, 2])
+        assert table.obs_names.tolist() == (["1"] if filtered else ["0", "1"])
+        assert isinstance(table.X, sparse.csr_array)
+        assert_array_equal(table.X.data, [5] if filtered else [3, 5])
+        assert table.var_names.tolist() == ["GeneB", "GeneA"]
+        if filtered:
+            assert result.shapes["Roi1_Boundaries"].index.tolist() == [2]
+        if shapes and geometry in {"circles", "both"}:
+            assert result.shapes["Roi1_CellCoordinates"].index.tolist() == ([2] if filtered else [9, 2])
+        if labels:
+            assert 9 in np.unique(result.labels["Roi1_Segmentation"].data.compute())
+        assert_array_equal(result.points["Roi1_TranscriptList"].compute()["cell"], [2, 9, 0])
+
+    def test_polygon_drop_does_not_hide_source_identity_disagreement(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",), invalid_cell_ids=(9,))
+        source = root / "Roi1_Boundaries.geojson"
+        document = json.loads(source.read_text())
+        document["features"][0]["id"] = "99"
+        source.write_text(json.dumps(document))
+        with pytest.raises(ReaderFormatError, match="ID disagreement"):
+            seqfish(root, invalid_geometries="drop")
+
+    def test_all_polygons_dropped_within_one_roi_fails(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",), invalid_cell_ids=(9, 2))
+        write_seqfish_dataset(root, rois=("Roi2",))
+        with pytest.raises(ReaderFormatError, match=r"all|empty"):
+            seqfish(root, invalid_geometries="drop")
+
+    def test_single_and_multiple_roi_frame_names(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path)
+        single = seqfish(root, rois=("Roi1",), shape_geometry="both")
+        multiple = seqfish(root)
+        for elements in (single.images, single.labels, single.points, single.shapes):
+            for element in elements.values():
+                frames = get_transformation(element, get_all=True)
+                assert isinstance(frames, dict)
+                assert set(frames) == {"global"}
+        for element in (multiple.images["Roi1_DAPI"], multiple.images["Roi2_DAPI"]):
+            frames = get_transformation(element, get_all=True)
+            assert isinstance(frames, dict)
+            assert set(frames) in ({"Roi1"}, {"Roi2"})
+
+    def test_invalid_polygon_policy_precedes_discovery(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="invalid_geometries"):
+            seqfish(tmp_path / "absent", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+
     def test_sorted_discovery_and_explicit_roi_order(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path)
         discovered = seqfish(root)
@@ -78,10 +139,10 @@ class TestSeqfish:
         assert_array_equal(boundaries.bounds, [[2, 1, 5, 3], [8, 4, 11, 7]])
         assert result.shapes["Roi1_CellCoordinates"].index.tolist() == [70000, 2]
         assert get_table_keys(table) == ("Roi1_Segmentation", "region", "instance_id")
-        assert get_transformation(result.images["Roi1_DAPI"], to_coordinate_system="Roi1") == Scale(
+        assert get_transformation(result.images["Roi1_DAPI"], to_coordinate_system="global") == Scale(
             [0.25, 0.5], axes=("y", "x")
         )
-        assert get_transformation(boundaries, to_coordinate_system="Roi1") == Scale([0.25, 0.5], axes=("y", "x"))
+        assert get_transformation(boundaries, to_coordinate_system="global") == Scale([0.25, 0.5], axes=("y", "x"))
 
     @pytest.mark.parametrize("geometry", ["polygons", "circles", "both"])
     def test_geometry_selection(self, tmp_path: Path, geometry: Literal["polygons", "circles", "both"]) -> None:

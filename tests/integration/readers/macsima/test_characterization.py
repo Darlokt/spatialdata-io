@@ -53,7 +53,7 @@ class TestMacsimaCharacterization:
         assert image.dtype == np.dtype(np.uint16)
         assert get_channel_names(result.images["run_v0_image"]) == ["CD15", "DAPI", "Bcl 2", "CD1c"]
         np.testing.assert_array_equal(image.data.compute(), np.stack(pixels))
-        np.testing.assert_allclose(_scale(result, "run_v0_image", "run_v0").scale, [0.17, 0.17])
+        np.testing.assert_allclose(_scale(result, "run_v0_image", "global").scale, [0.17, 0.17])
 
         expected = pd.DataFrame(
             {

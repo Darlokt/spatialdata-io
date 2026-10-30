@@ -1,11 +1,13 @@
-# Invalid-geometry policy
+# Geometry construction and invalid-geometry policy
 
 This private package owns one cross-reader output policy: what happens to
-source polygons that are not valid geometries.
+source polygons that are not valid geometries. It also owns exact construction
+of decoded GeoJSON Polygon and MultiPolygon geometry objects.
 
 ```python
 from spatialdata_io.readers._utils.geometry import (
     InvalidGeometryPolicy,
+    geojson_polygons,
     invalid_geometry_mask,
     raise_invalid_geometries,
     validate_invalid_geometry_policy,
@@ -25,6 +27,23 @@ from spatialdata_io.readers._utils.geometry import (
   classification and the mask raises `ValueError` if they reach it.
 - `raise_invalid_geometries()` raises one `ReaderFormatError` naming the
   invalid count and at most ten reader-owned identifiers.
+
+`geojson_polygons()` turns a sequence of decoded GeoJSON geometry objects
+into one Shapely geometry per entry, in source order. Generic GeoJSON and
+seqFISH boundaries share this contract:
+
+- each entry is a Polygon or MultiPolygon with nonempty coordinates;
+- each ring is a closed list of at least four 2D vertices; open rings are
+  rejected rather than closed by Shapely;
+- coordinates are finite JSON numbers (not booleans or strings) and integers
+  must be exactly representable in float64;
+- vertices, holes and part order are preserved, and topology is neither
+  classified nor repaired.
+
+Violations raise `ReaderFormatError` with the geometry's position. Validation
+is a Python pass over the decoded coordinates; construction is one vectorized
+ragged-array call. Document forms, feature identity, properties and CRS stay
+reader-owned.
 
 `"keep"` preserves source geometry exactly and is the default, because invalid
 polygons occur in otherwise valid vendor data (for example simplified Xenium

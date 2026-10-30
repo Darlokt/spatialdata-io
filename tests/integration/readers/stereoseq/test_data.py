@@ -13,7 +13,7 @@ import zarr
 from pandas import DataFrame
 from pandas.testing import assert_frame_equal
 from scipy.sparse import csc_array, csr_array
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Scale, get_transformation
 from xarray import DataArray
 
 from spatialdata_io import stereoseq
@@ -263,7 +263,7 @@ def _assert_layout_equivalent(actual: SpatialData, expected: SpatialData) -> Non
             transformations = get_transformation(target, get_all=True)
             assert isinstance(transformations, dict)
             assert set(transformations) == {"global"}
-            assert isinstance(get_transformation(target, to_coordinate_system="global"), Identity)
+            assert get_transformation(target, to_coordinate_system="global") == Scale([0.5, 0.5], axes=("x", "y"))
 
     for name, image in actual.images.items():
         reference_image = expected.images[name]
@@ -277,7 +277,7 @@ def _assert_layout_equivalent(actual: SpatialData, expected: SpatialData) -> Non
             transformations = get_transformation(raster, get_all=True)
             assert isinstance(transformations, dict)
             assert set(transformations) == {"global"}
-            assert isinstance(get_transformation(raster, to_coordinate_system="global"), Identity)
+            assert get_transformation(raster, to_coordinate_system="global") == Scale([0.5, 0.5], axes=("x", "y"))
 
 
 class TestStereoseqData:
@@ -422,8 +422,14 @@ class TestStereoseqData:
         self, require_test_dataset: Callable[[str], Path]
     ) -> None:
         root = require_test_dataset("stereoseq_mouse_eyeball")
-        with pytest.raises(ReaderFormatError, match=r"invalid polygon for cell.*55.*Self-intersection"):
-            stereoseq(root, cell_bins="unadjusted", cell_geometry="polygons", cell_counts_file="C04687E314.cellbin.gef")
+        with pytest.raises(ReaderFormatError, match=r"invalid geometries.*55"):
+            stereoseq(
+                root,
+                cell_bins="unadjusted",
+                cell_geometry="polygons",
+                invalid_geometries="raise",
+                cell_counts_file="C04687E314.cellbin.gef",
+            )
 
     def test_company_saw7_numbered_tree_matches_flat_export(
         self, require_test_dataset: Callable[[str], Path], tmp_path: Path, mocker: MockerFixture

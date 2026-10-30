@@ -10,7 +10,7 @@ from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FA
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.mcmicro._layout import TABLE_KEY, WsiLayout, discover_layout
 from spatialdata_io.readers.mcmicro._metadata import read_markers
-from spatialdata_io.readers.mcmicro._rasters import read_image, read_labels
+from spatialdata_io.readers.mcmicro._rasters import ImageGrid, read_image, read_labels
 from spatialdata_io.readers.mcmicro._tables import read_table
 
 if TYPE_CHECKING:
@@ -83,10 +83,16 @@ def mcmicro(
         ``<image>_<method>_<mask>`` in coordinate system ``global``.
         Tissue-microarray runs return the registered map ``tma_map`` in
         ``global``, ``core_<n>_image`` and ``core_<n>_<method>_<mask>`` in the
-        exact local pixel frame ``core_<n>``, and Coreograph tissue masks
+        local frame ``core_<n>``, and Coreograph tissue masks
         ``core_<n>_mask`` in their own frame ``core_<n>_mask``. Coreograph
         records no authoritative crop origins and masks may be downsampled, so
-        no transform between these frames is invented.
+        no transform between these frames is invented. Each image uses its
+        complete base OME XY spacing in µm, nm or mm when present, otherwise
+        source pixels. Same-grid segmentations inherit that calibration;
+        conflicting declarations fail. Independent tissue masks use only their
+        own complete OME calibration. Anisotropic spacing is preserved and the
+        native origin is unchanged. ASHLAR may itself write a default spacing;
+        declared output metadata cannot verify acquisition accuracy.
 
         ``tables['table']`` concatenates every quantification table in label
         order. ``X`` is an eager finite canonical CSR float64 array of mean
@@ -123,7 +129,7 @@ def mcmicro(
 
     images: dict[str, DataArray | DataTree] = {}
     labels: dict[str, DataArray | DataTree] = {}
-    grids: dict[str, tuple[int, int]] = {}
+    grids: dict[str, ImageGrid] = {}
     frames: dict[str, str] = {}
 
     if isinstance(layout, WsiLayout):

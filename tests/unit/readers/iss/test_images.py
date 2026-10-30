@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import tifffile
 from dask.callbacks import Callback
+from spatialdata.transformations import Identity, get_transformation
 from xarray import DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
@@ -201,3 +202,46 @@ class TestReadRasters:
             assert values.dtype == np.dtype(dtype)
             np.testing.assert_array_equal(np.unique(values), identifiers)
             np.testing.assert_array_equal(values[np.ix_([0, -1], [0, -1])], identifiers.reshape(2, 2))
+
+
+class TestPhysicalTransform:
+    """Require the original semantic grid and reconcile even partial declarations."""
+
+    def test_spatial_axis_reinterpretation_keeps_pixels(self, tmp_path: Path) -> None:
+        fixture = write_iss_dataset(tmp_path, height=40)
+        tifffile.imwrite(
+            tmp_path / "raw.tiff",
+            fixture.raw,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "PhysicalSizeX": 0.3, "PhysicalSizeY": 0.7},
+        )
+        layout = _discover_layout(
+            tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+        )
+        result = _read_rasters(layout, data_axes="cxy", raster=make_raster_options())
+        assert get_transformation(result.image, to_coordinate_system="global") == Identity()
+        assert get_transformation(result.labels, to_coordinate_system="global") == Identity()
+        np.testing.assert_array_equal(result.image.data.compute(), fixture.raw.transpose(0, 2, 1))
+
+    def test_partial_raw_and_labels_conflict(self, tmp_path: Path) -> None:
+        fixture = write_iss_dataset(tmp_path)
+        tifffile.imwrite(
+            tmp_path / "raw.tiff",
+            fixture.raw,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "PhysicalSizeX": 0.3},
+        )
+        tifffile.imwrite(
+            tmp_path / "labels.tiff",
+            fixture.labels,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "YX", "PhysicalSizeX": 0.4},
+        )
+        layout = _discover_layout(
+            tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+        )
+        with pytest.raises(ReaderFormatError, match="calibration"):
+            _read_rasters(layout, data_axes=None, raster=make_raster_options())

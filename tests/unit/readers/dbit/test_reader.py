@@ -63,6 +63,10 @@ class TestValidateGridOptions:
 class TestDbit:
     """Exercise validation precedence, inferred names, and final exact membership."""
 
+    def test_invalid_geometry_policy_precedes_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="invalid_geometries"):
+            dbit(tmp_path / "absent", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+
     def test_invalid_grid_option_fails_before_discovery(self, tmp_path: Path, mocker: MockerFixture) -> None:
         discovery = mocker.spy(dbit_reader, "_discover_layout")
 

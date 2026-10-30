@@ -86,7 +86,9 @@ class TestReadImages:
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
-            result = read_images((first, second), dataset_id="slide_region", options=NATIVE_CHUNKS)
+            result = read_images(
+                (first, second), dataset_id="slide_region", options=NATIVE_CHUNKS, transform=None, frame="global"
+            )
         tasks.assert_not_called()
         pixels.assert_not_called()
         assert list(result) == ["slide_region_z2", "slide_region_z0"]
@@ -103,13 +105,15 @@ class TestReadImages:
 
     def test_default_single_scale_and_tiles(self, tmp_path: Path) -> None:
         layer, source = _write_layer(tmp_path, 0)
-        image = read_images((layer,), dataset_id="region", options=DEFAULT_OPTIONS)["region_z0"]
+        image = read_images((layer,), dataset_id="region", options=DEFAULT_OPTIONS, transform=None, frame="global")[
+            "region_z0"
+        ]
         assert isinstance(image, DataArray)
         assert image.data.chunks == ((1, 1), (48,), (64,))
         np.testing.assert_array_equal(image.data.compute(), source)
 
     def test_no_requested_layers_is_empty(self) -> None:
-        assert read_images((), dataset_id="slide_region", options=DEFAULT_OPTIONS) == {}
+        assert read_images((), dataset_id="slide_region", options=DEFAULT_OPTIONS, transform=None, frame="global") == {}
 
     @pytest.mark.parametrize("invalid", ["shape", "dtype"])
     def test_selected_stains_and_planes_must_share_grid_and_dtype(self, tmp_path: Path, invalid: str) -> None:
@@ -124,26 +128,38 @@ class TestReadImages:
             photometric="minisblack",
         )
         with pytest.raises(ReaderFormatError, match="common shape"):
-            read_images((first, second), dataset_id="region", options=DEFAULT_OPTIONS)
+            read_images((first, second), dataset_id="region", options=DEFAULT_OPTIONS, transform=None, frame="global")
 
     def test_pyramids_and_output_chunks_are_explicit(self, tmp_path: Path) -> None:
         layer, source = _write_layer(tmp_path, 0)
-        plain = read_images((layer,), dataset_id="region", options=make_raster_options(chunks=(2, 12, 16)))["region_z0"]
+        plain = read_images(
+            (layer,),
+            dataset_id="region",
+            options=make_raster_options(chunks=(2, 12, 16)),
+            transform=None,
+            frame="global",
+        )["region_z0"]
         assert isinstance(plain, DataArray)
         assert plain.data.chunks == ((2,), (12, 12, 12, 12), (16, 16, 16, 16))
         np.testing.assert_array_equal(plain.data.compute(), source)
-        pyramid = read_images((layer,), dataset_id="region", options=make_raster_options([2, 2], 16))["region_z0"]
+        pyramid = read_images(
+            (layer,), dataset_id="region", options=make_raster_options([2, 2], 16), transform=None, frame="global"
+        )["region_z0"]
         assert isinstance(pyramid, DataTree)
         assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
         with pytest.raises(ValueError, match="spatial extent"):
-            read_images((layer,), dataset_id="region", options=make_raster_options([64]))
+            read_images(
+                (layer,), dataset_id="region", options=make_raster_options([64]), transform=None, frame="global"
+            )
 
     @pytest.mark.parametrize("fail", [False, True])
     def test_task_resources_close_on_success_and_failure(
         self, tmp_path: Path, mocker: MockerFixture, *, fail: bool
     ) -> None:
         layer, _ = _write_layer(tmp_path, 0)
-        image = read_images((layer,), dataset_id="region", options=NATIVE_CHUNKS)["region_z0"]
+        image = read_images((layer,), dataset_id="region", options=NATIVE_CHUNKS, transform=None, frame="global")[
+            "region_z0"
+        ]
         assert isinstance(image, DataArray)
         with tifffile.TiffFile(layer.channels[0].path) as source:
             store = source.aszarr(series=0, level=0, squeeze=True)

@@ -149,29 +149,35 @@ def _polygon_sets(store: _Store, n_cells: int) -> tuple[NDArray[np.uint32], Nucl
     """Return cell labels, nuclei and cell segmentation methods of the polygon-set family."""
     roles = _polygon_set_roles(store)
     cell_set = f"polygon_sets/{roles['cell']}"
-    cell_index = store.read(f"{cell_set}/cell_index", ndim=1, kind="ui").astype(np.int64)
+    cell_index = store.read(f"{cell_set}/cell_index", ndim=1, kind="ui")
     if not np.array_equal(np.sort(cell_index), np.arange(n_cells)):
         raise store.error(found="cell polygons not one per cell", expected="one cell polygon per cell")
+    cell_index = cell_index.astype(np.int64)
     # Label p + 1 belongs to cell cell_index[p].
     cell_labels = np.empty(n_cells, dtype=np.uint32)
     cell_labels[cell_index] = np.arange(1, n_cells + 1, dtype=np.uint32)
 
     methods = store.group.attrs.get("segmentation_methods")
-    method_index = store.read(f"{cell_set}/method", ndim=1, kind="ui").astype(np.int64)
-    if not isinstance(methods, list) or len(method_index) != n_cells or (method_index >= len(methods)).any():
+    method_index = store.read(f"{cell_set}/method", ndim=1, kind="ui")
+    if (
+        not isinstance(methods, list)
+        or len(method_index) != n_cells
+        or (method_index < 0).any()
+        or (method_index >= len(methods)).any()
+    ):
         raise store.error(
             found="cell methods outside segmentation_methods",
             expected="indexes into the segmentation_methods attribute",
         )
     cell_methods = np.empty(n_cells, dtype=object)
-    cell_methods[cell_index] = np.asarray(methods, dtype=object)[method_index]
+    cell_methods[cell_index] = np.asarray(methods, dtype=object)[method_index.astype(np.int64)]
 
     nuclei = None
     if "nucleus" in roles:
-        owners = store.read(f"polygon_sets/{roles['nucleus']}/cell_index", ndim=1, kind="ui").astype(np.int64)
-        if (owners >= n_cells).any():
+        owners = store.read(f"polygon_sets/{roles['nucleus']}/cell_index", ndim=1, kind="ui")
+        if (owners < 0).any() or (owners >= n_cells).any():
             raise store.error(found="nuclei owned by unknown cells", expected="nucleus cell_index values below N")
-        nuclei = Nuclei(np.arange(1, len(owners) + 1, dtype=np.uint32), owners)
+        nuclei = Nuclei(np.arange(1, len(owners) + 1, dtype=np.uint32), owners.astype(np.int64))
     return cell_labels, nuclei, cell_methods.astype(np.str_)
 
 
@@ -198,6 +204,11 @@ def _summary(store: _Store, n_cells: int) -> tuple[NDArray[np.float64], NDArray[
     counts = column("nucleus_count")
     if not np.isfinite(counts).all() or (counts < 0).any() or (counts != np.round(counts)).any():
         raise store.error(found="non-integral nucleus_count values", expected="nonnegative integral nucleus counts")
+    # int64.max rounds up to 2**63 in float64, so the upper bound is exclusive.
+    if (counts >= 2**63).any():
+        raise store.error(
+            found="nucleus_count outside int64 range", expected="nonnegative integral nucleus counts below 2**63"
+        )
     return centroids, counts.astype(np.int64)
 
 

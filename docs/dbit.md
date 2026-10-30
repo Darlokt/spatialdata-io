@@ -44,6 +44,10 @@ A is the x axis and B is the y axis. Without an image, grid cell `(A, B)` occupi
 
 With an image, both grid axes and the border inset are multiplied by `max(image_height, image_width) / N`. This uniform scaling preserves the historical square-grid convention for rectangular images too: the grid spans the longer image dimension on both axes. The image must already be cropped, oriented, and registered appropriately; the reader does not infer a registration or physical units. Shapes and images use identity transformations into the `global` coordinate system.
 
+Without an image these are barcode-grid units; with an image they use the documented image-pixel convention. OME spacing or nominal channel width alone cannot establish the barcode pitch, origin, orientation and capture footprint, so neither triggers automatic conversion to micrometres.
+
+`invalid_geometries="keep"`, `"drop"` and `"raise"` produce identical supported squares and linkage because this geometry is valid by construction. No topology scan is performed. The option is validated before I/O, and floating-point collapse of a positive square width fails in every mode.
+
 `table.obsm["spatial"]` retains the one-based integer `(array_A, array_B)` coordinates, even when an image scales the polygons. These values are barcode positions, not polygon centers or image-pixel coordinates.
 
 ## Image options and lazy execution

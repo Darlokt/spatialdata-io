@@ -37,6 +37,7 @@ class TestMerscopeCommand:
             include_cell_boundaries=True,
             include_table=True,
             include_images=True,
+            invalid_geometries="keep",
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
         )
@@ -89,6 +90,7 @@ class TestMerscopeCommand:
             include_cell_boundaries=False,
             include_table=False,
             include_images=False,
+            invalid_geometries="keep",
             scale_factors=(2, 3),
             chunks=(1, 16, 32),
         )

@@ -13,7 +13,7 @@ from dask.callbacks import Callback
 from scipy import sparse
 from shapely.geometry import MultiPolygon, Polygon
 from spatialdata.models import get_table_keys
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import get_transformation
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.merscope import merscope
@@ -112,7 +112,12 @@ class TestMerscopeCharacterization:
             assert image.shape == (2, 64, 80)
             assert image.dtype == np.dtype("uint16")
             assert image.coords["c"].to_numpy().tolist() == ["Cyto", "DAPI"]
-            assert get_transformation(image, to_coordinate_system="global") == Identity()
+            image_transform = get_transformation(image, to_coordinate_system="global")
+            assert not isinstance(image_transform, dict)
+            np.testing.assert_array_equal(
+                image_transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")),
+                np.linalg.inv([[2, 0.25, 10], [0, 3, -7], [0, 0, 1]]),
+            )
             for channel, offset in (("DAPI", 0), ("Cyto", 10_000)):
                 np.testing.assert_array_equal(
                     image.sel(c=channel).data[2:4, 3:5].compute(),
@@ -132,7 +137,7 @@ class TestMerscopeCharacterization:
             transform = cast("BaseTransformation", get_transformation(element, to_coordinate_system="global"))
             np.testing.assert_array_equal(
                 transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")),
-                [[2, 0.25, 10], [0, 3, -7], [0, 0, 1]],
+                np.eye(3),
             )
         materialized = points.compute()
         assert materialized["gene"].tolist() == ["GeneB", "GeneA", "Blank-1", "ZeroGene"]
@@ -251,4 +256,4 @@ class TestMerscopeCharacterization:
         boundaries.geometry = gpd.GeoSeries(geometries, index=boundaries.index)
         boundaries.to_parquet(path)
         with pytest.raises(ReaderFormatError, match=r"invalid|valid|geometry"):
-            _read(fixture, images=False, transcripts=False)
+            merscope(fixture.root, include_images=False, include_transcripts=False, invalid_geometries="raise")

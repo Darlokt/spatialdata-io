@@ -76,15 +76,6 @@ class BoundarySource:
 
 
 @dataclass(frozen=True, slots=True)
-class PhysicalSources:
-    """Require calibration alongside requested micron-coordinate products."""
-
-    transform: ArtifactFile
-    boundaries: BoundarySource | None
-    transcripts: TranscriptSource | None
-
-
-@dataclass(frozen=True, slots=True)
 class MosaicChannel:
     """Pair a scientific stain name with one validated single-plane TIFF."""
 
@@ -101,14 +92,23 @@ class MosaicLayer:
 
 
 @dataclass(frozen=True, slots=True)
+class Mosaics:
+    """Selected mosaic planes and the optional calibration stored beside them."""
+
+    layers: tuple[MosaicLayer, ...]
+    transform: ArtifactFile | None
+
+
+@dataclass(frozen=True, slots=True)
 class InstrumentLayout:
     """Describe requested products from the original instrument region."""
 
     root: DatasetRoot
     names: Names
     tables: TableFiles | None
-    images: tuple[MosaicLayer, ...]
-    physical: PhysicalSources | None
+    images: Mosaics | None
+    boundaries: BoundarySource | None
+    transcripts: TranscriptSource | None
     kind: Literal["instrument"] = field(default="instrument", init=False)
 
 
@@ -120,8 +120,9 @@ class VptLayout:
     vpt_root: DatasetRoot
     names: Names
     tables: TableFiles | None
-    images: tuple[MosaicLayer, ...]
-    physical: PhysicalSources | None
+    images: Mosaics | None
+    boundaries: BoundarySource | None
+    transcripts: TranscriptSource | None
     kind: Literal["vpt"] = field(default="vpt", init=False)
 
 
@@ -193,13 +194,18 @@ def _vpt_boundaries(root: DatasetRoot, entries: frozenset[str]) -> BoundarySourc
     return candidates[0]
 
 
-def _mosaic_layers(
-    root: DatasetRoot, directory: ArtifactDirectory, z_layers: tuple[int, ...] | None
-) -> tuple[MosaicLayer, ...]:
-    """Discover stain/plane pairs once and reject missing or aliased selections."""
+def _mosaics(root: DatasetRoot, directory: ArtifactDirectory, z_layers: tuple[int, ...] | None) -> Mosaics:
+    """Discover stain/plane pairs and the optional calibration in one directory scan.
+
+    Missing or aliased stain/plane selections fail.
+    """
     context = ReaderErrorContext("merscope", "mosaic image grid")
     files: dict[tuple[str, int], ArtifactFile] = {}
+    transform = None
     for entry in sorted(directory.iterdir()):
+        if entry.name == "micron_to_mosaic_pixel_transform.csv":
+            transform = _file(root, f"images/{entry.name}")
+            continue
         match = _MOSAIC_NAME.fullmatch(entry.name)
         if match is None:
             continue
@@ -229,7 +235,8 @@ def _mosaic_layers(
             found=f"missing stain/z pairs {missing!r}",
             expected="every requested plane for every stain",
         )
-    return tuple(MosaicLayer(z, tuple(MosaicChannel(stain, files[stain, z]) for stain in stains)) for z in selected)
+    layers = tuple(MosaicLayer(z, tuple(MosaicChannel(stain, files[stain, z]) for stain in stains)) for z in selected)
+    return Mosaics(layers, transform)
 
 
 def discover_layout(
@@ -285,17 +292,11 @@ def discover_layout(
             "current" if current else "original",
         )
 
-    images: tuple[MosaicLayer, ...] = ()
-    physical = None
-    if selection.images or boundaries is not None or transcripts is not None:
+    images = None
+    if selection.images:
         image_directory = require_metadata_directory(root, "images", context=ReaderErrorContext("merscope", "images"))
-        if selection.images:
-            images = _mosaic_layers(root, image_directory, selection.z_layers)
-        if boundaries is not None or transcripts is not None:
-            physical = PhysicalSources(
-                _file(root, "images/micron_to_mosaic_pixel_transform.csv"), boundaries, transcripts
-            )
+        images = _mosaics(root, image_directory, selection.z_layers)
 
     if vpt_root is None:
-        return InstrumentLayout(root, names, tables, images, physical)
-    return VptLayout(root, vpt_root, names, tables, images, physical)
+        return InstrumentLayout(root, names, tables, images, boundaries, transcripts)
+    return VptLayout(root, vpt_root, names, tables, images, boundaries, transcripts)

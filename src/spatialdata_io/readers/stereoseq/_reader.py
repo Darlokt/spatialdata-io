@@ -9,15 +9,18 @@ from typing import TYPE_CHECKING, Literal, cast
 import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
+from spatialdata.transformations import Scale, set_transformation
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
-from spatialdata_io.readers.stereoseq._analysis import read_analysis
+from spatialdata_io.readers.stereoseq._analysis import read_analyses
 from spatialdata_io.readers.stereoseq._cells import read_cells
 from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygons
 from spatialdata_io.readers.stereoseq._layout import discover_layout
+from spatialdata_io.readers.stereoseq._metadata import read_image_pitch
 from spatialdata_io.readers.stereoseq._rasters import read_image, read_mask
 from spatialdata_io.readers.stereoseq._square import read_square
 
@@ -31,6 +34,18 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.stereoseq._square import SquareCounts
 
 _ROLES = frozenset({"registered", "mask", "tissue_cut", "distance_mask", "expression"})
+
+
+def _set_grid_pitch(result: SpatialData, pitch_nm: int) -> None:
+    """Map every spatial element's native grid to micrometres without touching its buffers.
+
+    The common pitch can come from analyses read after the raw elements were
+    built, so it is attached in one pass over the assembled container.
+    """
+    scale = Scale([pitch_nm / 1000, pitch_nm / 1000], axes=("x", "y"))
+    for elements in (result.images, result.labels, result.points, result.shapes):
+        for element in elements.values():
+            set_transformation(element, scale, to_coordinate_system="global")
 
 
 def _sequence[T](values: Sequence[T], name: str) -> tuple[T, ...]:
@@ -147,6 +162,7 @@ def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the p
     bin_sizes: Sequence[int] | Literal["all"] = (),
     cell_bins: Literal["none", "unadjusted", "adjusted", "both"] = "none",
     cell_geometry: Literal["centroids", "polygons"] = "centroids",
+    invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
     square_counts_file: str | Path | None = None,
     cell_counts_file: str | Path | None = None,
     adjusted_cell_counts_file: str | Path | None = None,
@@ -177,9 +193,14 @@ def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the p
         Select no cells, unadjusted cells, adjusted cells, or both populations.
         Raw cells do not require square counts, analysis, or images.
     cell_geometry
-        Source centroids or literal valid source polygons. Centroid mode never
-        reads borders. Polygon mode rejects invalid rings without repair.
+        Source centroids or literal source polygons. Centroid mode never
+        reads borders. Polygon mode applies the topology policy without repair.
         Empty selected populations cannot be linked and fail.
+    invalid_geometries
+        Preserve invalid source topology, drop affected cells and matching
+        count rows/layers, or raise. Raw adjusted and unadjusted populations
+        are independent; analyses and masks remain unchanged. Paired-padding
+        errors always fail, and centroid mode does not inspect borders.
     square_counts_file
         Explicit square GEF. By default select the unique tissue/full GEF;
         ambiguous sources fail. Whole-chip raw counts require this override.
@@ -228,8 +249,11 @@ def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the p
         Masks are YX labels with their source boolean or integer dtype and
         values; generated levels downsample by nearest neighbour.
 
-        All elements map by identity to ``global``, in the matching normalized
-        expression grid (XY in tables/points). Stored square coordinates are
+        All elements map to ``global`` in micrometres using the common source
+        pitch in nm divided by 1000. Native values and table embeddings remain
+        in the matching normalized expression grid (XY in tables/points).
+        Image-only reads use associated GEF metadata when available, otherwise
+        retain the source grid. Stored square coordinates are
         already in that grid and are not multiplied by bin size. Common chip
         origins are retained as metadata, never added to only one element.
         Conflicting origins/pitches fail. Physical pitch is recorded in nm.
@@ -249,6 +273,7 @@ def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the p
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         Missing selected artifacts or incorrect filesystem kinds.
     """
+    policy = validate_invalid_geometry_policy(invalid_geometries)
     bins = _bin_selection(bin_sizes)
     roles = _sequence(image_roles, "image_roles")
     analyses = _sequence(analysis_files, "analysis_files")
@@ -309,32 +334,24 @@ def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the p
         if cells.borders is None:
             points[target] = make_points(cells.coordinates, index)
         else:
-            shapes[target] = make_polygons(cells.coordinates, cells.borders, index, path=cell_source.file)
+            shapes[target] = make_polygons(
+                cells.coordinates, cells.borders, index, path=cell_source.file, policy=policy
+            )
+            # Dropped contours remove their count rows; analyses still match the full raw population.
+            index = shapes[target].index
+        table = (
+            cells.table if len(index) == cells.table.n_obs else cells.table[pd.Index(cells.cell_ids).isin(index)].copy()
+        )
         counts_by_population[name] = cells
-        tables[f"{name}_table"] = _link(cells.table, target, index)
+        tables[f"{name}_table"] = _link(table, target, index)
 
-    physical_resolution = next((product.resolution for product in products), None)
-    for analysis_source in layout.analyses:
-        analysis = read_analysis(analysis_source, counts=counts_by_population)
-        if physical_resolution is not None and analysis.resolution != physical_resolution:
-            raise ReaderFormatError(
-                context=ReaderErrorContext("stereoseq", "coordinate frame"),
-                path=analysis_source.file,
-                found=f"analysis pitch {analysis.resolution} nm",
-                expected=f"common grid pitch {physical_resolution} nm",
-            )
-        physical_resolution = analysis.resolution
-
+    analyses, pitch = read_analyses(
+        layout.analyses,
+        counts=counts_by_population,
+        resolution=next((product.resolution for product in products), None),
+    )
+    for analysis in analyses:
         name = f"{analysis.name}_table"
-        # Historical spatial filenames omit the bin size; their final identity
-        # becomes known only after native H5AD metadata has been validated.
-        if name in tables:
-            raise ReaderFormatError(
-                context=ReaderErrorContext("stereoseq", "analysis"),
-                path=analysis_source.file,
-                found=f"duplicate analysis name {name!r}",
-                expected="distinct normalized analysis products",
-            )
         target = f"{analysis.name}_points"
         points[target] = make_points(analysis.coordinates, analysis.instance_ids)
         tables[name] = _link(analysis.table, target, analysis.instance_ids)
@@ -346,5 +363,10 @@ def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the p
         shapes=shapes,
         tables=tables,
     )
+    # Image-only selections take the pitch from associated GEF companions, if any.
+    if pitch is None:
+        pitch = read_image_pitch(layout.calibration, sample_id=layout.sample_id)
+    if pitch is not None:
+        _set_grid_pitch(result, pitch)
     set_reader_provenance(result.attrs, reader="stereoseq")
     return result

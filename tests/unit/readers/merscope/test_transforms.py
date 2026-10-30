@@ -19,15 +19,15 @@ if TYPE_CHECKING:
 
 
 class TestReadTransform:
-    """Interpret source microns as mosaic pixels without changing or repairing the matrix."""
+    """Invert the source affine once without discarding its geometric components."""
 
     def test_nonidentity_affine_direction(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "transform.csv")
         expected = np.asarray([[2, 0.25, 10], [0, 3, -7], [0, 0, 1]])
         np.savetxt(path, expected)
         actual = read_transform(path).to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
-        np.testing.assert_array_equal(actual, expected)
-        np.testing.assert_array_equal(actual @ [2, 2, 1], [14.5, -1, 1])
+        np.testing.assert_array_equal(actual, np.linalg.inv(expected))
+        np.testing.assert_allclose(actual @ [14.5, -1, 1], [2, 2, 1], rtol=1e-15, atol=1e-15)
 
     @pytest.mark.parametrize("scale", [1e-200, float(2**600)])
     def test_invertible_scale_is_not_rejected_by_determinant_underflow_or_overflow(
@@ -37,7 +37,7 @@ class TestReadTransform:
         expected = np.diag([scale, scale, 1])
         coefficient = str(2**600) if scale > 1 else repr(scale)
         path.write_text(f"{coefficient} 0 0\n0 {coefficient} 0\n0 0 1\n", encoding="utf-8")
-        np.testing.assert_array_equal(read_transform(path).matrix, expected)
+        np.testing.assert_array_equal(read_transform(path).matrix, np.linalg.inv(expected))
 
     @pytest.mark.parametrize(
         "content",

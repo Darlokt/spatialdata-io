@@ -129,7 +129,7 @@ def read_aligned(
     )
 
 
-def xenium_aligned_image(
+def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretation and raster options.
     image_file: str | Path,
     alignment_file: str | Path | None = None,
     *,

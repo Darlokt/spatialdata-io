@@ -21,7 +21,6 @@ if TYPE_CHECKING:
         include_cycle_in_channel_names: bool
         nuclei_channel_name: str
         split_threshold_nuclei_channel: int | None
-        include_transformations: bool
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
 
@@ -70,12 +69,6 @@ def _split_threshold(_context: click.Context, _parameter: click.Parameter, value
     show_default=True,
     help="Split nuclei channels into their own stack above this count; 'none' never splits.",
 )
-@click.option(
-    "--include-transformations/--no-include-transformations",
-    default=True,
-    show_default=True,
-    help="Scale pixels to micrometers.",
-)
 @scale_factors_option
 @chunks_option
 def macsima_command(input_path: Path, output_path: Path, **options: Unpack[_MacsimaOptions]) -> None:
@@ -90,7 +83,6 @@ def macsima_command(input_path: Path, output_path: Path, **options: Unpack[_Macs
         include_cycle_in_channel_names=options["include_cycle_in_channel_names"],
         nuclei_channel_name=options["nuclei_channel_name"],
         split_threshold_nuclei_channel=options["split_threshold_nuclei_channel"],
-        include_transformations=options["include_transformations"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
     )

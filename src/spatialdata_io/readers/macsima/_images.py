@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import dask.array as da
 from spatialdata.models import Image2DModel
-from spatialdata.transformations import Identity, Scale
+from spatialdata.transformations import Scale
 
 from spatialdata_io.readers._utils.image import normalize_raster_axes, read_tiff
 from spatialdata_io.readers.macsima._channels import NO_PADDING
@@ -37,13 +37,11 @@ def make_image(
     *,
     frame: str,
     pixel_size_um: float,
-    include_transformations: bool,
     raster: RasterOptions,
 ) -> DataArray | DataTree:
     """Stack planned channels as a lazy CYX image in the stack's coordinate system.
 
-    With transformations, ``frame`` is in micrometers through an isotropic
-    scale; otherwise it is the pixel grid itself. Building the image reads no
+    ``frame`` is in micrometers through the validated isotropic OME scale. Building the image reads no
     pixels; channels shared with another stack reuse the same graph keys.
     """
     stack = da.stack([_channel_array(channel) for channel in channels])
@@ -53,7 +51,7 @@ def make_image(
         )
         raise ValueError(message)
 
-    transformation = Scale([pixel_size_um, pixel_size_um], axes=("x", "y")) if include_transformations else Identity()
+    transformation = Scale([pixel_size_um, pixel_size_um], axes=("x", "y"))
     return Image2DModel.parse(
         stack,
         dims=_IMAGE_AXES,

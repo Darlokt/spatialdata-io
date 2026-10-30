@@ -15,6 +15,7 @@ from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_a
 if TYPE_CHECKING:
     import numpy as np
     from dask.array import Array
+    from spatialdata.transformations import Affine
     from xarray import DataArray, DataTree
 
     from spatialdata_io.readers._utils.image import RasterOptions
@@ -57,9 +58,18 @@ def _read_channel(path: ArtifactFile) -> Array:
 
 
 def read_images(
-    layers: tuple[MosaicLayer, ...], *, dataset_id: str, options: RasterOptions
+    layers: tuple[MosaicLayer, ...],
+    *,
+    dataset_id: str,
+    options: RasterOptions,
+    transform: Affine | None,
+    frame: str,
 ) -> dict[str, DataArray | DataTree]:
-    """Build one image per requested z index and validate a common source grid."""
+    """Build one image per requested z index and validate a common source grid.
+
+    ``transform`` maps mosaic pixels into micrometres; without it, ``frame``
+    is the mosaic pixel grid itself.
+    """
     images: dict[str, DataArray | DataTree] = {}
     reference: tuple[tuple[int, ...], np.dtype[np.generic]] | None = None
     for layer in layers:
@@ -87,6 +97,6 @@ def read_images(
             rgb=False,
             scale_factors=options.model_scale_factors,
             chunks=options.image_chunks(),
-            transformations={"global": Identity()},
+            transformations={frame: Identity() if transform is None else transform},
         )
     return images

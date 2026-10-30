@@ -8,6 +8,8 @@
 
 api.md
 cli.md
+generic.md
+calibration.md
 dbit.md
 seqfish.md
 merscope.md

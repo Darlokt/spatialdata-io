@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 from scipy import sparse
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     as_csr_array,
@@ -169,6 +169,7 @@ def finalize_table(  # noqa: PLR0913, RUF100 - Final reader-owned annotations an
     dataset_id: str,
     target: str | None,
     expected_instances: pd.Index | None,
+    source_instances: pd.Index | None,
 ) -> ad.AnnData:
     """Complete owned annotations and link once to an explicitly included cell footprint."""
     context = ReaderErrorContext("merscope", "cell table")
@@ -178,6 +179,21 @@ def finalize_table(  # noqa: PLR0913, RUF100 - Final reader-owned annotations an
     if target is not None:
         expected["cells_region"] = target
     validate_output_annotations(observations, expected, context=context)
+    if (
+        source_instances is not None
+        and expected_instances is not None
+        and len(source_instances) != len(expected_instances)
+    ):
+        if len(table.obs_names) != len(source_instances) or not table.obs_names.isin(source_instances).all():
+            raise ReaderFormatError(
+                context=context,
+                found="different original count and boundary populations",
+                expected="identical count and original boundary IDs before geometry filtering",
+            )
+        keep = table.obs_names.isin(expected_instances)
+        if not keep.all():
+            table = table[keep].copy()
+            observations = cast("pd.DataFrame", table.obs)
     for name, value in (("region", region_name), ("slide", slide_name), ("dataset_id", dataset_id)):
         observations[name] = pd.Series(value, index=observations.index, dtype="category")
     if target is not None:

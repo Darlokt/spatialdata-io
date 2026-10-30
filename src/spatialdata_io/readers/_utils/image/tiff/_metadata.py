@@ -42,8 +42,8 @@ def _native_chunks(
     level: int,
 ) -> tuple[int, ...]:
     """Read native chunk sizes from a short-lived store without decoding pixels."""
-    # Match TiffPageSeries.shape/axes even for shaped TIFFs, whose store default
-    # retains nonspatial singleton axes. tifffile always preserves X and Y.
+    # Use the same explicit singleton policy as semantic metadata. Shaped TIFF
+    # series retain extra singleton axes in some supported tifffile versions.
     store = tiff.aszarr(series=series, level=level, squeeze=True)
     try:
         array = zarr.open_array(store=store, mode="r")
@@ -69,6 +69,12 @@ def _level_metadata(
     if len(axes) != len(shape) or any(len(axis) != 1 for axis in axes):
         message = f"TIFF series {series_index} level {level_index} axes {axes!r} do not describe shape {shape}."
         raise RasterFormatError(message)
+    # tifffile versions differ in whether series metadata retains shaped-file
+    # singleton C/T/Z axes. Match squeeze=True in both metadata and pixel stores,
+    # while retaining singleton spatial dimensions.
+    dimensions = [(size, axis) for size, axis in zip(shape, axes, strict=True) if size != 1 or axis in ("X", "Y")]
+    shape = tuple(size for size, _ in dimensions)
+    axes = tuple(axis for _, axis in dimensions)
     if len(native_chunks) != len(shape) or any(size <= 0 for size in native_chunks):
         message = (
             f"TIFF series {series_index} level {level_index} has invalid native "
@@ -192,8 +198,8 @@ def inspect_tiff(
     -----
     Inspection opens short-lived Zarr stores only to obtain native chunk
     geometry. It never requests a pixel selection or decodes a TIFF segment.
-    Shapes follow tifffile's series convention: nonspatial singleton axes are
-    omitted, while X and Y remain present even when their length is one.
+    Nonspatial singleton axes are omitted explicitly; X and Y remain present
+    even when their length is one, independently of TIFF metadata defaults.
     """
     normalized_path = normalize_file_path(path)
     _validate_tiff_signature(normalized_path)

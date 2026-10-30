@@ -1,8 +1,7 @@
 """Demonstrate one invalid-geometry definition on two existing reader consumers.
 
-MERSCOPE and Stereo-seq currently reject invalid source polygons. These tests show
-that the shared classification flags exactly the polygons each reader rejects, on
-each reader's own source representation, without changing either reader.
+MERSCOPE and Stereo-seq use the shared invalid-topology definition under their
+explicit raise policies. Source preservation is the default for both readers.
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ import pyarrow.parquet as pq
 import pytest
 import shapely
 from shapely.geometry import Polygon
-from spatialdata.transformations import Affine
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
@@ -45,18 +43,17 @@ class TestMerscopeConsumer:
         pq.write_table(
             pa.table({"EntityID": ids, "ZIndex": [0] * len(ids), "Geometry": shapely.to_wkb(geometries)}), path
         )
-        identity = Affine(np.eye(3), input_axes=("x", "y"), output_axes=("x", "y"))
 
         mask = invalid_geometry_mask(geometries)
 
         assert np.flatnonzero(mask).tolist() == list(invalid)
         if invalid:
             with pytest.raises(ReaderFormatError, match="invalid"):
-                read_boundaries(path, transform=identity)
+                read_boundaries(path, policy="raise", frame="global")
             with pytest.raises(ReaderFormatError, match=r"2 invalid geometries.*cell-1.*cell-2"):
                 raise_invalid_geometries(mask, ids, context=ReaderErrorContext("merscope", "cell boundaries"))
         else:
-            assert len(read_boundaries(path, transform=identity)) == len(ids)
+            assert len(read_boundaries(path, policy="raise", frame="global").shapes) == len(ids)
 
 
 def _borders(rings: tuple[list[tuple[int, int]], ...]) -> NDArray[np.int16]:
@@ -80,8 +77,9 @@ class TestStereoseqConsumer:
 
         assert np.flatnonzero(mask).tolist() == list(invalid)
         if invalid:
-            with pytest.raises(ReaderFormatError, match=f"invalid polygon for cell {index[invalid[0]]!r}"):
-                make_polygons(centers, _borders(rings), index, path=tmp_path / "cells.gef")
+            with pytest.raises(ReaderFormatError, match="invalid geometries") as caught:
+                make_polygons(centers, _borders(rings), index, path=tmp_path / "cells.gef", policy="raise")
+            assert str(index[invalid[0]]) in str(caught.value)
         else:
-            shapes = make_polygons(centers, _borders(rings), index, path=tmp_path / "cells.gef")
+            shapes = make_polygons(centers, _borders(rings), index, path=tmp_path / "cells.gef", policy="keep")
             assert shapely.equals_exact(shapes.geometry.to_numpy(), geometries, tolerance=0).all()

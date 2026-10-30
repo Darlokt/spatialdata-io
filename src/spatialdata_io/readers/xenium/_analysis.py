@@ -50,6 +50,7 @@ _MEMBER = re.compile(
 )
 _FILES = {"clustering": "clusters", "pca": "projection", "umap": "projection"}
 _PREFIXES = {"pca": "PC", "umap": "UMAP"}
+_MIN_PROJECTION_COLUMNS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +158,7 @@ def read_analysis(source: AnalysisSource, barcodes: pd.Index) -> Analysis:
 
         prefix = _PREFIXES[kind]
         expected = [BARCODE, *(f"{prefix}-{index}" for index in range(1, len(header)))]
-        if len(header) < 2 or header != expected:
+        if len(header) < _MIN_PROJECTION_COLUMNS or header != expected:
             raise schema_error(path, "analysis", found=f"header {header!r}", expected=f"Barcode,{prefix}-1,...")
         projections[f"{kind}_{method}"] = _projection(
             _table(payload, header, pa.float64(), path), header, barcodes, path

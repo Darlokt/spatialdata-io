@@ -14,6 +14,7 @@ import pyarrow.csv as pacsv
 from dask import delayed
 from dask.bytes import read_bytes
 from spatialdata.models import PointsModel
+from spatialdata.transformations import Identity
 
 from spatialdata_io.readers.merscope._schemas import (
     STRING_DTYPE,
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from dask.delayed import Delayed
-    from spatialdata.transformations import Affine
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.merscope._layout import TranscriptSource
@@ -62,8 +62,8 @@ def read_transcripts(
     source: TranscriptSource,
     *,
     features: tuple[str, ...],
-    transform: Affine,
-    allowed_cell_ids: tuple[str, ...] | None = None,
+    frame: str,
+    allowed_cell_ids: tuple[str, ...] | None,
 ) -> dd.DataFrame:
     """Return calibrated XY points without reading transcript rows eagerly.
 
@@ -94,12 +94,12 @@ def read_transcripts(
         for index, block in enumerate(blocks[0])
     ]
     empty = pd.DataFrame({name: pd.Series(dtype=STRING_DTYPE) for name in columns})
-    frame = dd.from_delayed(parsed, meta=empty)
+    dataframe = dd.from_delayed(parsed, meta=empty)
 
     meta = normalize_transcript_partition(
         empty, features=features, path=path, assignment=source.assignment, allowed_cell_ids=allowed_cell_ids
     )
-    normalized = frame.map_partitions(
+    normalized = dataframe.map_partitions(
         normalize_transcript_partition,
         features=features,
         path=path,
@@ -119,6 +119,6 @@ def read_transcripts(
             coordinates={"x": "x", "y": "y"},
             feature_key="gene",
             instance_key="cell_id" if source.assignment == "current" and "cell_id" in columns else None,
-            transformations={"global": transform},
+            transformations={frame: Identity()},
             sort=False,
         )

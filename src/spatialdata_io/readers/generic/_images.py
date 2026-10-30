@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from spatialdata.models import Image2DModel, Image3DModel
-from spatialdata.transformations import Identity
+from spatialdata.transformations import Identity, Scale
 
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
     DEFAULT_CHUNKS,
     DEFAULT_SCALE_FACTORS,
@@ -16,6 +17,7 @@ from spatialdata_io.readers._utils.image import (
     inspect_tiff,
     make_raster_options,
     normalize_raster_axes,
+    ome_pixel_sizes_um,
     read_jpeg,
     read_png,
     read_tiff,
@@ -25,6 +27,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from xarray import DataArray, DataTree
+
+    from spatialdata_io.readers._utils.image import TiffMetadata
 
 # sphinx-autodoc-typehints currently renders PEP 695 aliases as ``TypeAliasType``.
 Chunks: TypeAlias = int | tuple[int, ...] | Mapping[str, int]  # noqa: UP040
@@ -38,6 +42,39 @@ _IMAGE_2D_AXES = frozenset(("c", "x", "y"))
 _IMAGE_2D_GRAYSCALE_AXES = frozenset(("x", "y"))
 _IMAGE_3D_AXES = frozenset(("c", "x", "y", "z"))
 _IMAGE_3D_GRAYSCALE_AXES = frozenset(("x", "y", "z"))
+
+
+def _physical_transform(
+    raster: LazyRaster, metadata: TiffMetadata | None, axes: Sequence[str], *, series: int, level: int
+) -> Identity | Scale:
+    """Calibrate retained spatial axes from complete level-zero OME sizes, otherwise keep pixels."""
+    if level != 0 or metadata is None or metadata.ome is None:
+        return Identity()
+    # An explicit reinterpretation of spatial axes breaks their OME association.
+    declared = tuple(axis.lower() for axis in raster.axes)
+    interpreted = tuple(axis.lower() for axis in axes)
+    if tuple(axis if axis in "xyz" else "" for axis in declared) != tuple(
+        axis if axis in "xyz" else "" for axis in interpreted
+    ):
+        return Identity()
+
+    pixels = metadata.ome.images[series].pixels
+    dimensions = {"x": pixels.size_x, "y": pixels.size_y, "z": pixels.size_z}
+    spatial_axes: tuple[Literal["x", "y", "z"], ...] = tuple(axis for axis in ("x", "y", "z") if axis in interpreted)
+    context = ReaderErrorContext("generic", "OME calibration")
+    for axis in spatial_axes:
+        if dimensions[axis] != raster.data.shape[declared.index(axis)]:
+            raise ReaderFormatError(
+                context=context,
+                path=metadata.path,
+                found=f"OME {axis.upper()} dimension {dimensions[axis]} disagrees with its base raster",
+                expected="matching source and OME spatial dimensions",
+            )
+
+    declared_sizes = ome_pixel_sizes_um(metadata, series=series, axes=spatial_axes, context=context)
+    sizes = [size for size in declared_sizes if size is not None]
+    # Mixing physical and pixel axes in one frame is not a valid calibration.
+    return Scale(sizes, axes=spatial_axes) if len(sizes) == len(spatial_axes) else Identity()
 
 
 def _canonical_axes(data_axes: Sequence[str]) -> tuple[str, ...]:
@@ -105,19 +142,19 @@ def _normalize_chunks(chunks: Chunks | None, *, axes: tuple[str, ...]) -> dict[s
     return dict(zip(axes, integers, strict=True))
 
 
-def _read_raster(path: Path, *, tiff_series: int, tiff_level: int) -> LazyRaster:
+def _read_raster(path: Path, *, tiff_series: int, tiff_level: int) -> tuple[LazyRaster, TiffMetadata | None]:
     suffix = path.suffix.lower()
     if suffix in TIFF_SUFFIXES:
         metadata = inspect_tiff(path)
-        return read_tiff(metadata, series=tiff_series, level=tiff_level)
+        return read_tiff(metadata, series=tiff_series, level=tiff_level), metadata
 
     if tiff_series != 0 or tiff_level != 0:
         message = "tiff_series and tiff_level can only select TIFF-family inputs."
         raise ValueError(message)
     if suffix in PNG_SUFFIXES:
-        return read_png(path)
+        return read_png(path), None
     if suffix in JPEG_SUFFIXES:
-        return read_jpeg(path)
+        return read_jpeg(path), None
 
     message = f"Unsupported image suffix {path.suffix!r}. Expected one of {VALID_IMAGE_TYPES}."
     raise ValueError(message)
@@ -154,7 +191,11 @@ def image(  # noqa: PLR0913, RUF100
     data_axes
         Explicit axes of the decoded source array.
     coordinate_system
-        Coordinate system receiving an identity transformation.
+        Target frame name. Complete level-zero OME calibration maps retained
+        spatial axes into micrometres; otherwise coordinates remain pixels.
+        Sizes in µm, nm and mm are supported. No stage origin is inferred.
+        Explicitly reinterpreted spatial axes, incomplete calibration and
+        nonzero stored levels retain source pixels.
     tiff_series
         Zero-based TIFF series. Must remain zero for PNG and JPEG inputs.
     tiff_level
@@ -197,7 +238,7 @@ def image(  # noqa: PLR0913, RUF100
     # Generic chunks are axis-aware and validated above; the shared options own the factors.
     model_scale_factors = make_raster_options(scale_factors).model_scale_factors
 
-    raster = _read_raster(Path(path), tiff_series=tiff_series, tiff_level=tiff_level)
+    raster, metadata = _read_raster(Path(path), tiff_series=tiff_series, tiff_level=tiff_level)
     normalized = normalize_raster_axes(
         raster.data,
         data_axes,
@@ -210,7 +251,9 @@ def image(  # noqa: PLR0913, RUF100
     return model.parse(
         normalized,
         dims=target_axes,
-        transformations={coordinate_system: Identity()},
+        transformations={
+            coordinate_system: _physical_transform(raster, metadata, data_axes, series=tiff_series, level=tiff_level)
+        },
         scale_factors=model_scale_factors,
         chunks=chunks_by_axis,
     )

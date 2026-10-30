@@ -97,7 +97,7 @@ class TestReadRasters:
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
 
         with pytest.raises(ValueError, match=r"extent|integer mask|32-bit|OME metadata"):
-            _read_rasters(sample, make_raster_options(factors))
+            _read_rasters(sample, make_raster_options(factors), metadata=None, calibrated_frame=sample.name)
         pixels.assert_not_called()
 
     @pytest.mark.parametrize("names", [["DNA", "CD3"], ["DNA", "DNA"], ["", "CD3"], None])
@@ -106,7 +106,7 @@ class TestReadRasters:
         metadata = {"axes": "CYX"} if names is None else {"axes": "CYX", "Channel": {"Name": names}}
         tifffile.imwrite(sample.image, image, ome=True, photometric="minisblack", metadata=metadata)
 
-        result = _read_rasters(sample, make_raster_options())
+        result = _read_rasters(sample, make_raster_options(), metadata=None, calibrated_frame=sample.name)
 
         assert isinstance(result.image, DataArray)
         expected = names if names and all(names) and len(set(names)) == len(names) else ["Channel:0:0", "Channel:0:1"]
@@ -126,7 +126,7 @@ class TestReadRasters:
             metadata={"axes": "CYX", "Channel": {"Name": names}},
         )
 
-        result = _read_rasters(sample, make_raster_options())
+        result = _read_rasters(sample, make_raster_options(), metadata=None, calibrated_frame=sample.name)
 
         assert isinstance(result.image, DataArray)
         assert result.image.coords["c"].to_numpy().tolist() == names
@@ -142,7 +142,7 @@ class TestReadRasters:
         )
         tifffile.imwrite(sample.labels, labels, photometric="minisblack")
 
-        result = _read_rasters(sample, make_raster_options())
+        result = _read_rasters(sample, make_raster_options(), metadata=None, calibrated_frame=sample.name)
 
         assert isinstance(result.image, DataArray)
         assert isinstance(result.labels, DataArray)
@@ -171,7 +171,9 @@ class TestReadRasters:
 
         # Chunks equal to the 16-pixel tiles keep one task per stored tile.
         with Callback(posttask=tasks):
-            result = _read_rasters(sample, make_raster_options(chunks=(1, 16, 16)))
+            result = _read_rasters(
+                sample, make_raster_options(chunks=(1, 16, 16)), metadata=None, calibrated_frame=sample.name
+            )
         tasks.assert_not_called()
         pixels.assert_not_called()
         assert isinstance(result.image, DataArray)
@@ -202,7 +204,7 @@ class TestReadRasters:
     ) -> None:
         sample, _, _ = _write_sample(tmp_path)
 
-        result = _read_rasters(sample, make_raster_options(chunks=chunks))
+        result = _read_rasters(sample, make_raster_options(chunks=chunks), metadata=None, calibrated_frame=sample.name)
 
         assert isinstance(result.image, DataArray)
         assert isinstance(result.labels, DataArray)
@@ -227,7 +229,7 @@ class TestReadRasters:
         )
         tifffile.imwrite(sample.labels, labels, photometric="minisblack", tile=(16, 16))
 
-        result = _read_rasters(sample, make_raster_options(factors))
+        result = _read_rasters(sample, make_raster_options(factors), metadata=None, calibrated_frame=sample.name)
 
         assert isinstance(result.image, DataTree)
         assert isinstance(result.labels, DataTree)

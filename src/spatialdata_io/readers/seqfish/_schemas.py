@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
-from math import isfinite
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import numpy as np
@@ -23,8 +22,6 @@ STRING_DTYPE = pd.ArrowDtype(pa.string())
 FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 CELL_COLUMNS = ("label", "area", "center_x", "center_y")
 _MAX_NUMBER_CHARACTERS = 128
-_MIN_RING_VERTICES = 4
-_SPATIAL_DIMENSIONS = 2
 _LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 
 
@@ -146,72 +143,16 @@ def validate_transcript_columns(columns: Sequence[str], path: ArtifactFile) -> t
     return ("name", "x", "y", *(column for column in ("z", "cell") if column in columns))
 
 
-class PolygonGeometry(TypedDict):
-    """Describe validated GeoJSON polygon rings without rebuilding coordinates."""
-
-    type: Literal["Polygon"]
-    coordinates: list[list[list[int | float]]]
-
-
-class MultiPolygonGeometry(TypedDict):
-    """Describe validated GeoJSON multipart polygon rings."""
-
-    type: Literal["MultiPolygon"]
-    coordinates: list[list[list[list[int | float]]]]
-
-
 class BoundaryFeature(TypedDict):
-    """Retain one source feature with authoritative top-level identity."""
+    """Retain one source feature with authoritative top-level identity.
+
+    ``geometry`` is validated and constructed by the shared GeoJSON polygon boundary.
+    """
 
     type: Literal["Feature"]
     id: str | int
-    geometry: PolygonGeometry | MultiPolygonGeometry
+    geometry: object
     properties: dict[str, object] | None
-
-
-def _validate_rings(polygon: object, path: ArtifactFile) -> None:
-    """Reject invalid 2D ring structure before Shapely can close it implicitly."""
-    if not isinstance(polygon, list) or not polygon:
-        raise schema_error(path, found="empty or malformed polygon rings", expected="nonempty closed 2D rings")
-    for ring in polygon:
-        if not isinstance(ring, list) or len(ring) < _MIN_RING_VERTICES or ring[0] != ring[-1]:
-            raise schema_error(
-                path, found="unclosed or short polygon ring", expected="at least four closed 2D vertices"
-            )
-        for vertex in ring:
-            if (
-                not isinstance(vertex, list)
-                or len(vertex) != _SPATIAL_DIMENSIONS
-                or any(isinstance(value, bool) or not isinstance(value, int | float) for value in vertex)
-            ):
-                raise schema_error(path, found="nonplanar or nonnumeric vertex", expected="numeric 2D polygon vertices")
-            try:
-                finite = all(isfinite(value) for value in vertex)
-            except OverflowError:
-                finite = False
-            if not finite:
-                raise schema_error(path, found="nonfinite polygon vertex", expected="finite float64 polygon vertices")
-            if any(isinstance(value, int) and value != float(value) for value in vertex):
-                raise schema_error(
-                    path,
-                    found="polygon integer precision loss",
-                    expected="integer vertices exactly representable in float64",
-                )
-
-
-def _validate_geometry(geometry: object, path: ArtifactFile) -> None:
-    """Validate the Polygon/MultiPolygon coordinate schema independently of GEOS."""
-    kind = geometry.get("type") if isinstance(geometry, dict) else None
-    if not isinstance(geometry, dict) or not isinstance(kind, str) or kind not in {"Polygon", "MultiPolygon"}:
-        raise schema_error(path, found="missing or nonpolygon geometry", expected="Polygon or MultiPolygon geometry")
-    coordinates = geometry.get("coordinates")
-    if kind == "Polygon":
-        _validate_rings(coordinates, path)
-    else:
-        if not isinstance(coordinates, list) or not coordinates:
-            raise schema_error(path, found="empty multipart geometry", expected="nonempty MultiPolygon coordinates")
-        for polygon in coordinates:
-            _validate_rings(polygon, path)
 
 
 def _normalize_boundary_properties(properties: object, identifier: str | int, path: ArtifactFile) -> None:
@@ -235,7 +176,7 @@ def _normalize_boundary_properties(properties: object, identifier: str | int, pa
 def boundary_features(
     document: dict[str, object], path: ArtifactFile
 ) -> tuple[list[BoundaryFeature], npt.NDArray[np.int64 | np.uint64]]:
-    """Validate the owned GeoJSON schema and normalize independent feature IDs."""
+    """Validate the owned Feature schema and normalize independent feature IDs."""
     features = document.get("features")
     if document.get("type") != "FeatureCollection" or not isinstance(features, list) or not features:
         raise schema_error(
@@ -254,12 +195,11 @@ def boundary_features(
         # GeoJSON requires this field; null properties carry no annotations.
         feature["properties"] = feature.get("properties")
         _normalize_boundary_properties(feature["properties"], identifier, path)
-        _validate_geometry(feature.get("geometry"), path)
     identifiers = normalize_ids(pd.Series([str(value) for value in raw_ids], dtype=STRING_DTYPE), path)
     if len(np.unique(identifiers)) != len(identifiers):
         raise schema_error(path, found="duplicate boundary IDs", expected="unique explicit boundary identifiers")
-    # The schema above validates every required field and nested coordinate
-    # representation of the JSON-owned feature dictionaries.
+    # The schema above validates feature identity and properties. Geometry
+    # structure belongs to the shared GeoJSON polygon constructor.
     return cast("list[BoundaryFeature]", features), identifiers
 
 

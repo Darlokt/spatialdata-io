@@ -38,6 +38,38 @@ class AnalysisResult:
     resolution: int
 
 
+def read_analyses(
+    sources: tuple[AnalysisSource, ...], *, counts: Mapping[str, SquareCounts | CellCounts], resolution: int | None
+) -> tuple[tuple[AnalysisResult, ...], int | None]:
+    """Read independent analyses and reconcile their normalized names and pitch.
+
+    Returns the analyses and the common pitch in nm, starting from the raw
+    products' ``resolution`` when known.
+    """
+    results: list[AnalysisResult] = []
+    names: set[str] = set()
+    for source in sources:
+        analysis = read_analysis(source, counts=counts)
+        if resolution is not None and analysis.resolution != resolution:
+            raise _schemas.format_error(
+                source.file,
+                "coordinate frame",
+                f"analysis pitch {analysis.resolution} nm",
+                f"common grid pitch {resolution} nm",
+            )
+        resolution = analysis.resolution
+        if analysis.name in names:
+            raise _schemas.format_error(
+                source.file,
+                "analysis",
+                f"duplicate analysis name {analysis.name!r}",
+                "distinct normalized analysis products",
+            )
+        names.add(analysis.name)
+        results.append(analysis)
+    return tuple(results), resolution
+
+
 def read_analysis(source: AnalysisSource, *, counts: Mapping[str, SquareCounts | CellCounts]) -> AnalysisResult:
     """Read a native analysis product, preserving its values and row/feature order."""
     table = ad.read_h5ad(source.file)

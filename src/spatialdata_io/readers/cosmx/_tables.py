@@ -114,11 +114,6 @@ class Counts:
     features: tuple[str, ...]
 
 
-def read_features(path: ArtifactFile) -> tuple[str, ...]:
-    """Read only the bounded count header, the complete ordered target vocabulary."""
-    return count_features(read_header(path), path)
-
-
 def read_counts(path: ArtifactFile) -> Counts:
     """Stream exact counts to CSR, removing the zero-ID background rows."""
     columns = read_header(path)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
@@ -14,10 +14,12 @@ from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataTree
 
 from spatialdata_io import __version__
 from spatialdata_io._cli.commands.mcmicro import mcmicro_command
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.mcmicro import mcmicro
 from tests.integration.readers.mcmicro._fixtures import write_mcmicro_dataset
 
@@ -60,8 +62,61 @@ def _expression(table: AnnData) -> sparse.csr_array:
     return table.X
 
 
+def _calibrate(path: Path, spacing: tuple[float, float]) -> None:
+    """Attach independently declared XY spacing without changing fixture pixels."""
+    with tifffile.TiffFile(path) as source:
+        values = source.asarray()
+        axes = source.series[0].axes
+    tifffile.imwrite(
+        path,
+        values,
+        ome=True,
+        photometric="minisblack",
+        metadata={"axes": axes, "PhysicalSizeX": spacing[0], "PhysicalSizeY": spacing[1]},
+    )
+
+
 class TestMcmicro:
     """Assemble supported layouts through the public reader."""
+
+    @pytest.mark.parametrize("mode", ["wsi", "tma"])
+    def test_declared_base_scale_and_independent_masks(self, tmp_path: Path, mode: Literal["wsi", "tma"]) -> None:
+        fixture = write_mcmicro_dataset(tmp_path, mode=mode)
+        _calibrate(tmp_path / "registration" / "sample_part_7.ome.tif", (0.3, 0.7))
+        if mode == "tma":
+            _calibrate(tmp_path / "dearray" / "1.ome.tif", (0.4, 0.8))
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            result = mcmicro(fixture.root)
+        assert not tasks
+        if mode == "wsi":
+            selected = [
+                (result.images["sample_part_7_image"], "global", [0.3, 0.7]),
+                (result.labels["sample_part_7_method_a_cells"], "global", [0.3, 0.7]),
+            ]
+        else:
+            selected = [
+                (result.images["tma_map"], "global", [0.3, 0.7]),
+                (result.images["core_1_image"], "core_1", [0.4, 0.8]),
+                (result.labels["core_1_method_a_cells"], "core_1", [0.4, 0.8]),
+            ]
+            assert get_transformation(result.images["core_2_image"], to_coordinate_system="core_2") == Identity()
+            assert get_transformation(result.labels["core_1_mask"], to_coordinate_system="core_1_mask") == Identity()
+        for element, frame, expected in selected:
+            transform = get_transformation(element, to_coordinate_system=frame)
+            assert isinstance(transform, Scale)
+            np.testing.assert_array_equal(transform.scale, expected)
+        np.testing.assert_array_equal(
+            result.tables["table"].obsm["spatial"][:2],
+            [[3.5, 3], [35.5, 26]] if mode == "tma" else [[3.5, 3], [75.5, 60]],
+        )
+
+    def test_conflicting_same_grid_labels_fail(self, tmp_path: Path) -> None:
+        write_mcmicro_dataset(tmp_path)
+        _calibrate(tmp_path / "registration" / "sample_part_7.ome.tif", (0.3, 0.7))
+        _calibrate(tmp_path / "segmentation" / "method_a-sample_part_7" / "cells.ome.tif", (0.4, 0.7))
+        with pytest.raises(ReaderFormatError, match="calibration"):
+            mcmicro(tmp_path)
 
     def test_historical_layout_public_contract(self, tmp_path: Path) -> None:
         image, labels = _write_historical_layout(tmp_path)

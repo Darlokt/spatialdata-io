@@ -104,7 +104,10 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         Numeric FCS identifiers normalize to signed or unsigned 64-bit integers.
         Numeric regions normalize to integer strings for categorical linkage.
         ``obsm['spatial']`` retains x/y pixel coordinates. Circles and images use
-        identity transforms to ``global``. No physical-unit conversion is inferred.
+        identity transforms to ``global`` in source pixels. A producer's acquisition
+        spacing does not prove the selected table's sidecar association or an
+        independently selected montage's reduction and origin. No Experiment
+        sidecar calibration or universal montage factor is inferred.
 
         Optional ``images['images']`` is lazy CYX and retains source dtype and
         channel order. It is a single scale unless ``scale_factors`` requests

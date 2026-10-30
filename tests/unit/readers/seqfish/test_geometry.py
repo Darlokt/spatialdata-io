@@ -42,10 +42,24 @@ def _write_boundaries(
 class TestReadBoundaries:
     """Align source IDs exactly while preserving holes and multipart geometry."""
 
+    def test_keep_preserves_invalid_source_topology(self, tmp_path: Path) -> None:
+        invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
+        path = _write_boundaries(tmp_path / "boundaries.geojson", [invalid], ("9",))
+
+        result = read_boundaries(
+            path, instance_ids=pd.Index([9]), roi="global", scale=Scale([0.25, 0.5], axes=("y", "x")), policy="keep"
+        )
+
+        assert result.index.tolist() == [9]
+        assert shapely.equals_exact(result.geometry.iloc[0], invalid, 0)
+        assert not result.geometry.is_valid.iloc[0]
+
     def test_already_aligned_ids_remain_in_source_order(self, tmp_path: Path) -> None:
         polygon = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
         path = _write_boundaries(tmp_path / "boundaries.geojson", [polygon], ("1",))
-        result = read_boundaries(path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")))
+        result = read_boundaries(
+            path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+        )
         assert result.index.tolist() == [1]
         assert result.geometry.iloc[0].equals(polygon)
 
@@ -55,7 +69,7 @@ class TestReadBoundaries:
         path = _write_boundaries(tmp_path / "boundaries.geojson", [multipart, polygon], ("2", "70001"))
         scale = Scale([0.25, 0.5], axes=("y", "x"))
 
-        result = read_boundaries(path, instance_ids=pd.Index([70001, 2]), roi="Roi1", scale=scale)
+        result = read_boundaries(path, instance_ids=pd.Index([70001, 2]), roi="Roi1", scale=scale, policy="keep")
 
         assert result.index.tolist() == [70001, 2]
         assert result.geometry.iloc[0].equals(polygon)
@@ -67,7 +81,9 @@ class TestReadBoundaries:
         polygon = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
         path = _write_boundaries(tmp_path / "boundaries.geojson", [polygon, polygon], ids)
         with pytest.raises(ReaderFormatError):
-            read_boundaries(path, instance_ids=pd.Index([1, 2]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")))
+            read_boundaries(
+                path, instance_ids=pd.Index([1, 2]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+            )
 
     @pytest.mark.parametrize("invalid", ["null", "empty", "crossing", "line", "z", "nonfinite", "population"])
     def test_invalid_geometry_or_population_fails(self, tmp_path: Path, invalid: str) -> None:
@@ -93,19 +109,24 @@ class TestReadBoundaries:
                 instance_ids=pd.Index([1, 2] if invalid == "population" else [1]),
                 roi="Roi1",
                 scale=Scale([1, 1], axes=("y", "x")),
+                policy="raise",
             )
 
     def test_empty_boundaries_fail(self, tmp_path: Path) -> None:
         path = _write_boundaries(tmp_path / "boundaries.geojson", [], ())
         with pytest.raises(ReaderFormatError, match="empty"):
-            read_boundaries(path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")))
+            read_boundaries(
+                path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+            )
 
     def test_source_failure_keeps_error_identity_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = ArtifactFile(tmp_path / "boundaries.geojson")
         error = OSError("injected source failure")
         mocker.patch("pathlib.Path.open", side_effect=error)
         with pytest.raises(OSError, match="injected") as caught:
-            read_boundaries(path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")))
+            read_boundaries(
+                path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+            )
         assert caught.value is error
         assert any("seqfish" in note and str(path) in note for note in error.__notes__)
 
@@ -115,7 +136,9 @@ class TestReadBoundaries:
         path = _write_boundaries(tmp_path / "boundaries.geojson", [Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], ("1",))
         mocker.patch.object(geometry_module, "_MAX_BOUNDARY_BYTES", 32)
         with pytest.raises(ReaderFormatError, match="32 bytes"):
-            read_boundaries(path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")))
+            read_boundaries(
+                path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+            )
 
     @pytest.mark.parametrize("property_id", ["2", None])
     def test_top_level_id_is_required_and_cannot_conflict_with_properties(
@@ -132,7 +155,11 @@ class TestReadBoundaries:
         )
         with pytest.raises(ReaderFormatError, match=r"Feature.id|explicit positive"):
             read_boundaries(
-                ArtifactFile(path), instance_ids=pd.Index([2]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x"))
+                ArtifactFile(path),
+                instance_ids=pd.Index([2]),
+                roi="Roi1",
+                scale=Scale([1, 1], axes=("y", "x")),
+                policy="keep",
             )
 
 

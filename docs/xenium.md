@@ -85,6 +85,8 @@ Every element is in the `global` coordinate system in micrometres, with its orig
 
 `obs` holds the `cells` table columns in source order with documented types: integer IDs are int64, other IDs are text, `nucleus_area` is NaN for cells without a nucleus. With `cells.zarr.zip`, `label_id` (uint32), `nucleus_centroid_x` and `nucleus_centroid_y` are added; XOA 2.0 cells tables lack `nucleus_count` and `segmentation_method`, which then also come from the store. `obsm["spatial"]` holds the float64 µm centroids.
 
+Polygon-set cell and segmentation-method indexes must be nonnegative and below their respective population bounds, including unsigned source values. Stored nucleus counts must be nonnegative integers representable as int64. Malformed values raise a contextual `ValueError` before conversion or indexing.
+
 The table annotates one returned element, chosen with `table_target`:
 
 | `table_target` | Instance column | Requires |

@@ -13,7 +13,7 @@ import tifffile
 from dask.callbacks import Callback
 from spatialdata import read_zarr
 from spatialdata.models import get_channel_names
-from spatialdata.transformations import Identity, Scale, get_transformation
+from spatialdata.transformations import Scale, get_transformation
 from xarray import DataTree
 
 from spatialdata_io._cli.commands.macsima import macsima_command
@@ -65,7 +65,7 @@ class TestMacsima:
         assert not executed
         assert list(result.images) == ["run_image"]
         assert list(result.tables) == ["run_table"]
-        assert result.coordinate_systems == ["run"]
+        assert result.coordinate_systems == ["global"]
         image = _image(result, "run_image")
         assert image.dims == ("c", "y", "x")
         assert image.data.chunks == ((1,) * len(channels), (12,), (15,))
@@ -94,6 +94,7 @@ class TestMacsima:
         result = macsima(tmp_path, parsing_style="processed_multiple_folders", exclude_folder_names=["keep_old"])
 
         assert list(result.images) == ["keep_image"]
+        assert result.coordinate_systems == ["global"]
 
     def test_nuclei_stack_shares_channel_names(self, tmp_path: Path) -> None:
         channels = (
@@ -110,7 +111,7 @@ class TestMacsima:
         assert result.tables["run_nuclei_table"].var["cycle"].tolist() == [1, 3, 5]
         # The name column keeps the marker; var_names hold the numbered channel names.
         assert result.tables["run_table"].var["name"].tolist() == ["CD3", "DAPI", "DAPI", "DAPI_background"]
-        assert sorted(result.coordinate_systems) == ["run"]
+        assert sorted(result.coordinate_systems) == ["global"]
 
     def test_equal_shapes_are_aligned_by_pixel_positions(self, tmp_path: Path) -> None:
         channels = (
@@ -127,17 +128,13 @@ class TestMacsima:
         expected[1, 1:, 2:] = pixels[1]
         np.testing.assert_array_equal(_image(result, "run_image").data.compute(), expected)
 
-    def test_frames_with_and_without_transformations(self, tmp_path: Path) -> None:
+    def test_single_stack_is_global_micrometers(self, tmp_path: Path) -> None:
         write_stack(tmp_path / "run", V1_CHANNELS[:2], version=1, physical_size=("170", "nm"))
-
-        scaled = macsima(tmp_path / "run")
-        pixels = macsima(tmp_path / "run", include_transformations=False)
-
-        scale = _frames(scaled, "run_image")["run"]
+        result = macsima(tmp_path / "run")
+        assert list(_frames(result, "run_image")) == ["global"]
+        scale = _frames(result, "run_image")["global"]
         assert isinstance(scale, Scale)
         np.testing.assert_array_equal(scale.scale, [0.17, 0.17])
-        assert list(_frames(pixels, "run_image")) == ["run"]
-        assert isinstance(_frames(pixels, "run_image")["run"], Identity)
 
     def test_pyramid_and_chunks(self, tmp_path: Path) -> None:
         write_stack(tmp_path / "run", (ChannelSpec("CD3", 1, "APC", shape=(16, 20)),), version=1)
@@ -246,8 +243,8 @@ class TestMacsimaRejects:
     def test_options_are_validated_before_discovery(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="scale_factors"):
             macsima(tmp_path / "missing", scale_factors=(1,))
-        with pytest.raises(TypeError, match="include_transformations must be a boolean"):
-            macsima(tmp_path / "missing", include_transformations=1)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+        with pytest.raises(TypeError, match="include_transformations"):
+            macsima(tmp_path / "missing", include_transformations=False)  # pyrefly: ignore[unexpected-keyword] - Invalid runtime input.
 
     def test_removed_raw_style(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="parsing_style must be one of"):

@@ -38,14 +38,14 @@ A historical `segmentation/<image>/` directory, without the method prefix, is ac
 | --- | --- |
 | `images["<image>_image"]` | Whole-slide registered image in `global`. |
 | `images["tma_map"]` | TMA registered image in `global`. |
-| `images["core_<n>_image"]` | Coreograph core in its local pixel frame `core_<n>`. |
+| `images["core_<n>_image"]` | Coreograph core in its local frame `core_<n>`. |
 | `labels["core_<n>_mask"]` | Coreograph tissue mask in its own frame `core_<n>_mask`. |
 | `labels["<image>_<method>_<mask>"]` | Segmentation labels in the frame of their image (`core_<n>` for cores). |
 | `tables["table"]` | One table linked to every label with quantified cells. |
 
 Images are lazy `(c, y, x)` arrays in source dtype. Their channels are the canonical MCQuant marker IDs in `markers.csv` row order: every occurrence of a repeated marker is suffixed, so `DAPI, CD3, DAPI` becomes `DAPI_1, CD3, DAPI_2`, and generated collisions such as `X, X, X_1` fail. The registered image and every core must have exactly one channel per marker. Labels are lazy integer `(y, x)` arrays that must match the spatial shape of their source image; masks keep their own, possibly downsampled, grid.
 
-All transformations are identities. Coreograph exports no authoritative crop origins and its masks may be downsampled, so the reader does not invent a transformation between the map, a core and its mask.
+Each image uses complete base OME X/Y physical sizes in µm, nm or mm to scale its local frame to micrometres. Missing or incomplete sizes retain the entire group in source pixels. Present invalid sizes or unsupported units fail. Anisotropic spacing and the native origin are preserved. Same-grid segmentations inherit the image calibration when their own declaration is absent; conflicting declared sizes fail. Independent tissue masks use only their own complete OME metadata. Coreograph exports no authoritative crop origins and masks may be downsampled, so no registration between map, cores and tissue masks is inferred. ASHLAR may write its own fallback spacing when acquisition metadata was unavailable: declared OME sizes are used as source metadata, not certified acquisition measurements.
 
 ## Table
 
@@ -53,7 +53,7 @@ All transformations are identities. Coreograph exports no authoritative crop ori
 
 Quantification tables need `CellID`, one column per canonical marker and `X_centroid`/`Y_centroid`. All tables of a run must have the same columns. Marker columns become eager, finite, canonical CSR float64 expression; exact decimal values are decoded with correct rounding, and nonfinite values or nonzero values that underflow to zero fail. `CellID` holds exact positive int64 label values, unique within each label and representable in that label's dtype; label pixels are never read to check them. MCQuant morphology columns (`Area`, `MajorAxisLength`, `MinorAxisLength`, `Eccentricity`, `Solidity`, `Extent`, `Orientation`, `column_centroid`, `row_centroid`) are float64 with empty fields as missing values. All other columns, including suffixed intensity properties, are kept as exact text.
 
-Rows follow label order and then source row order. Observation names are row positions `"0"`, `"1"`, ...; `region` names the label image and `CellID` is the instance key. `obsm["spatial"]` holds the float64 centroid pixel coordinates. A run without quantification returns no table.
+Rows follow label order and then source row order. Observation names are row positions `"0"`, `"1"`, ...; `region` names the label image and `CellID` is the instance key. `obsm["spatial"]` holds unchanged float64 centroid pixel coordinates, even when spatial elements have calibrated transforms. Area and morphology annotations keep their source pixel units; concatenating cores does not create one common physical coordinate array. A run without quantification returns no table.
 
 ## Options and execution
 

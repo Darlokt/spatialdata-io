@@ -59,7 +59,7 @@ class TestGeneric:
         result = generic(path, coordinate_system="cells")
 
         assert result is expected
-        parse.assert_called_once_with(path, coordinate_system="cells")
+        parse.assert_called_once_with(path, coordinate_system="cells", invalid_geometries="keep")
 
     @pytest.mark.parametrize(
         ("data_axes", "tiff_series", "match"),

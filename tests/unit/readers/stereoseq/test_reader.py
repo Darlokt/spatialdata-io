@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 from numpy.testing import assert_array_equal
 from scipy.sparse import csr_array
+from spatialdata.transformations import get_transformation
 
 import spatialdata_io
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
@@ -120,6 +121,10 @@ class TestLink:
 class TestStereoseq:
     """Enforce transaction boundaries not owned by individual product parsers."""
 
+    def test_invalid_polygon_policy_precedes_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="invalid_geometries"):
+            stereoseq(tmp_path / "missing", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+
     def test_no_products_fails_before_io(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="Select products"):
             stereoseq(tmp_path / "missing")
@@ -173,6 +178,12 @@ class TestStereoseq:
         assert_array_equal(result.tables["bin1_table"].obsm["spatial"], [[5, 6], [1, 2]])
 
         assert result.tables["cells_table"].uns["stereoseq"]["origin"] == [100, 200]
+        for element in (*result.images.values(), *result.points.values()):
+            transform = get_transformation(element, to_coordinate_system="global")
+            assert not isinstance(transform, dict)
+            assert_array_equal(
+                transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")) @ [10, 20, 1], [5, 10, 1]
+            )
 
     def test_duplicate_normalized_analysis_names_fail(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, family="outs", products=("analysis",))

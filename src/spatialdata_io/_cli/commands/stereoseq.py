@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         bin_sizes: tuple[int, ...] | Literal["all"]
         cell_bins: Literal["none", "unadjusted", "adjusted", "both"]
         cell_geometry: Literal["centroids", "polygons"]
+        invalid_geometries: Literal["keep", "drop", "raise"]
         square_counts_file: Path | None
         cell_counts_file: Path | None
         adjusted_cell_counts_file: Path | None
@@ -68,7 +69,7 @@ def _bin_sizes(
     type=click.Choice(["centroids", "polygons"]),
     default="centroids",
     show_default=True,
-    help="Stored centers or literal valid contours; polygons are never repaired.",
+    help="Stored centers or literal contours; polygons are never repaired.",
 )
 @click.option(
     "--square-counts-file",
@@ -104,6 +105,13 @@ def _bin_sizes(
 )
 @scale_factors_option
 @chunks_option
+@click.option(
+    "--invalid-geometries",
+    type=click.Choice(["keep", "drop", "raise"]),
+    default="keep",
+    show_default=True,
+    help="Keep invalid contours, drop affected raw cells, or fail.",
+)
 def stereoseq_command(input_path: Path, output_path: Path, **options: Unpack[_StereoseqOptions]) -> None:
     """Select products explicitly, read them, and write the resulting SpatialData."""
     from spatialdata_io.readers.stereoseq import stereoseq  # noqa: PLC0415, RUF100 - Keep command help lightweight.
@@ -114,6 +122,7 @@ def stereoseq_command(input_path: Path, output_path: Path, **options: Unpack[_St
         bin_sizes=options["bin_sizes"],
         cell_bins=options["cell_bins"],
         cell_geometry=options["cell_geometry"],
+        invalid_geometries=options["invalid_geometries"],
         square_counts_file=options["square_counts_file"],
         cell_counts_file=options["cell_counts_file"],
         adjusted_cell_counts_file=options["adjusted_cell_counts_file"],

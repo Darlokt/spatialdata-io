@@ -9,10 +9,11 @@ import numpy as np
 import pandas as pd
 import pytest
 import tifffile
+from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataTree
 
 from spatialdata_io import __version__
@@ -65,6 +66,138 @@ def _write_layout(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 class TestSteinbock:
     """Characterize sample pairing, lazy rasters, cleanup, and linkage."""
+
+    @pytest.mark.parametrize("kind", ["deepcell", "ilastik"])
+    def test_imc_sidecar_exact_sample_calibration_and_native_centroids(
+        self, steinbock_dataset: SteinbockDataset, kind: Literal["deepcell", "ilastik"]
+    ) -> None:
+        root = steinbock_dataset.root
+        # This producer-shaped sidecar includes an unrelated acquisition and
+        # deliberately differs from TIFF and table row order.
+        (root / "images.csv").write_text(
+            "extra,acquisition_height_um,image,width_px,height_px,acquisition_width_um\n"
+            "unused,99,other.tiff,12,8,99\n"
+            "kept,,sample-b.tiff,12,8,\n"
+            "kept,20,sample-a.tiff,12,8,6\n",
+            encoding="utf-8",
+        )
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            result = steinbock(root, labels_kind=kind)
+        assert not tasks
+        for element in (result.images["sample-a_image"], result.labels["sample-a_labels"]):
+            transform = get_transformation(element, to_coordinate_system="sample-a")
+            assert isinstance(transform, Scale)
+            np.testing.assert_array_equal(transform.scale, [0.5, 2.5])
+        assert get_transformation(result.images["sample-b_image"], to_coordinate_system="sample-b") == Identity()
+        np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[3, 1.5], [8.5, 5], [8.5, 5], [3, 1.5]])
+        np.testing.assert_array_equal(
+            result.images["sample-a_image"].data.compute(), steinbock_dataset.images["sample-a"]
+        )
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "sample-a.tiff,12,8,6,",
+            "sample-a.tiff,12,8,,20",
+            "sample-a.tiff,12,8,0,20",
+            "sample-a.tiff,12,8,nan,20",
+            "sample-a.tiff,12,8,inf,20",
+            "sample-a.tiff,12,8,-1,20",
+            "sample-a.tiff,11,8,6,20",
+            "sample-a.tiff,12,9,6,20",
+            "sample-a.tiff,12.5,8,6,20",
+            "sample-a.tiff,0,8,6,20",
+            "sample-a.tiff,12,8,1e999,20",
+            "sample-a.tiff,12,8,1e-999,20",
+        ],
+    )
+    def test_malformed_selected_imc_metadata_fails(self, steinbock_dataset: SteinbockDataset, row: str) -> None:
+        root = steinbock_dataset.root
+        (root / "images.csv").write_text(
+            "image,width_px,height_px,acquisition_width_um,acquisition_height_um\n" + row + "\n", encoding="utf-8"
+        )
+        with pytest.raises(ReaderFormatError, match=r"images\.csv"):
+            steinbock(root)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "image,width_px,height_px,image\nsample-a.tiff,12,8,sample-a.tiff\n",
+            "image,width_px,height_px\nsample-a.tiff,12,8\nsample-a.tiff,12,8\n",
+            "image,width_px\nsample-a.tiff,12\n",
+            "image,width_px,height_px,acquisition_width_um\nsample-a.tiff,12,8,6\n",
+            "image,width_px,height_px\nsample-a.tiff,12,8,extra\n",
+        ],
+    )
+    def test_ambiguous_or_malformed_sidecar_schema(self, steinbock_dataset: SteinbockDataset, text: str) -> None:
+        (steinbock_dataset.root / "images.csv").write_text(text, encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match=r"images\.csv"):
+            steinbock(steinbock_dataset.root)
+
+    def test_missing_sidecar_row_and_physical_columns_keep_pixels(self, steinbock_dataset: SteinbockDataset) -> None:
+        root = steinbock_dataset.root
+        (root / "images.csv").write_text("image,width_px,height_px\nother.tiff,12,8\n", encoding="utf-8")
+        result = steinbock(root)
+        for name in ("sample-a", "sample-b"):
+            assert get_transformation(result.images[f"{name}_image"], to_coordinate_system=name) == Identity()
+
+    @pytest.mark.parametrize("physical_x", [0.5, 0.4])
+    def test_sidecar_and_ome_agreement(self, steinbock_dataset: SteinbockDataset, physical_x: float) -> None:
+        root = steinbock_dataset.root
+        (root / "images.csv").write_text(
+            "image,width_px,height_px,acquisition_width_um,acquisition_height_um\nsample-a.tiff,12,8,6,20\n",
+            encoding="utf-8",
+        )
+        tifffile.imwrite(
+            root / "ome" / "sample-a.ome.tiff",
+            steinbock_dataset.images["sample-a"],
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "PhysicalSizeX": physical_x, "PhysicalSizeY": 2.5},
+        )
+        if physical_x == 0.4:
+            with pytest.raises(ReaderFormatError, match="calibration"):
+                steinbock(root)
+        else:
+            result = steinbock(root)
+            assert isinstance(
+                get_transformation(result.labels["sample-a_labels"], to_coordinate_system="sample-a"), Scale
+            )
+
+    def test_single_ome_calibrated_sample_uses_global(self, tmp_path: Path) -> None:
+        image, _ = _write_layout(tmp_path)
+        tifffile.imwrite(
+            tmp_path / "ome" / "sample.ome.tiff",
+            image,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "PhysicalSizeX": 300, "PhysicalSizeXUnit": "nm", "PhysicalSizeY": 0.7},
+        )
+        result = steinbock(tmp_path)
+        assert result.coordinate_systems == ["global"]
+        for element in (result.images["sample_image"], result.labels["sample_labels"]):
+            transform = get_transformation(element, to_coordinate_system="global")
+            assert isinstance(transform, Scale)
+            np.testing.assert_array_equal(transform.scale, [0.3, 0.7])
+
+    def test_partial_ome_image_and_mask_conflict(self, steinbock_dataset: SteinbockDataset) -> None:
+        root = steinbock_dataset.root
+        tifffile.imwrite(
+            root / "ome" / "sample-a.ome.tiff",
+            steinbock_dataset.images["sample-a"],
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "PhysicalSizeX": 0.3},
+        )
+        tifffile.imwrite(
+            root / "masks_deepcell" / "sample-a.tiff",
+            steinbock_dataset.deepcell["sample-a"],
+            ome=True,
+            metadata={"axes": "YX", "PhysicalSizeX": 0.4},
+        )
+        with pytest.raises(ReaderFormatError, match="calibration"):
+            steinbock(root)
 
     def test_synthetic_layout_preserves_public_contract(self, tmp_path: Path) -> None:
         image, labels = _write_layout(tmp_path)

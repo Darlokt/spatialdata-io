@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 STRING_DTYPE = pd.ArrowDtype(pa.string())
+GEOMETRY_REPRESENTATION_DTYPE = pd.CategoricalDtype(["union_footprint", "source_components"])
 FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 INTEGER_DTYPE = pd.ArrowDtype(pa.int64())
 _MAX_NUMBER_CHARACTERS = 128

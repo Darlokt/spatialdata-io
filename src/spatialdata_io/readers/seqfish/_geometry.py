@@ -11,6 +11,7 @@ from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.geometry import geojson_polygons, invalid_geometry_mask, raise_invalid_geometries
 from spatialdata_io.readers._utils.metadata import read_json_object
 from spatialdata_io.readers.seqfish._schemas import boundary_features, schema_error
 
@@ -18,32 +19,44 @@ if TYPE_CHECKING:
     from anndata import AnnData
     from spatialdata.transformations import Scale
 
+    from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _MAX_BOUNDARY_BYTES = 64 * 1024 * 1024
+_CONTEXT = ReaderErrorContext("seqfish", "cell boundaries")
 
 
-def read_boundaries(path: ArtifactFile, *, instance_ids: pd.Index, roi: str, scale: Scale) -> gpd.GeoDataFrame:
+def read_boundaries(
+    path: ArtifactFile, *, instance_ids: pd.Index, roi: str, scale: Scale, policy: InvalidGeometryPolicy
+) -> gpd.GeoDataFrame:
     """Read eager GeoJSON polygons and align their independently encoded IDs."""
-    document = read_json_object(
-        path, max_bytes=_MAX_BOUNDARY_BYTES, context=ReaderErrorContext("seqfish", "cell boundaries")
-    )
+    document = read_json_object(path, max_bytes=_MAX_BOUNDARY_BYTES, context=_CONTEXT)
     features, identifiers = boundary_features(document, path)
-    frame = gpd.GeoDataFrame.from_features(features)
-    geometry = frame.geometry
-    if (
-        geometry.isna().any()
-        or geometry.is_empty.any()
-        or not geometry.is_valid.all()
-        or not geometry.geom_type.isin(["Polygon", "MultiPolygon"]).all()
-        or geometry.has_z.any()
-    ):
-        raise schema_error(path, found="invalid, empty or nonplanar boundaries", expected="valid finite 2D polygons")
+    geometries = geojson_polygons([feature["geometry"] for feature in features], context=_CONTEXT, path=path)
+    # Match GeoDataFrame.from_features: properties become columns in first-seen order.
+    frame = gpd.GeoDataFrame(
+        [
+            {"geometry": geometry, **(feature["properties"] or {})}
+            for geometry, feature in zip(geometries, features, strict=True)
+        ]
+    )
     frame.index = pd.Index(identifiers, name="instance_id")
     if len(frame) != len(instance_ids) or (frame.index.get_indexer(instance_ids) < 0).any():
         raise schema_error(path, found="boundary/cell ID disagreement", expected="exactly the table cell IDs")
     if not frame.index.equals(instance_ids):
         frame = frame.loc[instance_ids]
+    if policy != "keep":
+        invalid = invalid_geometry_mask(frame.geometry.to_numpy())
+        if policy == "raise":
+            raise_invalid_geometries(invalid, frame.index.tolist(), context=_CONTEXT, path=path)
+        elif invalid.any():
+            frame = frame.loc[~invalid]
+            if frame.empty:
+                raise schema_error(
+                    path,
+                    found="all boundaries dropped, leaving an empty element",
+                    expected="at least one retained cell boundary",
+                )
     return ShapesModel.parse(frame, transformations={roi: scale})
 
 

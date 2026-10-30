@@ -90,7 +90,7 @@ class TestMacsimaData:
         expected = np.stack([tifffile.imread(root / file) for file in _FILES[dataset]])
         np.testing.assert_array_equal(image.data.compute(), expected)
         assert get_channel_names(result.images[f"{name}_image"]) == _EXPECTED[dataset].index.tolist()
-        transformation = get_transformation(result.images[f"{name}_image"], to_coordinate_system=name)
+        transformation = get_transformation(result.images[f"{name}_image"], to_coordinate_system="global")
         assert isinstance(transformation, Scale)
         np.testing.assert_array_equal(transformation.scale, [17.0, 17.0])
         table = result.tables[f"{name}_table"]

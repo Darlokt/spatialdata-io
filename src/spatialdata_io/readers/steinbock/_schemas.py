@@ -10,6 +10,10 @@ reserved output metadata and ambiguous annotation names are rejected.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
+from math import isfinite
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,7 +23,7 @@ import pyarrow as pa
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     import anndata as ad
 
@@ -190,3 +194,109 @@ def _validate_output_column(obs: pd.DataFrame, key: str, values: pd.Series, *, p
             found=f"conflicting reserved observation column {key!r}",
             expected="absent or semantically equal reader output metadata",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ImageMetadata:
+    """Own one selected emitted image's dimensions and optional IMC XY spacing."""
+
+    shape: tuple[int, int]
+    spacing_um: tuple[float, float] | None
+
+
+_IMAGE_FIELDS = frozenset({"image", "width_px", "height_px"})
+_EXTENT_FIELDS = frozenset({"acquisition_width_um", "acquisition_height_um"})
+_IMAGE_METADATA_CONTEXT = ReaderErrorContext("steinbock", "IMC images.csv")
+
+
+def image_metadata_columns(header: Sequence[str], path: ArtifactFile) -> dict[str, int]:
+    """Validate unique named fields and return projected source positions."""
+    if (
+        len(header) != len(set(header))
+        or not _IMAGE_FIELDS.issubset(header)
+        or len(_EXTENT_FIELDS.intersection(header)) == 1
+    ):
+        raise ReaderFormatError(
+            context=_IMAGE_METADATA_CONTEXT,
+            path=path,
+            found=f"header {list(header)!r}",
+            expected=(
+                "unique named image, width_px, height_px fields and either both acquisition extent fields or neither"
+            ),
+        )
+    return {name: index for index, name in enumerate(header) if name in _IMAGE_FIELDS | _EXTENT_FIELDS}
+
+
+def _metadata_number(text: str, path: ArtifactFile, *, image: str, field: str, integral: bool) -> Decimal:
+    """Parse exact decimal text and bound its magnitude before any exact rational use.
+
+    Decimal comparisons and float conversion reject huge exponents cheaply;
+    building a Fraction from unchecked text such as ``1e999999999`` would not.
+    """
+    try:
+        value = Decimal(text)
+    except InvalidOperation as error:
+        raise ReaderFormatError(
+            context=_IMAGE_METADATA_CONTEXT,
+            path=path,
+            found=f"{image!r} {field}={text!r}",
+            expected="finite positive numeric metadata",
+        ) from error
+    if (
+        not value.is_finite()
+        or value <= 0
+        or (integral and (value != value.to_integral_value() or value > 2**63 - 1))
+        or (not integral and (not isfinite(float(value)) or float(value) <= 0))
+    ):
+        raise ReaderFormatError(
+            context=_IMAGE_METADATA_CONTEXT,
+            path=path,
+            found=f"{image!r} {field}={text!r}",
+            expected="positive integral dimensions or finite positive physical extents",
+        )
+    return value
+
+
+def normalize_image_metadata(
+    columns: Mapping[str, Sequence[str]], selected: set[str], path: ArtifactFile
+) -> dict[str, ImageMetadata]:
+    """Validate identities globally and selected rows' emitted dimensions and extent pairs."""
+    names = columns["image"]
+    if len(set(names)) != len(names) or any(not name for name in names):
+        raise ReaderFormatError(
+            context=_IMAGE_METADATA_CONTEXT,
+            path=path,
+            found="empty or duplicate image names",
+            expected="unique exact image basenames",
+        )
+    result: dict[str, ImageMetadata] = {}
+    for index, name in enumerate(names):
+        if name not in selected:
+            continue
+        width = int(_metadata_number(columns["width_px"][index], path, image=name, field="width_px", integral=True))
+        height = int(_metadata_number(columns["height_px"][index], path, image=name, field="height_px", integral=True))
+        spacing = None
+        if "acquisition_width_um" in columns:
+            x = columns["acquisition_width_um"][index]
+            y = columns["acquisition_height_um"][index]
+            if bool(x) != bool(y):
+                raise ReaderFormatError(
+                    context=_IMAGE_METADATA_CONTEXT,
+                    path=path,
+                    found=f"partial physical extents for {name!r}",
+                    expected="both acquisition extents or two empty fields",
+                )
+            if x:
+                # Exact rational division avoids ambient Decimal-context rounding.
+                width_um = _metadata_number(x, path, image=name, field="acquisition_width_um", integral=False)
+                height_um = _metadata_number(y, path, image=name, field="acquisition_height_um", integral=False)
+                spacing = (float(Fraction(width_um) / width), float(Fraction(height_um) / height))
+                if not all(isfinite(value) and value > 0 for value in spacing):
+                    raise ReaderFormatError(
+                        context=_IMAGE_METADATA_CONTEXT,
+                        path=path,
+                        found=f"unrepresentable spacing for {name!r}",
+                        expected="finite positive micrometres per pixel",
+                    )
+        result[name] = ImageMetadata((height, width), spacing)
+    return result

@@ -12,6 +12,7 @@ central defaults.
 from __future__ import annotations
 
 from spatialdata_io.readers._utils.image._axes import normalize_raster_axes
+from spatialdata_io.readers._utils.image._calibration import ome_pixel_sizes_um
 from spatialdata_io.readers._utils.image._jpeg import read_jpeg
 from spatialdata_io.readers._utils.image._options import (
     DEFAULT_CHUNKS,
@@ -34,6 +35,7 @@ __all__ = [
     "inspect_tiff",
     "make_raster_options",
     "normalize_raster_axes",
+    "ome_pixel_sizes_um",
     "read_jpeg",
     "read_png",
     "read_tiff",

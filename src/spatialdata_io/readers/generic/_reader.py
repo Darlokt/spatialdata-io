@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.generic._images import VALID_IMAGE_TYPES, image
 from spatialdata_io.readers.generic._shapes import VALID_SHAPE_TYPES, geojson
@@ -30,6 +31,7 @@ def generic(  # noqa: PLR0913, RUF100
     tiff_level: int = 0,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
+    invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
 ) -> DataArray | DataTree | GeoDataFrame:
     """Read a generic image or GeoJSON file as a SpatialData element.
 
@@ -46,6 +48,8 @@ def generic(  # noqa: PLR0913, RUF100
         Explicit image axes. Required for images and invalid for GeoJSON.
     coordinate_system
         Coordinate system for the returned element. Defaults to ``"global"``.
+        Images use micrometres under complete applicable OME calibration,
+        otherwise pixels. GeoJSON retains source units without reprojection.
     tiff_series
         Zero-based TIFF series. Must remain zero for non-TIFF inputs.
     tiff_level
@@ -60,11 +64,15 @@ def generic(  # noqa: PLR0913, RUF100
         axes. ``None`` selects ``(1, 1024, 1024)`` for ``CYX`` and
         ``(1, 1, 1024, 1024)`` for ``CZYX``: one channel and one plane per
         chunk with square 1024-pixel tiles. Invalid for GeoJSON inputs.
+    invalid_geometries
+        GeoJSON topology policy: preserve source polygons, drop invalid
+        features without renumbering, or raise. Structural errors always fail.
+        Nondefault policies are invalid for images.
 
     Returns
     -------
     xarray.DataArray, xarray.DataTree, or geopandas.GeoDataFrame
-        Parsed SpatialData element with an identity transformation. Images are
+        Parsed SpatialData element with its source-to-target transformation. Images are
         multiscale ``DataTree`` values only when ``scale_factors`` is not empty.
 
     Raises
@@ -88,9 +96,14 @@ def generic(  # noqa: PLR0913, RUF100
         if scale_factors or chunks is not None:
             message = "scale_factors and chunks cannot be used with GeoJSON inputs."
             raise ValueError(message)
-        return geojson(normalized_path, coordinate_system=target_coordinate_system)
+        return geojson(
+            normalized_path, coordinate_system=target_coordinate_system, invalid_geometries=invalid_geometries
+        )
 
     if suffix in VALID_IMAGE_TYPES:
+        if validate_invalid_geometry_policy(invalid_geometries) != "keep":
+            message = "invalid_geometries is only applicable to GeoJSON inputs."
+            raise ValueError(message)
         if data_axes is None:
             message = "data_axes must be provided for image inputs."
             raise ValueError(message)

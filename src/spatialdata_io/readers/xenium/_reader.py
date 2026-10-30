@@ -77,7 +77,7 @@ def _feature_types(value: Sequence[str] | Literal["all"] | None) -> FeatureSelec
     return selected
 
 
-def _selection(
+def _selection(  # noqa: PLR0913, RUF100 - Normalize the explicit public product choices together.
     *,
     include_table: bool,
     table_target: TableTarget | None,
@@ -295,7 +295,7 @@ def _attrs(layout: XeniumLayout, panel: ProteinPanel | None, counts: Counts | No
     return attrs
 
 
-def xenium(
+def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format options form the public contract.
     path: str | Path,
     *,
     include_table: bool = True,

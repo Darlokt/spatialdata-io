@@ -23,6 +23,7 @@ from spatialdata_io.readers.dbit import dbit
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Literal
 
     from numpy.typing import NDArray
     from pytest_mock import MockerFixture
@@ -67,10 +68,13 @@ class TestDbit:
     """Check the public reader against small format-faithful inputs."""
 
     @pytest.mark.parametrize("sparse_source", [True, False])
-    def test_synthetic_layout_preserves_public_contract(self, tmp_path: Path, *, sparse_source: bool) -> None:
+    @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
+    def test_synthetic_layout_preserves_public_contract(
+        self, tmp_path: Path, *, sparse_source: bool, policy: Literal["keep", "drop", "raise"]
+    ) -> None:
         _write_layout(tmp_path, sparse_source=sparse_source)
 
-        result = dbit(tmp_path, dataset_id="sample", include_border=True, border_scale=1.0)
+        result = dbit(tmp_path, dataset_id="sample", include_border=True, border_scale=1.0, invalid_geometries=policy)
 
         assert list(result.shapes) == ["sample"]
         assert list(result.tables) == ["table"]

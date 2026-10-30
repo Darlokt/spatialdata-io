@@ -1,4 +1,4 @@
-"""Read the authoritative micron-to-mosaic-pixel affine calibration."""
+"""Invert the authoritative micron-to-mosaic-pixel calibration once."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ _AFFINE_SHAPE = (3, 3)
 
 
 def read_transform(path: ArtifactFile) -> Affine:
-    """Validate a bounded 3x3 homogeneous affine from microns to mosaic pixels."""
+    """Return the validated inverse mapping mosaic pixels into source micrometres."""
     context = ReaderErrorContext("merscope", "micron-to-mosaic transform")
     try:
         with path.open("rb") as source:
@@ -60,7 +60,7 @@ def read_transform(path: ArtifactFile) -> Affine:
             found="nonfinite inverse calibration",
             expected="a finite float64 inverse affine",
         )
-    return Affine(matrix, input_axes=("x", "y"), output_axes=("x", "y"))
+    return Affine(inverse, input_axes=("x", "y"), output_axes=("x", "y"))
 
 
 def _parse_matrix(payload: bytes) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:

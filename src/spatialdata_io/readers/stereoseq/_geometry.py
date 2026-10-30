@@ -12,12 +12,15 @@ from spatialdata.models import PointsModel, ShapesModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import dask.dataframe as dd
     from numpy.typing import NDArray
+
+    from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
 
 _PADDING = 32767
 _MIN_VERTICES = 3
@@ -33,9 +36,14 @@ def make_points(coordinates: NDArray[np.int64], index: pd.Index) -> dd.DataFrame
 
 
 def make_polygons(
-    coordinates: NDArray[np.int64], borders: NDArray[np.int16], index: pd.Index, *, path: Path
+    coordinates: NDArray[np.int64],
+    borders: NDArray[np.int16],
+    index: pd.Index,
+    *,
+    path: Path,
+    policy: InvalidGeometryPolicy,
 ) -> gpd.GeoDataFrame:
-    """Decode centroid-relative int16 pairs, rejecting invalid topology without repair."""
+    """Decode literal centroid-relative pairs and apply the selected topology policy."""
     context = ReaderErrorContext("stereoseq", "cell borders")
     if index.empty:
         raise ReaderFormatError(
@@ -70,13 +78,17 @@ def make_polygons(
     polygons = shapely.from_ragged_array(
         shapely.GeometryType.POLYGON, vertices, (ring_offsets, np.arange(len(index) + 1, dtype=np.int64))
     )
-    invalid = ~shapely.is_valid(polygons) | shapely.is_empty(polygons) | (shapely.area(polygons) == 0)
-    if invalid.any():
-        first = int(np.flatnonzero(invalid)[0])
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"invalid polygon for cell {index[first]!r}: {shapely.is_valid_reason(polygons[first])}",
-            expected="simple nondegenerate contours; select cell_geometry='centroids' to retain source centers",
-        )
+    if policy != "keep":
+        invalid = invalid_geometry_mask(polygons)
+        if policy == "raise":
+            raise_invalid_geometries(invalid, index.tolist(), context=context, path=path)
+        elif invalid.any():
+            polygons, index = polygons[~invalid], index[~invalid]
+            if index.empty:
+                raise ReaderFormatError(
+                    context=context,
+                    path=path,
+                    found="all polygons dropped, leaving an empty element",
+                    expected="at least one retained cell contour",
+                )
     return ShapesModel.parse(gpd.GeoDataFrame(geometry=polygons, index=index), transformations={"global": Identity()})

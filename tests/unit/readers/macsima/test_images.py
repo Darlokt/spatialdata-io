@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from dask.callbacks import Callback
 from spatialdata.models import get_channel_names
-from spatialdata.transformations import Identity, Scale, get_transformation
+from spatialdata.transformations import Scale, get_transformation
 from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
@@ -59,9 +59,7 @@ class TestMakeImage:
         executed: list[object] = []
 
         with Callback(posttask=lambda *args: executed.append(args)):
-            element = make_image(
-                plan.channels, frame="run", pixel_size_um=0.17, include_transformations=True, raster=_DEFAULT
-            )
+            element = make_image(plan.channels, frame="run", pixel_size_um=0.17, raster=_DEFAULT)
 
         assert not executed
         assert isinstance(element, DataArray)
@@ -80,30 +78,27 @@ class TestMakeImage:
         )
         plan, pixels = _plan(tmp_path, specs, padded=True)
 
-        element = make_image(
-            plan.channels, frame="run", pixel_size_um=0.17, include_transformations=True, raster=_DEFAULT
-        )
+        element = make_image(plan.channels, frame="run", pixel_size_um=0.17, raster=_DEFAULT)
 
         expected = np.zeros((2, 8, 9), dtype=np.uint16)
         expected[0, 2:8, 0:8] = pixels[0]
         expected[1, 0:7, 3:9] = pixels[1]
         np.testing.assert_array_equal(full_resolution(element).data.compute(), expected)
 
-    def test_without_transformations_the_frame_is_the_pixel_grid(self, tmp_path: Path) -> None:
+    def test_explicit_frame_retains_physical_scale(self, tmp_path: Path) -> None:
         plan, _ = _plan(tmp_path, (ChannelSpec("CD3", 1, "APC"),))
 
         element = make_image(
             plan.channels,
             frame="run",
             pixel_size_um=0.17,
-            include_transformations=False,
             raster=make_raster_options(chunks=1),
         )
 
         frames = get_transformation(element, get_all=True)
         assert isinstance(frames, dict)
         assert list(frames) == ["run"]
-        assert isinstance(frames["run"], Identity)
+        assert isinstance(frames["run"], Scale)
 
     def test_chunks_and_pyramid(self, tmp_path: Path) -> None:
         plan, _ = _plan(
@@ -114,7 +109,6 @@ class TestMakeImage:
             plan.channels,
             frame="run",
             pixel_size_um=0.17,
-            include_transformations=True,
             raster=make_raster_options((2, 2), (2, 8, 8)),
         )
 
@@ -130,15 +124,12 @@ class TestMakeImage:
                 plan.channels,
                 frame="run",
                 pixel_size_um=0.17,
-                include_transformations=True,
                 raster=make_raster_options((2, 4), 1),
             )
 
     def test_small_region_reads_one_band_of_one_channel(self, tmp_path: Path, mocker: MockerFixture) -> None:
         plan, pixels = _plan(tmp_path, (ChannelSpec("CD3", 1, "APC"), ChannelSpec("CD4", 2, "PE")))
-        element = make_image(
-            plan.channels, frame="run", pixel_size_um=0.17, include_transformations=True, raster=_DEFAULT
-        )
+        element = make_image(plan.channels, frame="run", pixel_size_um=0.17, raster=_DEFAULT)
         selection = mocker.spy(tiff_dask, "_read_tiff_selection")
 
         np.testing.assert_array_equal(full_resolution(element).data[1, :2, :3].compute(), pixels[1][:2, :3])

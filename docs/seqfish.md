@@ -21,11 +21,11 @@ ROI names are the prefixes before `_CellCoordinates.csv`. By default they are di
 
 The first CellxGene field contains positive integer cell identifiers; the remaining nonempty, unique headers identify expression features in their source order. Counts must be finite nonnegative integers. CellCoordinates provides unique matching integer `label` values, finite `center_x` and `center_y`, and finite nonnegative `area`. Its rows may be reordered: alignment follows exact cell IDs, preserving the expression row order. IDs retain their integer values, including values above 65535. Zero area is accepted for the table and polygon output; centroid circles require strictly positive areas.
 
-GeoJSON is a UTF-8 FeatureCollection limited to 64 MiB. It contains polygon features with explicit top-level Feature `id` values corresponding to cell identifiers. Property fields cannot substitute for these source identifiers. An optional `properties.id` must represent the same exact integer as its Feature `id`; conflicting values fail. The reserved property name `geometry` is rejected so annotations cannot replace the source geometry. Other source property annotations are retained. Features may be reordered. Integer polygon vertices must be exactly representable in float64. Missing, duplicate or mismatched IDs and invalid geometry fail; geometry is neither silently repaired nor assigned an ID by row position.
+GeoJSON is a UTF-8 FeatureCollection limited to 64 MiB. It contains polygon features with explicit top-level Feature `id` values corresponding to cell identifiers. Property fields cannot substitute for these source identifiers. An optional `properties.id` must represent the same exact integer as its Feature `id`; conflicting values fail. The reserved property name `geometry` is rejected so annotations cannot replace the source geometry. Other source property annotations are retained. Features may be reordered. Integer polygon vertices must be exactly representable in float64. Missing, duplicate or mismatched IDs and malformed geometry fail in every policy; geometry is neither repaired nor assigned an ID by row position. Invalid topology follows `invalid_geometries`.
 
 ## Output and coordinates
 
-Every ROI has its own coordinate system, named by its prefix. The returned elements are:
+A single selected ROI uses `global` in micrometres. When multiple independent ROIs are selected, each retains its prefix as its frame name; matching units do not establish registration. Element names retain their ROI prefix in either case. The returned elements are:
 
 | Element | Contract |
 | --- | --- |
@@ -45,6 +45,8 @@ Transcript `z` is retained as integer `z_raw`. The export does not establish a p
 ## Options and execution
 
 `include_images`, `include_labels`, `include_transcripts` and `include_shapes` default to `True`. `shape_geometry="polygons"` is the default; `"circles"` or `"both"` selects centroid circles or both geometry types. `include_shapes=False` excludes both.
+
+`invalid_geometries="keep"` preserves invalid polygon topology by default. `"raise"` reports invalid cell IDs. `"drop"` removes the affected polygon, its requested centroid circle and its expression-table row, preserving surviving IDs, row order, sparse values and annotations. Complete boundary/table identity agreement is validated before dropping. Labels and lazy transcript assignments remain unchanged. A requested boundary element becoming empty fails the whole read. Circles-only and shapes-disabled modes never read boundaries or drop cells.
 
 `scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Computing a region decodes only the TIFF tiles, or strips grouped into bands of at most 16 MiB, that intersect its chunks. A sequence such as `(2, 2)` builds image and label pyramids with the appropriate interpolation for each product. Generated label pyramids require segmentation dtypes of at most 32 bits, avoiding upstream integer rounding. Full-resolution source series and level remain fixed, so alternate scenes and uncalibrated source pyramid levels cannot be selected accidentally.
 

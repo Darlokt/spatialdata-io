@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import localcontext
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -19,6 +20,8 @@ from spatialdata_io.readers.steinbock._schemas import (
     _validate_centroids,
     _validate_output_column,
     _validate_table,
+    image_metadata_columns,
+    normalize_image_metadata,
 )
 from tests.unit.readers.steinbock.test_tables import _sample
 
@@ -260,3 +263,76 @@ class TestCentroidColumns:
         assert x.dtype == y.dtype == np.dtype(np.uint64)
         assert int(x[0]) == 2**63 + 1
         assert int(y[0]) == 2**64 - 1
+
+
+class TestImageMetadataColumns:
+    """Project named fields by source position and reject ambiguous header contracts."""
+
+    def test_projects_reordered_named_fields(self, tmp_path: Path) -> None:
+        positions = image_metadata_columns(["height_px", "extra", "image", "width_px"], ArtifactFile(tmp_path))
+        assert positions == {"height_px": 0, "image": 2, "width_px": 3}
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            [],
+            ["image", "image", "width_px", "height_px"],
+            ["image", "width_px"],
+            ["image", "width_px", "height_px", "acquisition_height_um"],
+        ],
+    )
+    def test_invalid_headers(self, tmp_path: Path, header: list[str]) -> None:
+        with pytest.raises(ReaderFormatError):
+            image_metadata_columns(header, ArtifactFile(tmp_path))
+
+
+class TestNormalizeImageMetadata:
+    """Validate exact dimensions, complete extents and representable local lengths."""
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("width_px", "not-a-number"),
+            ("width_px", "12.5"),
+            ("height_px", "0"),
+            ("width_px", str(2**63)),
+            ("acquisition_width_um", ""),
+            ("acquisition_width_um", "-1"),
+            ("acquisition_width_um", "nan"),
+            ("acquisition_width_um", "inf"),
+            ("acquisition_width_um", "1e999"),
+            ("acquisition_width_um", "1e-999"),
+            ("acquisition_width_um", "5e-324"),
+            ("acquisition_width_um", "1e999999999"),
+            ("acquisition_width_um", "1e-999999999"),
+        ],
+    )
+    def test_invalid_selected_values(self, tmp_path: Path, field: str, value: str) -> None:
+        values = {
+            "image": ["s.tiff"],
+            "width_px": ["12"],
+            "height_px": ["8"],
+            "acquisition_width_um": ["6"],
+            "acquisition_height_um": ["20"],
+        }
+        values[field] = [value]
+        with pytest.raises(ReaderFormatError):
+            normalize_image_metadata(values, {"s.tiff"}, ArtifactFile(tmp_path))
+
+    @pytest.mark.parametrize("names", [[""], ["s.tiff", "s.tiff"]])
+    def test_invalid_identities(self, tmp_path: Path, names: list[str]) -> None:
+        with pytest.raises(ReaderFormatError, match="image names"):
+            normalize_image_metadata({"image": names}, {"s.tiff"}, ArtifactFile(tmp_path))
+
+    def test_ratios_are_independent_of_decimal_context(self, tmp_path: Path) -> None:
+        columns = {
+            "image": ["s.tiff"],
+            "width_px": ["11"],
+            "height_px": ["13"],
+            "acquisition_width_um": ["3"],
+            "acquisition_height_um": ["7"],
+        }
+        with localcontext() as context:
+            context.prec = 2
+            metadata = normalize_image_metadata(columns, {"s.tiff"}, ArtifactFile(tmp_path))
+        assert metadata["s.tiff"].spacing_um == (3 / 11, 7 / 13)

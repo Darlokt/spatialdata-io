@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import tifffile
 from dask.callbacks import Callback
+from shapely.geometry import Polygon
 from spatialdata import SpatialData, read_zarr
 from spatialdata.transformations import get_transformation
 from xarray import DataArray, DataTree
@@ -19,6 +20,7 @@ from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
 from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers.generic import generic, image
+from tests.integration.readers.generic._fixtures import write_geojson
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,6 +71,91 @@ def _write_geojson(path: Path) -> None:
 
 class TestImage:
     """Exercise exact lazy image-model composition."""
+
+    @pytest.mark.parametrize(("unit", "factor"), [("µm", 1.0), ("nm", 0.001), ("mm", 1000.0)])
+    def test_base_ome_calibration_preserves_pixels_and_maps_landmarks(
+        self, tmp_path: Path, unit: str, factor: float
+    ) -> None:
+        path = tmp_path / "calibrated.ome.tif"
+        source = np.arange(16 * 24, dtype=np.uint16).reshape(16, 24)
+        tifffile.imwrite(
+            path,
+            source,
+            photometric="minisblack",
+            metadata={
+                "axes": "YX",
+                "PhysicalSizeX": 0.5,
+                "PhysicalSizeY": 2.0,
+                "PhysicalSizeXUnit": unit,
+                "PhysicalSizeYUnit": unit,
+            },
+        )
+        executed: list[object] = []
+
+        with Callback(pretask=lambda key, *_: executed.append(key)):
+            result = image(path, "yx", "sample")
+
+        assert not executed
+        transform = get_transformation(result, to_coordinate_system="sample")
+        assert not isinstance(transform, dict)
+        affine = transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
+        np.testing.assert_allclose(affine @ [6, 7, 1], [3 * factor, 14 * factor, 1])
+        np.testing.assert_array_equal(result.data.compute(), source[None])
+
+    @pytest.mark.parametrize("physical_z", [None, 3.0])
+    def test_volume_requires_calibration_of_every_retained_spatial_axis(
+        self, tmp_path: Path, physical_z: float | None
+    ) -> None:
+        path = tmp_path / "volume.ome.tif"
+        metadata: dict[str, object] = {"axes": "ZYX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 2.0}
+        if physical_z is not None:
+            metadata["PhysicalSizeZ"] = physical_z
+        source = np.zeros((2, 16, 24), dtype=np.uint8)
+        tifffile.imwrite(path, source, photometric="minisblack", metadata=metadata)
+
+        result = image(path, "zyx", "sample")
+
+        transform = get_transformation(result, to_coordinate_system="sample")
+        assert not isinstance(transform, dict)
+        expected = np.diag([0.5, 2, 3, 1]) if physical_z is not None else np.eye(4)
+        np.testing.assert_array_equal(
+            transform.to_affine_matrix(input_axes=("x", "y", "z"), output_axes=("x", "y", "z")), expected
+        )
+
+    def test_ome_calibration_uses_selected_series(self, tmp_path: Path) -> None:
+        path = tmp_path / "series.ome.tif"
+        with tifffile.TiffWriter(path, ome=True) as writer:
+            for size in (0.5, 2.0):
+                writer.write(
+                    np.zeros((16, 24), dtype=np.uint8),
+                    photometric="minisblack",
+                    metadata={"axes": "YX", "PhysicalSizeX": size, "PhysicalSizeY": size},
+                )
+
+        result = image(path, "yx", "sample", tiff_series=1)
+
+        transform = get_transformation(result, to_coordinate_system="sample")
+        assert not isinstance(transform, dict)
+        np.testing.assert_array_equal(
+            transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")), np.diag([2, 2, 1])
+        )
+
+    def test_ome_axis_reinterpretation_retains_pixels(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.ome.tif"
+        tifffile.imwrite(
+            path,
+            np.zeros((16, 24), dtype=np.uint8),
+            photometric="minisblack",
+            metadata={"axes": "YX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 2.0},
+        )
+
+        result = image(path, "xy", "sample")
+
+        transform = get_transformation(result, to_coordinate_system="sample")
+        assert not isinstance(transform, dict)
+        np.testing.assert_array_equal(
+            transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")), np.eye(3)
+        )
 
     @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
     def test_64bit_image_store_roundtrip(self, tmp_path: Path, dtype: type[np.int64 | np.uint64]) -> None:
@@ -301,6 +388,42 @@ class TestGeneric:
 class TestGenericToZarr:
     """Exercise silent library persistence."""
 
+    def test_appending_requires_explicit_frame_and_preserves_existing_store(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.ome.tif"
+        output = tmp_path / "output.zarr"
+        tifffile.imwrite(
+            path,
+            np.zeros((16, 24), dtype=np.uint8),
+            photometric="minisblack",
+            metadata={"axes": "YX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 2.0},
+        )
+        shapes_path = tmp_path / "shapes.geojson"
+        _write_geojson(shapes_path)
+        generic_to_zarr(path, output, name="image", data_axes="yx")
+
+        with pytest.raises(ValueError, match="explicit coordinate_system"):
+            generic_to_zarr(shapes_path, output)
+
+        assert not SpatialData.read(output).shapes
+        generic_to_zarr(shapes_path, output, coordinate_system="source_pixels")
+        restored = SpatialData.read(output)
+        image_frames = get_transformation(restored.images["image"], get_all=True)
+        shape_frames = get_transformation(restored.shapes["shapes"], get_all=True)
+        assert isinstance(image_frames, dict)
+        assert isinstance(shape_frames, dict)
+        assert set(image_frames) == {"global"}
+        assert set(shape_frames) == {"source_pixels"}
+
+    def test_polygon_drop_surviving_ids_round_trip(self, tmp_path: Path) -> None:
+        valid = Polygon([(0, 0), (2, 0), (0, 2)])
+        invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
+        path = write_geojson(tmp_path / "shapes.geojson", [valid, invalid, valid])
+        output = tmp_path / "output.zarr"
+
+        generic_to_zarr(path, output, invalid_geometries="drop")
+
+        assert SpatialData.read(output).shapes["shapes"].index.tolist() == [0, 2]
+
     def test_round_trips_exact_pixels_without_stdout(
         self,
         tmp_path: Path,
@@ -331,7 +454,7 @@ class TestGenericToZarr:
         _write_geojson(shapes_path)
         generic_to_zarr(image_path, output, data_axes="yx")
 
-        generic_to_zarr(shapes_path, output, name="regions")
+        generic_to_zarr(shapes_path, output, name="regions", coordinate_system="global")
 
         spatial_data = SpatialData.read(output)
         assert set(spatial_data.images) == {"image"}
@@ -417,7 +540,16 @@ class TestReadGenericWrapper:
 
         append = runner.invoke(
             generic_command,
-            ["--input", str(shapes_path), "--output", str(output), "--name", "regions"],
+            [
+                "--input",
+                str(shapes_path),
+                "--output",
+                str(output),
+                "--name",
+                "regions",
+                "--coordinate-system",
+                "global",
+            ],
         )
 
         assert append.exit_code == 0, append.output

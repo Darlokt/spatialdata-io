@@ -14,7 +14,7 @@ from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
 from scipy.sparse import csr_array, csr_matrix, sparray, spmatrix
 from spatialdata import SpatialData
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -23,6 +23,11 @@ from tests.integration.readers.stereoseq._fixtures import Family, Profile, write
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Literal
+
+    from pytest_mock import MockerFixture
+
+    from tests.integration.readers.stereoseq._fixtures import Product
 
 pytestmark = [pytest.mark.integration, pytest.mark.stereoseq]
 
@@ -35,6 +40,120 @@ def _counts(table: ad.AnnData, *, layer: str | None = None) -> csr_array:
 
 class TestStereoseq:
     """Check supported compositions against explicit source values and identities."""
+
+    def test_image_only_ambiguous_calibration_companion_fails(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path, family="outs", products=("square", "registered"))
+        fixture.square.with_name("sample.gef").write_bytes(fixture.square.read_bytes())
+        with pytest.raises(ReaderFormatError, match="image calibration companion"):
+            stereoseq(fixture.root, image_roles=("registered",))
+
+    def test_polygon_drop_retains_uint64_count_and_exon_extremes(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path, products=("cells",), invalid_cell_ids=(200,))
+        maximum = 2**64 - 1
+        with h5py.File(fixture.cells, "r+") as handle:
+            group = handle["cellBin"]
+            del group["cellExp"]
+            group["cellExp"] = np.array([(0, 11), (1, maximum)], dtype=[("geneID", "u4"), ("count", "u8")])
+            del group["cellExpExon"]
+            group["cellExpExon"] = np.array([5, maximum - 1], dtype=np.uint64)
+
+        result = stereoseq(fixture.root, cell_bins="unadjusted", cell_geometry="polygons", invalid_geometries="drop")
+
+        table = result.tables["cells_table"]
+        assert_array_equal(_counts(table).data, np.array([maximum], dtype=np.uint64))
+        assert_array_equal(_counts(table, layer="exon").data, np.array([maximum - 1], dtype=np.uint64))
+        assert table.obs_names.tolist() == ["100"]
+
+    @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs", "flat"])
+    @pytest.mark.parametrize("profile", ["name_only", "id_and_name"])
+    def test_polygon_drop_preserves_independent_populations_and_sparse_layers(
+        self, tmp_path: Path, family: Family, profile: Profile
+    ) -> None:
+        fixture = write_dataset(
+            tmp_path,
+            family=family,
+            profile=profile,
+            products=("cells", "adjusted_cells"),
+            invalid_cell_ids=(200,),
+            invalid_adjusted_cell_ids=(100,),
+        )
+
+        result = stereoseq(
+            fixture.root,
+            cell_bins="both",
+            cell_geometry="polygons",
+            invalid_geometries="drop",
+            cell_counts_file=fixture.cells if family == "flat" else None,
+            adjusted_cell_counts_file=fixture.adjusted_cells if family == "flat" else None,
+        )
+
+        for name, identifier, count, exon in (("cells", 100, 22, 6), ("adjusted_cells", 200, 11, 5)):
+            table = result.tables[f"{name}_table"]
+            shapes = result.shapes[f"{name}_polygons"]
+            assert table.obs_names.tolist() == [str(identifier)]
+            assert shapes.index.tolist() == [identifier]
+            assert_array_equal(_counts(table).data, [count])
+            assert_array_equal(_counts(table, layer="exon").data, [exon])
+            assert _counts(table).dtype == np.uint64
+            assert table.obs["instance_id"].tolist() == [identifier]
+
+    def test_geometry_drop_preserves_analysis_of_original_cell_population(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path, family="outs", products=("cells", "analysis"), invalid_cell_ids=(200,))
+
+        result = stereoseq(
+            fixture.root,
+            cell_bins="unadjusted",
+            cell_geometry="polygons",
+            invalid_geometries="drop",
+            analysis_files=(fixture.analysis,),
+        )
+
+        assert result.tables["cells_table"].obs_names.tolist() == ["100"]
+        assert result.tables["cells_analysis_r0_5_table"].obs["id"].tolist() == [200, 100]
+        assert len(result.points["cells_analysis_r0_5_points"].compute()) == 2
+
+    @pytest.mark.parametrize(
+        "products", [("cells", "registered"), ("analysis", "registered"), ("square", "registered")]
+    )
+    def test_physical_pitch_maps_every_element_without_changing_native_coordinates(
+        self, tmp_path: Path, products: tuple[Product, ...]
+    ) -> None:
+        fixture = write_dataset(tmp_path, family="outs", products=products)
+        result = stereoseq(
+            fixture.root,
+            cell_bins="unadjusted" if "cells" in products else "none",
+            bin_sizes=(50,) if "square" in products else (),
+            analysis_files=(fixture.analysis,) if "analysis" in products else (),
+            image_roles=("registered",),
+        )
+        for elements in (result.images, result.labels, result.points, result.shapes):
+            for element in elements.values():
+                transform = get_transformation(element, to_coordinate_system="global")
+                assert not isinstance(transform, dict)
+                assert_array_equal(
+                    transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")) @ [10, 20, 1], [5, 10, 1]
+                )
+        if "cells" in products:
+            assert_array_equal(result.tables["cells_table"].obsm["spatial"], [[10, 20], [30, 40]])
+        if "square" in products:
+            assert_array_equal(result.tables["bin50_table"].obsm["spatial"], [[5, 6], [1, 2]])
+
+    @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs"])
+    @pytest.mark.parametrize("companion", ["square", "cells"])
+    def test_image_only_calibration_reads_only_associated_gef_metadata(
+        self, tmp_path: Path, mocker: MockerFixture, family: Family, companion: Literal["square", "cells"]
+    ) -> None:
+        fixture = write_dataset(tmp_path, family=family, products=(companion, "registered"))
+        read = mocker.spy(h5py.Dataset, "__getitem__")
+        result = stereoseq(fixture.root, image_roles=("registered",))
+
+        read.assert_not_called()
+        image = next(iter(result.images.values()))
+        transform = get_transformation(image, to_coordinate_system="global")
+        assert not isinstance(transform, dict)
+        assert_array_equal(
+            transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")), np.diag([0.5, 0.5, 1])
+        )
 
     def test_saw7_cell_correction_distance_mask(self, tmp_path: Path) -> None:
         # A8/A9 place this cellCorrect output in 051.cellcut, not 04.register.
@@ -202,7 +321,7 @@ class TestStereoseq:
         shape = result.shapes["cells_polygons"]
         assert shape.geometry.iloc[0].bounds == (9, 19, 11, 21)
         assert shape.geometry.iloc[1].bounds == (29, 39, 31, 41)
-        assert isinstance(get_transformation(shape), Identity)
+        assert get_transformation(shape) == Scale([0.5, 0.5], axes=("x", "y"))
         assert set(result.tables["cells_table"].obs["instance_id"]) == set(shape.index)
 
     def test_selected_empty_population_fails_linkage(self, tmp_path: Path) -> None:

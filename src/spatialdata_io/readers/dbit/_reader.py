@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from math import isfinite
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -11,6 +11,7 @@ from spatialdata import SpatialData
 from xarray import DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
@@ -67,6 +68,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     dataset_id: str | None = None,
     include_border: bool = True,
     border_scale: float = 1.0,
+    invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
     data_axes: str | None = None,
     tiff_series: int = 0,
     tiff_level: int = 0,
@@ -112,6 +114,10 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     border_scale
         Finite inset multiplier in [0, 4). Zero gives touching squares.
         Values whose remaining width rounds to zero are rejected.
+    invalid_geometries
+        Polygon topology policy. Supported squares are valid by construction,
+        so all three modes return identical geometry and table linkage. Loss
+        of representable positive square width always fails.
     data_axes
         Optional TIFF source axes such as ``CYX`` for an unlabeled stack.
         Otherwise metadata determines axes. Only singleton extra axes may be
@@ -180,6 +186,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     TypeError
         If option or expression types are unsupported.
     """
+    validate_invalid_geometry_policy(invalid_geometries)
     _validate_grid_options(dataset_id, include_border=include_border, border_scale=border_scale)
     _validate_image_options(data_axes, tiff_series, tiff_level)
     raster = make_raster_options(scale_factors, chunks)

@@ -16,6 +16,7 @@ from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygon
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Literal
 
     from numpy.typing import NDArray
 
@@ -51,7 +52,7 @@ class TestMakePolygons:
         centers = np.array([[2**32 - 1, -(2**31)]], dtype=np.int64)
         border = _border([(-2, -1), (3, -1), (3, 2), (-2, 2)])
 
-        shapes = make_polygons(centers, border, pd.Index([800]), path=tmp_path / "cells.gef")
+        shapes = make_polygons(centers, border, pd.Index([800]), path=tmp_path / "cells.gef", policy="keep")
         expected = np.array(
             [
                 [2**32 - 3, -(2**31) - 1],
@@ -69,7 +70,8 @@ class TestMakePolygons:
         assert isinstance(get_transformation(shapes), Identity)
 
     @pytest.mark.parametrize("case", ["single_component", "interior", "too_short"])
-    def test_malformed_padding(self, tmp_path: Path, case: str) -> None:
+    @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
+    def test_malformed_padding(self, tmp_path: Path, case: str, policy: Literal["keep", "drop", "raise"]) -> None:
         border = _border([(0, 0), (1, 0), (0, 1)])
         if case == "single_component":
             border[0, 2, 0] = 32767
@@ -79,7 +81,9 @@ class TestMakePolygons:
             border[0, 2] = 32767
 
         with pytest.raises(ReaderFormatError, match="paired"):
-            make_polygons(np.zeros((1, 2), dtype=np.int64), border, pd.Index([7]), path=tmp_path / "cells.gef")
+            make_polygons(
+                np.zeros((1, 2), dtype=np.int64), border, pd.Index([7]), path=tmp_path / "cells.gef", policy=policy
+            )
 
     @pytest.mark.parametrize(
         "vertices",
@@ -107,9 +111,33 @@ class TestMakePolygons:
         ],
     )
     def test_invalid_topology(self, tmp_path: Path, vertices: list[tuple[int, int]]) -> None:
-        with pytest.raises(ReaderFormatError, match=r"invalid polygon.*55"):
+        with pytest.raises(ReaderFormatError, match=r"invalid geometries.*55"):
             make_polygons(
-                np.array([[4802, 5360]], dtype=np.int64), _border(vertices), pd.Index([55]), path=tmp_path / "cells.gef"
+                np.array([[4802, 5360]], dtype=np.int64),
+                _border(vertices),
+                pd.Index([55]),
+                path=tmp_path / "cells.gef",
+                policy="raise",
+            )
+
+    def test_keep_preserves_collinear_source_vertices(self, tmp_path: Path) -> None:
+        border = _border([(0, 0), (1, 1), (2, 2)])
+        shapes = make_polygons(
+            np.zeros((1, 2), dtype=np.int64), border, pd.Index([55]), path=tmp_path / "cells.gef", policy="keep"
+        )
+        polygon = shapes.geometry.iloc[0]
+        assert isinstance(polygon, Polygon)
+        assert_array_equal(polygon.exterior.coords, [[0, 0], [1, 1], [2, 2], [0, 0]])
+        assert not shapes.geometry.is_valid.iloc[0]
+
+    def test_all_dropped_fails(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="all polygons dropped"):
+            make_polygons(
+                np.zeros((1, 2), dtype=np.int64),
+                _border([(0, 0), (1, 1), (2, 2)]),
+                pd.Index([55]),
+                path=tmp_path / "cells.gef",
+                policy="drop",
             )
 
     def test_empty(self, tmp_path: Path) -> None:
@@ -119,4 +147,5 @@ class TestMakePolygons:
                 np.empty((0, 32, 2), dtype=np.int16),
                 pd.Index([], dtype=np.uint64),
                 path=tmp_path / "cells.gef",
+                policy="keep",
             )

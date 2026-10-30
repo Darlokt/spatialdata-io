@@ -11,7 +11,7 @@ import click
 from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
 
 if TYPE_CHECKING:
-    from typing import TypedDict, Unpack
+    from typing import Literal, TypedDict, Unpack
 
     class _DbitOptions(TypedDict):
         """Describe Click-converted source, grid, and image options."""
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         dataset_id: str | None
         include_border: bool
         border_scale: float
+        invalid_geometries: Literal["keep", "drop", "raise"]
         data_axes: str | None
         tiff_series: int
         tiff_level: int
@@ -85,6 +86,13 @@ if TYPE_CHECKING:
 )
 @scale_factors_option
 @chunks_option
+@click.option(
+    "--invalid-geometries",
+    type=click.Choice(["keep", "drop", "raise"]),
+    default="keep",
+    show_default=True,
+    help="Polygon policy; supported generated squares are valid in every mode.",
+)
 def dbit_command(input_path: Path, output_path: Path, **options: Unpack[_DbitOptions]) -> None:
     """Read one DBiT dataset and write its linked SpatialData store."""
     # Click's range comparison accepts NaN, so check finiteness explicitly.
@@ -102,6 +110,7 @@ def dbit_command(input_path: Path, output_path: Path, **options: Unpack[_DbitOpt
         dataset_id=options["dataset_id"],
         include_border=options["include_border"],
         border_scale=options["border_scale"],
+        invalid_geometries=options["invalid_geometries"],
         data_axes=options["data_axes"],
         tiff_series=options["tiff_series"],
         tiff_level=options["tiff_level"],
