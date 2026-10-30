@@ -35,11 +35,14 @@ _LAZY_IMPORTS: dict[str, str] = {
 }
 
 __all__ = [
-    # readers
     "codex",
     "cosmx",
     "curio",
     "dbit",
+    "generic",
+    "generic_to_zarr",
+    "geojson",
+    "image",
     "iss",
     "macsima",
     "mcmicro",
@@ -52,16 +55,10 @@ __all__ = [
     "xenium",
     "xenium_aligned_image",
     "xenium_explorer_selection",
-    # readers file types
-    "generic",
-    "geojson",
-    "image",
-    # converters
-    "generic_to_zarr",
 ]
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> Any:  # noqa: ANN401  # Lazy exports are declared concretely under TYPE_CHECKING.
     """Import and cache a public entry point without eagerly loading all readers."""
     if name in _LAZY_IMPORTS:
         module_path = _LAZY_IMPORTS[name]
@@ -69,16 +66,16 @@ def __getattr__(name: str) -> Any:
         val = getattr(mod, name)
         globals()[name] = val
         return val
-    else:
-        try:
-            return globals()[name]
-        except KeyError as e:
-            raise AttributeError(f"Module 'spatialdata_io' has no attribute '{name}'") from e
+    try:
+        return globals()[name]
+    except KeyError as e:
+        msg = f"Module 'spatialdata_io' has no attribute '{name}'"
+        raise AttributeError(msg) from e
 
 
 def __dir__() -> list[str]:
     """Expose lazy public entry points and package version to introspection."""
-    return __all__ + ["__version__"]
+    return [*__all__, "__version__"]
 
 
 if TYPE_CHECKING:

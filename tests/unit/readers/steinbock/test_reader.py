@@ -17,7 +17,7 @@ class TestSteinbock:
 
     def test_invalid_kind_precedes_path_io(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="labels_kind"):
-            steinbock(tmp_path / "absent", labels_kind="other")  # type: ignore[bad-argument-type, arg-type]  # Exercise an untyped caller.
+            steinbock(tmp_path / "absent", labels_kind="other")  # pyrefly: ignore[bad-argument-type] - Exercise an untyped caller.
 
     def test_invalid_chunks_precede_path_io(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="positive"):

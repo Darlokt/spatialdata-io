@@ -75,9 +75,7 @@ def prepare_anndata_dataframe(
         levels = [_prepare_index(level, context=context, allow_float_nulls=allow_float_nulls) for level in index.levels]
         if any(new is not old for new, old in zip(levels, index.levels, strict=True)):
             # pandas accepts Index levels; pandas-stubs models them as nested sequences.
-            frame.index = index.set_levels(
-                levels,  # type: ignore[arg-type]  # pyrefly: ignore[bad-argument-type]
-            )
+            frame.index = index.set_levels(levels)  # pyrefly: ignore[bad-argument-type]
     else:
         prepared = _prepare_index(index, context=context, allow_float_nulls=allow_float_nulls)
         if prepared is not index:

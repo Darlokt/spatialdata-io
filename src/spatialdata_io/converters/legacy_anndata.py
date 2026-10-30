@@ -1,7 +1,10 @@
+"""Convert between SpatialData and the legacy spatial AnnData representation."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from contextlib import suppress
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
@@ -19,12 +22,19 @@ from spatialdata.transformations import Identity, Scale
 
 if TYPE_CHECKING:
     from anndata import AnnData
+    from spatialdata.transformations import BaseTransformation
+    from xarray import DataArray, DataTree
+
+_DOWNSCALED_HIRES_LENGTH = 2000
+_DOWNSCALED_LOWRES_LENGTH = 600
+_DEFAULT_SPOT_DIAMETER = 10
 
 
 def to_legacy_anndata(
     sdata: SpatialData,
     coordinate_system: str | None = None,
     table_name: str | None = None,
+    *,
     include_images: bool = False,
 ) -> AnnData:
     """Convert a SpatialData object to a (legacy) spatial AnnData object.
@@ -46,12 +56,18 @@ def to_legacy_anndata(
         The name of the table in the SpatialData object to consider. If None and the SpatialData object has only one
         table, that table will be used.
     include_images
-        If True, includes downscaled versions of the images in the output AnnData object. It is recommended to handle
-        the full resolution images separately and keep them in the SpatialData object.
+        Keyword-only option. If True, includes downscaled versions of the images in the output AnnData object.
+        It is recommended to handle the full resolution images separately and keep them in the SpatialData object.
 
     Returns
     -------
     The legacy spatial AnnData object.
+
+    Raises
+    ------
+    ValueError
+        If coordinate-system or table selection is missing or ambiguous, or the
+        selected table does not annotate exactly one nonempty Shapes or Labels element.
 
     Notes
     -----
@@ -109,120 +125,124 @@ def to_legacy_anndata(
         - Due to the legacy nature of the AnnData object generated, this function may not handle all the edge cases,
           please report any issue you may find.
     """
-    DOWNSCALED_HIRES_LENGTH = 2000
-    DOWNSCALED_LOWRES_LENGTH = 600
-    # check that coordinate system is valid
-    css = sdata.coordinate_systems
-    if coordinate_system is None:
-        assert len(css) == 1, "The SpatialData object has more than one coordinate system. Please specify one."
-        coordinate_system = css[0]
+    sdata, coordinate_system, table_name = _select_table(sdata, coordinate_system, table_name)
+    geometry_sdata, region_name = _linked_circles(sdata, table_name)
+    if include_images:
+        hires, lowres = _render_images(sdata, geometry_sdata, coordinate_system)
+        adata = hires.tables[table_name].copy()
+        _add_images(adata, hires, lowres, region_name)
+        geometry_sdata = hires
     else:
-        assert coordinate_system in css, (
-            f"The SpatialData object does not have the coordinate system {coordinate_system}."
-        )
-    sdata = sdata.filter_by_coordinate_system(coordinate_system)
-
-    if table_name is None:
-        assert len(sdata.tables) == 1, (
-            "When the table_name is not specified, the SpatialData object must have exactly one table. The specified "
-            f"sdata object, after being filtered for the coordinate system {coordinate_system}, has "
-            f"{len(sdata.tables)} tables."
-        )
-        table_name = next(iter(sdata.tables))
-    else:
-        assert table_name in sdata.tables, f"The table {table_name} is not present in the SpatialData object."
-
-    table = sdata[table_name]
-    (
-        region,
-        _,
-        instance_key,
-    ) = get_table_keys(table)
-    if not isinstance(region, list):
-        region = [region]
-
-    # the table needs to annotate exactly one Shapes element
-    if len(region) != 1:
-        raise ValueError(f"The table needs to annotate exactly one element. Found {len(region)}.")
-    if region[0] not in sdata.shapes and region[0] not in sdata.labels:
-        raise ValueError("The table needs to annotate a Shapes or Labels element, not Points.")
-    element = sdata[region[0]]
-    region_name = region[0]
-
-    # convert polygons, multipolygons and labels to circles
-    shapes = to_circles(element)
-    circles_sdata = SpatialData(tables={table_name: table}, shapes={region_name: shapes})
-
-    joined_elements, new_table = join_spatialelement_table(
-        sdata=circles_sdata, spatial_element_names=region_name, table_name=table_name, how="inner", match_rows="left"
-    )
-
-    # the table after the filtering must not be empty
-    assert len(new_table) > 0, (
-        "The table does not annotate any geometry in the Shapes element. This could also be caused by a mismatch "
-        "between the type of the indices of the geometries and the type of the INSTANCE_KEY column of the table."
-    )
-
-    sdata_pre_rasterize = SpatialData(
-        tables={table_name: new_table}, shapes={region_name: joined_elements[region_name]}
-    )
-
-    # process the images
-    downscaled_images_hires = {}
-    downscaled_images_lowres = {}
-    sdata_post_rasterize = None
-    if not include_images:
-        sdata_post_rasterize = sdata_pre_rasterize
-    else:
-        sdata_images = sdata.subset(element_names=list(sdata.images.keys()))
-        for image_name, image in sdata_images.images.items():
-            sdata_pre_rasterize[image_name] = image
-        bb = get_extent(sdata_images, coordinate_system=coordinate_system)
-
-        parameters_dict = {"x": "target_width", "y": "target_height", "z": "target_depth"}
-        longest_side = max(bb, key=bb.get)
-        parameter_hires = {parameters_dict[longest_side]: DOWNSCALED_HIRES_LENGTH}
-        parameter_lowres = {parameters_dict[longest_side]: DOWNSCALED_LOWRES_LENGTH}
-        downscaled_hires = transform_to_data_extent(
-            sdata_pre_rasterize, coordinate_system=coordinate_system, maintain_positioning=False, **parameter_hires
-        )
-        downscaled_lowres = transform_to_data_extent(
-            sdata_pre_rasterize, coordinate_system=coordinate_system, maintain_positioning=False, **parameter_lowres
-        )
-        for image_name in sdata_images.images.keys():
-            downscaled_images_hires[image_name] = downscaled_hires[image_name]
-            downscaled_images_lowres[image_name] = downscaled_lowres[image_name]
-
-        if sdata_post_rasterize is None:
-            sdata_post_rasterize = downscaled_hires
-
-    adata = sdata_post_rasterize[table_name].copy()
-
-    if len(downscaled_images_hires) > 0:
-        for image_name in sdata_images.images.keys():
-            if "spatial" not in adata.uns:
-                adata.uns["spatial"] = {}
-            adata.uns["spatial"][image_name] = {}
-            adata.uns["spatial"][image_name]["images"] = {
-                "hires": downscaled_images_hires[image_name].data.compute().transpose([1, 2, 0]),
-                "lowres": downscaled_images_lowres[image_name].data.compute().transpose([1, 2, 0]),
-            }
-            try:
-                adata.uns["spatial"][image_name]["scalefactors"] = {
-                    "tissue_hires_scalef": 1.0,
-                    "tissue_lowres_scalef": DOWNSCALED_LOWRES_LENGTH / DOWNSCALED_HIRES_LENGTH,
-                    "spot_diameter_fullres": sdata_post_rasterize.shapes[region_name]["radius"].iloc[0] * 2,
-                }
-            except KeyError:
-                pass
-
+        adata = geometry_sdata.tables[table_name].copy()
     adata.obsm["spatial"] = (
-        get_centroids(sdata_post_rasterize[region_name], coordinate_system=coordinate_system).compute().values
+        get_centroids(geometry_sdata.shapes[region_name], coordinate_system=coordinate_system).compute().to_numpy()
     )
     return adata
 
 
-def from_legacy_anndata(adata: AnnData, rgb: bool | None = None) -> SpatialData:
+def _select_table(
+    sdata: SpatialData, coordinate_system: str | None, table_name: str | None
+) -> tuple[SpatialData, str, str]:
+    coordinate_systems = sdata.coordinate_systems
+    if coordinate_system is None:
+        if len(coordinate_systems) != 1:
+            msg = "The SpatialData object must have exactly one coordinate system. Please specify one."
+            raise ValueError(msg)
+        coordinate_system = coordinate_systems[0]
+    elif coordinate_system not in coordinate_systems:
+        msg = f"The SpatialData object does not have the coordinate system {coordinate_system}."
+        raise ValueError(msg)
+    sdata = sdata.filter_by_coordinate_system(coordinate_system)
+    if table_name is None:
+        if len(sdata.tables) != 1:
+            msg = (
+                "When the table_name is not specified, the SpatialData object must have exactly one table. "
+                "The specified "
+                f"sdata object, after being filtered for the coordinate system {coordinate_system}, has "
+                f"{len(sdata.tables)} tables."
+            )
+            raise ValueError(msg)
+        table_name = next(iter(sdata.tables))
+    elif table_name not in sdata.tables:
+        msg = f"The table {table_name} is not present in the SpatialData object."
+        raise ValueError(msg)
+    return sdata, coordinate_system, table_name
+
+
+def _linked_circles(sdata: SpatialData, table_name: str) -> tuple[SpatialData, str]:
+    table = sdata.tables[table_name]
+    region, _, _ = get_table_keys(table)
+    regions = region if isinstance(region, list) else [region]
+    if len(regions) != 1:
+        msg = f"The table needs to annotate exactly one element. Found {len(regions)}."
+        raise ValueError(msg)
+    region_name = regions[0]
+    if region_name not in sdata.shapes and region_name not in sdata.labels:
+        msg = "The table needs to annotate a Shapes or Labels element, not Points."
+        raise ValueError(msg)
+    # Labels and polygonal shapes use the same legacy circle approximation.
+    shapes = to_circles(sdata[region_name])
+    circles_sdata = SpatialData(tables={table_name: table}, shapes={region_name: shapes})
+    joined_elements, new_table = join_spatialelement_table(
+        sdata=circles_sdata, spatial_element_names=region_name, table_name=table_name, how="inner", match_rows="left"
+    )
+    if len(new_table) == 0:
+        msg = (
+            "The table does not annotate any geometry in the Shapes element. This could also be caused by a mismatch "
+            "between the type of the indices of the geometries and the type of the INSTANCE_KEY column of the table."
+        )
+        raise ValueError(msg)
+    return SpatialData(tables={table_name: new_table}, shapes={region_name: joined_elements[region_name]}), region_name
+
+
+def _render_images(
+    sdata: SpatialData, geometry_sdata: SpatialData, coordinate_system: str
+) -> tuple[SpatialData, SpatialData]:
+    sdata_images = sdata.subset(element_names=list(sdata.images))
+    for image_name, image in sdata_images.images.items():
+        geometry_sdata[image_name] = image
+    bounding_box = get_extent(sdata_images, coordinate_system=coordinate_system)
+    parameters = {"x": "target_width", "y": "target_height", "z": "target_depth"}
+    longest_side = max(bounding_box, key=bounding_box.__getitem__)
+    hires = transform_to_data_extent(
+        geometry_sdata,
+        coordinate_system=coordinate_system,
+        maintain_positioning=False,
+        **{parameters[longest_side]: _DOWNSCALED_HIRES_LENGTH},
+    )
+    lowres = transform_to_data_extent(
+        geometry_sdata,
+        coordinate_system=coordinate_system,
+        maintain_positioning=False,
+        **{parameters[longest_side]: _DOWNSCALED_LOWRES_LENGTH},
+    )
+    return hires, lowres
+
+
+def _add_images(adata: AnnData, hires: SpatialData, lowres: SpatialData, region_name: str) -> None:
+    for image_name in hires.images:
+        if "spatial" not in adata.uns:
+            spatial_metadata: dict[str, object] = {}
+            adata.uns["spatial"] = spatial_metadata
+        # transform_to_data_extent produces single-scale images; SpatialData.images
+        # retains a DataArray | DataTree annotation for its general container contract.
+        hires_image = cast("DataArray", hires.images[image_name])
+        lowres_image = cast("DataArray", lowres.images[image_name])
+        adata.uns["spatial"][image_name] = {
+            "images": {
+                "hires": hires_image.data.compute().transpose([1, 2, 0]),
+                "lowres": lowres_image.data.compute().transpose([1, 2, 0]),
+            }
+        }
+        with suppress(KeyError):
+            adata.uns["spatial"][image_name]["scalefactors"] = {
+                "tissue_hires_scalef": 1.0,
+                "tissue_lowres_scalef": _DOWNSCALED_LOWRES_LENGTH / _DOWNSCALED_HIRES_LENGTH,
+                "spot_diameter_fullres": hires.shapes[region_name]["radius"].iloc[0] * 2,
+            }
+
+
+def from_legacy_anndata(adata: AnnData, *, rgb: bool | None = None) -> SpatialData:
     """Convert (legacy) spatial AnnData object to SpatialData object.
 
     This is useful for parsing a (legacy) spatial AnnData object, for example the ones produced by Scanpy and older
@@ -233,137 +253,89 @@ def from_legacy_anndata(adata: AnnData, rgb: bool | None = None) -> SpatialData:
     adata
         (legacy) spatial AnnData object
     rgb
-        Argument passed to `spatialdata.models.Image2DModel.parse()`. If `None`,
+        Keyword-only argument passed to `spatialdata.models.Image2DModel.parse()`. If `None`,
         3-(4) channels images will be interpreted as RGB(A).
 
     Returns
     -------
     The SpatialData object
 
+    Raises
+    ------
+    TypeError
+        If spatial coordinates are present and observation metadata is not a pandas DataFrame.
+
     Notes
     -----
     The SpatialData object will have one hires and one lowres image for each dataset in the AnnData object.
     """
-    # AnnData keys
-    SPATIAL = "spatial"
-
-    SCALEFACTORS = "scalefactors"
-    TISSUE_HIRES_SCALEF = "tissue_hires_scalef"
-    TISSUE_LOWRES_SCALEF = "tissue_lowres_scalef"
-    SPOT_DIAMETER_FULLRES = "spot_diameter_fullres"
-
-    IMAGES = "images"
-    HIRES = "hires"
-    LOWRES = "lowres"
-    DEFAULT_SCALE_FACTOR = 1.0
-
-    # SpatialData keys
-    REGION = "locations"
-    REGION_KEY = "region"
-    INSTANCE_KEY = "instance_id"
-    SPOT_DIAMETER_FULLRES_DEFAULT = 10
-
-    images = {}
+    images, transformations, diameters = _legacy_images(adata, rgb=rgb)
+    diameter = _spot_diameter(diameters)
     shapes = {}
-    spot_diameter_fullres_list = []
-    shapes_transformations = {}
-
-    if SPATIAL in adata.uns:
-        dataset_ids = list(adata.uns[SPATIAL].keys())
-        for dataset_id in dataset_ids:
-            dataset_data = adata.uns[SPATIAL][dataset_id]
-            keys = set(dataset_data.keys())
-            scalefactors_raw = dataset_data.get(SCALEFACTORS, {}) if isinstance(dataset_data, Mapping) else {}
-            scalefactors = scalefactors_raw if isinstance(scalefactors_raw, Mapping) else {}
-
-            if SPOT_DIAMETER_FULLRES in scalefactors:
-                spot_diameter_fullres_list.append(scalefactors[SPOT_DIAMETER_FULLRES])
-
-            image_data = dataset_data.get(IMAGES, {}) if IMAGES in keys and isinstance(dataset_data, Mapping) else {}
-            if not isinstance(image_data, Mapping):
-                image_data = {}
-            for image_key, image_value in image_data.items():
-                if image_key not in (HIRES, LOWRES):
-                    logger.warning(
-                        "Found non-standard image key '%s' in dataset '%s' - attempting to parse.",
-                        image_key,
-                        dataset_id,
-                    )
-                # prefer scalefactors keyed by the image name, fall back to tissue_<image_key>_scalef
-                # then to legacy hires/lowres names, finally default to 1.0.
-                scalefactor = None
-                scalefactor_source = None
-                if image_key in scalefactors:
-                    scalefactor = scalefactors[image_key]
-                    scalefactor_source = image_key
-                elif f"tissue_{image_key}_scalef" in scalefactors:
-                    scalefactor = scalefactors[f"tissue_{image_key}_scalef"]
-                    scalefactor_source = f"tissue_{image_key}_scalef"
-                elif image_key == HIRES and TISSUE_HIRES_SCALEF in scalefactors:
-                    scalefactor = scalefactors[TISSUE_HIRES_SCALEF]
-                    scalefactor_source = TISSUE_HIRES_SCALEF
-                elif image_key == LOWRES and TISSUE_LOWRES_SCALEF in scalefactors:
-                    scalefactor = scalefactors[TISSUE_LOWRES_SCALEF]
-                    scalefactor_source = TISSUE_LOWRES_SCALEF
-
-                if scalefactor is None:
-                    scalefactor = DEFAULT_SCALE_FACTOR
-                    logger.warning(
-                        "Scale factor missing for image '%s' in dataset '%s'; defaulting to %s",
-                        image_key,
-                        dataset_id,
-                        DEFAULT_SCALE_FACTOR,
-                    )
-                else:
-                    logger.debug(
-                        "Using scalefactor '%s' for image '%s' in dataset '%s'",
-                        scalefactor_source,
-                        image_key,
-                        dataset_id,
-                    )
-
-                transform_name = f"{dataset_id}_{image_key}"
-                image_name = f"{dataset_id}_{image_key}"
-                images[image_name] = Image2DModel.parse(
-                    image_value,
-                    dims=("y", "x", "c"),
-                    transformations={transform_name: Identity()},
-                    rgb=rgb,
-                )
-                shapes_transformations[transform_name] = Scale([scalefactor, scalefactor], axes=("x", "y"))
-
-    # validate the spot_diameter_fullres value
-    spot_diameter_fullres: float
-    if len(spot_diameter_fullres_list) > 0:
-        d = np.array(spot_diameter_fullres_list)
-        if not np.allclose(d, d[0]):
-            logger.warning(
-                "spot_diameter_fullres is not constant across datasets. Using the average value.",
-            )
-            spot_diameter_fullres = d.mean()
-        else:
-            spot_diameter_fullres = d[0]
-    else:
-        logger.warning(
-            f"spot_diameter_fullres is not present. Using {SPOT_DIAMETER_FULLRES_DEFAULT} as default value.",
+    new_table = adata.copy()
+    if "spatial" in adata.obsm:
+        shapes["locations"] = ShapesModel.parse(
+            adata.obsm["spatial"], geometry=0, radius=diameter / 2, transformations=transformations
         )
-        spot_diameter_fullres = SPOT_DIAMETER_FULLRES_DEFAULT
-
-    # parse and prepare the shapes
-    if SPATIAL in adata.obsm:
-        xy = adata.obsm[SPATIAL]
-        radius = spot_diameter_fullres / 2
-        shapes[REGION] = ShapesModel.parse(xy, geometry=0, radius=radius, transformations=shapes_transformations)
-
-        # link the shapes to the table
-        new_table = adata.copy()
-        if TableModel.ATTRS_KEY in new_table.uns:
-            del new_table.uns[TableModel.ATTRS_KEY]
-        assert isinstance(new_table.obs, pd.DataFrame)
-        new_table.obs[REGION_KEY] = REGION
-        new_table.obs[REGION_KEY] = new_table.obs[REGION_KEY].astype("category")
-        new_table.obs[INSTANCE_KEY] = shapes[REGION].index.values
-        new_table = TableModel.parse(new_table, region=REGION, region_key=REGION_KEY, instance_key=INSTANCE_KEY)
-    else:
-        new_table = adata.copy()
+        new_table.uns.pop(TableModel.ATTRS_KEY, None)
+        if not isinstance(new_table.obs, pd.DataFrame):
+            msg = "Legacy spatial conversion requires pandas DataFrame observation metadata."
+            raise TypeError(msg)
+        new_table.obs["region"] = "locations"
+        new_table.obs["region"] = new_table.obs["region"].astype("category")
+        new_table.obs["instance_id"] = shapes["locations"].index.to_numpy()
+        new_table = TableModel.parse(new_table, region="locations", region_key="region", instance_key="instance_id")
     return SpatialData(tables={"table": new_table}, images=images, shapes=shapes)
+
+
+def _legacy_images(
+    adata: AnnData, *, rgb: bool | None
+) -> tuple[dict[str, DataArray | DataTree], dict[str, BaseTransformation], list[float]]:
+    images: dict[str, DataArray | DataTree] = {}
+    transformations: dict[str, BaseTransformation] = {}
+    diameters: list[float] = []
+    for dataset_id, dataset in adata.uns.get("spatial", {}).items():
+        keys = set(dataset.keys())
+        scalefactors_raw = dataset.get("scalefactors", {}) if isinstance(dataset, Mapping) else {}
+        scalefactors = scalefactors_raw if isinstance(scalefactors_raw, Mapping) else {}
+        if "spot_diameter_fullres" in scalefactors:
+            diameters.append(scalefactors["spot_diameter_fullres"])
+        image_data = dataset.get("images", {}) if "images" in keys and isinstance(dataset, Mapping) else {}
+        if not isinstance(image_data, Mapping):
+            continue
+        for image_key, image_value in image_data.items():
+            if image_key not in ("hires", "lowres"):
+                logger.warning(
+                    "Found non-standard image key '%s' in dataset '%s' - attempting to parse.", image_key, dataset_id
+                )
+            scalefactor = _scale_factor(scalefactors, dataset_id, image_key)
+            image_name = f"{dataset_id}_{image_key}"
+            images[image_name] = Image2DModel.parse(
+                image_value, dims=("y", "x", "c"), transformations={image_name: Identity()}, rgb=rgb
+            )
+            transformations[image_name] = Scale([scalefactor, scalefactor], axes=("x", "y"))
+    return images, transformations, diameters
+
+
+def _scale_factor(scalefactors: Mapping[str, float | None], dataset_id: str, image_key: str) -> float:
+    # A direct image-name entry takes precedence, including an explicit None.
+    source = image_key if image_key in scalefactors else f"tissue_{image_key}_scalef"
+    scalefactor = scalefactors.get(source)
+    if scalefactor is None:
+        logger.warning(
+            "Scale factor missing for image '%s' in dataset '%s'; defaulting to %s", image_key, dataset_id, 1.0
+        )
+        return 1.0
+    logger.debug("Using scalefactor '%s' for image '%s' in dataset '%s'", source, image_key, dataset_id)
+    return scalefactor
+
+
+def _spot_diameter(diameters: list[float]) -> float:
+    if not diameters:
+        logger.warning("spot_diameter_fullres is not present. Using %s as default value.", _DEFAULT_SPOT_DIAMETER)
+        return _DEFAULT_SPOT_DIAMETER
+    values = np.array(diameters)
+    if not np.allclose(values, values[0]):
+        logger.warning("spot_diameter_fullres is not constant across datasets. Using the average value.")
+        return values.mean()
+    return values[0]

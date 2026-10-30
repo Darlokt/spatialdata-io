@@ -37,7 +37,7 @@ class TestDiscoverLayout:
         assert not hasattr(layout, "__dict__")
 
         with pytest.raises(FrozenInstanceError):
-            layout.image = None  # type: ignore[misc, read-only]  # Verify the runtime frozen dataclass contract.
+            layout.image = None  # pyrefly: ignore[read-only] - Verify the runtime frozen dataclass contract.
 
     def test_optional_image_absence(self, tmp_path: Path) -> None:
         _write_artifacts(tmp_path)

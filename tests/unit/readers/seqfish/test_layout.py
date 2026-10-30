@@ -73,7 +73,7 @@ class TestMakeSelection:
                 include_labels=False,
                 include_transcripts=False,
                 include_shapes=False,
-                shape_geometry=geometry,  # type: ignore[bad-argument-type, arg-type]  # Validate untyped public choices even for excluded products.
+                shape_geometry=geometry,  # pyrefly: ignore[bad-argument-type] - Validate untyped public choices even for excluded products.
                 rois=None,
             )
 
@@ -88,7 +88,7 @@ class TestMakeSelection:
                 include_transcripts=False,
                 include_shapes=False,
                 shape_geometry="polygons",
-                rois=rois,  # type: ignore[bad-argument-type, arg-type]  # Exercise malformed caller-owned selections.
+                rois=rois,  # pyrefly: ignore[bad-argument-type] - Exercise malformed caller-owned selections.
             )
 
     def test_duplicate_rois_fail(self) -> None:
@@ -104,7 +104,7 @@ class TestMakeSelection:
                 include_transcripts=False,
                 include_shapes=False,
                 shape_geometry="polygons",
-                rois=rois,  # type: ignore[bad-argument-type, arg-type]  # Reject unordered values from untyped callers.
+                rois=rois,  # pyrefly: ignore[bad-argument-type] - Reject unordered values from untyped callers.
             )
 
 

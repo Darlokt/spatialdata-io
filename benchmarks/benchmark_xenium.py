@@ -55,7 +55,8 @@ def get_paths() -> tuple[Path, Path]:
     path_write = path / "data_benchmark.zarr"
 
     if not path_read.exists():
-        raise ValueError(f"Data directory not found: {path_read}")
+        msg = f"Data directory not found: {path_read}"
+        raise ValueError(msg)
 
     return path_read, path_write
 

@@ -51,8 +51,10 @@ from spatialdata_io import generic_to_zarr
 
 generic_to_zarr("image.ome.tif", "sample.zarr", data_axes="cyx")
 generic_to_zarr(
-    "regions.geojson", "sample.zarr",
-    coordinate_system="source_pixels", invalid_geometries="keep",
+    "regions.geojson",
+    "sample.zarr",
+    coordinate_system="source_pixels",
+    invalid_geometries="keep",
 )
 ```
 

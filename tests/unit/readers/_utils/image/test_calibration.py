@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from ome_types import OME
-from ome_types.model import Image, Pixels
+from ome_types.model import Image, Pixels, UnitsLength
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import TiffMetadata
@@ -78,7 +78,7 @@ class TestOmePixelSizesUm:
         # Bypass Pydantic's own nonpositive-value rejection to exercise conversion
         # invariants independently of the external model's validation policy.
         pixels.__dict__["physical_size_x"] = value
-        pixels.physical_size_x_unit = unit  # pyrefly: ignore[bad-assignment] - Runtime unit validation belongs to the third-party model.
+        pixels.physical_size_x_unit = UnitsLength(unit)
         with pytest.raises(ReaderFormatError, match="PhysicalSizeX") as caught:
             ome_pixel_sizes_um(_metadata(pixels), series=0, axes=("x", "y"), context=_CONTEXT)
         assert "source.tif" in str(caught.value)

@@ -1,1 +1,1 @@
-# ASV benchmarks for spatialdata-io
+"""ASV benchmark suite for spatialdata-io."""

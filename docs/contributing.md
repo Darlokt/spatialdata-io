@@ -149,28 +149,62 @@ The `.venv` directory is typically automatically discovered by IDEs such as VS C
 ## Code-style
 
 This package uses [pre-commit][]-style hooks to enforce consistent code-styles.
-We recommend running them with [prek][], a fast, drop-in replacement for `pre-commit` that reads the same `.pre-commit-config.yaml`.
+Run them with [prek][], which reads `.pre-commit-config.yaml` and provides built-in file checks.
 On every commit, the checks will either automatically fix issues with the code, or raise an error message.
 
-To enable the checks locally, install [prek][] (e.g. with `uv tool install prek`) and run
+Install the development and test dependencies before enabling the hooks:
 
 ```bash
-prek install
+uv sync --group dev --group test
+uv run --no-sync prek install
 ```
 
-in the root of the repository.
-prek will automatically download all dependencies when it is run for the first time.
+Run these commands in the repository root. Hooks use prek's built-ins and run local tools with `uv run --no-sync`,
+reusing the project's `.venv` without creating separate hook environments.
+Run `uv sync --group dev --group test` again after development dependencies change.
+
+Run all checks manually with `uv run --no-sync prek run --all-files`.
+
+The `priorities` block at the top of `.pre-commit-config.yaml` defines the execution order.
+Hooks reference these names; hooks with the same priority may run concurrently:
+
+| Priority | Hooks | File access |
+| --- | --- | --- |
+| `line-endings` | `mixed-line-ending` | Normalizes text files to LF line endings. |
+| `trailing-whitespace` | `trailing-whitespace` | Removes trailing whitespace from text files. |
+| `final-newline` | `end-of-file-fixer` | Fixes final newlines in text files. |
+| `project-config` | `pyproject-fmt` | Formats project TOML files before other `uv run` hooks read the configuration. |
+| `fixes` | `ruff-check`, `pretty-format-json`, `zizmor` | Apply fixes to Python/notebooks, JSON and GitHub Actions YAML respectively; their target files do not overlap. |
+| `format` | `ruff-format` | Formats Python, stubs, notebooks and Python code blocks in Markdown after Ruff's lint fixes. |
+| `checks` | `pyrefly`, `detect-private-key`, `check-case-conflict`, `check-merge-conflict` | Read source files or filenames after all file edits finish. |
+
+The text fixers run separately because they can modify the same files.
+`require_serial` prevents concurrent batches of a single hook; priorities control concurrency between different hooks.
+
+Ruff's strict linting and formatting settings and Pyrefly's strict type-checking settings live in `pyproject.toml`.
+Pyrefly is the project's only type checker and checks `benchmarks`, `src`, and `tests` with `uv run --no-sync pyrefly check`.
+
+After the same dependency setup, Hatch's check commands use these tools and settings from the project's `.venv`:
+
+```bash
+hatch check code   # Ruff lint checks; add --fix to apply fixes
+hatch check fmt    # Ruff formatting checks, including Python code blocks in Markdown
+hatch check types  # Pyrefly type checks
+```
+
+The older `hatch fmt` command also uses the project tools.
 
 If you didn’t run the checks locally, the `Pre-commit checks` job of the GitHub Actions CI runs them on your pull request and reports any failures.
 We strongly encourage installing and running the checks locally first to understand their usage.
 
 Finally, most editors have an _autoformat on save_ feature.
-Consider enabling this option for [ruff][ruff-editors] and [biome][biome-editors].
+Consider enabling this option for [Ruff][ruff-editors].
+Prek's built-in JSON formatter preserves key order and uses four-space indentation.
+JSONC and CSS files are not automatically formatted.
 
 [pre-commit]: https://pre-commit.com/
 [prek]: https://prek.j178.dev/
 [ruff-editors]: https://docs.astral.sh/ruff/integrations/
-[biome-editors]: https://biomejs.dev/guides/integrate-in-editor/
 
 (writing-tests)=
 

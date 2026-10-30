@@ -63,8 +63,8 @@ class TestPackage:
 
     def test_path_is_required_at_runtime(self) -> None:
         with pytest.raises(TypeError, match="path"):
-            dbit()  # type: ignore[missing-argument, call-arg]  # Exercise the required public argument.
+            dbit()  # pyrefly: ignore[missing-argument] - Exercise the required public argument.
 
     def test_options_cannot_be_positional(self) -> None:
         with pytest.raises(TypeError, match="positional"):
-            dbit("dataset", "table.h5ad")  # type: ignore[bad-argument-count, call-arg]  # Exercise keyword-only options.
+            dbit("dataset", "table.h5ad")  # pyrefly: ignore[bad-argument-count] - Exercise keyword-only options.

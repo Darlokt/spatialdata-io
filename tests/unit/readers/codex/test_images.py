@@ -31,11 +31,11 @@ class TestValidateImageOptions:
     @pytest.mark.parametrize("series", [-1, True, 1.5])
     def test_invalid_series(self, series: float) -> None:
         with pytest.raises(ValueError, match="tiff_series"):
-            _validate_image_options(None, series)  # type: ignore[bad-argument-type, arg-type]  # Untyped caller input.
+            _validate_image_options(None, series)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
 
     def test_invalid_axes_type(self) -> None:
         with pytest.raises(TypeError, match="data_axes"):
-            _validate_image_options(["c", "y", "x"], None)  # type: ignore[bad-argument-type, arg-type]  # Untyped caller input.
+            _validate_image_options(["c", "y", "x"], None)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
 
     @pytest.mark.parametrize(
         "read",

@@ -4,7 +4,7 @@ import importlib.util
 import sys
 import tarfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pooch
 import pytest
@@ -12,6 +12,8 @@ import requests
 
 if TYPE_CHECKING:
     from types import ModuleType
+
+    from scripts.test_data_downloader.manifest import TestDataset as TestDatasetType
 
 
 SCRIPT_DIR = Path(__file__).parents[2] / "scripts" / "test_data_downloader"
@@ -21,7 +23,8 @@ SHA256 = "sha256:" + "0" * 64
 def _load_module(module_name: str, module_path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not import {module_path}")
+        msg = f"Could not import {module_path}"
+        raise RuntimeError(msg)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -32,7 +35,7 @@ manifest = _load_module("manifest", SCRIPT_DIR / "manifest.py")
 download_test_data = _load_module("downloader", SCRIPT_DIR / "downloader.py")
 
 
-def _make_dataset(
+def _make_dataset(  # noqa: PLR0913 -- fixture options mirror the dataset fields varied by these tests.
     key: str = "example",
     *,
     group: str = "group",
@@ -41,7 +44,7 @@ def _make_dataset(
     source: str = "example",
     test_path: str = "",
     doi: str = "",
-) -> Any:
+) -> TestDatasetType:
     return download_test_data.TestDataset(
         key=key,
         group=group,
@@ -63,14 +66,14 @@ class TestFetchDataset:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         dataset = _make_dataset()
-        seen_create: dict[str, Any] = {}
-        seen_fetch: dict[str, Any] = {}
+        seen_create: dict[str, object] = {}
+        seen_fetch: dict[str, object] = {}
 
         class Manager:
-            def fetch(self, file_name: str, processor: Any = None) -> None:
+            def fetch(self, file_name: str, processor: object | None = None) -> None:
                 seen_fetch.update(file_name=file_name, processor=processor)
 
-        def create(**kwargs: Any) -> Manager:
+        def create(**kwargs: object) -> Manager:
             seen_create.update(kwargs)
             return Manager()
 
@@ -87,8 +90,9 @@ class TestFetchDataset:
             "retry_if_failed": download_test_data.DOWNLOAD_RETRIES,
         }
         assert seen_fetch["file_name"] == archive_name
-        assert isinstance(seen_fetch["processor"], pooch.Unzip)
-        assert seen_fetch["processor"].extract_dir == dataset.extracted_dir
+        processor = seen_fetch["processor"]
+        assert isinstance(processor, pooch.Unzip)
+        assert processor.extract_dir == dataset.extracted_dir
 
     def test_loads_hashes_and_fetches_all_files_from_doi_registry(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -98,7 +102,8 @@ class TestFetchDataset:
         registry_loaded = False
 
         class Manager:
-            registry: dict[str, str] = {}
+            def __init__(self) -> None:
+                self.registry: dict[str, str] = {}
 
             @property
             def registry_files(self) -> list[str]:
@@ -116,7 +121,7 @@ class TestFetchDataset:
                 assert self.registry[file_name].startswith("md5:")
                 fetched.append(file_name)
 
-        def create(**kwargs: Any) -> Manager:
+        def create(**kwargs: object) -> Manager:
             assert kwargs == {
                 "path": tmp_path / dataset.extracted_dir,
                 "base_url": "doi:10.5281/zenodo.123/",
@@ -136,12 +141,15 @@ class TestFetchDataset:
         dataset = _make_dataset("doi", doi="10.5281/zenodo.123")
 
         class Manager:
-            registry_files: list[str] = []
+            registry_files: tuple[str, ...] = ()
 
             def load_registry_from_doi(self) -> None:
                 return None
 
-        monkeypatch.setattr(download_test_data.pooch, "create", lambda **kwargs: Manager())
+        def create(**_kwargs: object) -> Manager:
+            return Manager()
+
+        monkeypatch.setattr(download_test_data.pooch, "create", create)
 
         with pytest.raises(ValueError, match="contains no files"):
             download_test_data._fetch_dataset(dataset, tmp_path, tmp_path / dataset.extracted_dir)
@@ -169,13 +177,13 @@ class TestFetchDataset:
         )
         extracted = tmp_path / "staged"
         extracted.mkdir()
-        seen_create: dict[str, Any] = {}
+        seen_create: dict[str, object] = {}
 
         class Manager:
             def fetch(self, file_name: str) -> str:
                 return str(first if file_name == "asset-0" else second)
 
-        def create(**kwargs: Any) -> Manager:
+        def create(**kwargs: object) -> Manager:
             seen_create.update(kwargs)
             return Manager()
 
@@ -373,7 +381,7 @@ extract = true
             doi=doi,
         )
 
-        with pytest.raises(ValueError, match="exactly one source|requires both url and known_hash"):
+        with pytest.raises(ValueError, match=r"exactly one source|requires both url and known_hash"):
             manifest.validate_datasets((dataset,))
 
     @pytest.mark.parametrize("target", ["", "/absolute", "../outside", r"C:\outside", r"nested\..\outside"])
@@ -408,7 +416,7 @@ extract = true
             group="group",
             extracted_dir="example",
             source="source",
-            assets=(manifest.DatasetAsset("https://example.com/file", SHA256, ".", extract=1),),  # type: ignore[arg-type]
+            assets=(manifest.DatasetAsset("https://example.com/file", SHA256, ".", extract=1),),
         )
 
         with pytest.raises(ValueError, match="extract must be a boolean"):
@@ -510,11 +518,11 @@ class TestDownloadDataset:
     ) -> None:
         dataset = _make_dataset("existing")
         (tmp_path / dataset.extracted_dir).mkdir()
-        monkeypatch.setattr(
-            download_test_data,
-            "_fetch_dataset",
-            lambda *args: pytest.fail("download should have been skipped"),
-        )
+
+        def unexpected_fetch(_dataset: TestDatasetType, _temporary_path: Path, _extracted_path: Path) -> None:
+            pytest.fail("download should have been skipped")
+
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", unexpected_fetch)
 
         download_test_data.download_dataset(dataset, tmp_path, force=False)
 
@@ -526,7 +534,7 @@ class TestDownloadDataset:
         target.mkdir()
         (target / "old.txt").write_text("old", encoding="utf-8")
 
-        def fetch(dataset: object, temporary_path: Path, extracted_path: Path) -> None:
+        def fetch(_dataset: TestDatasetType, _temporary_path: Path, extracted_path: Path) -> None:
             (extracted_path / "payload.txt").write_text("ok", encoding="utf-8")
 
         monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
@@ -539,8 +547,9 @@ class TestDownloadDataset:
     def test_wraps_pooch_download_errors(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         dataset = _make_dataset("error")
 
-        def fetch(dataset: object, temporary_path: Path, extracted_path: Path) -> None:
-            raise requests.HTTPError("403 Client Error")
+        def fetch(_dataset: TestDatasetType, _temporary_path: Path, _extracted_path: Path) -> None:
+            msg = "403 Client Error"
+            raise requests.HTTPError(msg)
 
         monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
 
@@ -556,8 +565,9 @@ class TestDownloadDataset:
         existing = target / "existing.txt"
         existing.write_text("keep", encoding="utf-8")
 
-        def fetch(*_args: object) -> None:
-            raise requests.HTTPError("download failed")
+        def fetch(_dataset: TestDatasetType, _temporary_path: Path, _extracted_path: Path) -> None:
+            msg = "download failed"
+            raise requests.HTTPError(msg)
 
         monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
 
@@ -571,7 +581,7 @@ class TestDownloadDataset:
         target = tmp_path / dataset.extracted_dir
         target.write_text("old", encoding="utf-8")
 
-        def fetch(_dataset: object, _temporary_path: Path, extracted_path: Path) -> None:
+        def fetch(_dataset: TestDatasetType, _temporary_path: Path, extracted_path: Path) -> None:
             (extracted_path / "payload.txt").write_text("new", encoding="utf-8")
 
         monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
@@ -583,7 +593,11 @@ class TestDownloadDataset:
 
     def test_reports_download_without_expected_contents(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         dataset = _make_dataset("empty")
-        monkeypatch.setattr(download_test_data, "_fetch_dataset", lambda *args: None)
+
+        def fetch(_dataset: TestDatasetType, _temporary_path: Path, _extracted_path: Path) -> None:
+            return None
+
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
 
         with pytest.raises(download_test_data.DatasetDownloadError, match="expected directory"):
             download_test_data.download_dataset(dataset, tmp_path, force=False)
@@ -598,7 +612,7 @@ class TestMain:
         third = _make_dataset("third")
         attempted: list[str] = []
 
-        def download_dataset(dataset: Any, output: Path, force: bool) -> None:
+        def download_dataset(dataset: TestDatasetType, output: Path, *, force: bool) -> None:
             attempted.append(dataset.key)
             assert output == tmp_path
             assert not force
@@ -627,8 +641,10 @@ class TestMain:
         second = _make_dataset("second")
         attempted: list[str] = []
 
-        def download_dataset(dataset: Any, output: Path, force: bool) -> None:
+        def download_dataset(dataset: TestDatasetType, output: Path, *, force: bool) -> None:
             attempted.append(dataset.key)
+            assert output == tmp_path
+            assert not force
             if dataset == first:
                 raise download_test_data.DatasetDownloadError(dataset, "HTTP 403 Forbidden")
 

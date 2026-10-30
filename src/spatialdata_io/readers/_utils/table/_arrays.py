@@ -141,7 +141,7 @@ def as_csr_array(
         else:
             # scipy-stubs does not model the public sparse base classes as
             # accepted by csr_array, although SciPy supports this conversion.
-            result = sparse.csr_array(sparse_data, copy=False)  # type: ignore[call-overload]
+            result = sparse.csr_array(sparse_data, copy=False)  # pyrefly: ignore[no-matching-overload]
             result = _canonicalize_csr(result, owns_data=True)
     elif type(data) is np.ndarray:
         _validate_two_dimensions(data)

@@ -33,13 +33,13 @@ class TestValidateImageOptions:
 
     def test_invalid_axes_type(self) -> None:
         with pytest.raises(TypeError, match="data_axes"):
-            _validate_image_options(["y", "x"], 0, 0)  # type: ignore[bad-argument-type, arg-type]  # Untrusted caller input.
+            _validate_image_options(["y", "x"], 0, 0)  # pyrefly: ignore[bad-argument-type] - Untrusted caller input.
 
     @pytest.mark.parametrize("value", [-1, True, 0.5, None])
     @pytest.mark.parametrize("option", ["series", "level"])
     def test_invalid_tiff_selection(self, value: float | None, option: str) -> None:
         with pytest.raises(ValueError, match=f"tiff_{option}"):
-            _validate_image_options(None, value if option == "series" else 0, value if option == "level" else 0)  # type: ignore[bad-argument-type, arg-type]  # Untrusted caller input.
+            _validate_image_options(None, value if option == "series" else 0, value if option == "level" else 0)  # pyrefly: ignore[bad-argument-type] - Untrusted caller input.
 
     @pytest.mark.parametrize("axes", [None, "YX", "YXS", "TZCYX"])
     def test_valid_options(self, axes: str | None) -> None:

@@ -20,7 +20,8 @@ def _load_dataset_manifest() -> ModuleType:
     manifest_path = Path(__file__).parents[1] / "scripts" / "test_data_downloader" / "manifest.py"
     spec = importlib.util.spec_from_file_location("manifest", manifest_path)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not import {manifest_path}")
+        msg = f"Could not import {manifest_path}"
+        raise RuntimeError(msg)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

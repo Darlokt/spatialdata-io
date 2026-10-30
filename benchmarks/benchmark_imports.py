@@ -32,9 +32,11 @@ import sys
 def _import_time(statement: str) -> float:
     """Time an import in a fresh subprocess. Returns seconds."""
     code = f"import time; t0=time.perf_counter(); {statement}; print(time.perf_counter()-t0)"
-    result = subprocess.run(
+    # `statement` is supplied only by the source-controlled benchmark methods.
+    result = subprocess.run(  # noqa: S603
         [sys.executable, "-c", code],
         capture_output=True,
+        check=False,
         text=True,
     )
     if result.returncode != 0:
@@ -52,7 +54,7 @@ class ImportBenchmark:
 
     # ASV settings tuned for subprocess-based import timing:
     timeout = 120  # seconds before ASV kills a benchmark; generous since each
-    # call spawns a subprocess (~2s each × 10 repeats = ~20s worst case)
+    # call spawns a subprocess (about 2s each, 10 repeats, 20s worst case)
     repeat = 5  # number of timing samples ASV collects; high because import
     # times have variance from OS caching / disk I/O / background load;
     # ASV reports the median and IQR from these samples

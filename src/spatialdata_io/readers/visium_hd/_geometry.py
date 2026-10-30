@@ -9,7 +9,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
-from pyogrio.errors import DataSourceError, GeometryError  # type: ignore[import-untyped]  # Pyogrio has no type marker.
+from pyogrio.errors import DataSourceError, GeometryError
 from shapely.errors import GEOSException
 from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity

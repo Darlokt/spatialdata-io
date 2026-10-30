@@ -39,7 +39,7 @@ class DatasetDownloadError(RuntimeError):
         super().__init__(f"{dataset.key}: {reason}")
 
 
-def download_dataset(dataset: TestDataset, output: Path, force: bool) -> None:
+def download_dataset(dataset: TestDataset, output: Path, *, force: bool) -> None:
     """Download, verify, and install one dataset.
 
     All network and extraction work is staged in a temporary directory below
@@ -87,8 +87,6 @@ def download_dataset(dataset: TestDataset, output: Path, force: bool) -> None:
             # The temporary directory is below output, so this is a same-filesystem rename in normal operation.
             shutil.move(extracted_path, target)
             print(f"Downloaded {dataset.key} to {target}")
-    except DatasetDownloadError:
-        raise
     except (requests.exceptions.RequestException, tarfile.TarError, ValueError, zipfile.BadZipFile, OSError) as exc:
         raise DatasetDownloadError(dataset, str(exc)) from exc
 
@@ -118,7 +116,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     failures: list[DatasetDownloadError] = []
     for dataset in _selected_datasets(args.dataset, args.group):
         try:
-            download_dataset(dataset, args.output, args.force)
+            download_dataset(dataset, args.output, force=args.force)
         except DatasetDownloadError as exc:
             failures.append(exc)
             print(f"ERROR: {exc}", file=sys.stderr)
@@ -174,7 +172,8 @@ def _fetch_dataset(dataset: TestDataset, temporary_path: Path, extracted_path: P
         # DOI repositories publish a per-file registry; Pooch loads its hashes and verifies each fetch.
         manager.load_registry_from_doi()
         if not manager.registry_files:
-            raise ValueError(f"DOI repository {dataset.doi!r} contains no files")
+            msg = f"DOI repository {dataset.doi!r} contains no files"
+            raise ValueError(msg)
         for file_name in manager.registry_files:
             manager.fetch(file_name)
         return
@@ -208,7 +207,8 @@ def _fetch_assets(dataset: TestDataset, temporary_path: Path, extracted_path: Pa
     for index, asset in enumerate(dataset.assets):
         fetched = manager.fetch(f"asset-{index}")
         if not isinstance(fetched, str):
-            raise TypeError(f"Pooch returned an unexpected path collection for dataset asset {index}.")
+            msg = f"Pooch returned an unexpected path collection for dataset asset {index}."
+            raise TypeError(msg)
         _install_asset(Path(fetched), asset, extracted_path)
 
 

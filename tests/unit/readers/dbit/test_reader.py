@@ -32,7 +32,7 @@ class TestValidateGridOptions:
     )
     def test_invalid_dataset_id(self, dataset_id: str | int) -> None:
         with pytest.raises(ValueError, match="dataset_id"):
-            _validate_grid_options(dataset_id, include_border=True, border_scale=1.0)  # type: ignore[bad-argument-type, arg-type]  # Exercise untrusted caller types.
+            _validate_grid_options(dataset_id, include_border=True, border_scale=1.0)  # pyrefly: ignore[bad-argument-type] - Exercise untrusted caller types.
 
     @pytest.mark.parametrize("dataset_id", [None, "sample", "sample_1-2.3", "échantillon"])
     def test_valid_dataset_id(self, dataset_id: str | None) -> None:
@@ -41,12 +41,12 @@ class TestValidateGridOptions:
     @pytest.mark.parametrize("include_border", [0, 1, "true", None])
     def test_invalid_boolean(self, include_border: int | str | None) -> None:
         with pytest.raises(TypeError, match="include_border"):
-            _validate_grid_options("sample", include_border=include_border, border_scale=1.0)  # type: ignore[bad-argument-type, arg-type]  # Exercise untrusted caller types.
+            _validate_grid_options("sample", include_border=include_border, border_scale=1.0)  # pyrefly: ignore[bad-argument-type] - Exercise untrusted caller types.
 
     @pytest.mark.parametrize("border_scale", [True, "1", None])
     def test_invalid_scale_type(self, *, border_scale: bool | str | None) -> None:
         with pytest.raises(TypeError, match="border_scale"):
-            _validate_grid_options("sample", include_border=True, border_scale=border_scale)  # type: ignore[bad-argument-type, arg-type]  # Exercise untrusted caller types.
+            _validate_grid_options("sample", include_border=True, border_scale=border_scale)  # pyrefly: ignore[bad-argument-type] - Exercise untrusted caller types.
 
     @pytest.mark.parametrize("include_border", [True, False])
     @pytest.mark.parametrize("border_scale", [-1.0, 4.0, float("nan"), float("inf"), float("-inf")])

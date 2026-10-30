@@ -92,7 +92,7 @@ class TestMakeSelection:
                 include_cell_boundaries=False,
                 include_table=False,
                 include_transcripts=False,
-                z_layers=indexes,  # type: ignore[bad-argument-type, arg-type]  # Validate malformed untyped caller input.
+                z_layers=indexes,  # pyrefly: ignore[bad-argument-type] - Validate malformed untyped caller input.
             )
 
     @pytest.mark.parametrize("indexes", [[], [-1], [True], [1.0], [1, 1]])
@@ -103,7 +103,7 @@ class TestMakeSelection:
                 include_cell_boundaries=False,
                 include_table=False,
                 include_transcripts=False,
-                z_layers=indexes,  # type: ignore[bad-argument-type, arg-type]  # Runtime integer and duplicate validation.
+                z_layers=indexes,  # pyrefly: ignore[bad-argument-type] - Runtime integer and duplicate validation.
             )
 
 
@@ -248,9 +248,9 @@ class TestDiscoverLayout:
     @pytest.mark.parametrize("name", ["", " ", ".", "..", "a/b", "a\\b", "a\x00b", 1])
     def test_invalid_name_overrides(self, tmp_path: Path, name: str | int) -> None:
         with pytest.raises((ValueError, TypeError), match="region_name"):
-            discover_layout(tmp_path, _selection(), region_name=name)  # type: ignore[bad-argument-type, arg-type]  # Validate untyped public names before I/O.
+            discover_layout(tmp_path, _selection(), region_name=name)  # pyrefly: ignore[bad-argument-type] - Validate untyped public names before I/O.
         with pytest.raises((ValueError, TypeError), match="slide_name"):
-            discover_layout(tmp_path, _selection(), slide_name=name)  # type: ignore[bad-argument-type, arg-type]  # Both names share the same declared boundary.
+            discover_layout(tmp_path, _selection(), slide_name=name)  # pyrefly: ignore[bad-argument-type] - Both names share the same declared boundary.
 
     @pytest.mark.parametrize("escape", ["relative_vpt", "artifact"])
     def test_containment(self, tmp_path: Path, escape: str) -> None:

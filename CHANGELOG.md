@@ -27,7 +27,8 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 ### Changed
 
 - Adopted the current `cookiecutter-scverse` template: `hatch`-managed test environments, `uv`-based CI and
-  documentation builds, `mypy` type checking of `src` and `tests`, `biome`/`pyproject-fmt`/`zizmor` pre-commit hooks,
+  documentation builds, strict Pyrefly type checking and Ruff linting configured in `pyproject.toml`,
+  local `pyproject-fmt`/`zizmor` hooks and prek's built-in file checks,
   and Dependabot updates.
 - Reimplemented the existing generic reader as a package over the centralized
   lazy raster utilities. Its Python source argument is now `path`, image options

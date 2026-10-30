@@ -3,13 +3,22 @@
     "project": "spatialdata-io",
     "project_url": "https://github.com/scverse/spatialdata-io",
     "repo": ".",
-    "branches": ["faster-imports", "main"],
+    "branches": [
+        "faster-imports",
+        "main"
+    ],
     "dvcs": "git",
     "environment_type": "virtualenv",
-    "pythons": ["3.13"],
+    "pythons": [
+        "3.13"
+    ],
     "build_command": [],
-    "install_command": ["python -m pip install {build_dir}"],
-    "uninstall_command": ["python -m pip uninstall -y {project}"],
+    "install_command": [
+        "python -m pip install {build_dir}"
+    ],
+    "uninstall_command": [
+        "python -m pip uninstall -y {project}"
+    ],
     "env_dir": ".asv/env",
     "results_dir": ".asv/results",
     "html_dir": ".asv/html",
@@ -19,5 +28,8 @@
     "install_timeout": 600,
     "repeat": 5,
     "processes": 1,
-    "attribute_selection": ["time_*", "peakmem_*"]
+    "attribute_selection": [
+        "time_*",
+        "peakmem_*"
+    ]
 }

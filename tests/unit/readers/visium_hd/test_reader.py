@@ -65,10 +65,10 @@ class TestVisiumHD:
     ) -> None:
         discovery = mocker.spy(_reader, "discover_layout")
         with pytest.raises(error, match=match):
-            visium_hd(tmp_path, **options)  # type: ignore[arg-type]  # pyrefly: ignore[bad-argument-type] - Invalid runtime options.
+            visium_hd(tmp_path, **options)  # pyrefly: ignore[bad-argument-type] - Invalid runtime options.
         discovery.assert_not_called()
 
     @pytest.mark.parametrize("options", [{"data_axes": "CYX"}, {"tiff_series": 0}, {"scale_factors": [2]}])
     def test_microscopy_options_require_images(self, tmp_path: Path, options: dict[str, object]) -> None:
         with pytest.raises(ValueError, match="include_images"):
-            visium_hd(tmp_path, include_images=False, **options)  # type: ignore[arg-type]  # pyrefly: ignore[bad-argument-type] - Runtime option combinations.
+            visium_hd(tmp_path, include_images=False, **options)  # pyrefly: ignore[bad-argument-type] - Runtime option combinations.

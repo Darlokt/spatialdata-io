@@ -25,31 +25,25 @@ dynamic = [
   "version", # allow version to be set by git tags
 ]
 dependencies = [
-  "anndata>=0.12",
+  "anndata>=0.13",
   "click",
   "dask[array,dataframe]",
-  "dask-image",
   "geopandas",
   "h5py",
   "imagecodecs>=2026.5.10",
-  "imageio",
   "numpy",
   "ome-types",
-  "packaging",
-  "pandas",
-  "pillow",
+  "pandas>=3",
   "pyarrow",
+  "pyogrio",
   "pyyaml",
   "readfcs",
   "scanpy",
-  "scikit-image",
   "scipy>=1.15",
   "shapely",
   "spatialdata>=0.7.3a0",
   "tifffile>=2026.5.2",
-  "tqdm",
   "xarray",
-  "xmltodict",
   "zarr>=3.2",
 ]
 # https://docs.pypi.org/project_metadata/#project-urls
@@ -59,26 +53,28 @@ urls.Source = "https://github.com/scverse/spatialdata-io"
 
 [dependency-groups]
 dev = [
-  "mypy",
   "pandas-stubs",
   "pooch>=1.9",
-  "prek",
+  "prek>=0.5",
+  "pyproject-fmt>=2.26",
+  "pyrefly>=1.4",
   "requests",
+  "ruff>=0.17.2",
   "scipy-stubs",
   "twine>=4.0.2",
   "types-geopandas",
   "types-pyyaml",
   "types-shapely",
-  "types-tqdm",
-  "types-xmltodict",
+  "zizmor>=1.28",
 ]
 test = [
-  "coverage>=7.10",
   # PyArrow 22 cannot read two deliberately truncated Xenium test fixtures.
   # https://github.com/scverse/spatialdata-io/issues/334
   "pyarrow!=22",
   "pytest",
+  "pytest-cov>=7",
   "pytest-mock",
+  "pytest-xdist>=3.8",
 ]
 doc = [
   "ipykernel",
@@ -107,6 +103,46 @@ envs.docs.scripts.build = "sphinx-build -M html docs docs/_build -W {args}"
 envs.docs.scripts.clean = "git clean -fdX -- {args:docs}"
 envs.docs.scripts.open = "python -m webbrowser -t docs/_build/html/index.html"
 envs.docs.dependency-groups = [ "doc" ]
+envs.hatch-check-code.detached = true
+envs.hatch-check-code.dependencies = []
+envs.hatch-check-code.scripts.lint-check = """\
+  uv run --no-sync --no-active ruff check --no-fix {env:HATCH_CHECK_CODE_ARGS:} {args:.}\
+  """
+envs.hatch-check-code.scripts.lint-fix = """\
+  uv run --no-sync --no-active ruff check --fix {env:HATCH_CHECK_CODE_ARGS:} {args:.}\
+  """
+envs.hatch-check-code.config-path = "none"
+envs.hatch-check-fmt.detached = true
+envs.hatch-check-fmt.dependencies = []
+envs.hatch-check-fmt.scripts.format-check = """\
+  uv run --no-sync --no-active ruff format --check --diff {env:HATCH_CHECK_FMT_ARGS:} {args:.}\
+  """
+envs.hatch-check-fmt.scripts.format-fix = """\
+  uv run --no-sync --no-active ruff format {env:HATCH_CHECK_FMT_ARGS:} {args:.}\
+  """
+envs.hatch-check-fmt.config-path = "none"
+envs.hatch-check-types.detached = true
+envs.hatch-check-types.dependencies = []
+envs.hatch-check-types.scripts.check = "uv run --no-sync --no-active pyrefly check {args}"
+envs.hatch-check-types.scripts.check-summarize = "uv run --no-sync --no-active pyrefly check --summarize-errors {args}"
+envs.hatch-check-types.scripts.config = "uv run --no-sync --no-active pyrefly dump-config {args}"
+envs.hatch-check-types.scripts.coverage = "uv run --no-sync --no-active pyrefly coverage report {args}"
+envs.hatch-check-types.config-path = "none"
+envs.hatch-static-analysis.detached = true
+envs.hatch-static-analysis.dependencies = []
+envs.hatch-static-analysis.scripts.format-check = """\
+  uv run --no-sync --no-active ruff format --check --diff {env:HATCH_FMT_ARGS:} {args:.}\
+  """
+envs.hatch-static-analysis.scripts.format-fix = """\
+  uv run --no-sync --no-active ruff format {env:HATCH_FMT_ARGS:} {args:.}\
+  """
+envs.hatch-static-analysis.scripts.lint-check = """\
+  uv run --no-sync --no-active ruff check --no-fix {env:HATCH_FMT_ARGS:} {args:.}\
+  """
+envs.hatch-static-analysis.scripts.lint-fix = """\
+  uv run --no-sync --no-active ruff check --fix {env:HATCH_FMT_ARGS:} {args:.}\
+  """
+envs.hatch-static-analysis.config-path = "none"
 envs.hatch-test.matrix = [
   # Test the lowest and highest supported Python versions with normal deps
   { deps = [ "stable" ], python = [ "3.12", "3.14" ] },
@@ -121,74 +157,78 @@ envs.hatch-test.overrides.matrix.deps.env-vars = [
 envs.hatch-test.dependency-groups = [ "dev", "test" ]
 
 [tool.ruff]
+target-version = "py312"
 line-length = 120
-src = [ "src" ]
-extend-include = [ "*.ipynb" ]
+src = [ "benchmarks", "src" ]
+include = [ "*.ipynb", "*.md", "*.py", "*.pyi" ]
+fix = true
+format.indent-style = "space"
+format.quote-style = "double"
+format.line-ending = "lf"
 format.docstring-code-format = true
-lint.select = [
-  "B",      # flake8-bugbear
-  "BLE",    # flake8-blind-except
-  "C4",     # flake8-comprehensions
-  "D",      # pydocstyle
-  "E",      # Error detected by Pycodestyle
-  "F",      # Errors detected by Pyflakes
-  "I",      # isort
-  "RUF100", # Report unused noqa directives
-  "TID",    # flake8-tidy-imports
-  "UP",     # pyupgrade
-  "W",      # Warning detected by Pycodestyle
-]
+lint.select = [ "ALL" ]
 lint.ignore = [
-  "B008", # Errors from function calls in argument defaults. These are fine when the result is immutable.
-  "D100", # Missing docstring in public module
-  "D104", # Missing docstring in public package
-  "D105", # __magic__ methods are often self-explanatory, allow missing docstrings
-  "D107", # Missing docstring in __init__
-  # Disable one in each pair of mutually incompatible rules
-  "D203", # We don’t want a blank line before a class docstring
-  "D213", # <> We want docstrings to start immediately after the opening triple quote
-  "D400", # first line should end with a period [Bug: doesn’t work with single-line docstrings]
-  "D401", # First line should be in imperative mood; try rephrasing
-  "E501", # line too long -> we accept long comment lines; formatter gets rid of long code lines
-  "E731", # Do not assign a lambda expression, use a def -> lambda expression assignments are convenient
-  "E741", # allow I, O, l as variable names -> I is the identity matrix
+  "COM812", # conflicts with the formatter
+  "CPY001", # the repository does not require source-file copyright headers
 ]
-lint.per-file-ignores."*/__init__.py" = [ "F401" ]
-lint.per-file-ignores."docs/*" = [ "I" ]
-lint.per-file-ignores."tests/*" = [ "D" ]
+lint.per-file-ignores."docs/**/*.ipynb" = [
+  "PLR2004", # small verification values are clearer inline in tutorials
+  "S101",    # executable tutorials use assertions to verify stages
+]
+lint.per-file-ignores."docs/conf.py" = [
+  "INP001", # standalone Sphinx configuration; docs is not a package
+]
+lint.per-file-ignores."scripts/test_data_downloader/*.py" = [
+  "INP001", # directory script with local sibling imports, invoked directly by path
+]
+lint.per-file-ignores."scripts/test_data_downloader/downloader.py" = [
+  "T201", # CLI progress, listing and error output are part of the command contract
+]
+lint.per-file-ignores."scripts/test_data_downloader/manifest.py" = [
+  "TRY004", # malformed TOML schema values use the documented ValueError contract
+]
+lint.per-file-ignores."tests/**/*.py" = [
+  "D1",      # test modules, fixtures and test names do not need public API docstrings
+  "PLR2004", # small numeric examples are clearer inline in tests
+  "S101",    # pytest uses assert rewriting
+  "SLF001",  # unit tests exercise private implementation boundaries
+]
 lint.pydocstyle.convention = "numpy"
 
-# Dependencies that ship neither inline types nor stubs. Listed explicitly rather than
-# globally, so that a newly added untyped dependency is still reported.
-[[tool.mypy.overrides]]
-module = [
-  "anndata.*",
-  "dask_image.*",
-  "h5py.*",
-  "multiscale_spatial_image.*",
-  "pooch.*",
-  "pyarrow.*",
-  "rasterio.*",
-  "readfcs.*",
-  "rioxarray.*",
-  "scanpy.*",
-  "spatial_image.*",
-  "spatialdata.*",
-]
-ignore_missing_imports = true
+[tool.pyproject-fmt]
+max_supported_python = "3.14"
 
-[[tool.mypy.overrides]]
-# PyArrow's generated compute functions are runtime attributes that are omitted
-# from the pyarrow 24 type information.
-module = [
-  "spatialdata_io.readers.cosmx",
-  "spatialdata_io.readers.xenium",
+[tool.pyrefly]
+python-version = "3.12"
+project-includes = [
+  "benchmarks",
+  "src",
+  "tests",
 ]
-disable_error_code = [ "attr-defined" ]
+project-excludes = [
+  "build",
+  "dist",
+  "docs/_build",
+]
+search-path = [ ".", "src" ]
+errors.unused-ignore = "error"
+errors.unused-type-ignore = "error"
+check-unannotated-defs = true
+ignore-missing-imports = []
+infer-return-types = "checked"
+infer-with-first-use = true
+min-severity = "warn"
+output-format = "full-text"
+preset = "strict"
+type-ignore-unknown-tag-behavior = "no-effect"
+use-ignore-files = true
 
 [tool.pytest]
 addopts = [
-  "--import-mode=importlib", # allow using test files with same name
+  "--import-mode=importlib",   # allow using test files with same name
+  "--cov=spatialdata_io",
+  "--cov-branch",
+  "--cov-report=term-missing",
 ]
 # used by the third-party test modules that `anndata.tests.helpers` and
 # `spatialdata.testing` pull in, which strict marker checking would otherwise reject
@@ -222,11 +262,13 @@ testpaths = [ "tests" ]
 xfail_strict = true
 
 [tool.coverage]
+run.source = [ "spatialdata_io" ]
 run.omit = [
   "**/test_*.py",
 ]
+run.branch = true
 run.patch = [ "subprocess" ]
-run.source = [ "spatialdata_io" ]
+report.show_missing = true
 
 [tool.cruft]
 skip = [

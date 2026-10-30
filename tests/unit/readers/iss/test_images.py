@@ -40,7 +40,7 @@ class TestValidateDataAxes:
 
     def test_invalid_axes_type(self) -> None:
         with pytest.raises(TypeError, match="data_axes"):
-            _validate_data_axes(["c", "y", "x"])  # type: ignore[bad-argument-type, arg-type]  # Exercise an untyped caller boundary.
+            _validate_data_axes(["c", "y", "x"])  # pyrefly: ignore[bad-argument-type] - Exercise an untyped caller boundary.
 
 
 class TestReadRaster:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import cloudpickle  # type: ignore[import-untyped]  # third-party package has no type information
+import cloudpickle
 import imagecodecs
 import numpy as np
 import pytest

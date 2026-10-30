@@ -114,14 +114,17 @@ def load_datasets(path: str | Path = DATASETS_TOML) -> tuple[TestDataset, ...]:
     try:
         raw_manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"Invalid dataset manifest TOML in {manifest_path}: {exc}") from exc
+        msg = f"Invalid dataset manifest TOML in {manifest_path}: {exc}"
+        raise ValueError(msg) from exc
     unknown_root_fields = set(raw_manifest) - {"datasets"}
     if unknown_root_fields:
         unknown = ", ".join(sorted(unknown_root_fields))
-        raise ValueError(f"Dataset manifest has unknown root field(s): {unknown}.")
+        msg = f"Dataset manifest has unknown root field(s): {unknown}."
+        raise ValueError(msg)
     raw_datasets = raw_manifest.get("datasets")
     if not isinstance(raw_datasets, list):
-        raise ValueError("Dataset manifest must define a [[datasets]] array.")
+        msg = "Dataset manifest must define a [[datasets]] array."
+        raise ValueError(msg)
     datasets = tuple(_parse_dataset(raw_dataset, index) for index, raw_dataset in enumerate(raw_datasets))
     validate_datasets(datasets)
     return datasets
@@ -160,9 +163,11 @@ def validate_datasets(datasets: tuple[TestDataset, ...] | None = None) -> None:
         _validate_dataset_source(dataset)
         _validate_relative_path(dataset.key, "test_path", dataset.test_path, allow_current=True)
         if dataset.key in seen_keys:
-            raise ValueError(f"Duplicate test dataset key: {dataset.key!r}.")
+            msg = f"Duplicate test dataset key: {dataset.key!r}."
+            raise ValueError(msg)
         if dataset.extracted_dir in seen_extracted_dirs:
-            raise ValueError(f"Duplicate test dataset extracted_dir: {dataset.extracted_dir!r}.")
+            msg = f"Duplicate test dataset extracted_dir: {dataset.extracted_dir!r}."
+            raise ValueError(msg)
         seen_keys.add(dataset.key)
         seen_extracted_dirs.add(dataset.extracted_dir)
 
@@ -189,7 +194,8 @@ def get_dataset(key: str) -> TestDataset:
         return _datasets_by_key()[key]
     except KeyError as exc:
         available = ", ".join(sorted(_datasets_by_key()))
-        raise KeyError(f"Unknown test dataset key {key!r}. Available keys: {available}") from exc
+        msg = f"Unknown test dataset key {key!r}. Available keys: {available}"
+        raise KeyError(msg) from exc
 
 
 def datasets_by_group(group: str) -> tuple[TestDataset, ...]:
@@ -213,30 +219,35 @@ def _validate_dataset_strings(dataset: TestDataset) -> None:
     for field_name in COMMON_REQUIRED_FIELDS:
         value = getattr(dataset, field_name)
         if not isinstance(value, str):
-            raise ValueError(f"Dataset {dataset.key!r} field {field_name!r} must be a string.")
+            msg = f"Dataset {dataset.key!r} field {field_name!r} must be a string."
+            raise ValueError(msg)
         if not value.strip():
-            raise ValueError(f"Dataset {dataset.key!r} has empty {field_name}.")
+            msg = f"Dataset {dataset.key!r} has empty {field_name}."
+            raise ValueError(msg)
     for field_name in STRING_SOURCE_FIELDS:
         if not isinstance(getattr(dataset, field_name), str):
-            raise ValueError(f"Dataset {dataset.key!r} field {field_name!r} must be a string.")
+            msg = f"Dataset {dataset.key!r} field {field_name!r} must be a string."
+            raise ValueError(msg)
 
 
 def _validate_dataset_source(dataset: TestDataset) -> None:
     if not isinstance(dataset.assets, tuple):
-        raise ValueError(f"Dataset {dataset.key!r} assets must be a tuple of DatasetAsset values.")
+        msg = f"Dataset {dataset.key!r} assets must be a tuple of DatasetAsset values."
+        raise ValueError(msg)
     has_archive = bool(dataset.url.strip() or dataset.known_hash.strip())
     has_doi = bool(dataset.doi.strip())
     has_assets = bool(dataset.assets)
     if sum((has_archive, has_doi, has_assets)) != 1:
-        raise ValueError(
-            f"Dataset {dataset.key!r} must define exactly one source: an archive, a DOI, or an assets array."
-        )
+        msg = f"Dataset {dataset.key!r} must define exactly one source: an archive, a DOI, or an assets array."
+        raise ValueError(msg)
     if has_archive:
         if not dataset.url.strip() or not dataset.known_hash.strip():
-            raise ValueError(f"Dataset {dataset.key!r} archive requires both url and known_hash.")
+            msg = f"Dataset {dataset.key!r} archive requires both url and known_hash."
+            raise ValueError(msg)
         _validate_known_hash(dataset.key, dataset.known_hash)
     if has_doi and (not dataset.doi.startswith("10.") or any(character.isspace() for character in dataset.doi)):
-        raise ValueError(f"Dataset {dataset.key!r} doi must be a DOI without a 'doi:' prefix.")
+        msg = f"Dataset {dataset.key!r} doi must be a DOI without a 'doi:' prefix."
+        raise ValueError(msg)
     if has_assets:
         _validate_assets(dataset)
 
@@ -245,29 +256,35 @@ def _validate_assets(dataset: TestDataset) -> None:
     seen_targets: set[str] = set()
     for index, asset in enumerate(dataset.assets):
         if not isinstance(asset, DatasetAsset):
-            raise ValueError(f"Dataset {dataset.key!r} asset {index} must be a DatasetAsset.")
+            msg = f"Dataset {dataset.key!r} asset {index} must be a DatasetAsset."
+            raise ValueError(msg)
         if not isinstance(asset.url, str):
-            raise ValueError(f"Dataset {dataset.key!r} asset {index} url must be a string.")
+            msg = f"Dataset {dataset.key!r} asset {index} url must be a string."
+            raise ValueError(msg)
         if not isinstance(asset.known_hash, str):
-            raise ValueError(f"Dataset {dataset.key!r} asset {index} known_hash must be a string.")
+            msg = f"Dataset {dataset.key!r} asset {index} known_hash must be a string."
+            raise ValueError(msg)
         if not isinstance(asset.target, str):
-            raise ValueError(f"Dataset {dataset.key!r} asset {index} target must be a string.")
+            msg = f"Dataset {dataset.key!r} asset {index} target must be a string."
+            raise ValueError(msg)
         if not isinstance(asset.extract, bool):
-            raise ValueError(f"Dataset {dataset.key!r} asset {index} extract must be a boolean.")
+            msg = f"Dataset {dataset.key!r} asset {index} extract must be a boolean."
+            raise ValueError(msg)
         if not asset.url.strip():
-            raise ValueError(f"Dataset {dataset.key!r} asset {index} has empty url.")
+            msg = f"Dataset {dataset.key!r} asset {index} has empty url."
+            raise ValueError(msg)
         _validate_known_hash(f"{dataset.key} asset {index}", asset.known_hash)
         _validate_relative_path(dataset.key, f"asset {index} target", asset.target, allow_current=asset.extract)
         if asset.target in seen_targets:
-            raise ValueError(f"Dataset {dataset.key!r} has duplicate asset target {asset.target!r}.")
+            msg = f"Dataset {dataset.key!r} has duplicate asset target {asset.target!r}."
+            raise ValueError(msg)
         seen_targets.add(asset.target)
 
 
 def _validate_identifier(value: str, *, dataset_key: str, field: str) -> None:
     if not IDENTIFIER_PATTERN.fullmatch(value):
-        raise ValueError(
-            f"Dataset {dataset_key!r} {field} must contain only lowercase letters, digits, underscores, and hyphens."
-        )
+        msg = f"Dataset {dataset_key!r} {field} must contain only lowercase letters, digits, underscores, and hyphens."
+        raise ValueError(msg)
 
 
 def _validate_relative_path(
@@ -282,25 +299,31 @@ def _validate_relative_path(
     windows_path = PureWindowsPath(value)
     paths = (posix_path, windows_path)
     if value and (any(path.is_absolute() for path in paths) or any(".." in path.parts for path in paths)):
-        raise ValueError(f"Dataset {dataset_key!r} {field} must be a relative path inside extracted_dir.")
+        msg = f"Dataset {dataset_key!r} {field} must be a relative path inside extracted_dir."
+        raise ValueError(msg)
     if value in {"", "."} and not allow_current:
-        raise ValueError(f"Dataset {dataset_key!r} {field} must name a destination inside extracted_dir.")
+        msg = f"Dataset {dataset_key!r} {field} must name a destination inside extracted_dir."
+        raise ValueError(msg)
     if require_single_component and any(len(path.parts) != 1 for path in paths):
-        raise ValueError(f"Dataset {dataset_key!r} {field} must be a single directory name.")
+        msg = f"Dataset {dataset_key!r} {field} must be a single directory name."
+        raise ValueError(msg)
 
 
 def _parse_dataset(raw_dataset: object, index: int) -> TestDataset:
     if not isinstance(raw_dataset, dict):
-        raise ValueError(f"Dataset manifest entry at index {index} must be a table.")
+        msg = f"Dataset manifest entry at index {index} must be a table."
+        raise ValueError(msg)
     dataset_fields = set(raw_dataset)
     unknown_fields = dataset_fields - ALLOWED_FIELDS
     if unknown_fields:
         unknown = ", ".join(sorted(unknown_fields))
-        raise ValueError(f"Dataset manifest entry at index {index} has unknown field(s): {unknown}.")
+        msg = f"Dataset manifest entry at index {index} has unknown field(s): {unknown}."
+        raise ValueError(msg)
     missing_fields = set(COMMON_REQUIRED_FIELDS) - dataset_fields
     if missing_fields:
         missing = ", ".join(sorted(missing_fields))
-        raise ValueError(f"Dataset manifest entry at index {index} is missing required field(s): {missing}.")
+        msg = f"Dataset manifest entry at index {index} is missing required field(s): {missing}."
+        raise ValueError(msg)
     values: dict[str, Any] = dict(raw_dataset)
     raw_assets = values.pop("assets", [])
     for field_name in STRING_SOURCE_FIELDS:
@@ -313,18 +336,22 @@ def _parse_dataset(raw_dataset: object, index: int) -> TestDataset:
 
 def _parse_assets(raw_assets: object, *, dataset_index: int) -> tuple[DatasetAsset, ...]:
     if not isinstance(raw_assets, list):
-        raise ValueError(f"Dataset manifest entry at index {dataset_index} assets must be an array of tables.")
+        msg = f"Dataset manifest entry at index {dataset_index} assets must be an array of tables."
+        raise ValueError(msg)
     parsed: list[DatasetAsset] = []
     for asset_index, raw_asset in enumerate(raw_assets):
         if not isinstance(raw_asset, dict):
-            raise ValueError(f"Dataset {dataset_index} asset {asset_index} must be a table.")
+            msg = f"Dataset {dataset_index} asset {asset_index} must be a table."
+            raise ValueError(msg)
         fields = set(raw_asset)
         unknown = fields - ASSET_ALLOWED_FIELDS
         missing = ASSET_REQUIRED_FIELDS - fields
         if unknown:
-            raise ValueError(f"Dataset {dataset_index} asset {asset_index} has unknown field(s): {sorted(unknown)}.")
+            msg = f"Dataset {dataset_index} asset {asset_index} has unknown field(s): {sorted(unknown)}."
+            raise ValueError(msg)
         if missing:
-            raise ValueError(f"Dataset {dataset_index} asset {asset_index} is missing field(s): {sorted(missing)}.")
+            msg = f"Dataset {dataset_index} asset {asset_index} is missing field(s): {sorted(missing)}."
+            raise ValueError(msg)
         values = dict(raw_asset)
         values.setdefault("extract", False)
         parsed.append(DatasetAsset(**values))
@@ -333,7 +360,8 @@ def _parse_assets(raw_assets: object, *, dataset_index: int) -> tuple[DatasetAss
 
 def _validate_known_hash(dataset_key: str, known_hash: str) -> None:
     if not KNOWN_HASH_PATTERN.fullmatch(known_hash):
-        raise ValueError(f"Dataset {dataset_key!r} known_hash must be formatted as 'sha256:<64 hex characters>'.")
+        msg = f"Dataset {dataset_key!r} known_hash must be formatted as 'sha256:<64 hex characters>'."
+        raise ValueError(msg)
 
 
 DATASETS = load_datasets()

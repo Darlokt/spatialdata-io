@@ -85,12 +85,12 @@ class TestMakeImageOptions:
     @pytest.mark.parametrize("axes", [17, [1], b"YX"])
     def test_invalid_axes_types(self, axes: object) -> None:
         with pytest.raises(TypeError, match="data_axes must be a sequence"):
-            make_image_options(scale_factors=(), chunks=8, data_axes=axes, tiff_series=None)  # type: ignore[arg-type]  # pyrefly: ignore[bad-argument-type] - Runtime option validation.
+            make_image_options(scale_factors=(), chunks=8, data_axes=axes, tiff_series=None)  # pyrefly: ignore[bad-argument-type] - Runtime option validation.
 
     @pytest.mark.parametrize("series", [True, -1, 1.5])
     def test_invalid_series(self, series: object) -> None:
         with pytest.raises(ValueError, match="tiff_series"):
-            make_image_options(scale_factors=(), chunks=8, data_axes=None, tiff_series=series)  # type: ignore[arg-type]  # pyrefly: ignore[bad-argument-type] - Runtime option validation.
+            make_image_options(scale_factors=(), chunks=8, data_axes=None, tiff_series=series)  # pyrefly: ignore[bad-argument-type] - Runtime option validation.
 
 
 class TestReadFullres:

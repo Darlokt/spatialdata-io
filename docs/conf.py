@@ -1,4 +1,4 @@
-# Configuration file for the Sphinx documentation builder.
+"""Sphinx configuration for the spatialdata-io documentation."""
 
 # This file only contains a selection of the most common options. For a full
 # list see the documentation:
@@ -7,7 +7,7 @@
 # -- Path setup --------------------------------------------------------------
 import shutil
 import sys
-from datetime import datetime
+from datetime import date
 from importlib.metadata import metadata
 from pathlib import Path
 
@@ -28,9 +28,12 @@ sys.path.insert(0, str(HERE / "extensions"))
 info = metadata("spatialdata-io")
 project = info["Name"]
 author = info["Author"]
-copyright = f"{datetime.now():%Y}, {author}."
+copyright = f"{date.today():%Y}, {author}."  # noqa: A001, DTZ011  # Sphinx requires this key and local calendar year.
 version = info["Version"]
-urls = dict(pu.split(", ") for pu in info.get_all("Project-URL"))
+urls = dict(pu.split(", ") for pu in info.get_all("Project-URL") or [])
+if "Source" not in urls:
+    msg = "Missing required 'Source' entry in Project-URL metadata."
+    raise KeyError(msg)
 repository_url = urls["Source"]
 
 # The full version, including alpha/beta/rc tags

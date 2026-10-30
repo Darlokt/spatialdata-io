@@ -6,7 +6,7 @@ from dataclasses import replace
 from math import prod
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
-import cloudpickle  # type: ignore[import-untyped]  # third-party package has no type information
+import cloudpickle
 import dask
 import dask.array as da
 import numpy as np
