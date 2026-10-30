@@ -126,6 +126,9 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     projected union, while ``source_components`` preserves every component of
     cells with invalid slices. Overlaps may remain invalid and summed component
     area does not represent projected cell area. No topology repair is applied.
+    Boundary ``ZIndex`` annotations may be null; populated values must be
+    nonnegative int64 plane indexes. Every slice contributes to the XY footprint
+    independently of this optional stack annotation.
 
     VPT's reassigned transcript CSV, when present, uses its count header and
     ``cell_id`` annotations. Otherwise the original instrument transcript CSV

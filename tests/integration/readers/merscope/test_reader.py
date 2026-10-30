@@ -36,6 +36,29 @@ class TestMerscope:
     """Read actual CSV, GeoParquet and TIFF artifacts through the public API."""
 
     @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
+    def test_nullable_planes_preserve_xy_footprints(
+        self, tmp_path: Path, profile: Literal["standard", "cellpose", "watershed"]
+    ) -> None:
+        fixture = write_merscope_dataset(tmp_path, profile=profile)
+        vpt = None if profile == "standard" else fixture.analysis
+        expected = merscope(fixture.root, vpt_directory=vpt)
+        path = fixture.analysis / (
+            "cell_boundaries.parquet" if profile == "standard" else f"{profile}_micron_space.parquet"
+        )
+        boundaries = gpd.read_parquet(path)
+        boundaries["ZIndex"] = pd.array([None, 2, None, 0], dtype="Int64")
+        boundaries.to_parquet(path)
+        actual = merscope(fixture.root, vpt_directory=vpt)
+        name = "slide_region_polygons"
+        assert actual.shapes[name].index.equals(expected.shapes[name].index)
+        assert actual.shapes[name].geometry.geom_equals_exact(expected.shapes[name].geometry, tolerance=0).all()
+        actual_x = actual.tables["table"].X
+        expected_x = expected.tables["table"].X
+        assert isinstance(actual_x, sparse.csr_array)
+        assert isinstance(expected_x, sparse.csr_array)
+        assert_array_equal(actual_x.data, expected_x.data)
+
+    @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
     @pytest.mark.parametrize("current", [False, True])
     def test_drop_whole_cell_keeps_original_transcript_population(
         self, tmp_path: Path, profile: Literal["standard", "cellpose", "watershed"], *, current: bool

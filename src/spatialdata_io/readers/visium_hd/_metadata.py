@@ -219,8 +219,6 @@ def read_source_metadata(path: ArtifactFile) -> SourceMetadata:
         add_reader_context(error, context=_context("feature slice metadata"), path=path)
         raise
 
-    # Validate the nested legacy string even though its scanner transform is not used.
-    _json_object(values.get("hd_layout_json"), path=path)
     matrices = values.get("transform_matrices")
     if not isinstance(matrices, dict):
         raise _error(path, "missing transform_matrices object", "nullable forward/inverse matrix pairs")

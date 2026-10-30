@@ -288,8 +288,10 @@ def validate_analysis_table(table: AnnData, path: ArtifactFile) -> AnalysisSchem
     if not isinstance(matrix, (np.ndarray, csr_array, csc_array, csr_matrix, csc_matrix)):
         raise format_error(path, "X", type(matrix).__name__, "a materialized numerical expression array")
     values = matrix if isinstance(matrix, np.ndarray) else matrix.data
-    if values.dtype.kind not in "iuf" or not np.isfinite(values).all():
-        raise format_error(path, "X", "nonnumerical or nonfinite values", "finite numerical analysis expression")
+    if values.dtype.kind not in "iuf":
+        raise format_error(path, "X", "nonnumerical values", "numerical analysis expression")
+    # X is unchanged until final linkage, whose bounded normalization also
+    # validates finiteness in every declared expression layer.
 
     coordinates = _analysis_coordinates(table, obs, path)
     bin_type, bin_size, resolution = _analysis_metadata(table, path)

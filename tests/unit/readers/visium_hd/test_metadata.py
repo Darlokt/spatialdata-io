@@ -30,6 +30,29 @@ def _replace_metadata(path: ArtifactFile, text: str) -> None:
 class TestReadSourceMetadata:
     """Verify read source metadata contracts."""
 
+    @pytest.mark.parametrize("layout", [None, {}, {"unconsumed": "annotation"}, "not JSON"])
+    def test_ignores_unused_nested_layout(self, tmp_path: Path, layout: object) -> None:
+        write_bundle(tmp_path)
+        path = _source(tmp_path)
+        expected = metadata.read_source_metadata(path)
+        with h5py.File(path, "r+") as handle:
+            values = json.loads(handle.attrs["metadata_json"])
+        if layout is None:
+            values.pop("hd_layout_json")
+        else:
+            values["hd_layout_json"] = layout
+        _replace_metadata(path, json.dumps(values))
+        actual = metadata.read_source_metadata(path)
+        assert (actual.nrows, actual.ncols, actual.sample_id, actual.spot_pitch) == (
+            expected.nrows,
+            expected.ncols,
+            expected.sample_id,
+            expected.spot_pitch,
+        )
+        assert actual.microscope is not None
+        assert expected.microscope is not None
+        np.testing.assert_array_equal(actual.microscope.spot_to_image, expected.microscope.spot_to_image)
+
     @pytest.mark.parametrize("null", [None, "microscope", "cytassist"])
     def test_metadata(self, tmp_path: Path, null: str | None) -> None:
         write_bundle(tmp_path)
@@ -66,7 +89,6 @@ class TestReadSourceMetadata:
             "pitch",
             "unsupported-pitch",
             "sample",
-            "layout",
             "matrices",
             "missing",
             "part-null",
@@ -91,14 +113,12 @@ class TestReadSourceMetadata:
             "pitch": -1,
             "unsupported-pitch": 4,
             "sample": None,
-            "layout": "[]",
             "matrices": [],
         }
         keys = {
             "pitch": "spot_pitch",
             "unsupported-pitch": "spot_pitch",
             "sample": "sample_id",
-            "layout": "hd_layout_json",
             "matrices": "transform_matrices",
         }
         if mode in replacements:

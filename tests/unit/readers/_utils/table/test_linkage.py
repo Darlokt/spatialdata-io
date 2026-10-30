@@ -331,6 +331,23 @@ class TestParseLinkedTable:
 class TestExpectedInstanceIds:
     """Validate exact target comparison without semantic coercion."""
 
+    @pytest.mark.parametrize("dtype", ["int64", "uint64", "object", "string", "string[pyarrow]"])
+    def test_preserves_borrowed_readonly_targets(self, mocker: MockerFixture, dtype: str) -> None:
+        values = [2, 1] if dtype in {"int64", "uint64"} else ["02", "01"]
+        target = pd.Index(values, dtype=dtype, name="source")
+        before = target.copy(deep=True)
+        array = target.to_numpy(copy=False)
+        array.flags.writeable = False
+        adata = _table(instances=pd.Series(values[::-1], dtype=dtype))
+        mocker.patch.object(TableModel, "parse", side_effect=_public_parser_stub)
+        parse_linked_table(
+            adata,
+            TableLinkage(("cells",), "region", "instance"),
+            context=_CONTEXT,
+            expected_instance_ids={"cells": target},
+        )
+        pd.testing.assert_index_equal(target, before, exact=True)
+
     def test_accepts_partial_reordered_targets_without_mutation(self, mocker: MockerFixture) -> None:
         adata = _table(
             regions=["a", "a"],

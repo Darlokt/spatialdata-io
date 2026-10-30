@@ -333,15 +333,11 @@ class TestValidateAnalysisTable:
         with pytest.raises(ReaderFormatError, match=r"unique|nonempty"):
             _schemas.validate_analysis_table(table, ArtifactFile(Path("analysis.h5ad")))
 
-    @pytest.mark.parametrize("case", ["none", "nan_sparse", "inf_dense", "complex"])
-    def test_rejects_nonmaterialized_or_nonfinite_expression(self, case: str) -> None:
+    @pytest.mark.parametrize("case", ["none", "complex"])
+    def test_rejects_nonmaterialized_or_nonnumerical_expression(self, case: str) -> None:
         table = _native_analysis()
         if case == "none":
             table.X = None
-        elif case == "nan_sparse":
-            table.X = csr_array([[float("nan"), 0], [1, 2]])
-        elif case == "inf_dense":
-            table.X = np.array([[1.0, float("inf")], [1, 2]])
         else:
             table.X = np.array([[1j, 0], [1, 2]])
 

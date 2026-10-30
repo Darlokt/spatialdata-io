@@ -237,6 +237,11 @@ class TestValidateOutputAnnotations:
 class TestNormalizeBoundaryIds:
     """Validate physical primitive types before WKB geometry decoding."""
 
+    @pytest.mark.parametrize("planes", [pa.array([None, 2], type=pa.int64()), pa.nulls(2)])
+    def test_nullable_plane_annotations(self, tmp_path: Path, planes: pa.Array) -> None:
+        table = pa.table({"EntityID": ["a", "a"], "ZIndex": planes, "Type": ["Cell", "Cell"]})
+        assert normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet")).tolist() == ["a", "a"]
+
     def test_repeated_planes_and_large_ids(self, tmp_path: Path) -> None:
         table = pa.table({"EntityID": [2**63 - 1, 2**63 - 1], "ZIndex": [0, 0], "Type": ["cell", "Cell"]})
         result = normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet"))

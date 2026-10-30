@@ -189,8 +189,6 @@ class TestBoundaryFeatures:
             "id_float",
             "id_zero",
             "property_type",
-            "property_id_type",
-            "property_conflict",
             "property_geometry",
         ],
     )
@@ -214,12 +212,8 @@ class TestBoundaryFeatures:
             feature["id"] = 0
         elif invalid == "property_type":
             feature["properties"] = "not an object"
-        elif invalid == "property_id_type":
-            feature["properties"] = {"id": False}
         elif invalid == "property_geometry":
             feature["properties"] = {"geometry": None}
-        else:
-            feature["properties"] = {"id": "2"}
         with pytest.raises(ReaderFormatError):
             boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))
 
@@ -244,9 +238,19 @@ class TestBoundaryFeatures:
         feature["properties"] = {"id": "01"}
         validated, ids = boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))
         assert ids.tolist() == [1]
-        assert validated[0]["properties"] == {"id": "1"}
+        assert validated[0]["properties"] == {"id": "01"}
         feature["properties"] = None
         assert boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))[0][0]["properties"] is None
+
+    @pytest.mark.parametrize("annotation", ["unrelated", False, None, 2, {"source": "other"}])
+    def test_property_id_is_an_independent_annotation(self, tmp_path: Path, annotation: object) -> None:
+        document = _boundary_document()
+        features = document["features"]
+        assert isinstance(features, list)
+        features[0]["properties"] = {"id": annotation}
+        validated, ids = boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))
+        assert ids.tolist() == [1]
+        assert validated[0]["properties"] == {"id": annotation}
 
 
 def _boundary_document() -> dict[str, object]:

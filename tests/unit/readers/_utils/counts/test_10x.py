@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
-from anndata import AnnData
+from anndata import AnnData, read_h5ad
 from scipy import sparse
 
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
@@ -150,12 +150,27 @@ class TestRead10xH5:
             "spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_h5",
             return_value=view,
         )
+        expression = mocker.patch.object(AnnData, "X", new_callable=mocker.PropertyMock)
 
         with pytest.raises(ValueError, match="owned AnnData, not a view") as caught:
             read_10x_h5(path, context=_CONTEXT)
 
         assert caught.value.__notes__ == [f"While handling {_CONTEXT.describe(path=path)}."]
         source.assert_called_once()
+        expression.assert_not_called()
+
+    def test_backed_source_is_rejected_before_accessing_expression(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        source_file = tmp_path / "source.h5ad"
+        _table().write_h5ad(source_file)
+        table = read_h5ad(source_file, backed="r")
+        mocker.patch("spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_h5", return_value=table)
+        expression = mocker.patch.object(AnnData, "X", new_callable=mocker.PropertyMock)
+        try:
+            with pytest.raises(TypeError, match="in-memory"):
+                read_10x_h5(_artifact_file(source_file), context=_CONTEXT)
+            expression.assert_not_called()
+        finally:
+            table.file.close()
 
     def test_real_normalizer_rejects_nonfinite_expression_with_source_context(
         self, tmp_path: Path, mocker: MockerFixture
@@ -298,6 +313,28 @@ class TestRead10xMtx:
 
 
 class TestNormalizeCounts:
+    @pytest.mark.parametrize("matrix", [np.ones((1, 1)), np.ones((1, 1), dtype=np.complex128)])
+    def test_rejects_unsupported_source_storage(self, tmp_path: Path, matrix: np.ndarray) -> None:
+        with pytest.raises(TypeError, match="numerical CSR or CSC"):
+            _normalize_counts(AnnData(matrix), tmp_path / "counts.h5", _CONTEXT)
+
+    def test_rejects_complex_sparse_source(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="numerical CSR or CSC"):
+            _normalize_counts(AnnData(sparse.csr_array([[1j]])), tmp_path / "counts.h5", _CONTEXT)
+
+    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
+    def test_duplicate_entries_cannot_hide_invalid_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:
+        matrix = sparse.csr_array((np.array(values), [0, 0], [0, 2]), shape=(1, 1))
+        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
+            _normalize_counts(AnnData(matrix), tmp_path / "counts.h5", _CONTEXT)
+
+    def test_valid_duplicates_and_unsorted_entries_sum(self, tmp_path: Path) -> None:
+        matrix = sparse.csr_array((np.array([2, 0, 3, 4]), [1, 0, 1, 0], [0, 4]), shape=(1, 2))
+        result = _normalize_counts(AnnData(matrix), tmp_path / "counts.h5", _CONTEXT)
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.has_canonical_format
+        np.testing.assert_array_equal(result.X.toarray(), [[4, 5]])
+
     @pytest.mark.parametrize("dtype", [np.int32, np.int64, np.float32, np.float64])
     def test_realistic_counts_keep_storage_and_dtype(
         self, tmp_path: Path, dtype: type[np.int32 | np.int64 | np.float32 | np.float64]

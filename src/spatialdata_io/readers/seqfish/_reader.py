@@ -93,7 +93,9 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         ``<ROI>_Segmentation``, ``<ROI>_TranscriptList``,
         ``<ROI>_Boundaries`` and/or ``<ROI>_CellCoordinates`` when requested.
         Tables contain eager finite canonical CSR count arrays in source feature
-        and observation order; cells and boundaries align by exact identifiers.
+        and observation order; cells and boundaries align by exact top-level
+        feature identifiers. GeoJSON properties are independent annotations.
+        Polygon drops retain surviving positional row names, including gaps.
 
     Raises
     ------

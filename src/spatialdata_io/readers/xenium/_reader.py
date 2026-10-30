@@ -399,10 +399,14 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
           ``feature_name`` (count-matrix features in source order),
           ``cell_id`` with the vendor unassigned sentinel, ``qv`` and the other
           documented columns;
-        - table ``table``: float32 canonical CSR ``X`` in source feature order,
+        - table ``table``: canonical CSR ``X`` in source feature order (float32
+          for official int32 HDF5 and MTX inputs),
           ``obs`` with the cells-table columns, ``label_id`` (uint32) and nucleus
           centroids when ``cells.zarr.zip`` is present, and float64 µm centroids in
           ``obsm["spatial"]``.
+
+        Alternate HDF5 numerical dtypes follow Scanpy; protein division requires
+        floating storage. Float32 retains its integer precision limits.
 
         Images and labels carry ``Scale(pixel_size)``, polygons a half-pixel
         ``Translation`` registering their vertices (traced through pixel centres

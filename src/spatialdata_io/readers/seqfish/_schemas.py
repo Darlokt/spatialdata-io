@@ -152,22 +152,12 @@ class BoundaryFeature(TypedDict):
     properties: dict[str, object] | None
 
 
-def _normalize_boundary_properties(properties: object, identifier: str | int, path: ArtifactFile) -> None:
-    """Reject annotation collisions while preserving compatible source properties."""
+def _validate_boundary_properties(properties: object, path: ArtifactFile) -> None:
+    """Protect the geometry column; other properties are independent annotations."""
     if properties is not None and not isinstance(properties, dict):
         raise schema_error(path, found="malformed feature properties", expected="an object or null properties")
     if properties is not None and "geometry" in properties:
         raise schema_error(path, found="reserved properties.geometry", expected="geometry only in Feature.geometry")
-    if properties is not None and "id" in properties:
-        property_id = properties["id"]
-        if isinstance(property_id, bool) or not isinstance(property_id, str | int):
-            raise schema_error(path, found="ambiguous properties.id", expected="properties.id matching Feature.id")
-        pair = normalize_ids(pd.Series([str(identifier), str(property_id)], dtype=STRING_DTYPE), path)
-        if pair[0] != pair[1]:
-            raise schema_error(path, found="conflicting properties.id", expected="properties.id matching Feature.id")
-        # An optional duplicate identity column must not undergo pandas'
-        # mixed-number inference before the authoritative index is attached.
-        properties["id"] = str(pair[0])
 
 
 def boundary_features(
@@ -191,7 +181,7 @@ def boundary_features(
         raw_ids.append(identifier)
         # GeoJSON requires this field; null properties carry no annotations.
         feature["properties"] = feature.get("properties")
-        _normalize_boundary_properties(feature["properties"], identifier, path)
+        _validate_boundary_properties(feature["properties"], path)
     identifiers = normalize_ids(pd.Series([str(value) for value in raw_ids], dtype=STRING_DTYPE), path)
     if len(np.unique(identifiers)) != len(identifiers):
         raise schema_error(path, found="duplicate boundary IDs", expected="unique explicit boundary identifiers")

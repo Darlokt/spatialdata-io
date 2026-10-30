@@ -54,7 +54,9 @@ The 2 µm positions and scale factors calibrate every read, even if only larger
 bins or segmentations are returned. Grid dimensions come from feature-slice
 metadata when present, otherwise from the position columns, followed by exact
 coverage validation. Only selected count populations must be present. Version
-and optional library identity come from the selected HDF5 matrix.
+and optional library identity come from the selected HDF5 matrix. Feature-slice
+metadata validates the outer JSON and consumed grid/transform fields; the unused
+`hd_layout_json` annotation is ignored.
 
 A null microscope matrix pair does not prevent loading: the registration is
 fitted directly from 2 µm positions. This is tested synthetically; no real
@@ -71,7 +73,7 @@ from spatialdata_io import visium_hd
 # Compact exact grid representation; default otherwise builds every bin polygon.
 sdata = visium_hd("outs", bin_geometry="labels")
 
-# Cells and exact derived nucleus counts, without bin elements or images.
+# Cells and derived nucleus counts, without bin elements or images.
 sdata = visium_hd(
     "outs",
     bin_sizes=(),
@@ -111,7 +113,10 @@ aggregation uses int64, rejecting unsafe integer conversion or possible sum
 overflow; final counts use float32, whose precision applies to large values.
 Every returned expression matrix is a canonical SciPy CSR sparse **array**.
 Nothing is densified. Linkage is performed once after all filtering, using
-independent shape or label IDs.
+the actual returned shape indexes or derived grid-label IDs. Source count
+validation inherits Scanpy conversion and duplicate handling; the reader does
+not reject valid duplicate count entries or rescan counts before upstream
+conversion. See [table numerical limits](table_contracts.md#persistence-ownership-and-numerical-limits).
 
 `invalid_geometries="keep"` preserves source topology. `"drop"` removes an invalid
 returned cell polygon with its cell table row and associated nucleus; an invalid

@@ -34,6 +34,19 @@ if TYPE_CHECKING:
 class TestSeqfish:
     """Exercise the public transaction using actual on-disk vendor artifacts."""
 
+    def test_preserves_independent_property_ids(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",), reorder_boundaries=True)
+        path = root / "Roi1_Boundaries.geojson"
+        document = json.loads(path.read_text())
+        for feature in document["features"]:
+            feature["properties"]["id"] = f"annotation-{feature['id']}"
+        path.write_text(json.dumps(document))
+        result = seqfish(root, shape_geometry="polygons")
+        shapes = result.shapes["Roi1_Boundaries"]
+        assert shapes.index.tolist() == [9, 2]
+        assert shapes["id"].tolist() == ["annotation-9", "annotation-2"]
+        assert result.tables["table_Roi1"].obs["instance_id"].tolist() == [9, 2]
+
     @pytest.mark.parametrize("labels", [False, True])
     @pytest.mark.parametrize("shapes", [False, True])
     @pytest.mark.parametrize("geometry", ["polygons", "circles", "both"])
@@ -372,15 +385,6 @@ class TestSeqfish:
         with pytest.raises(ReaderFormatError, match=r"id|ID"):
             seqfish(root)
 
-    def test_conflicting_property_and_feature_ids_fail(self, tmp_path: Path) -> None:
-        root = write_seqfish_dataset(tmp_path, rois=("Roi1",))
-        source = root / "Roi1_Boundaries.geojson"
-        collection = json.loads(source.read_text(encoding="utf-8"))
-        collection["features"][0]["properties"]["id"] = "90000"
-        source.write_text(json.dumps(collection), encoding="utf-8")
-        with pytest.raises(ReaderFormatError, match=r"id|ID"):
-            seqfish(root)
-
     def test_matching_property_id_does_not_narrow_large_source_id(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path, rois=("Roi1",))
         identifier = 2**53 + 1
@@ -399,6 +403,8 @@ class TestSeqfish:
         source.write_text(json.dumps(collection), encoding="utf-8")
         result = seqfish(root, include_labels=False)
         assert result.shapes["Roi1_Boundaries"].index.tolist() == [identifier, 2]
+        assert result.shapes["Roi1_Boundaries"]["id"].iloc[0] == identifier
+        assert pd.isna(result.shapes["Roi1_Boundaries"]["id"].iloc[1])
         assert_array_equal(result.tables["table_Roi1"].obs["instance_id"], [identifier, 2])
 
     def test_duplicate_cell_identifiers_fail(self, tmp_path: Path) -> None:

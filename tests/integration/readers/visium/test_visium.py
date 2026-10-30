@@ -22,6 +22,7 @@ from spatialdata.transformations import BaseTransformation, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io import __version__
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.visium import visium
 
 if TYPE_CHECKING:
@@ -150,6 +151,20 @@ def _assert_table_contract(result: SpatialData) -> None:
 
 class TestVisiumSyntheticWorkflow:
     """Prove every supported count and position layout through the public API."""
+
+    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
+    def test_rejects_malformed_duplicate_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:
+        source = tmp_path / "filtered_feature_bc_matrix.h5"
+        _write_h5(source)
+        _write_spatial(tmp_path, version="v2")
+        with h5py.File(source, "r+") as handle:
+            data = handle["matrix/data"][:].astype(np.float64)
+            data[:2] = values
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+            handle["matrix/indices"][1] = 0
+        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
+            visium(tmp_path)
 
     def test_named_positions_accept_reordered_fields_and_project_extensions(self, tmp_path: Path) -> None:
         """Named positions accept reordered fields and project extensions."""

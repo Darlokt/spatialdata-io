@@ -266,7 +266,7 @@ def _integer_comparison_values(
             found=f"target identifier range [{minimum}, {maximum}] for region {region!r}",
             expected=f"values losslessly representable by observed dtype {dtype!s}",
         )
-    return values.astype(dtype, copy=True)
+    return values.astype(dtype, copy=False)
 
 
 def _expected_pairs(
@@ -297,7 +297,7 @@ def _expected_pairs(
                 context=context,
             )
         else:
-            instances = index.to_numpy(dtype=object, copy=True)
+            instances = index.to_numpy(dtype=object, copy=False)
         instance_arrays.append(instances)
         region_arrays.append(np.full(len(index), region, dtype=object))
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -95,6 +96,19 @@ def _q20_counts(result: SpatialData, table: AnnData) -> NDArray[np.int64]:
 
 class TestXenium:
     """Every family returns exact, explicitly linked micrometre elements."""
+
+    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0), (1.25, 0.0)])
+    def test_rejects_malformed_source_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:
+        """Modified synthetic source records exercise the shared count boundary."""
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        with h5py.File(bundle.root / "cell_feature_matrix.h5", "r+") as handle:
+            data = handle["matrix/data"][:].astype(np.float64)
+            data[:2] = values
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+            handle["matrix/indices"][1] = handle["matrix/indices"][0]
+        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
+            xenium(bundle.root)
 
     @pytest.mark.parametrize("profile", PROFILES, ids=PROFILE_IDS)
     def test_family_contract(self, tmp_path: Path, profile: fx.Profile) -> None:

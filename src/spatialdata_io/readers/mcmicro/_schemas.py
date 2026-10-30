@@ -74,7 +74,7 @@ def canonical_markers(names: Sequence[str]) -> tuple[str, ...]:
 
 
 def normalize_markers(frame: pd.DataFrame, path: ArtifactFile) -> MarkerPanel:
-    """Validate lexical marker rows and derive collision-free feature IDs in panel order."""
+    """Index the owned Arrow-string panel with collision-free MCQuant feature IDs."""
     if MARKER_NAME not in frame.columns:
         raise schema_error(path, found=f"columns {frame.columns.tolist()!r}", expected=f"a {MARKER_NAME!r} column")
     if frame.empty:
@@ -92,9 +92,8 @@ def normalize_markers(frame: pd.DataFrame, path: ArtifactFile) -> MarkerPanel:
         )
 
     # Every optional column is free-form module metadata; keep its exact text.
-    var = frame.astype(STRING_DTYPE)
-    var.index = pd.Index(features)
-    return MarkerPanel(features, var)
+    frame.index = pd.Index(features)
+    return MarkerPanel(features, frame)
 
 
 @dataclass(frozen=True, slots=True)

@@ -80,7 +80,7 @@ With footprints included, the table links through categorical `cells_region` and
 Boundary Parquet requires `EntityID`, `ZIndex` and WKB `Geometry`, with optional
 `Type` restricted to Cell/cell. Required columns are projected. Geometry must
 be nonempty finite planar Polygon or MultiPolygon, and source IDs and plane
-annotations must be valid under every policy. No geometry is repaired.
+annotations must be valid under every policy. `ZIndex` may be null, as permitted by the [VPT geometry schema](https://vizgen.github.io/vizgen-postprocessing/output_data_formats/geometry_file_format.html); populated values must be nonnegative int64 plane indexes. Every slice participates in the XY footprint independently of its plane annotation. This applies to the supported instrument, Cellpose and Watershed layouts; it does not add support for other entity types. No geometry is repaired.
 
 `invalid_geometries="keep"` retains ordinary all-z union footprints for cells
 whose source slices are valid. If any slice is invalid, that cell instead

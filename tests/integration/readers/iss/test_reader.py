@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import tifffile
+from anndata.tests.helpers import assert_equal
 from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
@@ -29,6 +30,65 @@ if TYPE_CHECKING:
 
 class TestIss:
     """Read genuine artifacts without compatibility shims or mocked parsers."""
+
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    def test_inherited_slots_and_raw_survive_persistence(self, tmp_path: Path, storage: str) -> None:
+        """Keep inherited values aligned, including raw's independent feature vocabulary."""
+        write_iss_dataset(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        rows, features = source.shape
+        source.obs["nullable_annotation"] = pd.array([1] + [None] * (rows - 1), dtype="Int16")
+        source.layers["counts"] = sparse.csc_matrix(np.arange(rows * features).reshape(rows, features))
+        source.layers["dense_metadata"] = np.arange(rows * features, dtype=np.float32).reshape(rows, features)
+        source.layers["sparse_metadata"] = sparse.csc_matrix(source.layers["dense_metadata"])
+        source.obsm["inherited"] = np.arange(rows * 2).reshape(rows, 2)
+        source.varm["inherited"] = np.arange(features * 2).reshape(features, 2)
+        source.obsp["inherited"] = sparse.csr_matrix(np.arange(rows * rows).reshape(rows, rows))
+        source.varp["inherited"] = sparse.csr_matrix(np.arange(features * features).reshape(features, features))
+        source.uns["inherited"] = {"nested": {"meaning": "unchanged", "number": 3}}
+        raw = ad.AnnData(
+            sparse.csr_matrix(np.arange(rows * 4, dtype=np.int32).reshape(rows, 4)),
+            obs=pd.DataFrame(index=source.obs_names),
+            var=pd.DataFrame({"annotation": [1.0, np.nan, 3.0, 4.0]}, index=["raw-z", "raw-a", "raw-b", "raw-c"]),
+        )
+        source.raw = raw
+        source.write_h5ad(path)
+        original = ad.read_h5ad(path)
+
+        result = iss(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+        table = result.tables["table"]
+        assert isinstance(table.X, sparse.csr_array)
+        assert isinstance(table.layers["counts"], sparse.csr_array)
+        assert isinstance(table.layers["sparse_metadata"], sparse.csc_matrix)
+        destination = tmp_path / f"inherited.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            restored = ad.read_h5ad(destination)
+        else:
+            result.write(destination)
+            restored = read_zarr(destination).tables["table"]
+
+        order = [0, 1]
+        expected = original[order].copy()
+        for actual in (table, restored):
+            assert actual.obs_names.tolist() == expected.obs_names.tolist()
+            assert isinstance(actual.obs, pd.DataFrame)
+            assert isinstance(expected.obs, pd.DataFrame)
+            pd.testing.assert_series_equal(actual.obs["nullable_annotation"], expected.obs["nullable_annotation"])
+            for name in ("counts", "dense_metadata", "sparse_metadata"):
+                assert_equal(actual.layers[name], expected.layers[name], exact=True)
+            for mapping in ("obsm", "varm", "obsp", "varp"):
+                assert_equal(getattr(actual, mapping)["inherited"], getattr(expected, mapping)["inherited"], exact=True)
+            assert_equal(actual.raw, expected.raw, exact=True)
+            assert actual.raw is not None
+            assert actual.raw.obs_names.tolist() == expected.obs_names.tolist()
+            assert actual.uns["inherited"] == expected.uns["inherited"]
+            assert get_table_keys(actual) == get_table_keys(table)
+            np.testing.assert_array_equal(actual.obsm["spatial"], table.obsm["spatial"])
+        unchanged = ad.read_h5ad(path)
+        assert unchanged.obs_names.equals(original.obs_names)
+        assert "region" not in unchanged.obs
 
     @pytest.mark.parametrize("ome", [False, True])
     def test_explicit_sample_channels_compose_with_linked_tables(self, tmp_path: Path, *, ome: bool) -> None:

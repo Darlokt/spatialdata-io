@@ -130,9 +130,7 @@ class TestReadBoundaries:
         assert any("seqfish" in note and str(path) in note for note in error.__notes__)
 
     @pytest.mark.parametrize("property_id", ["2", None])
-    def test_top_level_id_is_required_and_cannot_conflict_with_properties(
-        self, tmp_path: Path, property_id: str | None
-    ) -> None:
+    def test_properties_cannot_substitute_for_top_level_identity(self, tmp_path: Path, property_id: str | None) -> None:
         path = tmp_path / "boundaries.geojson"
         identifier = '"id":"1",' if property_id is not None else ""
         path.write_text(
@@ -142,7 +140,7 @@ class TestReadBoundaries:
             + "[[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}]}",
             encoding="utf-8",
         )
-        with pytest.raises(ReaderFormatError, match=r"Feature.id|explicit positive"):
+        with pytest.raises(ReaderFormatError, match=r"explicit positive|ID disagreement"):
             read_boundaries(
                 ArtifactFile(path),
                 instance_ids=pd.Index([2]),

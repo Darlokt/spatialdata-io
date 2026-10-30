@@ -21,10 +21,12 @@ Both functions return the identical, freshly read `AnnData` after
 sparse array. A canonical Scanpy CSR matrix can be wrapped without copying its
 `data`, `indices`, or `indptr` buffers. Conversion from another sparse format
 allocates only the required CSR storage and never densifies expression data.
-Negative and fractional count values fail at this in-memory boundary. Float32
-remains the normal Scanpy count representation; no maximum count or precision
-ceiling is imposed. These checks do not reread expression records or create a
-second expression matrix.
+Negative and fractional entries retained by Scanpy fail before local duplicate
+summation. Finiteness and canonical CSR storage remain the shared table
+normalizer's responsibility. Float32 remains the normal Scanpy representation,
+including its integer precision limits: large source integers may already have
+rounded. These checks do not reread expression records or create a second
+expression matrix. Upstream filtering can discard unselected source entries.
 
 The return value is eager, owned, and in memory. The public Scanpy readers own
 expression and annotation parsing and return fully materialized tables. The
@@ -32,6 +34,9 @@ wrapper owns a short-lived MatrixMarket header stream and retains no open
 resources, cache, temporary artifact, or process-global setting. Header inspection requires an
 integer coordinate source; general and symmetric storage are accepted. Legacy
 family selection follows Scanpy's uncompressed `genes.tsv` convention.
+The upstream MTX parser can truncate malformed integer-header tokens and sum
+duplicate records before returning. Result validation cannot recover that
+information; strict rejection of every malformed MTX record is not guaranteed.
 
 ## Explicit options and side effects
 

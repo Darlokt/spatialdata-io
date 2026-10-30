@@ -152,6 +152,42 @@ def _open_hdf5_sources() -> set[Path]:
 
 
 class TestRead10xH5:
+    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
+    def test_upstream_filtering_discards_unselected_entries(self, tmp_path: Path, values: tuple[float, float]) -> None:
+        """The boundary validates retained values, not source records removed by Scanpy."""
+        source = tmp_path / "unselected.h5"
+        _write_h5_v3(source)
+        with h5py.File(source, "r+") as handle:
+            data = _COUNTS.data.astype(np.float64)
+            data[:2] = values
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+            handle["matrix/indices"][:2] = [1, 1]
+        table = read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT)
+        expression = _assert_canonical_sparse(table)
+        assert expression.shape == (4, 3)
+        assert expression[0:1].nnz == 0
+        np.testing.assert_array_equal(expression.data, [4.0, 5.0, 6.0])
+
+    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
+    @pytest.mark.parametrize(("genome", "gex_only"), [(None, False), (None, True), ("GRCh38", True)])
+    def test_rejects_invalid_entries_before_duplicate_reduction(
+        self, tmp_path: Path, values: tuple[float, float], *, genome: str | None, gex_only: bool
+    ) -> None:
+        """Deliberately malformed HDF5 records must not become valid counts by summation."""
+        source = tmp_path / "duplicates.h5"
+        _write_h5_v3(source)
+        with h5py.File(source, "r+") as handle:
+            data = _COUNTS.data.astype(np.float64)
+            data[:2] = values
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+            handle["matrix/indices"][1] = 0
+
+        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
+            read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT, genome=genome, gex_only=gex_only)
+        assert source.resolve() not in _open_hdf5_sources()
+
     @pytest.mark.parametrize("value", [-1.0, 0.5])
     def test_rejects_negative_and_fractional_counts(self, tmp_path: Path, value: float) -> None:
         source = tmp_path / "matrix.h5"

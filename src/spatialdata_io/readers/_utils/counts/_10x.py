@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import gzip
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from scanpy import read_10x_h5 as _scanpy_read_10x_h5
 from scanpy import read_10x_mtx as _scanpy_read_10x_mtx
+from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.table import normalize_owned_anndata
@@ -16,7 +17,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from anndata import AnnData
-    from scipy import sparse
 
     from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 
@@ -31,12 +31,20 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
 
 
 def _normalize_counts(adata: AnnData, path: Path, context: ReaderErrorContext) -> AnnData:
-    table = normalize_owned_anndata(adata)
-    # The source API always supplies expression; normalization has established
-    # its concrete eager CSR representation without duplicating its buffers.
-    matrix = cast("sparse.csr_array | None", table.X)
+    # The shared owner rejects these containers before even accessing X.
+    if adata.is_view or adata.isbacked:
+        return normalize_owned_anndata(adata)
+
+    matrix = adata.X
     if matrix is None:
         raise ReaderFormatError(context=context, path=path, found="missing count data", expected="a count matrix")
+    # Scanpy returns CSR (HDF5) or CSC (MTX). Inspect entries before normalization
+    # can sum duplicates and hide a negative or fractional source value.
+    if not isinstance(matrix, sparse.csr_array | sparse.csr_matrix | sparse.csc_array | sparse.csc_matrix) or (
+        matrix.dtype.kind not in "biuf"
+    ):
+        message = "The 10x source must return a real numerical CSR or CSC count matrix."
+        raise TypeError(message)
     values = matrix.data
     if values.size and values.min() < 0:
         raise ReaderFormatError(
@@ -45,11 +53,12 @@ def _normalize_counts(adata: AnnData, path: Path, context: ReaderErrorContext) -
     if values.dtype.kind == "f":
         for start in range(0, values.size, _VALIDATION_BATCH_SIZE):
             batch = values[start : start + _VALIDATION_BATCH_SIZE]
-            if np.any(batch != np.floor(batch)):
+            # NaN and infinities remain the shared normalizer's responsibility.
+            if np.any(batch > np.floor(batch)):
                 raise ReaderFormatError(
                     context=context, path=path, found="fractional counts", expected="integer count values"
                 )
-    return table
+    return normalize_owned_anndata(adata)
 
 
 def _validate_mtx_header(
@@ -111,7 +120,9 @@ def read_10x_h5(
     Network fallback is disabled. Scanpy owns source parsing, filtering,
     alignment, and source lifetime. Canonical CSR matrix storage can be wrapped
     as a sparse array without copying its buffers.
-    Float32 storage is retained without a maximum-count or precision ceiling.
+    Count checks inspect entries retained by Scanpy before local duplicate
+    summation. Filtering can discard unselected source entries. Float32 storage
+    is retained; source integers above its exact range can already be rounded.
     """
     try:
         adata = _scanpy_read_10x_h5(
@@ -195,8 +206,10 @@ def read_10x_mtx(  # noqa: PLR0913, RUF100
     Scanpy caching is disabled. Scanpy owns source parsing, filtering,
     alignment, and source lifetime. Literal ``.`` and ``..`` prefixes are safe
     because Scanpy concatenates them with fixed companion basenames.
-    Only the MatrixMarket header is inspected outside Scanpy. Float32
-    storage is retained without a maximum-count or precision ceiling.
+    Only the MatrixMarket header is inspected outside Scanpy. Its parser can
+    truncate malformed integer tokens and sum duplicates before returning;
+    validation of its result cannot recover those source records. Float32
+    storage is retained, including its integer precision limits.
     """
     try:
         _validate_mtx_prefix(prefix)

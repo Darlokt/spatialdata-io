@@ -6,6 +6,7 @@ import shutil
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
@@ -162,20 +163,35 @@ class TestMacsima:
 
         assert get_channel_names(result.images["run_image"]) == ["CD3"]
 
-    def test_writes_and_restores_the_table(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    def test_writes_and_restores_the_table(self, tmp_path: Path, storage: str) -> None:
         write_stack(tmp_path / "run", V1_CHANNELS, version=1)
         result = macsima(tmp_path / "run")
 
-        result.write(tmp_path / "out.zarr")
-        restored = read_zarr(tmp_path / "out.zarr")
+        table = result.tables["run_table"]
+        if storage == "h5ad":
+            table.write_h5ad(tmp_path / "out.h5ad", convert_strings_to_categoricals=False)
+            restored = ad.read_h5ad(tmp_path / "out.h5ad")
+        else:
+            result.write(tmp_path / "out.zarr")
+            restored = read_zarr(tmp_path / "out.zarr").tables["run_table"]
 
-        original_var, restored_var = result.tables["run_table"].var, restored.tables["run_table"].var
+        for actual in (table, restored):
+            assert actual.shape == (0, len(V1_CHANNELS))
+            assert actual.X is None
+            assert not actual.obsm
+            assert not actual.layers
+            assert actual.raw is None
+            assert not actual.uns
+        original_var, restored_var = table.var, restored.var
         assert isinstance(original_var, pd.DataFrame)
         assert isinstance(restored_var, pd.DataFrame)
         pd.testing.assert_frame_equal(restored_var, original_var, check_index_type=False)
-        np.testing.assert_array_equal(
-            _image(restored, "run_image").data.compute(), _image(result, "run_image").data.compute()
-        )
+        if storage == "zarr":
+            np.testing.assert_array_equal(
+                _image(read_zarr(tmp_path / "out.zarr"), "run_image").data.compute(),
+                _image(result, "run_image").data.compute(),
+            )
 
     def test_cli_writes_a_store(self, tmp_path: Path, runner: CliRunner) -> None:
         write_stack(tmp_path / "run", V0_CHANNELS, version=0)

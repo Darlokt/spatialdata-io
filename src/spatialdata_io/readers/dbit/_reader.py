@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 _MAX_BORDER_SCALE = 4
 
 
-def _validate_grid_options(dataset_id: str | None, *, include_border: bool, border_scale: float) -> None:
-    """Reject invalid names and nonfinite, negative, or collapsed border widths."""
+def _validate_dataset_id(dataset_id: str | None) -> None:
+    """Reject names that cannot identify the returned spatial grid."""
     if dataset_id is not None and (
         not isinstance(dataset_id, str)
         or not dataset_id
@@ -46,6 +46,11 @@ def _validate_grid_options(dataset_id: str | None, *, include_border: bool, bord
             "and not be '.', '..', or 'table' (case-insensitive)."
         )
         raise ValueError(message)
+
+
+def _validate_grid_options(dataset_id: str | None, *, include_border: bool, border_scale: float) -> None:
+    """Reject invalid names and nonfinite, negative, or collapsed border widths."""
+    _validate_dataset_id(dataset_id)
 
     if not isinstance(include_border, bool):
         message = "include_border must be a boolean."
@@ -196,7 +201,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     )
     if dataset_id is None:
         dataset_id = layout.table.stem
-        _validate_grid_options(dataset_id, include_border=include_border, border_scale=border_scale)
+        _validate_dataset_id(dataset_id)
 
     image_options = data_axes is not None or tiff_series != 0 or tiff_level != 0 or raster != make_raster_options()
     if layout.image is None and image_options:

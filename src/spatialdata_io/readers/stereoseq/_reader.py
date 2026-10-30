@@ -11,7 +11,7 @@ import pandas as pd
 from spatialdata import SpatialData
 from spatialdata.transformations import Scale, set_transformation
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
@@ -155,7 +155,7 @@ def _link(table: ad.AnnData, target: str, index: pd.Index) -> ad.AnnData:
     )
 
 
-def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the public boundary typed.
+def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain one explicit transaction outline.
     path: str | Path,
     *,
     sample_id: str | None = None,
@@ -350,11 +350,15 @@ def stereoseq(  # noqa: PLR0913, RUF100 - explicit product selections keep the p
         counts=counts_by_population,
         resolution=next((product.resolution for product in products), None),
     )
-    for analysis in analyses:
+    for source, analysis in zip(layout.analyses, analyses, strict=True):
         name = f"{analysis.name}_table"
         target = f"{analysis.name}_points"
         points[target] = make_points(analysis.coordinates, analysis.instance_ids)
-        tables[name] = _link(analysis.table, target, analysis.instance_ids)
+        try:
+            tables[name] = _link(analysis.table, target, analysis.instance_ids)
+        except (TypeError, ValueError) as error:
+            add_reader_context(error, context=ReaderErrorContext("stereoseq", "analysis table"), path=source.file)
+            raise
 
     result = SpatialData(
         images={source.name: read_image(source, raster=raster) for source in layout.images if not source.is_mask},

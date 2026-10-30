@@ -214,7 +214,9 @@ def normalize_boundary_ids(table: pa.Table, path: ArtifactFile) -> pd.Index:
     if not (pa.types.is_integer(ids.type) or pa.types.is_string(ids.type) or pa.types.is_large_string(ids.type)):
         raise schema_error(path, found=f"EntityID dtype {ids.type}", expected="exact integer or text identities")
     identifiers = normalize_cell_ids(pd.Series(ids, dtype=STRING_DTYPE), path)
-    planes = integer_values(table.column("ZIndex"), path)
+    # VPT permits absent plane annotations. XY footprint construction uses every
+    # geometry row, independently of this optional 3D stack annotation.
+    planes = integer_values(table.column("ZIndex").drop_null(), path)
     if planes.dtype.kind == "u":
         raise schema_error(path, found="ZIndex overflow", expected="nonnegative int64 plane indexes")
     if "Type" in table.column_names:

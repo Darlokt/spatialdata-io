@@ -164,14 +164,10 @@ def validate_clusters(clusters: pd.DataFrame, observations: pd.Index, path: Arti
 
 def validate_metrics(metrics: pd.DataFrame, path: ArtifactFile, uns_keys: set[str]) -> None:
     """Validate the positional metric/value exception and named trailing categories."""
-    if (
-        not isinstance(metrics.index, pd.RangeIndex)
-        or len(metrics.columns) < _MIN_METRIC_FIELDS
-        or "Category" not in metrics.columns[2:]
-    ):
+    if len(metrics.columns) < _MIN_METRIC_FIELDS or "Category" not in metrics.columns[2:]:
         raise schema_error(
             path,
-            found=f"columns {metrics.columns.tolist()!r}, inferred row index {type(metrics.index).__name__}",
+            found=f"columns {metrics.columns.tolist()!r}",
             expected="metric and value columns followed by Category, with matching row widths",
         )
 

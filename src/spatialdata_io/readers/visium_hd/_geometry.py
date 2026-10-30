@@ -33,7 +33,7 @@ class BoundaryData:
     centroids: NDArray[np.float64] | None
 
 
-def _validate_source(source: gpd.GeoDataFrame, path: ArtifactFile, context: ReaderErrorContext) -> None:
+def _validate_source(source: gpd.GeoDataFrame, path: ArtifactFile, context: ReaderErrorContext) -> NDArray[np.float64]:
     """Validate external IDs and ring representation independently of topology policy."""
 
     def fail(found: str, expected: str) -> ReaderFormatError:
@@ -65,6 +65,7 @@ def _validate_source(source: gpd.GeoDataFrame, path: ArtifactFile, context: Read
     if not np.isfinite(coordinates).all():
         msg = "nonfinite polygon coordinates"
         raise fail(msg, "finite polygon coordinates")
+    return coordinates
 
 
 def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cell", "nucleus"]) -> BoundaryData:
@@ -89,9 +90,7 @@ def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cel
         add_reader_context(error, context=context, path=path)
         raise
 
-    _validate_source(source, path, context)
-
-    coordinates = shapely.get_coordinates(source.geometry.to_numpy())
+    coordinates = _validate_source(source, path, context)
     transformed = image_to_global(frame, coordinates)
     geometry = shapely.set_coordinates(source.geometry.to_numpy(), transformed)
     index = pd.Index(source["cell_id"].to_numpy(dtype=np.int64), name="cell_id")

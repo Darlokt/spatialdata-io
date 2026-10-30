@@ -103,7 +103,11 @@ def mcmicro(
         holds its exact int64 label value. ``obsm['spatial']``
         holds the float64 ``X_centroid``/``Y_centroid`` pixel coordinates.
         MCQuant morphology columns are nullable float64 and all other columns
-        remain exact text. No table is returned without quantification.
+        remain exact text. Area retains pixel squared units, axis lengths and
+        centroid annotations retain pixels, and Eccentricity/Solidity/Extent are
+        dimensionless. Orientation is in radians, counter-clockwise from the
+        row axis to the major axis, between -pi/2 and pi/2. No table is returned
+        without quantification.
 
     Raises
     ------

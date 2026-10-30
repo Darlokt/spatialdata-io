@@ -32,12 +32,14 @@ def read_boundaries(
     document = read_json_object(path, context=_CONTEXT)
     features, identifiers = boundary_features(document, path)
     geometries = geojson_polygons([feature["geometry"] for feature in features], context=_CONTEXT, path=path)
-    # Match GeoDataFrame.from_features: properties become columns in first-seen order.
+    # Keep arbitrary annotation IDs exact, including nullable integers, rather
+    # than allowing pandas to infer a lossy floating column from JSON values.
     frame = gpd.GeoDataFrame(
         [
             {"geometry": geometry, **(feature["properties"] or {})}
             for geometry, feature in zip(geometries, features, strict=True)
-        ]
+        ],
+        dtype=object,
     )
     frame.index = pd.Index(identifiers, name="instance_id")
     if len(frame) != len(instance_ids) or (frame.index.get_indexer(instance_ids) < 0).any():
