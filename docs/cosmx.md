@@ -22,7 +22,7 @@ The count matrix needs `fov` and `cell_ID` columns. Every other column is an exp
 
 Table rows follow metadata order. Observation names are the vendor `cell` IDs when the metadata provides them (AtoMx) and row positions `"0"`, `"1"`, ... otherwise. AtoMx's `cell_id` column is an exact copy of `cell` and a case variant of `cell_ID`, so it is dropped; any other case-variant column names fail. `fov` and `cell_ID` are int64. `Area`, `Area.um2`, `AspectRatio`, `Width`, `Height` and every `Mean.*`/`Max.*` intensity are float64, with empty fields and `NA` as missing values. All other metadata columns stay exact text. `obsm["spatial_pixels"]` and `obsm["global"]` preserve the local and global cell centers in pixels. Categorical string `obs["spatial_pixel_frame"]` identifies each local FOV frame. Without calibration, no canonical `obsm["spatial"]` is returned. With explicit `pixel_size_um`, canonical `spatial` is float64 global cell-center XY in micrometres. `uns["spatialdata_io_positions"]` describes the units, position meaning and frames; the preserved native `global` array has the descriptive frame `global_pixels`.
 
-With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with instance key `cell_ID`, and every FOV with cells must have labels. Cell IDs must fit their own FOV's inspected integer label dtype; this check does not read label pixels or establish full pixel membership. Without that directory the table is returned unlinked.
+With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with instance key `cell_ID`, and every FOV with cells must have labels. A present empty directory, including one containing only dotfiles, fails during discovery. Missing labels for any FOV with cells fail before count parsing or raster construction. Cell IDs must fit their own FOV's inspected integer label dtype; this check does not read label pixels or establish full pixel membership. Without that directory the table is returned unlinked. An empty optional `CellComposite` directory is allowed.
 
 ## Coordinates
 
@@ -34,7 +34,7 @@ With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with 
 
 CosMx local coordinates are pixel indices with a reversed vertical axis: the raster pixel at row `r` and column `c` of an `H`-row FOV has local coordinates `(c, H - r)`. This was measured on the public 2021 Lung5_Rep2 release and on an AtoMx mouse-brain export, from label pixels against cell metadata and polygon extremes. Raster pixels are returned exactly as stored; the reflection is part of each raster's transformation.
 
-Each FOV's local-to-global map is a translation per axis, possibly with a reversed axis: `global = ±local + offset`. Exports differ in the sign of the y axis. The sign and offset are derived from every metadata cell and accepted only when one offset lies within the printed rounding interval of all of them; no affine is fitted. A pixel FOV-position file (`fov,x_px,y_px` or `FOV,x_global_px,y_global_px,...`) must agree with the cells and places FOVs without cells; millimetre-only position files are accepted but not used. Stage positions alone do not establish stage-to-pixel calibration; no universal micrometre-per-pixel constant or scale fitted from a single FOV is applied. A FOV with rasters but no cells and no pixel position fails.
+Each FOV's local-to-global map is a translation per axis, possibly with a reversed axis: `global = ±local + offset`. Exports differ in the sign of the y axis. The sign and offset are derived from every metadata cell and accepted only when one offset lies within the printed rounding interval of all of them; no affine is fitted. A pixel FOV-position file (`fov,x_px,y_px` or `FOV,x_global_px,y_global_px,...`) must agree with the cells and places FOVs without cells; millimetre-only position files are accepted but not used. For a positive axis, the printed position's rounding interval is intersected with the cell-derived offset interval. The printed center is preserved when feasible; otherwise the midpoint of their intersection is used. This selects a feasible placement within source precision and cannot recover an unprinted exact origin. Reflected axes use cell evidence for their offsets. Stage positions alone do not establish stage-to-pixel calibration; no universal micrometre-per-pixel constant or scale fitted from a single FOV is applied. A FOV with rasters but no cells and no pixel position fails. A wholly cell-empty export is unsupported because it cannot establish the dataset's axis signs, even when pixel FOV positions are present.
 
 The raster convention has only been evidenced for exports whose global axes run in the same direction as the local axes. Rasters in an export with a reversed global axis therefore fail, while its table and transcripts are read.
 
@@ -54,7 +54,7 @@ One task owns members beginning in about 8 MiB of compressed data, including the
 
 ## Options and execution
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale. JPEG and PNG composites decode their whole frame for any selection; TIFF sources read only the tiles, or strips grouped into bands of at most 16 MiB, that intersect the selected chunks. Construction executes no raster or transcript tasks.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale. TIFF sample axes are interpreted as image channels, including RGB samples. JPEG and PNG composites decode their whole frame for any selection. TIFF sources read the native tiles, or whole-row strips grouped into bands with a 16 MiB decoded-byte target, that intersect the selected output chunks. A native strip larger than that target remains a single source chunk. Requested output chunks may span several source tiles or bands, so even a small selection can decode all source chunks needed for its output chunk. Construction executes no raster or transcript tasks.
 
 ## Python and command line
 
@@ -67,7 +67,7 @@ sdata.write("Lung5_Rep2.zarr")
 ```
 
 ```bash
-spatialdata_io cosmx --input Lung5_Rep2 --output Lung5_Rep2.zarr --no-include-transcripts
+python -m spatialdata_io cosmx --input Lung5_Rep2 --output Lung5_Rep2.zarr --no-include-transcripts
 ```
 
 The former `transcripts`, `imread_kwargs` and `image_models_kwargs` arguments have been removed; use `include_transcripts`, `scale_factors` and `chunks`. Compared with earlier releases, the reader:

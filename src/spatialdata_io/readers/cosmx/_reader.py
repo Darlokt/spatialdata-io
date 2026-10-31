@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from spatialdata import SpatialData
@@ -19,7 +20,6 @@ from spatialdata_io.readers.cosmx._transforms import solve_placements
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from dask.dataframe import DataFrame
     from xarray import DataArray, DataTree
@@ -93,10 +93,12 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
         With labels, ``region`` links each cell to
         ``<fov>_labels`` with instance key ``cell_ID``. IDs must fit their
         FOV's inspected integer label dtype, without reading pixels; without a
-        ``CellLabels`` directory the table is unlinked.
+        ``CellLabels`` directory the table is unlinked. A present directory
+        must contain labels for every FOV with cells and cannot be empty.
 
         ``images['<fov>_image']`` is a lazy ``(c, y, x)`` array with source
-        pixels unchanged (8-bit color composites use channels ``r, g, b``), and
+        pixels unchanged (8-bit color composites use channels ``r, g, b``;
+        TIFF samples are channels), and
         ``labels['<fov>_labels']`` is lazy integer ``(y, x)`` on the same grid.
         ``points['<dataset_id>_transcripts']`` holds one lazy point per
         transcript at its global ``x``/``y`` pixel position, with ``target``
@@ -127,7 +129,11 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     AtoMx export. Each FOV's local-to-global map is ``global = ±local +
     offset`` per axis, derived from every metadata cell and accepted only when
     one offset satisfies all printed rounding bounds; pixel FOV positions,
-    when present, must agree. Rasters are supported for exports whose axes
+    when present, must agree within their printed intervals. A printed origin
+    already feasible for the cells is preserved; otherwise the midpoint of
+    the cell/position intersection is used. Wholly cell-empty exports cannot
+    determine the dataset axis signs and are unsupported.
+    Rasters are supported for exports whose axes
     are not reversed between frames; the raster convention of exports with a
     reversed global axis has not been evidenced, so such rasters fail.
     AtoMx 3.10.5 pancreas coordinates do not satisfy this translation contract;
@@ -166,6 +172,16 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     layout = discover_layout(path, dataset_id=dataset_id, include_transcripts=include_transcripts)
 
     metadata = read_metadata(layout.metadata)
+    # Discovery rejects empty label directories, so an empty tuple means absence.
+    linked = bool(layout.labels)
+    missing = sorted(set(metadata.fovs.tolist()) - {item.fov for item in layout.labels}) if linked else []
+    if missing:
+        raise ReaderFormatError(
+            context=ReaderErrorContext("cosmx", "CellLabels"),
+            path=Path(path) / "CellLabels",
+            found=f"no labels for FOVs {missing}",
+            expected="labels for every FOV with cells",
+        )
     counts = read_counts(layout.counts)
     positions = {} if layout.fov_positions is None else read_fov_positions(layout.fov_positions)
     raster_fovs = frozenset(item.fov for item in (*layout.images, *layout.labels))
@@ -175,7 +191,7 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     if raster_fovs and any((p.sign_x, p.sign_y) != (1, 1) for p in placements.values()):
         raise ReaderFormatError(
             context=ReaderErrorContext("cosmx", "FOV rasters"),
-            path=layout.root,
+            path=layout.metadata,
             found="rasters in an export whose global axes are reversed relative to local axes",
             expected="rasters only in exports with the evidenced local and global orientation",
         )
@@ -198,16 +214,6 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
         )
         validate_label_ids(metadata.cell_ids[metadata.fovs == item.fov], dtype, item.path)
 
-    # A CellLabels directory is the table target; every FOV with cells needs its labels.
-    linked = bool(layout.labels)
-    missing = sorted(set(metadata.fovs.tolist()) - {item.fov for item in layout.labels})
-    if linked and missing:
-        raise ReaderFormatError(
-            context=ReaderErrorContext("cosmx", "CellLabels"),
-            path=layout.root,
-            found=f"no labels for FOVs {missing}",
-            expected="labels for every FOV with cells",
-        )
     table = build_table(counts, metadata, path=layout.metadata, linked=linked, pixel_size_um=pixel_size_um)
 
     points: dict[str, DataFrame] = {}

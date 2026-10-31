@@ -10,6 +10,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
+import tifffile
 from click.testing import CliRunner
 from dask.callbacks import Callback
 from scipy import sparse
@@ -22,7 +23,7 @@ from spatialdata_io import __version__
 from spatialdata_io._cli.commands.cosmx import cosmx_command
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.cosmx import cosmx
+from spatialdata_io.readers.cosmx import _reader, cosmx
 from tests.integration.readers.cosmx._fixtures import LANDMARKS, POSITIONS, global_xy, local_xy, write_cosmx_dataset
 
 if TYPE_CHECKING:
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
 
     from anndata import AnnData
     from dask.dataframe import DataFrame as DaskDataFrame
+    from pytest_mock import MockerFixture
     from spatialdata import SpatialData
     from xarray import DataTree
 
@@ -128,11 +130,65 @@ class TestCosmx:
         with pytest.raises(ReaderFormatError, match="global axes are reversed"):
             cosmx(fixture.root)
 
-    def test_labels_must_cover_every_fov_with_cells(self, tmp_path: Path) -> None:
+    def test_labels_must_cover_every_fov_with_cells(self, tmp_path: Path, mocker: MockerFixture) -> None:
         fixture = write_cosmx_dataset(tmp_path)
         (fixture.root / "CellLabels" / "CellLabels_F010.tif").unlink()
-        with pytest.raises(ReaderFormatError, match=r"no labels for FOVs \[10\]"):
+        counts = mocker.spy(_reader, "read_counts")
+        image = mocker.spy(_reader, "read_image")
+        labels = mocker.spy(_reader, "read_labels")
+        tasks: list[object] = []
+        with (
+            Callback(posttask=lambda *args: tasks.append(args)),
+            pytest.raises(ReaderFormatError, match=r"no labels for FOVs \[10\]"),
+        ):
             cosmx(fixture.root)
+        counts.assert_not_called()
+        image.assert_not_called()
+        labels.assert_not_called()
+        assert not tasks
+
+    @pytest.mark.parametrize("dotfile", [False, True])
+    def test_present_empty_labels_fail_during_discovery(
+        self, tmp_path: Path, mocker: MockerFixture, *, dotfile: bool
+    ) -> None:
+        fixture = write_cosmx_dataset(tmp_path)
+        directory = fixture.root / "CellLabels"
+        for path in directory.iterdir():
+            path.unlink()
+        if dotfile:
+            (directory / ".hidden.tif").write_bytes(b"ignored")
+        metadata = mocker.spy(_reader, "read_metadata")
+        counts = mocker.spy(_reader, "read_counts")
+        image = mocker.spy(_reader, "read_image")
+        labels = mocker.spy(_reader, "read_labels")
+        tasks: list[object] = []
+        with (
+            Callback(posttask=lambda *args: tasks.append(args)),
+            pytest.raises(ReaderFormatError, match="CellLabels"),
+        ):
+            cosmx(fixture.root)
+        metadata.assert_not_called()
+        counts.assert_not_called()
+        image.assert_not_called()
+        labels.assert_not_called()
+        assert not tasks
+
+    def test_absent_labels_leave_images_and_table_unlinked(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path)
+        shutil.rmtree(fixture.root / "CellLabels")
+        result = cosmx(fixture.root)
+        assert list(result.images) == ["2_image", "10_image"]
+        assert not result.labels
+        assert result.tables["table"].obs["region"].tolist() == ["2_labels", "2_labels", "10_labels", "10_labels"]
+        assert "spatialdata_attrs" not in result.tables["table"].uns
+
+    def test_wholly_cell_empty_export_cannot_establish_dataset_signs(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path, rasters=False)
+        for suffix in ("metadata", "exprMat"):
+            path = fixture.root / f"Run_1_{suffix}_file.csv"
+            pd.read_csv(path).iloc[:0].to_csv(path, index=False)
+        with pytest.raises(ReaderFormatError, match="one sign determined by cells"):
+            cosmx(fixture.root, include_transcripts=False)
 
     def test_ids_must_fit_their_own_fov_label_dtype_without_reading_pixels(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path)
@@ -171,6 +227,103 @@ class TestCosmx:
         restored = pickle.loads(pickle.dumps(data))  # noqa: S301, RUF100 - Only deserialize this test's own graph.
         np.testing.assert_array_equal(restored.compute(), data.compute())
 
+    @pytest.mark.parametrize("chunk_size", [16, 32])
+    def test_compressed_tiff_composition_reads_only_selected_model_chunks(
+        self, tmp_path: Path, mocker: MockerFixture, chunk_size: int
+    ) -> None:
+        fixture = write_cosmx_dataset(tmp_path)
+        height, width = 64, 80
+        yy, xx = np.indices((height, width), dtype=np.uint16)
+        image = np.stack([(yy * 7 + xx * 3) % 256, xx % 256, yy % 256], axis=-1).astype(np.uint8)
+        labels = np.zeros((height, width), dtype=np.uint16)
+        for cell, (row, column) in LANDMARKS.items():
+            labels[row, column] = cell
+        for fov in POSITIONS:
+            (fixture.root / "CellComposite" / f"CellComposite_F{fov:03d}.png").unlink()
+            tifffile.imwrite(
+                fixture.root / "CellComposite" / f"CellComposite_F{fov:03d}.tif",
+                image,
+                photometric="rgb",
+                compression="deflate",
+                tile=(16, 16),
+            )
+            tifffile.imwrite(
+                fixture.root / "CellLabels" / f"CellLabels_F{fov:03d}.tif",
+                labels,
+                photometric="minisblack",
+                compression="deflate",
+                tile=(16, 16),
+            )
+        # Keep the same landmark row indices and the evidenced local Y = H - row convention.
+        for suffix, columns in (
+            ("metadata", ("CenterY_local_px", "CenterY_global_px")),
+            ("tx", ("y_local_px", "y_global_px")),
+        ):
+            path = fixture.root / f"Run_1_{suffix}_file.csv"
+            frame = pd.read_csv(path)
+            for column in columns:
+                frame[column] += height - 6
+            frame.to_csv(path, index=False)
+
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            result = cosmx(fixture.root, chunks=(3, chunk_size, chunk_size))
+        assert not tasks
+        actual_image = result.images["2_image"]
+        assert isinstance(actual_image, DataArray)
+        actual_labels = _labels(result, 2)
+        assert actual_image.dims == ("c", "y", "x")
+        assert actual_labels.dims == ("y", "x")
+        assert actual_image.shape == (3, height, width)
+        assert actual_labels.shape == (height, width)
+        assert actual_image.dtype == np.dtype(np.uint8)
+        assert actual_labels.dtype == np.dtype(np.uint16)
+        assert actual_image.coords["c"].to_numpy().tolist() == ["r", "g", "b"]
+        restored_image, restored_labels = pickle.loads(  # noqa: S301, RUF100 - Deserialize this test's own graphs.
+            pickle.dumps((actual_image.data, actual_labels.data))
+        )
+
+        # Observe compressed payload reads, so the bound measures source I/O rather than graph size.
+        payloads: dict[str, tuple[tuple[int, int], ...]] = {}
+        for path in (
+            fixture.root / "CellComposite" / "CellComposite_F002.tif",
+            fixture.root / "CellLabels" / "CellLabels_F002.tif",
+        ):
+            with tifffile.TiffFile(path) as tiff:
+                page = tiff.pages[0]
+                payloads[path.name] = tuple(
+                    (start, start + count) for start, count in zip(page.dataoffsets, page.databytecounts, strict=True)
+                )
+        reads: dict[str, list[tuple[int, int]]] = {name: [] for name in payloads}
+        original_read = tifffile.FileHandle.read
+
+        def tracked_read(handle: tifffile.FileHandle, size: int = -1, /) -> bytes:
+            start = handle.tell()
+            value = original_read(handle, size)
+            if handle.name in reads:
+                reads[handle.name].append((start, start + len(value)))
+            return value
+
+        mocker.patch.object(tifffile.FileHandle, "read", new=tracked_read)
+        np.testing.assert_array_equal(
+            restored_image[:, 1:5, 2:7].compute(scheduler="synchronous"), image[1:5, 2:7].transpose(2, 0, 1)
+        )
+        np.testing.assert_array_equal(restored_labels[1:5, 2:7].compute(scheduler="synchronous"), labels[1:5, 2:7])
+        expected_tiles = {0} if chunk_size == 16 else {0, 1, 5, 6}
+        for name, ranges in payloads.items():
+            observed = {
+                index
+                for index, (start, stop) in enumerate(ranges)
+                if any(max(start, low) < min(stop, high) for low, high in reads[name])
+            }
+            assert observed == expected_tiles
+        center = np.array([2.5, 1.5, 1.0])
+        for raster in (actual_image, actual_labels):
+            np.testing.assert_array_equal(
+                (_transform(raster, "global") @ center)[:2], result.tables["table"].obsm["global"][0]
+            )
+
+    @pytest.mark.cli
     def test_zarr_round_trip_and_cli(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path / "input")
         output = tmp_path / "output.zarr"
@@ -232,6 +385,40 @@ class TestCosmxCalibration:
             assert isinstance(transform, BaseTransformation)
             np.testing.assert_array_equal(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.diag([0.5, 0.5, 1]))
             np.testing.assert_array_equal(points.compute()[["x", "y"]].to_numpy()[0], [1002, 5005.625])
+
+    @pytest.mark.parametrize("pixel_size_um", [None, 0.5])
+    def test_coarse_positions_compose_with_cell_bounds_and_point_frames(
+        self, tmp_path: Path, pixel_size_um: float | None
+    ) -> None:
+        fixture = write_cosmx_dataset(tmp_path)
+        # Whole-pixel origins straddle the true origins: above FOV 2 Y and below FOV 10 X.
+        (fixture.root / "Run_1_fov_positions_file.csv").write_text("fov,x_px,y_px\n2,1000,5001\n10,3000,7000\n")
+        result = cosmx(fixture.root, pixel_size_um=pixel_size_um)
+        scale = 1.0 if pixel_size_um is None else pixel_size_um
+        table = result.tables["table"]
+        points = result.points["Run_1_transcripts"]
+        events = points.compute()
+        np.testing.assert_array_equal(
+            table.obsm["global"], [global_xy(fov, cell, "flat_2021") for fov in POSITIONS for cell in LANDMARKS]
+        )
+        if pixel_size_um is not None:
+            np.testing.assert_array_equal(table.obsm["spatial"], table.obsm["global"] * scale)
+        for index, fov in enumerate(POSITIONS):
+            # Bounds combine the half printed units of the local and global cell centers.
+            half = np.array([0.1 if fov == 2 else 0.055, 0.1])
+            for cell, (row, column) in LANDMARKS.items():
+                center = np.array([column + 0.5, row + 0.5, 1.0])
+                expected = table.obsm["global"][index * 2 + cell - 1]
+                for raster in (result.images[f"{fov}_image"], result.labels[f"{fov}_labels"]):
+                    observed = (_transform(raster, "global") @ center)[:2] / scale
+                    assert np.all(np.abs(observed - expected) <= half)
+                    np.testing.assert_array_equal((_transform(raster, str(fov)) @ center)[:2], local_xy(cell))
+            selected = events[events["fov"] == fov]
+            native = np.column_stack([selected["x"], selected["y"], np.ones(len(selected))])
+            local = (_transform(points, str(fov)) @ native.T).T[:, :2]
+            assert np.all(np.abs(local - selected[["x_local", "y_local"]].to_numpy()) <= half)
+            global_points = (_transform(points, "global") @ native.T).T[:, :2]
+            np.testing.assert_array_equal(global_points, native[:, :2] * scale)
 
     @pytest.mark.parametrize("value", [0.0, -1.0, float("inf"), float("nan")])
     def test_invalid_scale(self, tmp_path: Path, value: float) -> None:

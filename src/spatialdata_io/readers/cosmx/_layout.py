@@ -40,7 +40,6 @@ class FovFile:
 class CosmxLayout:
     """Describe the artifacts of one export; geometry and schemas are read later."""
 
-    root: DatasetRoot
     dataset_id: str
     counts: ArtifactFile
     metadata: ArtifactFile
@@ -120,6 +119,8 @@ def _fov_files(root: DatasetRoot, name: str, suffixes: frozenset[str]) -> tuple[
         if fov in files:
             raise _error(entry, artifact=name, found=f"two files for FOV {fov}", expected="one raster per FOV")
         files[fov] = require_metadata_file(root, f"{name}/{entry.name}", context=context)
+    if name == "CellLabels" and not files:
+        raise _error(directory, artifact=name, found="no label rasters", expected="a nonempty CellLabels directory")
     return tuple(FovFile(fov, files[fov]) for fov in sorted(files))
 
 
@@ -133,7 +134,6 @@ def discover_layout(path: str | Path, *, dataset_id: str | None, include_transcr
     prefix = _infer_dataset_id(root, names) if dataset_id is None else dataset_id
 
     return CosmxLayout(
-        root,
         prefix,
         _required(root, names, prefix, _COUNTS),
         _required(root, names, prefix, "metadata_file"),

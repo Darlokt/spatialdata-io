@@ -51,9 +51,11 @@ def _source(path: ArtifactFile, artifact: str) -> LazyRaster:
 
 def _normalize(raster: LazyRaster, path: ArtifactFile, artifact: str, target: tuple[str, ...]) -> Array:
     """Name source axes explicitly, dropping only singleton extra axes."""
+    # TIFF declares interleaved RGB(A) components as samples rather than channels.
+    axes = tuple("c" if axis.lower() == "s" else axis for axis in raster.axes) if target == _IMAGE_AXES else raster.axes
     try:
         return normalize_raster_axes(
-            raster.data, raster.axes, target_axes=target, add_missing=("c",) if target == _IMAGE_AXES else ()
+            raster.data, axes, target_axes=target, add_missing=("c",) if target == _IMAGE_AXES else ()
         )
     except ValueError as error:
         raise ReaderFormatError(

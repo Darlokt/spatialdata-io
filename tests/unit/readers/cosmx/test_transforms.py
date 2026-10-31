@@ -14,6 +14,7 @@ from spatialdata_io.readers.cosmx._transforms import (
     FovPosition,
     Placement,
     Sign,
+    _midpoint,
     raster_to_local,
     solve_placements,
 )
@@ -77,6 +78,24 @@ class TestPlacement:
         np.testing.assert_array_equal(_apply(forward, [(2, 3)]), [[1000.25 + sign_x * 2, 5000.5 + sign_y * 3]])
 
 
+class TestMidpoint:
+    """Finite interval endpoints retain a feasible midpoint across the float64 range."""
+
+    @pytest.mark.parametrize(
+        ("low", "high", "expected"),
+        [
+            (5e-324, 5e-324, 5e-324),
+            (-5e-324, -5e-324, -5e-324),
+            (-5e-324, 1.5e-323, 5e-324),
+            (-1.5e308, 1.5e308, 0),
+            (1.5e308, 1.5e308, 1.5e308),
+            (-1.5e308, -1.5e308, -1.5e308),
+        ],
+    )
+    def test_finite_range(self, low: float, high: float, expected: float) -> None:
+        assert _midpoint(low, high) == expected
+
+
 class TestSolvePlacements:
     """Signs and offsets are exact consequences of every cell's rounding interval."""
 
@@ -126,7 +145,7 @@ class TestSolvePlacements:
         with pytest.raises(ReaderFormatError, match=match):
             _solve(tmp_path, fovs, (x, y))
 
-    def test_positions_are_exact_offsets_and_place_fovs_without_cells(self, tmp_path: Path) -> None:
+    def test_feasible_positions_are_preserved_and_place_fovs_without_cells(self, tmp_path: Path) -> None:
         positions = {1: FovPosition(100.0, 10.0, 5e-7, 5e-7), 3: FovPosition(300.5, 30.25, 5e-7, 5e-7)}
         placements = _solve(
             tmp_path,
@@ -136,6 +155,38 @@ class TestSolvePlacements:
             positions=positions,
         )
         assert placements == {1: Placement(1, 1, 100.0, 10.0), 3: Placement(1, 1, 300.5, 30.25)}
+
+    @pytest.mark.parametrize("axis", [0, 1])
+    @pytest.mark.parametrize(
+        ("position", "half", "expected"),
+        [(99.6, 0.35, 99.925), (100.4, 0.35, 100.075), (100.025, 0.001, 100.025)],
+    )
+    def test_position_and_cell_intersection(
+        self, tmp_path: Path, axis: int, position: float, half: float, expected: float
+    ) -> None:
+        samples = (_samples([2, 6], [102, 106], half=0.05), _samples([2, 6], [102, 106], half=0.05))
+        origin = FovPosition(position, 100, half, 0) if axis == 0 else FovPosition(100, position, 0, half)
+        placement = _solve(tmp_path, [1, 1], samples, positions={1: origin})[1]
+        offset = (placement.offset_x, placement.offset_y)[axis]
+        assert offset == pytest.approx(expected, rel=0, abs=1e-12)
+        assert position - half <= offset <= position + half
+        # Check every original cell, independently of the solver's reduced interval.
+        source = samples[axis]
+        allowance = source.local_half + source.global_half
+        allowance += 2 * np.finfo(np.float64).eps * np.maximum(np.abs(source.local), np.abs(source.global_))
+        assert np.all(np.abs(source.global_ - source.local - offset) <= allowance)
+
+    def test_position_interval_touching_cell_interval(self, tmp_path: Path) -> None:
+        samples = (_samples([0, 4], [0, 4], half=0), _samples([0, 4], [0, 4], half=0))
+        placement = _solve(tmp_path, [1, 1], samples, positions={1: FovPosition(1, -1, 1, 1)})[1]
+        assert placement == Placement(1, 1, 0, 0)
+
+    def test_large_finite_offset_midpoint_does_not_overflow(self, tmp_path: Path) -> None:
+        samples = _samples([0, 1e300], [1.5e308, 1.50000001e308], half=0)
+        with np.errstate(over="raise"):
+            placement = _solve(tmp_path, [1, 1], (samples, samples))[1]
+        assert np.isfinite([placement.offset_x, placement.offset_y]).all()
+        assert placement.offset_x == pytest.approx(1.5e308, rel=1e-15)
 
     def test_position_must_agree_with_cells(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="outside cell-derived"):

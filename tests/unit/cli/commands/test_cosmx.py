@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+pytestmark = pytest.mark.cosmx
+
+
 class TestCosmxCommand:
     """Keep prefix, transcript and raster options aligned with the reader."""
 

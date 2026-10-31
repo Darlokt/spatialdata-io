@@ -39,7 +39,7 @@ _DECODING_ULPS = 2 * np.finfo(np.float64).eps
 
 @dataclass(frozen=True, slots=True)
 class AxisSamples:
-    """Own one axis of every metadata cell: values and their printed rounding bounds."""
+    """Borrow one axis of owned cell coordinates, alongside its printed rounding bounds."""
 
     local: npt.NDArray[np.float64]
     global_: npt.NDArray[np.float64]
@@ -123,6 +123,11 @@ def _dataset_sign(candidates: dict[int, dict[Sign, tuple[float, float]]], axis: 
     return determined.pop()
 
 
+def _midpoint(low: float, high: float) -> float:
+    """Choose a midpoint without overflowing or halving same-sign subnormal endpoints."""
+    return low + (high - low) / 2 if low >= 0 or high <= 0 else (low + high) / 2
+
+
 def solve_placements(
     fovs: npt.NDArray[np.int64],
     samples: tuple[AxisSamples, AxisSamples],
@@ -132,7 +137,7 @@ def solve_placements(
     path: ArtifactFile,
 ) -> dict[int, Placement]:
     """Derive every required FOV's placement from all of its cells, cross-checked by positions."""
-    candidates: list[dict[int, dict[Sign, tuple[float, float]]]] = [{}, {}]
+    candidates: tuple[dict[int, dict[Sign, tuple[float, float]]], dict[int, dict[Sign, tuple[float, float]]]] = ({}, {})
     for fov in np.unique(fovs).tolist():
         rows = fovs == fov
         for axis, axis_samples in enumerate(samples):
@@ -153,17 +158,20 @@ def solve_placements(
         for axis, sign in enumerate(signs):
             interval = candidates[axis].get(fov, {}).get(sign)
             if position is not None and sign == 1:
-                # Evidenced exports with a positive axis print the FOV origin as the exact offset.
                 value, half = (position.x, position.x_half) if axis == 0 else (position.y, position.y_half)
-                if interval is not None and not interval[0] - half <= value <= interval[1] + half:
-                    raise _error(
-                        path,
-                        found=f"FOV {fov} {_AXES[axis]} position {value} outside cell-derived {interval}",
-                        expected="FOV positions consistent with every cell",
-                    )
+                if interval is not None:
+                    low, high = max(interval[0], value - half), min(interval[1], value + half)
+                    if low > high:
+                        raise _error(
+                            path,
+                            found=f"FOV {fov} {_AXES[axis]} position {value} outside cell-derived {interval}",
+                            expected="FOV positions consistent with every cell",
+                        )
+                    # A rounded origin is an interval, not necessarily a feasible offset itself.
+                    value = value if low <= value <= high else _midpoint(low, high)
                 offsets.append(value)
             elif interval is not None:
-                offsets.append((interval[0] + interval[1]) / 2)
+                offsets.append(_midpoint(*interval))
             else:
                 raise _error(
                     path,

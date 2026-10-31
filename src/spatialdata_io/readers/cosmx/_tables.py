@@ -128,9 +128,11 @@ def read_counts(path: ArtifactFile) -> Counts:
             values = count_block([block.column(name) for name in features], features, path)
             # CosMx reports per-FOV background as cell 0; it is not a cell observation.
             keep = cell != 0
-            blocks.append(as_csr_array(values[keep]))
-            fovs.append(fov[keep])
-            cell_ids.append(cell[keep])
+            if not keep.all():
+                values, fov, cell = values[keep], fov[keep], cell[keep]
+            blocks.append(as_csr_array(values))
+            fovs.append(fov)
+            cell_ids.append(cell)
     expression = sparse.vstack(blocks, format="csr") if blocks else sparse.csr_array((0, len(features)), dtype=np.int64)
     all_fovs = np.concatenate(fovs) if fovs else np.empty(0, np.int64)
     all_cells = np.concatenate(cell_ids) if cell_ids else np.empty(0, np.int64)
@@ -160,11 +162,15 @@ def read_metadata(path: ArtifactFile) -> CellMetadata:
     if pd.MultiIndex.from_arrays([fovs, cell_ids]).has_duplicates:
         raise schema_error(path, found="duplicate (fov, cell_ID) keys", expected="one row per cell")
 
-    centers = {name: float_values(source.column(name), path, name) for name in CENTERS}
+    local = np.empty((source.num_rows, 2), dtype=np.float64)
+    global_ = np.empty_like(local)
+    for axis, (local_name, global_name) in enumerate((CENTERS[0::2], CENTERS[1::2])):
+        local[:, axis] = float_values(source.column(local_name), path, local_name)
+        global_[:, axis] = float_values(source.column(global_name), path, global_name)
     halves = {name: half_units(source.column(name), path, name) for name in CENTERS}
-    samples = tuple(
-        AxisSamples(centers[local], centers[global_], halves[local], halves[global_])
-        for local, global_ in (CENTERS[0::2], CENTERS[1::2])
+    samples = (
+        AxisSamples(local[:, 0], global_[:, 0], halves[CENTERS[0]], halves[CENTERS[2]]),
+        AxisSamples(local[:, 1], global_[:, 1], halves[CENTERS[1]], halves[CENTERS[3]]),
     )
 
     index = pd.RangeIndex(source.num_rows)
@@ -192,14 +198,7 @@ def read_metadata(path: ArtifactFile) -> CellMetadata:
             found=f"case-variant column names {sorted(set(folded[folded.duplicated()]))}",
             expected="annotation names that are unique ignoring case",
         )
-    return CellMetadata(
-        obs,
-        fovs,
-        cell_ids,
-        np.column_stack([centers["CenterX_local_px"], centers["CenterY_local_px"]]),
-        np.column_stack([centers["CenterX_global_px"], centers["CenterY_global_px"]]),
-        (samples[0], samples[1]),
-    )
+    return CellMetadata(obs, fovs, cell_ids, local, global_, samples)
 
 
 def read_fov_positions(path: ArtifactFile) -> dict[int, FovPosition]:
@@ -226,7 +225,8 @@ def build_table(
 ) -> ad.AnnData:
     """Align counts to metadata order by exact keys and link once to per-FOV labels.
 
-    ``path`` identifies the metadata artifact in population errors.
+    Finalize the reader-owned ``metadata.obs`` in place and reuse its native
+    coordinate buffers. ``path`` identifies the metadata artifact in population errors.
     """
     keys = pd.MultiIndex.from_arrays([counts.fovs, counts.cell_ids])
     order = keys.get_indexer(pd.MultiIndex.from_arrays([metadata.fovs, metadata.cell_ids]))

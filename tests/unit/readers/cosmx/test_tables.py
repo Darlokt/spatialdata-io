@@ -80,6 +80,36 @@ class TestReadCounts:
         counts = read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A\n"))
         assert counts.expression.shape == (0, 1)
 
+    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("cells", [(1, 2, 3), (0, 0, 0), (0, 2, 3)])
+    def test_background_modes(
+        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, cells: tuple[int, ...]
+    ) -> None:
+        mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_BATCH_ROWS", batch_rows)
+        text = "fov,cell_ID,A,B\n" + "".join(f"1,{cell},{i},0\n" for i, cell in enumerate(cells))
+        counts = read_counts(_write(tmp_path, "c.csv", text))
+        assert isinstance(counts.expression, sparse.csr_array)
+        assert not isinstance(counts.expression, sparse.spmatrix)
+        assert counts.expression.has_canonical_format
+        assert counts.expression.dtype == np.int64
+        expected = np.array([[i, 0] for i, cell in enumerate(cells) if cell], dtype=np.int64).reshape(-1, 2)
+        np.testing.assert_array_equal(counts.expression.toarray(), expected)
+        assert counts.cell_ids.tolist() == [cell for cell in cells if cell]
+
+    def test_invalid_background_counts_are_not_ignored(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="below 0"):
+            read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A\n1,0,-1\n"))
+
+    def test_large_sparse_expression_is_never_densified(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        features = [f"Gene{i}" for i in range(512)]
+        rows = [f"1,{row + 1}," + ",".join("1" if i == row % 512 else "0" for i in range(512)) for row in range(2048)]
+        path = _write(tmp_path, "c.csv", "fov,cell_ID," + ",".join(features) + "\n" + "\n".join(rows) + "\n")
+        mocker.patch.object(sparse.csr_array, "toarray", side_effect=AssertionError("expression densified"))
+        counts = read_counts(path)
+        assert counts.expression.shape == (2048, 512)
+        assert counts.expression.nnz == 2048
+        np.testing.assert_array_equal(counts.expression.data, np.ones(2048, dtype=np.int64))
+
     @pytest.mark.parametrize(
         ("text", "match"),
         [
@@ -104,6 +134,11 @@ class TestReadMetadata:
         np.testing.assert_array_equal(metadata.local, [[2, 5], [6, 2], [2, 5]])
         np.testing.assert_array_equal(metadata.global_, [[102, 15], [106, 12], [202, 25]])
         np.testing.assert_array_equal(metadata.samples[0].local_half, [0.5, 0.5, 0.5])
+        for axis, samples in enumerate(metadata.samples):
+            assert np.shares_memory(samples.local, metadata.local[:, axis])
+            assert np.shares_memory(samples.global_, metadata.global_[:, axis])
+            np.testing.assert_array_equal(samples.local, metadata.local[:, axis])
+            np.testing.assert_array_equal(samples.global_, metadata.global_[:, axis])
         obs = metadata.obs
         assert obs.columns.tolist() == ["fov", "cell_ID", "Area", "Mean.DAPI", "note"]
         assert obs["Mean.DAPI"].isna().tolist() == [False, True, True]

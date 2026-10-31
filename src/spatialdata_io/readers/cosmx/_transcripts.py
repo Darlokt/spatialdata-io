@@ -105,14 +105,9 @@ def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
     return _normalize(table, features=projection.features, path=path)
 
 
-def _without_header(payload: bytes) -> bytes:
-    """Drop the header record that begins the first source partition."""
-    return payload.split(b"\n", 1)[1] if b"\n" in payload else b""
-
-
 def _plain_block(block: bytes, projection: _Projection, *, first: bool) -> pd.DataFrame:
     """Parse one newline-delimited byte block of an uncompressed source."""
-    return _parse(_without_header(block) if first else block, projection)
+    return _parse(block.partition(b"\n")[2] if first else block, projection)
 
 
 def _decode_member(
@@ -142,15 +137,7 @@ def _decode_member(
     return handle.tell() - len(decoder.unused_data), decoder.unused_data
 
 
-@dataclass(frozen=True, slots=True)
-class _MemberRange:
-    """Immutable task state: a compressed byte range, ending at most at the file end."""
-
-    start: int
-    stop: int
-
-
-def _gzip_range(spec: _MemberRange, projection: _Projection, offset: int) -> tuple[int, pd.DataFrame]:
+def _gzip_range(projection: _Projection, offset: int, *, start: int, stop: int) -> tuple[int, pd.DataFrame]:
     """Read contiguously from the predecessor's verified boundary, never resynchronizing.
 
     The scalar end offset orders source reads without keeping open resources in
@@ -160,9 +147,9 @@ def _gzip_range(spec: _MemberRange, projection: _Projection, offset: int) -> tup
     payload = bytearray()
     pending = b""
     with projection.path.open("rb") as handle:
-        while offset < spec.stop:
+        while offset < stop:
             offset, pending = _decode_member(handle, offset, projection.path, payload, pending)
-    if spec.start == 0:
+    if start == 0:
         del payload[: payload.find(b"\n") + 1]
     return offset, _parse(payload, projection)
 
@@ -175,8 +162,9 @@ def _partitions(projection: _Projection) -> list[Delayed]:
         offset: int | Delayed = 0
         partitions: list[Delayed] = []
         for start in range(0, size, _GZIP_RANGE_BYTES):
-            spec = _MemberRange(start, min(start + _GZIP_RANGE_BYTES, size))
-            task = delayed(_gzip_range, nout=2)(spec, projection, offset)
+            task = delayed(_gzip_range, nout=2)(
+                projection, offset, start=start, stop=min(start + _GZIP_RANGE_BYTES, size)
+            )
             offset, partition = task
             partitions.append(partition)
         return partitions

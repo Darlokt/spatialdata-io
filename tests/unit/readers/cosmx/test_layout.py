@@ -66,6 +66,35 @@ class TestDiscoverLayout:
         layout = discover_layout(root, dataset_id="Run_2", include_transcripts=False)
         assert layout.counts.name == "Run_2_exprMat_file.csv.gz"
 
+    @pytest.mark.parametrize("dotfile", [False, True])
+    def test_present_empty_labels_fail(self, tmp_path: Path, *, dotfile: bool) -> None:
+        root = _touch(tmp_path, *_CORE)
+        directory = root / "CellLabels"
+        directory.mkdir()
+        if dotfile:
+            (directory / ".DS_Store").touch()
+        with pytest.raises(ReaderFormatError, match="no label rasters") as error:
+            discover_layout(root, dataset_id=None, include_transcripts=False)
+        assert str(directory) in str(error.value)
+
+    def test_empty_composites_remain_optional(self, tmp_path: Path) -> None:
+        root = _touch(tmp_path, *_CORE)
+        (root / "CellComposite").mkdir()
+        layout = discover_layout(root, dataset_id=None, include_transcripts=False)
+        assert layout.images == ()
+
+    def test_partial_labels_are_discovered_without_metadata_parsing(self, tmp_path: Path) -> None:
+        root = _touch(tmp_path, *_CORE, "CellLabels/CellLabels_F002.tif")
+        layout = discover_layout(root, dataset_id=None, include_transcripts=False)
+        assert [item.fov for item in layout.labels] == [2]
+
+    @pytest.mark.parametrize("artifact", ["CellLabels", "CellComposite"])
+    def test_raster_directory_wrong_kind(self, tmp_path: Path, artifact: str) -> None:
+        root = _touch(tmp_path, *_CORE, artifact)
+        with pytest.raises(NotADirectoryError) as error:
+            discover_layout(root, dataset_id=None, include_transcripts=False)
+        assert error.value.filename == str(root / artifact)
+
     @pytest.mark.parametrize(
         ("files", "match"),
         [

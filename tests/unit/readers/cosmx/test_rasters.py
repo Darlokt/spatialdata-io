@@ -41,6 +41,17 @@ def _matrix(transform: BaseTransformation) -> np.ndarray:
 class TestReadImage:
     """Encoded and TIFF images keep source pixels; frames carry the reflection."""
 
+    @pytest.mark.parametrize("channels", [3, 4])
+    def test_rgb_tiff_samples_are_channels(self, tmp_path: Path, channels: int) -> None:
+        pixels = np.arange(4 * 5 * channels, dtype=np.uint8).reshape(4, 5, channels)
+        path = tmp_path / "C_F002.tif"
+        tifffile.imwrite(path, pixels, photometric="rgb")
+        element, grid = read_image(ArtifactFile(path), fov=2, placement=_PLACEMENT, options=_DEFAULT)
+        assert grid == (4, 5)
+        assert element.dims == ("c", "y", "x")
+        assert element.coords["c"].to_numpy().tolist() == list("rgba"[:channels])
+        np.testing.assert_array_equal(element.data.compute(), np.moveaxis(pixels, -1, 0))
+
     def test_png_color_composite(self, tmp_path: Path) -> None:
         pixels = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
         (tmp_path / "C_F002.png").write_bytes(imagecodecs.png_encode(pixels))
