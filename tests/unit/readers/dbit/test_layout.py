@@ -30,7 +30,6 @@ class TestDiscoverLayout:
 
         layout = _discover_layout(tmp_path, table_file=None, barcode_positions_file=None, image_file=None)
 
-        assert layout.root == tmp_path.resolve()
         assert layout.table == (tmp_path / "sample.h5ad").resolve()
         assert layout.barcode_positions == (tmp_path / "barcode_list.txt").resolve()
         assert layout.image == (tmp_path / "prefix_tissue_lowres_image.png").resolve()

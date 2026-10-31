@@ -314,20 +314,27 @@ active feature columns does not rename `raw.var` columns. Inherited
 The H5AD plus barcode-map layout sorts observations by A then B, retaining
 original names. Slicing aligns every observation mapping, both axes of `obsp`
 and the rows of `raw`; raw features retain their independent order.
-Imported expression dtype, annotations and missingness remain. `array_A` and
-`array_B` are one-based int64 grid coordinates; textual `sample` and
+Imported expression dtype, unrelated annotations and missingness remain.
+`array_A` and `array_B` are one-based int64 grid coordinates; textual `sample` and
 categorical `region` contain the dataset name, and int64 `pixel_id` is the
 zero-based sorted row position. Float64 is not inferred as a physical unit:
 `obsm["spatial_grid"]` contains integer `(A, B)` grid positions. Any
 imported `spatial` is preserved exactly under `spatial_source` before sorting;
 canonical physical `spatial` is absent.
 
-The generated grid index checks final membership in `(region, pixel_id)`;
-source linkage is intentionally replaced. `X` and optional `counts` become
-CSR; other layers, embeddings, feature mappings, ordinary `uns` and `raw`
+The reader owns `obs` columns `array_A`, `array_B`, `sample`, `region`, and
+`pixel_id`, deliberately overwriting imported values whether equal, conflicting,
+or null. It discards any inherited `uns["spatialdata_attrs"]` without
+interpretation, generates fresh linkage, and checks final membership in
+`(region, pixel_id)` against the generated grid index. The source H5AD file
+remains unchanged. Coordinate destination collisions still fail: imported
+`spatial` can move to `spatial_source` only when that destination is free.
+
+`X` and optional `counts` become canonical CSR sparse arrays; other layers,
+embeddings, feature mappings, ordinary `uns` and `raw`
 survive. Integer duplicate accumulation that would overflow its source dtype
 fails. The optional image determines the square-grid display scale but does
-not rewrite table positions. See [DBiT](dbit.md).
+not rewrite table positions or establish physical calibration. See [DBiT](dbit.md).
 
 ### seqFISH
 

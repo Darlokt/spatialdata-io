@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
-    DatasetRoot,
     normalize_dataset_root,
     optional_unique_path,
     require_caller_file,
@@ -27,7 +26,6 @@ _IMAGE_SUFFIXES = frozenset({".tif", ".tiff", ".btf", ".png", ".jpg", ".jpeg"})
 class _DbitLayout:
     """Hold canonical validated artifacts without loaded data or open resources."""
 
-    root: DatasetRoot
     table: ArtifactFile
     barcode_positions: ArtifactFile
     image: ArtifactFile | None
@@ -93,4 +91,4 @@ def _discover_layout(
             expected="a TIFF-family, PNG, or JPEG histology image",
         )
 
-    return _DbitLayout(root, table, barcode_positions, image)
+    return _DbitLayout(table, barcode_positions, image)

@@ -47,11 +47,8 @@ def _read_barcodes(path: ArtifactFile) -> _Barcodes:
 
     _normalize_barcodes(frame, path)
 
-    maps: list[Mapping[str, int]] = []
-    for axis in ("A", "B"):
-        selected = frame["axis"].eq(axis)
-        maps.append(
-            MappingProxyType(dict(zip(frame.loc[selected, "sequence"], frame.loc[selected, "position"], strict=True)))
-        )
-
-    return _Barcodes(maps[0], maps[1])
+    a, b = (
+        MappingProxyType(dict(zip(frame.loc[selected, "sequence"], frame.loc[selected, "position"], strict=True)))
+        for selected in (frame["axis"].eq("A"), frame["axis"].eq("B"))
+    )
+    return _Barcodes(a, b)

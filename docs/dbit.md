@@ -38,7 +38,7 @@ H5AD observation names encode the B sequence in their first eight characters and
 | `tables["table"]` | Eager owned AnnData, sorted by A position and then B position, with source feature order retained. |
 | `images[dataset_id + "_image"]` | Optional lazy image in `(c, y, x)` order, with source pixel dtype and channel order retained. |
 
-The table records `array_A`, `array_B`, `sample`, categorical `region`, and integer `pixel_id` columns. Its region and instance linkage targets the final shape index. Existing H5AD linkage metadata is replaced. Its `region` and `pixel_id` observation fields are replaced when that previous linkage explicitly declares both field names; malformed corresponding declarations fail. Otherwise reserved `array_A`, `array_B`, `sample`, `region`, and `pixel_id` fields must be absent or semantically equal to the generated values. Conflicting preserved metadata fails instead of being overwritten. Other observation/feature metadata and aligned arrays are retained, including their source dtypes, missingness, and categorical order. Named annotation columns accept arbitrary order and additional fields; duplicate column names fail. Generated grid identifiers reach the output as NumPy int64, `sample` as pandas strings, and `region` as categorical strings. `X` and an existing `counts` layer become finite, canonical SciPy CSR sparse arrays; other layers retain their representation. Duplicate sparse entries are summed while retaining the source dtype. If an integer sum would overflow that dtype, reading fails: write the source counts with a wider integer dtype before retrying. The reader owns its newly read table and does not modify the source H5AD.
+The reader owns the generated `obs` columns `array_A`, `array_B`, `sample`, `region`, and `pixel_id`. It deliberately overwrites these columns whether imported values are equal, conflicting, or null. Any inherited `uns["spatialdata_attrs"]` is discarded without interpretation, and fresh table linkage targets the final shape index. Other observation/feature metadata and aligned arrays are retained, including their source dtypes, missingness, and categorical order. Named annotation columns accept arbitrary order and additional fields; duplicate column names fail. Generated grid identifiers reach the output as NumPy int64, `sample` as pandas strings, and `region` as categorical strings. `X` and an existing `counts` layer become finite, canonical SciPy CSR sparse arrays; other layers retain their representation. Duplicate sparse entries are summed while retaining the source dtype. If an integer sum would overflow that dtype, reading fails: write the source counts with a wider integer dtype before retrying. The reader owns its newly read table and does not modify the source H5AD.
 
 A is the x axis and B is the y axis. Without an image, grid cell `(A, B)` occupies `[A - 1, A] × [B - 1, B]` before the border inset. `include_border=True` shrinks each edge inward by `0.125 * border_scale` grid units. `border_scale` must be finite and satisfy `0 <= border_scale < 4`, including when `include_border=False`.
 
@@ -50,7 +50,7 @@ Without an image these are barcode-grid units; with an image they use the docume
 
 `table.obsm["spatial_grid"]` retains the one-based integer `(array_A, array_B)` coordinates, even when an image scales the polygons. These values are barcode positions, not polygon centers or image-pixel coordinates.
 
-`uns["spatialdata_io_positions"]` describes `spatial_grid` as grid ordinals in the `barcode_grid` frame. Imported `obsm["spatial"]` moves exactly to `spatial_source` before sorting, preserving dtype and shape; an occupied destination raises. No physical `spatial` is produced. Channel widths and fitting display polygons to an image do not establish physical table calibration.
+`uns["spatialdata_io_positions"]` describes `spatial_grid` as grid ordinals in the `barcode_grid` frame. Existing `spatial_grid` or `spatialdata_io_positions` destinations raise. Imported `obsm["spatial"]` moves exactly to `spatial_source` before sorting, preserving dtype and shape; an occupied destination raises when this move is required. No physical `spatial` is produced. Channel widths and fitting display polygons to an image do not establish physical table calibration.
 
 ## Image options and lazy execution
 
@@ -85,7 +85,7 @@ sdata.write("sample.zarr")
 The CLI uses the same option names in kebab case. Repeat `--scale-factors` once per generated level, and `--chunks` once for a single size or three times in CYX order:
 
 ```bash
-spatialdata_io dbit --input dataset --output sample.zarr \
+python -m spatialdata_io dbit --input dataset --output sample.zarr \
   --table-file sample.h5ad --barcode-positions-file barcode_list.txt \
   --image-file registered.tif --no-include-border \
   --scale-factors 2 --scale-factors 2 --chunks 1 --chunks 512 --chunks 512

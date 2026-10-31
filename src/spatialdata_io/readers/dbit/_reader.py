@@ -19,7 +19,7 @@ from spatialdata_io.readers.dbit._barcodes import _read_barcodes
 from spatialdata_io.readers.dbit._geometry import _make_grid
 from spatialdata_io.readers.dbit._images import _read_image, _validate_image_options
 from spatialdata_io.readers.dbit._layout import _discover_layout
-from spatialdata_io.readers.dbit._schemas import GRID_DTYPE, SAMPLE_DTYPE, _validate_output_column
+from spatialdata_io.readers.dbit._schemas import GRID_DTYPE, SAMPLE_DTYPE
 from spatialdata_io.readers.dbit._tables import _read_table
 
 if TYPE_CHECKING:
@@ -158,12 +158,13 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         exactly to ``spatial_source`` before sorting; occupied destinations fail.
         Physical ``spatial`` is absent. ``pixel_id``
         is the zero-based sorted row index. ``sample`` and categorical ``region``
-        contain the grid name. Previous source linkage is replaced with exact
-        membership in the new grid. Additional H5AD annotation fields accept
-        arbitrary order and retain source dtypes and missingness. Duplicate
-        annotation names and conflicting reserved output columns fail. Equal
-        reserved values are accepted. Region/pixel_id columns belonging to a
-        declared previous linkage are replaced together with that linkage.
+        contain the grid name, with exact membership in the new grid.
+        The reader deliberately overwrites these five observation columns,
+        whether imported values are equal, conflicting or null. Any inherited
+        ``uns['spatialdata_attrs']`` is discarded without interpretation and
+        replaced by linkage to the generated grid. Additional H5AD annotation
+        fields accept arbitrary order and retain source dtypes and missingness.
+        Duplicate annotation names fail.
 
         ``shapes[dataset_id]`` contains clockwise squares, with A mapped to x
         and B to y. Without an image a grid step is one unit. With an image,
@@ -206,7 +207,13 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         dataset_id = layout.table.stem
         _validate_dataset_id(dataset_id)
 
-    image_options = data_axes is not None or tiff_series != 0 or tiff_level != 0 or raster != make_raster_options()
+    image_options = (
+        data_axes is not None
+        or tiff_series != 0
+        or tiff_level != 0
+        or raster.scale_factors != DEFAULT_SCALE_FACTORS
+        or raster.chunks != DEFAULT_CHUNKS
+    )
     if layout.image is None and image_options:
         message = "data_axes, tiff_series, tiff_level, and nondefault scale_factors or chunks require an image."
         raise ValueError(message)
@@ -235,12 +242,10 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     # _read_table validates eager frames; AnnData also types backed Dataset2D.
     obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
 
-    regions = pd.Series(pd.Categorical([dataset_id] * table.n_obs), index=obs.index)
-    samples = pd.Series(dataset_id, index=obs.index, dtype=SAMPLE_DTYPE)
-    identifiers = pd.Series(np.arange(table.n_obs, dtype=np.int64), index=obs.index, dtype=GRID_DTYPE)
-    for key, values in (("region", regions), ("sample", samples), ("pixel_id", identifiers)):
-        _validate_output_column(obs, key, values, path=layout.table)
-        obs[key] = values
+    obs["region"] = pd.Categorical([dataset_id] * table.n_obs)
+    obs["sample"] = pd.Series(dataset_id, index=obs.index, dtype=SAMPLE_DTYPE)
+    obs["pixel_id"] = pd.Series(np.arange(table.n_obs, dtype=np.int64), index=obs.index, dtype=GRID_DTYPE)
+    table.uns.pop("spatialdata_attrs", None)
 
     # Link once, after sorting and constructing the independent geometry target.
     context = ReaderErrorContext("dbit", "linked table")

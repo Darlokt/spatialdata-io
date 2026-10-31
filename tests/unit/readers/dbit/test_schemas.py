@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -14,8 +15,6 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.dbit._schemas import (
     BARCODE_SOURCE_DTYPE,
     _normalize_barcodes,
-    _source_linkage_columns,
-    _validate_output_column,
     _validate_table,
 )
 
@@ -67,6 +66,71 @@ class TestValidateTable:
             _validate_table(table, ArtifactFile(tmp_path / "source.h5ad"))
         assert table.obsm["spatial"] is native
 
+    @pytest.mark.parametrize("kind", ["equal", "conflicting", "null", "categorical"])
+    def test_generated_observation_columns_are_accepted_unchanged(self, tmp_path: Path, kind: str) -> None:
+        """Source values and storage are irrelevant to generated output destinations."""
+        table = ad.AnnData(np.ones((2, 2)))
+        native = np.arange(6, dtype=np.int16).reshape(2, 3)
+        table.obsm["spatial"] = native
+        for field in ("array_A", "array_B", "sample", "region", "pixel_id"):
+            if kind == "categorical":
+                table.obs[field] = pd.Categorical(["stale", None], categories=["stale"], ordered=True)
+            elif kind == "null":
+                table.obs[field] = pd.array([None, None], dtype="Int16")
+            elif field in {"sample", "region"}:
+                table.obs[field] = ["sample" if kind == "equal" else "other"] * 2
+            else:
+                table.obs[field] = [0, 1] if field == "pixel_id" and kind == "equal" else [1, 2]
+        assert isinstance(table.obs, pd.DataFrame)
+        original = table.obs.copy(deep=True)
+
+        _validate_table(table, ArtifactFile(tmp_path / "source.h5ad"))
+
+        pd.testing.assert_frame_equal(table.obs, original)
+        assert table.obsm["spatial"] is native
+        assert "spatial_source" not in table.obsm
+        assert "spatial_grid" not in table.obsm
+
+    @pytest.mark.parametrize(
+        "linkage",
+        [
+            None,
+            False,
+            "",
+            {},
+            {"region": 42},
+            {"region": "old", "region_key": "region", "instance_key": "pixel_id"},
+            {"region": "old", "region_key": "custom_region", "instance_key": "custom_id"},
+        ],
+    )
+    def test_inherited_linkage_is_accepted_without_mutation(
+        self, tmp_path: Path, *, linkage: bool | str | dict[str, str | int] | None
+    ) -> None:
+        """Schema validation leaves arbitrary prior linkage for final replacement."""
+        table = ad.AnnData(np.ones((2, 2)))
+        native = np.arange(6).reshape(2, 3)
+        table.obsm["spatial"] = native
+        table.uns["spatialdata_attrs"] = linkage
+        original = deepcopy(linkage)
+
+        _validate_table(table, ArtifactFile(tmp_path / "source.h5ad"))
+
+        assert table.obsm["spatial"] is native
+        assert "spatial_source" not in table.obsm
+        assert table.uns["spatialdata_attrs"] is linkage
+        assert table.uns["spatialdata_attrs"] == original
+        np.testing.assert_array_equal(native, np.arange(6).reshape(2, 3))
+
+    def test_independent_source_coordinates_remain_available(self, tmp_path: Path) -> None:
+        """An imported source embedding needs no displacement without spatial."""
+        table = ad.AnnData(np.ones((2, 2)))
+        native = np.arange(6).reshape(2, 3)
+        table.obsm["spatial_source"] = native
+
+        _validate_table(table, ArtifactFile(tmp_path / "source.h5ad"))
+
+        assert table.obsm["spatial_source"] is native
+
     @pytest.mark.parametrize("axis", ["obs", "var"])
     def test_duplicate_names(self, tmp_path: Path, axis: str) -> None:
         """Reject duplicate annotations before named access."""
@@ -84,46 +148,3 @@ class TestValidateTable:
         frame.index = pd.Index(pd.array([None], dtype="string"))
         with pytest.raises(ReaderFormatError, match="identifiers"):
             _validate_table(table, ArtifactFile(tmp_path / "table.h5ad"))
-
-
-class TestValidateOutputColumn:
-    """Reject distinct numeric families or nulls in reserved metadata."""
-
-    @pytest.mark.parametrize("existing", [True, None, "1", 1.5])
-    def test_conflicts(self, tmp_path: Path, *, existing: bool | str | float | None) -> None:
-        """Keep integer output semantics exact despite Python coercion rules."""
-        with pytest.raises(ReaderFormatError, match="conflicting reserved"):
-            _validate_output_column(
-                pd.DataFrame({"pixel_id": [existing]}),
-                "pixel_id",
-                pd.Series([1], dtype="int64[pyarrow]"),
-                path=ArtifactFile(tmp_path / "table.h5ad"),
-            )
-
-
-class TestSourceLinkageColumns:
-    """Recognize a declared old target without deleting unrelated metadata."""
-
-    @pytest.mark.parametrize("regions", ["old", ["old"], ("old",), np.asarray(["old"])])
-    def test_valid_previous_linkage(self, tmp_path: Path, regions: str | list[str] | tuple[str] | np.ndarray) -> None:
-        """Accept supported persisted region declaration representations."""
-        table = ad.AnnData(np.ones((1, 1)))
-        table.obs["region"], table.obs["pixel_id"] = ["old"], [90]
-        table.uns["spatialdata_attrs"] = {"region": regions, "region_key": "region", "instance_key": "pixel_id"}
-        assert _source_linkage_columns(table, ArtifactFile(tmp_path / "table.h5ad")) == ("region", "pixel_id")
-
-    @pytest.mark.parametrize("regions", [None, "", [], [None]])
-    def test_malformed_previous_linkage(self, tmp_path: Path, regions: str | list[None] | None) -> None:
-        """Reject incomplete declarations before removing source linkage fields."""
-        table = ad.AnnData(np.ones((1, 1)))
-        table.obs["region"], table.obs["pixel_id"] = ["old"], [90]
-        table.uns["spatialdata_attrs"] = {"region": regions, "region_key": "region", "instance_key": "pixel_id"}
-        with pytest.raises(ReaderFormatError, match="malformed previous"):
-            _source_linkage_columns(table, ArtifactFile(tmp_path / "table.h5ad"))
-
-    def test_missing_declared_columns(self, tmp_path: Path) -> None:
-        """Reject a declaration lacking its corresponding annotation fields."""
-        table = ad.AnnData(np.ones((1, 1)))
-        table.uns["spatialdata_attrs"] = {"region": "old", "region_key": "region", "instance_key": "pixel_id"}
-        with pytest.raises(ReaderFormatError, match="malformed previous"):
-            _source_linkage_columns(table, ArtifactFile(tmp_path / "table.h5ad"))

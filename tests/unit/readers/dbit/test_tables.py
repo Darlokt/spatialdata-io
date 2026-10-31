@@ -81,6 +81,26 @@ class TestExpressionArray:
 
         np.testing.assert_array_equal(_expression_array(expression).data, [0.375])
 
+    def test_boolean_duplicate_storage_is_canonicalized(self) -> None:
+        """Boolean compressed input retains its dtype through the shared validator."""
+        expression = sparse.csr_array((np.array([True, False]), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))
+
+        result = _expression_array(expression)
+
+        assert result.dtype == np.dtype(np.bool_)
+        assert result.has_canonical_format
+        np.testing.assert_array_equal(result.data, [True])
+        np.testing.assert_array_equal(result.indices, [0])
+        np.testing.assert_array_equal(result.indptr, [0, 1])
+
+    @pytest.mark.parametrize("storage", [sparse.csr_array, sparse.csc_array])
+    def test_malformed_float_storage_is_rejected(self, storage: type[sparse.csr_array | sparse.csc_array]) -> None:
+        """Noninteger guard dispatch still leaves compressed storage validation intact."""
+        expression = storage((np.array([0.125, 0.25]), np.array([0, 2]), np.array([0, 2])), shape=(1, 1))
+
+        with pytest.raises(ValueError, match="active indices"):
+            _expression_array(expression)
+
 
 class TestReadTable:
     """Preserve auxiliary annotations while validating expression and identifiers."""

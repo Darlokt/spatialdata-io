@@ -15,10 +15,8 @@ from spatialdata_io.readers._utils.table import as_csr_array, validate_integer_d
 from spatialdata_io.readers.dbit._schemas import (
     BARCODE_LENGTH,
     GRID_DTYPE,
-    _source_linkage_columns,
     _validate_barcode_prefixes,
     _validate_mapped_positions,
-    _validate_output_column,
     _validate_table,
 )
 
@@ -33,7 +31,10 @@ def _expression_array(
     values: npt.NDArray[np.generic] | sparse.sparray | sparse.spmatrix,
 ) -> sparse.csr_array:
     """Canonicalize expression without overflowing duplicate integer entries."""
-    if isinstance(values, (sparse.csr_array, sparse.csr_matrix, sparse.csc_array, sparse.csc_matrix)):
+    if (
+        isinstance(values, (sparse.csr_array, sparse.csr_matrix, sparse.csc_array, sparse.csc_matrix))
+        and values.dtype.kind in "iu"
+    ):
         validate_integer_duplicate_sums(values)
 
     return as_csr_array(values)
@@ -51,7 +52,6 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
     _validate_table(table, path)
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")
-    source_linkage_columns = _source_linkage_columns(table, path)
 
     # Export IDs encode B then A; output coordinates are A/x then B/y.
     names = table.obs_names.str.slice(0, 2 * BARCODE_LENGTH).str.upper()
@@ -63,8 +63,6 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
 
     # The schema validates eager H5AD frames; AnnData also types backed Dataset2D.
     obs = cast("pd.DataFrame", table.obs)
-    _validate_output_column(obs, "array_A", a, path=path)
-    _validate_output_column(obs, "array_B", b, path=path)
     obs["array_A"], obs["array_B"] = a.array, b.array
 
     # Convert before row selection: AnnData's copy must never duplicate a dense
@@ -101,11 +99,5 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
         },
     }
     table.uns[POSITIONS_KEY] = positions
-
-    # A declared old linkage identifies metadata that the new grid replaces.
-    # Unlinked columns with these reserved names remain preserved annotations.
-    table.uns.pop("spatialdata_attrs", None)
-    for key in source_linkage_columns:
-        del obs[key]
 
     return table

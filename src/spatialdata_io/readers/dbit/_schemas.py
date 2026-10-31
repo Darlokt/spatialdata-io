@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 
@@ -94,7 +93,7 @@ def _normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
 
 
 def _validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
-    """Require nonempty expression and unique nonnull indexes and annotation names."""
+    """Validate imported identifiers, expression presence and coordinate destinations."""
     context = ReaderErrorContext("dbit", "expression table")
     if "spatial_grid" in table.obsm or POSITIONS_KEY in table.uns:
         raise ReaderFormatError(
@@ -125,6 +124,7 @@ def _validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
             found="duplicate annotation columns",
             expected="unique observation and feature column names",
         )
+
     if (
         table.obs_names.hasnans
         or not table.obs_names.is_unique
@@ -162,57 +162,3 @@ def _validate_mapped_positions(a: pd.Series, b: pd.Series, path: ArtifactFile) -
             found="unknown observation barcodes",
             expected="every B/A barcode in the position map",
         )
-
-
-def _validate_output_column(obs: pd.DataFrame, key: str, values: pd.Series, *, path: ArtifactFile) -> None:
-    """Reject conflicting reserved metadata using exact scalar comparisons.
-
-    Equal existing values are accepted; the generated field takes its declared
-    output storage. Python scalar comparison avoids float promotion of uint64 IDs.
-    """
-    if key in obs and any(
-        not pd.api.types.is_scalar(left)
-        or pd.isna(left)
-        or isinstance(left, bool) != isinstance(right, bool)
-        or left != right
-        for left, right in zip(obs[key].tolist(), values.tolist(), strict=True)
-    ):
-        raise _table_error(
-            path,
-            found=f"conflicting reserved observation column {key!r}",
-            expected="absent or semantically equal reader output metadata",
-        )
-
-
-def _table_error(path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
-    """Describe a reserved output annotation conflict."""
-    return ReaderFormatError(
-        context=ReaderErrorContext("dbit", "expression table"), path=path, found=found, expected=expected
-    )
-
-
-def _source_linkage_columns(table: ad.AnnData, path: ArtifactFile) -> tuple[str, ...]:
-    """Recognize only declared source region/pixel fields replaced by this reader."""
-    previous = table.uns.get("spatialdata_attrs")
-    if (
-        not isinstance(previous, dict)
-        or previous.get("region_key") != "region"
-        or previous.get("instance_key") != "pixel_id"
-    ):
-        return ()
-    regions = previous.get("region")
-    if isinstance(regions, str):
-        valid_regions = bool(regions)
-    else:
-        valid_regions = (
-            isinstance(regions, (list, tuple, np.ndarray))
-            and len(regions) > 0
-            and all(isinstance(region, str) and bool(region) for region in regions)
-        )
-    if not valid_regions or not {"region", "pixel_id"}.issubset(table.obs.columns):
-        raise _table_error(
-            path,
-            found="malformed previous source linkage",
-            expected="a nonempty region declaration and its region/pixel_id columns",
-        )
-    return ("region", "pixel_id")

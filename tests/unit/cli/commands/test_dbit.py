@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+pytestmark = pytest.mark.dbit
+
+
 class TestDbitCommand:
     """Verify typed options, root-relative overrides, validation, and persistence."""
 

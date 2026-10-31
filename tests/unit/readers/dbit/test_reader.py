@@ -12,16 +12,19 @@ import pytest
 from spatialdata.models import get_table_keys
 
 import spatialdata_io.readers.dbit._reader as dbit_reader
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
 from spatialdata_io.readers.dbit import dbit
 from spatialdata_io.readers.dbit._reader import _validate_grid_options
 from tests.integration.readers.dbit.test_reader import _write_layout
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from pytest_mock import MockerFixture
     from spatialdata import SpatialData
+
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
 
 
 class TestValidateGridOptions:
@@ -138,39 +141,66 @@ class TestDbit:
         assert list(result.shapes) == ["valid"]
         assert get_table_keys(result.tables["table"]) == ("valid", "region", "pixel_id")
 
-    def test_stale_linkage_is_replaced_once_with_final_shape_membership(
-        self, tmp_path: Path, mocker: MockerFixture
+    @pytest.mark.parametrize(
+        "linkage",
+        [
+            None,
+            False,
+            "",
+            {},
+            {"region": 42},
+            {"region": "old", "region_key": "region", "instance_key": "pixel_id"},
+            {"region": "old", "region_key": "custom_region", "instance_key": "custom_id"},
+        ],
+    )
+    def test_final_linkage_replaces_inherited_metadata_once(
+        self, tmp_path: Path, mocker: MockerFixture, *, linkage: bool | str | dict[str, str | int] | None
     ) -> None:
-        """Stale linkage is replaced once with final shape membership."""
+        """Link exactly once with final independent targets and no inherited declaration."""
         _write_layout(tmp_path)
-        source = tmp_path / "sample.h5ad"
-        original = ad.read_h5ad(source)
-        original.obs["region"] = pd.Categorical(["old", "old"])
-        original.obs["pixel_id"] = [90, 91]
-        original.uns["spatialdata_attrs"] = {"region": ["old"], "region_key": "region", "instance_key": "pixel_id"}
-        original.write_h5ad(source)
-        parse = mocker.spy(dbit_reader, "parse_linked_table")
+        source = ad.read_h5ad(tmp_path / "sample.h5ad")
+        source.uns["spatialdata_attrs"] = linkage
+        source.obs["region"] = pd.Categorical(["old", "old"])
+        source.obs["pixel_id"] = [90, 91]
+        mocker.patch("spatialdata_io.readers.dbit._tables.ad.read_h5ad", return_value=source)
+
+        def checked_linkage(
+            table: ad.AnnData,
+            target: TableLinkage,
+            /,
+            *,
+            context: ReaderErrorContext,
+            expression_layers: tuple[str, ...],
+            expected_instance_ids: Mapping[str, pd.Index],
+        ) -> ad.AnnData:
+            """Inspect the pre-link table before the real parser attaches new metadata."""
+            assert "spatialdata_attrs" not in table.uns
+            assert table.obs["region"].tolist() == ["sample", "sample"]
+            np.testing.assert_array_equal(table.obs["pixel_id"], [0, 1])
+            return parse_linked_table(
+                table,
+                target,
+                context=context,
+                expression_layers=expression_layers,
+                expected_instance_ids=expected_instance_ids,
+            )
+
+        parse = mocker.patch.object(dbit_reader, "parse_linked_table", side_effect=checked_linkage)
         discovery = mocker.spy(dbit_reader, "_discover_layout")
+        grid = mocker.spy(dbit_reader, "_make_grid")
 
         result = dbit(tmp_path)
 
         discovery.assert_called_once()
+        grid.assert_called_once()
         parse.assert_called_once()
         assert parse.call_args.kwargs["expression_layers"] == ("counts",)
         expected_ids = parse.call_args.kwargs["expected_instance_ids"]
         assert list(expected_ids) == ["sample"]
         pd.testing.assert_index_equal(expected_ids["sample"], result.shapes["sample"].index)
-
-        table = result.tables["table"]
-        assert get_table_keys(table) == ("sample", "region", "pixel_id")
-        assert table.obs["region"].tolist() == ["sample", "sample"]
-        np.testing.assert_array_equal(table.obs["pixel_id"], result.shapes["sample"].index)
-
-        retained = ad.read_h5ad(source)
-        assert retained.obs["region"].tolist() == ["old", "old"]
-        np.testing.assert_array_equal(retained.obs["pixel_id"], [90, 91])
-        assert retained.uns["spatialdata_attrs"]["region"] == ["old"]
-        assert "array_A" not in retained.obs
+        assert expected_ids["sample"] is grid.spy_return.index
+        assert get_table_keys(result.tables["table"]) == ("sample", "region", "pixel_id")
+        np.testing.assert_array_equal(result.tables["table"].obs["pixel_id"], result.shapes["sample"].index)
 
     def test_table_without_counts_layer_has_no_expression_layer_override(
         self, tmp_path: Path, mocker: MockerFixture

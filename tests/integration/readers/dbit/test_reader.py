@@ -19,7 +19,6 @@ from spatialdata.models import get_table_keys
 from spatialdata.transformations import Identity, get_transformation
 
 from spatialdata_io import __version__
-from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.dbit import dbit
 
 if TYPE_CHECKING:
@@ -129,6 +128,60 @@ class TestDbit:
         unchanged = ad.read_h5ad(path)
         assert unchanged.obs_names.equals(original.obs_names)
         assert "region" not in unchanged.obs
+
+    @pytest.mark.parametrize("storage", [sparse.csr_array, sparse.csc_array])
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    @pytest.mark.parametrize("dtype", ["int8", "uint8"])
+    @pytest.mark.parametrize("unsafe", [False, True])
+    def test_real_h5ad_duplicate_expression_is_exact_or_rejected(
+        self,
+        tmp_path: Path,
+        storage: type[sparse.csr_array | sparse.csc_array],
+        slot: str,
+        dtype: str,
+        *,
+        unsafe: bool,
+    ) -> None:
+        """Keep duplicate storage through H5AD and exercise both public expression slots."""
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        value = 100 if dtype == "int8" else 150
+        values = [value, value, 7] if unsafe else [20, 30, 7]
+        expression = storage((np.array(values, dtype=dtype), np.array([0, 0, 1]), np.array([0, 2, 3])), shape=(2, 2))
+        if slot == "X":
+            source.X = expression
+        else:
+            source.layers[slot] = expression
+        source.write_h5ad(path)
+        persisted = ad.read_h5ad(path)
+        before = persisted.X if slot == "X" else persisted.layers[slot]
+        assert isinstance(before, sparse.csr_matrix | sparse.csc_matrix | sparse.csr_array | sparse.csc_array)
+        assert before.format == expression.format
+        assert before.dtype == np.dtype(dtype)
+        assert not before.has_canonical_format
+        np.testing.assert_array_equal(before.data, values)
+        np.testing.assert_array_equal(before.indices, [0, 0, 1])
+        np.testing.assert_array_equal(before.indptr, [0, 2, 3])
+        original_bytes = path.read_bytes()
+
+        if unsafe:
+            with pytest.raises(ValueError, match="source dtype") as raised:
+                dbit(tmp_path)
+            assert any("dbit" in note and str(path) in note for note in raised.value.__notes__)
+        else:
+            table = dbit(tmp_path).tables["table"]
+            actual = table.X if slot == "X" else table.layers[slot]
+            assert isinstance(actual, sparse.csr_array)
+            assert not isinstance(actual, sparse.spmatrix)
+            assert actual.has_canonical_format
+            assert actual.dtype == np.dtype(dtype)
+            np.testing.assert_array_equal(actual.data, [7, 50])
+            np.testing.assert_array_equal(actual.indices, [1, 0])
+            np.testing.assert_array_equal(actual.indptr, [0, 1, 2])
+            assert table.obs_names.tolist() == _ORDERED_NAMES
+            assert table.var_names.tolist() == ["gene-b", "gene-a"]
+        assert path.read_bytes() == original_bytes
 
     @pytest.mark.parametrize("sparse_source", [True, False])
     @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
@@ -403,27 +456,65 @@ class TestDbit:
         pd.testing.assert_frame_equal(restored.obs, table.obs, check_exact=True)
         pd.testing.assert_frame_equal(restored.var, table.var, check_exact=True)
 
-    @pytest.mark.parametrize("field", ["array_A", "array_B", "sample", "region", "pixel_id"])
-    @pytest.mark.parametrize("conflicting", [False, True])
-    def test_reserved_output_columns(self, tmp_path: Path, field: str, *, conflicting: bool) -> None:
-        """Reject conflicting preserved fields while allowing equal final values."""
+    @pytest.mark.parametrize("kind", ["equal", "conflicting", "null", "categorical"])
+    def test_reserved_output_columns_are_overwritten(self, tmp_path: Path, kind: str) -> None:
+        """Replace all generated columns and prior linkage while preserving imported state."""
         _write_layout(tmp_path)
         path = tmp_path / "sample.h5ad"
         source = ad.read_h5ad(path)
-        if field in {"region", "sample"}:
-            source.obs[field] = ["other" if conflicting else "sample"] * 2
-        elif field == "pixel_id":
-            source.obs[field] = [1, 1 if conflicting else 0]
-        else:
-            source.obs[field] = [2, 2 if conflicting else 1]
+        for field in ("array_A", "array_B", "sample", "region", "pixel_id"):
+            if kind == "categorical":
+                source.obs[field] = pd.Categorical(["stale", None], categories=["stale"], ordered=True)
+            elif kind == "null":
+                source.obs[field] = pd.array([None, None], dtype="Int16")
+            elif field in {"sample", "region"}:
+                source.obs[field] = ["other" if kind == "conflicting" else "sample"] * 2
+            elif field == "pixel_id":
+                source.obs[field] = [90, 91] if kind == "conflicting" else [1, 0]
+            else:
+                source.obs[field] = [90, 91] if kind == "conflicting" else [2, 1]
+        linkages = {
+            "equal": {"region": "old", "region_key": "region", "instance_key": "pixel_id"},
+            "conflicting": {"region": "old", "region_key": "custom_region", "instance_key": "custom_id"},
+            "null": {"region": 42, "region_key": "region", "instance_key": "pixel_id"},
+            "categorical": {"region_key": "missing_column", "instance_key": "also_missing"},
+        }
+        source.uns["spatialdata_attrs"] = linkages[kind]
+        source.obs["custom_region"] = pd.Categorical(["old", "older"])
+        source.obs["custom_id"] = np.asarray([90, 91], dtype=np.int16)
+        native = np.arange(6, dtype=np.int16).reshape(2, 3)
+        source.obsm["spatial"] = native
         source.write_h5ad(path)
+        original = ad.read_h5ad(path)
+        original_bytes = path.read_bytes()
 
-        if conflicting:
-            with pytest.raises(ReaderFormatError, match="conflicting reserved"):
-                dbit(tmp_path)
-        else:
-            result = dbit(tmp_path)
-            assert result.tables["table"].obs[field].tolist() == source.obs[field].tolist()[::-1]
+        result = dbit(tmp_path)
+
+        table = result.tables["table"]
+        assert isinstance(table.obs, pd.DataFrame)
+        assert isinstance(original.obs, pd.DataFrame)
+        assert table.obs_names.tolist() == _ORDERED_NAMES
+        for field in ("array_A", "array_B"):
+            np.testing.assert_array_equal(table.obs[field], [1, 2])
+            assert table.obs[field].dtype == np.dtype(np.int64)
+        np.testing.assert_array_equal(table.obs["pixel_id"], [0, 1])
+        assert table.obs["pixel_id"].dtype == np.dtype(np.int64)
+        assert table.obs["sample"].tolist() == ["sample", "sample"]
+        assert table.obs["region"].tolist() == ["sample", "sample"]
+        assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
+        assert table.obs["region"].cat.categories.tolist() == ["sample"]
+        assert get_table_keys(table) == ("sample", "region", "pixel_id")
+        np.testing.assert_array_equal(table.obs["pixel_id"], result.shapes["sample"].index)
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], [[1, 1], [2, 2]])
+        np.testing.assert_array_equal(table.obsm["spatial_source"], native[::-1])
+        assert table.obsm["spatial_source"].dtype == np.int16
+        assert "spatial" not in table.obsm
+        pd.testing.assert_frame_equal(
+            table.obs[["quality", "annotation", "custom_region", "custom_id"]],
+            original.obs.iloc[::-1][["quality", "annotation", "custom_region", "custom_id"]],
+        )
+        assert table.uns["experiment"] == original.uns["experiment"]
+        assert path.read_bytes() == original_bytes
 
     def test_default_h5ad_writer_preserves_sample_categories(self, tmp_path: Path) -> None:
         """Check the default writer's exact category normalization separately."""

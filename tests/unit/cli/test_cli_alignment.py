@@ -28,7 +28,7 @@ _READER_CASES = (
     _ReaderCase("spatialdata_io.readers.codex", "codex", "codex"),
     pytest.param(_ReaderCase("spatialdata_io.readers.cosmx", "cosmx", "cosmx"), marks=pytest.mark.cosmx),
     pytest.param(_ReaderCase("spatialdata_io.readers.curio", "curio", "curio"), marks=pytest.mark.curio),
-    _ReaderCase("spatialdata_io.readers.dbit", "dbit", "dbit"),
+    pytest.param(_ReaderCase("spatialdata_io.readers.dbit", "dbit", "dbit"), marks=pytest.mark.dbit),
     pytest.param(_ReaderCase("spatialdata_io.readers.iss", "iss", "iss"), marks=pytest.mark.iss),
     pytest.param(_ReaderCase("spatialdata_io.readers.macsima", "macsima", "macsima"), marks=pytest.mark.macsima),
     _ReaderCase("spatialdata_io.readers.mcmicro", "mcmicro", "mcmicro"),
@@ -81,6 +81,40 @@ class TestCliAlignment:
         for name, default in _RASTER_DEFAULTS.items():
             assert parameters[name].default == default
             assert command[name].default == default
+
+
+@pytest.mark.dbit
+class TestDbitCommandContract:
+    """Keep DBiT CLI selection inclusive of command, alignment and persistence."""
+
+    def test_reader_cli_conjunction_collects_command_alignment_and_workflow_tests(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "--no-cov",
+                "-q",
+                "-m",
+                "dbit and cli",
+                "tests/unit/cli/commands/test_dbit.py",
+                "tests/unit/cli/test_cli_alignment.py",
+                "tests/integration/readers/dbit",
+            ],
+            cwd=Path(__file__).parents[3],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert "TestDbitCommand::test_defaults_and_output_writing" in completed.stdout
+        assert "TestCliAlignment::test_vendor_command_and_reader_parameter_names_agree[dbit]" in completed.stdout
+        assert "TestCliAlignment::test_raster_options_use_the_central_defaults[dbit]" in completed.stdout
+        assert "TestDbitCommandWorkflow::test_writes_linked_spatialdata_zarr" in completed.stdout
+        assert "TestDbit::" not in completed.stdout
+        assert "test_reader.py::" not in completed.stdout
+        assert "test_grid.py::" not in completed.stdout
 
 
 @pytest.mark.iss

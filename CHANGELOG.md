@@ -35,6 +35,12 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Changed
 
+- DBiT explicitly owns and overwrites `obs` columns `array_A`, `array_B`,
+  `sample`, `region`, and `pixel_id`, whether imported values are equal,
+  conflicting, or null. It discards any inherited `uns["spatialdata_attrs"]`
+  without interpretation and generates fresh linkage to the barcode grid.
+  Unrelated annotations and source files remain unchanged. Grid and image-pixel
+  coordinate conventions remain unchanged, with no new physical calibration.
 - **Breaking:** Steinbock rejects imported `obs['cell_id']` and `obs['region']`
   even when they equal the generated values; these names are reserved output
   destinations. Equal redundant source `Image` and `image` columns remain
