@@ -132,6 +132,24 @@ transformation does not update table arrays. Explicit coordinate refresh or
 export is needed after registration. The metadata describes coordinates, rather
 than storing a general transformation engine.
 
+### Use tables outside SpatialData
+
+Access `sdata.tables["table"]` directly for AnnData analysis. This borrows the
+existing object; use `.copy()` before independent mutation. Partition independent
+row frames using the declaration's `frame_key` before physical analysis that
+does not handle separate frames. Slicing keeps row-aligned positions, but
+reserved linkage metadata can retain surplus regions.
+
+`to_legacy_anndata()` preserves table positions by default. Explicit
+`position_source="centroids"` derives linked-element positions in one selected
+frame, with original physical coordinates preserved as `spatial_original` when
+replaced. Native derived coordinates use `spatial_centroids`; they never supply
+uncalibrated canonical `spatial`. Image export has been removed.
+`from_legacy_anndata()` imports plain legacy XY as `spatial_pixels` and links
+the table to `locations` Points using new collision-checked columns, preserving
+original IDs. See [AnnData access and legacy conversion](legacy_anndata.md) for
+ownership, library selection and persistence examples.
+
 ### Visium
 
 Space Ranger headerless/headered position layouts and HDF5/plain or compressed

@@ -79,3 +79,22 @@ Ordinary AnnData concatenation does not reconcile coordinate declarations;
 separate samples with overlapping local origins must remain partitioned for
 physical analysis. See [table contracts](table_contracts.md) for native keys,
 position meanings and persistence limitations.
+
+## Legacy AnnData boundaries
+
+Plain legacy AnnData `obsm["spatial"]` uses full-resolution image-pixel indices,
+not micrometres. `from_legacy_anndata()` preserves it as `spatial_pixels` and
+creates linked Points without inferred spot radii. Legacy resolution factors
+register stored image levels to that pixel frame; they are not a physical
+calibration. Declared physical positions are supported without legacy images;
+physical positions with legacy images require a mapping those scalar factors
+cannot establish and fail.
+
+`to_legacy_anndata()` preserves stored positions by default. Explicit centroid
+mode applies linked-element transformations in one selected frame and declares
+the resulting position definition and units. A frame name alone cannot establish
+micrometres. Native centroids stay in `spatial_centroids`, and original physical
+positions replaced by physical centroids remain in `spatial_original`.
+Label centroids can require computing the complete raster. No images are
+exported or resampled. See [AnnData access and legacy conversion](legacy_anndata.md)
+for explicit selection, ownership and source-snapshot limitations.

@@ -47,6 +47,10 @@ I/O for the `spatialdata` project.
 
 ### Conversion functions
 
+For direct table access, explicit table/centroid position selection and importing
+legacy image libraries, see [AnnData access and legacy conversion](legacy_anndata.md).
+The exporter returns one coordinate frame per call and does not export images.
+
 ```{eval-rst}
 .. currentmodule:: spatialdata_io
 

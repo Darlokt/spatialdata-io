@@ -22,6 +22,7 @@ xenium.md
 visium_hd.md
 raster_options.md
 table_contracts.md
+legacy_anndata.md
 changelog.md
 contributing.md
 references.md

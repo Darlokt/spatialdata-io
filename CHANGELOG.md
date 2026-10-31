@@ -26,6 +26,14 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Changed
 
+- **Breaking:** `to_legacy_anndata()` preserves table positions by default and
+  offers explicit `position_source="centroids"` with ID-aligned linked targets,
+  one selected coordinate frame and preservation of replaced physical positions.
+  `from_legacy_anndata()` imports plain legacy coordinates as pixels and creates
+  linked Points while preserving original identifiers. Multiple legacy libraries
+  require explicit library/observation association; consumed image scales must
+  be positive and finite. Both functions return owned results with CSR-array
+  expression. See the AnnData access and legacy conversion guide.
 - Adopted the current `cookiecutter-scverse` template: `hatch`-managed test environments, `uv`-based CI and
   documentation builds, strict Pyrefly type checking and Ruff linting configured in `pyproject.toml`,
   local `pyproject-fmt`/`zizmor` hooks and prek's built-in file checks,
@@ -55,6 +63,8 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Removed
 
+- `to_legacy_anndata(include_images=...)` and its image rendering/resampling
+  path. Keep registered images and transformations in SpatialData.
 - Support for Python 3.11.
 - The generic image reader's `use_tiff_memmap` argument and its separate
   memmap/PIMS implementations. TIFF-family inputs now use one bounded,
