@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+import cloudpickle
 import numpy as np
 import pytest
+import tifffile
 from dask.callbacks import Callback
 from spatialdata.models import get_channel_names
 from spatialdata.transformations import Scale, get_transformation
@@ -19,7 +21,13 @@ from spatialdata_io.readers.macsima._channels import ChannelOptions, StackPlan, 
 from spatialdata_io.readers.macsima._images import make_image
 from spatialdata_io.readers.macsima._layout import StackFiles
 from spatialdata_io.readers.macsima._metadata import read_channel
-from tests.integration.readers.macsima._fixtures import ChannelSpec, full_resolution, write_channel
+from tests.integration.readers.macsima._fixtures import (
+    ChannelSpec,
+    channel_ome_xml,
+    channel_pixels,
+    default_file_name,
+    full_resolution,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,13 +35,31 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from pytest_mock import MockerFixture
 
+    from spatialdata_io.readers._utils.image.tiff._types import _TiffReadSpec
+
 _DEFAULT = make_raster_options()
 
 
 def _plan(
-    directory: Path, specs: tuple[ChannelSpec, ...], *, padded: bool = False
+    directory: Path,
+    specs: tuple[ChannelSpec, ...],
+    *,
+    padded: bool = False,
+    storage: Literal["rows", "strip", "tiles"] = "rows",
 ) -> tuple[StackPlan, list[NDArray[np.uint16]]]:
-    pixels = [write_channel(directory, spec, version=1, index=index) for index, spec in enumerate(specs)]
+    pixels = [channel_pixels(spec, index) for index, spec in enumerate(specs)]
+    for index, (spec, plane) in enumerate(zip(specs, pixels, strict=True)):
+        file_name = default_file_name(spec)
+        tifffile.imwrite(
+            directory / file_name,
+            plane,
+            description=channel_ome_xml(spec, version=1, file_name=file_name, index=index).encode(),
+            metadata=None,
+            photometric="minisblack",
+            compression=None if storage == "rows" else "deflate",
+            rowsperstrip=None if storage == "tiles" else spec.shape[0] if storage == "strip" else 1,
+            tile=(16, 16) if storage == "tiles" else None,
+        )
     sources = []
     for path in sorted(directory.iterdir()):
         source = read_channel(ArtifactFile(path.resolve()))
@@ -49,6 +75,19 @@ def _plan(
     with pytest.warns(UserWarning, match="Zero-padding") if padded else nullcontext():
         plan = plan_stack(stack, sources, options)
     return plan, pixels
+
+
+def _record_selections(mocker: MockerFixture) -> list[tuple[Path, tuple[slice, ...], int]]:
+    reads: list[tuple[Path, tuple[slice, ...], int]] = []
+    read_selection = tiff_dask._read_tiff_selection
+
+    def record(spec: _TiffReadSpec, selection: tuple[slice, ...]) -> NDArray[np.generic]:
+        result = read_selection(spec, selection)
+        reads.append((spec.path, selection, result.nbytes))
+        return result
+
+    mocker.patch.object(tiff_dask, "_read_tiff_selection", side_effect=record)
+    return reads
 
 
 class TestMakeImage:
@@ -127,11 +166,73 @@ class TestMakeImage:
                 raster=make_raster_options((2, 4), 1),
             )
 
-    def test_small_region_reads_one_band_of_one_channel(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        plan, pixels = _plan(tmp_path, (ChannelSpec("CD3", 1, "APC"), ChannelSpec("CD4", 2, "PE")))
-        element = make_image(plan.channels, frame="run", pixel_size_um=0.17, raster=_DEFAULT)
-        selection = mocker.spy(tiff_dask, "_read_tiff_selection")
+    def test_default_rechunking_reads_neighboring_bands_of_selected_channel(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        # Three 600-row source bands straddle the default 1024-row output boundary.
+        mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 600 * 17 * 2)
+        plan, pixels = _plan(
+            tmp_path,
+            (ChannelSpec("CD3", 1, "APC", shape=(1800, 17)), ChannelSpec("CD4", 2, "PE", shape=(1800, 17))),
+        )
+        reads = _record_selections(mocker)
+        executed: list[object] = []
 
-        np.testing.assert_array_equal(full_resolution(element).data[1, :2, :3].compute(), pixels[1][:2, :3])
+        with Callback(posttask=lambda *args: executed.append(args)):
+            element = make_image(plan.channels, frame="run", pixel_size_um=0.17, raster=_DEFAULT)
+            restored = cloudpickle.loads(cloudpickle.dumps(full_resolution(element).data))
 
-        selection.assert_called_once()
+        assert not executed
+        assert not reads
+        assert restored.chunks == ((1, 1), (1024, 776), (17,))
+        assert get_channel_names(element) == ["CD3", "CD4"]
+        np.testing.assert_array_equal(
+            restored[1, 1100:1106, 2:5].compute(scheduler="synchronous"), pixels[1][1100:1106, 2:5]
+        )
+
+        path = plan.channels[1].source.tiff.path
+        assert sorted(reads, key=lambda read: read[1][0].start) == [
+            (path, (slice(600, 1200), slice(0, 17)), 600 * 17 * 2),
+            (path, (slice(1200, 1800), slice(0, 17)), 600 * 17 * 2),
+        ]
+        assert sum(read[2] for read in reads) == 40_800
+
+    @pytest.mark.parametrize(
+        ("storage", "expected_selection", "decoded_bytes"),
+        [
+            ("strip", (slice(0, 48), slice(0, 32)), 48 * 32 * 2),
+            ("tiles", (slice(16, 32), slice(16, 32)), 16 * 16 * 2),
+        ],
+    )
+    def test_compressed_storage_composes_serializable_lazy_channels(
+        self,
+        tmp_path: Path,
+        mocker: MockerFixture,
+        storage: Literal["strip", "tiles"],
+        expected_selection: tuple[slice, slice],
+        decoded_bytes: int,
+    ) -> None:
+        # A 3072-byte native strip remains indivisible above the 1024-byte target.
+        mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 1024)
+        plan, pixels = _plan(
+            tmp_path,
+            (ChannelSpec("CD3", 1, "APC", shape=(48, 32)), ChannelSpec("CD4", 2, "PE", shape=(48, 32))),
+            storage=storage,
+        )
+        reads = _record_selections(mocker)
+        executed: list[object] = []
+
+        with Callback(posttask=lambda *args: executed.append(args)):
+            element = make_image(
+                plan.channels, frame="run", pixel_size_um=0.17, raster=make_raster_options(chunks=(1, 16, 16))
+            )
+            restored = cloudpickle.loads(cloudpickle.dumps(full_resolution(element).data))
+
+        assert not executed
+        assert not reads
+        assert restored.chunks == ((1, 1), (16, 16, 16), (16, 16))
+        np.testing.assert_array_equal(
+            restored[1, 18:20, 18:21].compute(scheduler="synchronous"), pixels[1][18:20, 18:21]
+        )
+
+        assert reads == [(plan.channels[1].source.tiff.path, expected_selection, decoded_bytes)]

@@ -49,6 +49,16 @@ def _read(directory: Path, spec: ChannelSpec, version: SchemaVersion) -> Channel
 class TestReadChannel:
     """Interpret one channel file from a single inspection."""
 
+    @pytest.mark.parametrize("version", [0, 1])
+    @pytest.mark.parametrize("value", [0, 2**53 + 1, 2**63 - 1])
+    def test_integer_annotations_preserve_int64_values(
+        self, tmp_path: Path, version: SchemaVersion, value: int
+    ) -> None:
+        metadata = _read(tmp_path, ChannelSpec("CD3", value, "APC", roi=value), version)
+
+        assert metadata.cycle == value
+        assert metadata.roi == value
+
     def test_v0_export(self, tmp_path: Path) -> None:
         write_channel(tmp_path, V0_CHANNELS[0], version=0, index=0, stored_name="channel.tif")
         path = ArtifactFile((tmp_path / "channel.tif").resolve())
@@ -200,6 +210,29 @@ _V1 = _xml(ChannelSpec("CD3", 1, "APC", clone="REA1151"))
 
 class TestReadChannelRejects:
     """Malformed MACSima content fails with reader, version, and path context."""
+
+    @pytest.mark.parametrize("version", [0, 1])
+    @pytest.mark.parametrize("field", ["cycle", "ROI ID"])
+    @pytest.mark.parametrize("text", [str(2**63), "9" * 5000], ids=["int64-overflow", "long-decimal"])
+    def test_integer_annotations_outside_int64(
+        self, tmp_path: Path, version: SchemaVersion, field: str, text: str
+    ) -> None:
+        xml = _xml(ChannelSpec("CD3", 1, "APC"), version=version)
+        if field == "cycle":
+            xml = xml.replace('<M K="Cycle">1</M>', f'<M K="Cycle">{text}</M>')
+        else:
+            key, value = ("ROI ID", "1") if version == 0 else ("RoiId", "001")
+            xml = xml.replace(f'<M K="{key}">{value}</M>', f'<M K="{key}">{text}</M>')
+        path = _write_xml(tmp_path, xml)
+
+        with pytest.raises(ReaderFormatError, match="signed int64") as caught:
+            read_channel(path)
+
+        message = str(caught.value)
+        assert f"{field} {text!r}" in message
+        assert str(path) in message
+        assert "reader 'macsima'" in message
+        assert f"detected version '{'0.15.3' if version == 0 else '1.1.1'}'" in message
 
     @pytest.mark.parametrize(
         ("xml", "match"),

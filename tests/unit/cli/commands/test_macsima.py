@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+pytestmark = pytest.mark.macsima
+
+
 class TestMacsimaCommand:
     """Verify repeated options, typed values and the normalized reader call."""
 

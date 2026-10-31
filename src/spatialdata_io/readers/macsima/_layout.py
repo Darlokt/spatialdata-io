@@ -50,7 +50,6 @@ class StackFiles:
 class MacsimaLayout:
     """Every stack of one invocation; both parsing styles share this shape."""
 
-    root: DatasetRoot
     stacks: tuple[StackFiles, ...]
 
 
@@ -89,8 +88,9 @@ def _is_candidate(path: Path, directory: ArtifactDirectory) -> bool:
 
 def _candidate_files(directory: ArtifactDirectory) -> tuple[ArtifactFile, ...]:
     """Return the candidate TIFFs below a folder in lexical path order."""
-    paths = sorted_paths(directory.rglob("*"), context=_CONTEXT, search_path=directory)
-    return tuple(require_file(path, context=_CONTEXT) for path in paths if _is_candidate(path, directory))
+    candidates = (path for path in directory.rglob("*") if _is_candidate(path, directory))
+    paths = sorted_paths(candidates, context=_CONTEXT, search_path=directory)
+    return tuple(require_file(path, context=_CONTEXT) for path in paths)
 
 
 def _require_unique_names(stacks: Sequence[StackFiles], root: DatasetRoot) -> None:
@@ -161,5 +161,5 @@ def discover_layout(
     """
     root = normalize_dataset_root(path, context=_CONTEXT)
     if parsing_style == "processed_single_folder":
-        return MacsimaLayout(root, _single_folder(root))
-    return MacsimaLayout(root, _multiple_folders(root, exclude_folder_names))
+        return MacsimaLayout(_single_folder(root))
+    return MacsimaLayout(_multiple_folders(root, exclude_folder_names))

@@ -55,8 +55,10 @@ def _read_sources(stack: StackFiles) -> list[ChannelSource]:
     return sources
 
 
-def _insert_unique[T](elements: MutableMapping[str, T], name: str, element: T, *, stack: StackFiles) -> None:
-    """Insert one element and reject a name that another stack already generated.
+def _insert_unique(
+    elements: MutableMapping[str, DataArray | DataTree], name: str, element: DataArray | DataTree, *, stack: StackFiles
+) -> None:
+    """Insert one image and reject a name that another stack already generated.
 
     SpatialData element names must be unique ignoring case.
     """
@@ -149,6 +151,7 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
           ``autofluorescence``) strings; ``cycle`` int64; ``well``,
           ``fluorophore`` and ``clone`` strings and ``ROI`` nullable Int64,
           NA when absent; ``exposure`` float64 milliseconds, NaN when absent.
+          Cycle and ROI values are non-negative and at most ``2**63 - 1``.
           The table annotates no element.
         - ``<stack>_nuclei_image`` and ``<stack>_nuclei_table`` when the
           nuclei stack is split off. A channel has the same name in both
@@ -183,10 +186,12 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
 
     Notes
     -----
-    Each TIFF is inspected once. Construction executes no pixel tasks. Strips
-    of whole rows are read in bands of at most 16 MiB, so computing a small
-    region decodes only the intersecting bands. Source files must remain
-    available. Vendor-written pyramid levels are not used.
+    Each TIFF is inspected once. Construction executes no pixel tasks. The
+    shared TIFF reader uses native tiles or whole-row bands targeting 16 MiB
+    of decoded data; a larger native strip remains one source chunk. Output
+    rechunking can require neighboring tiles or bands beyond a requested crop.
+    A whole-plane source strip can require whole-plane decoding. Source files
+    must remain available. Vendor-written pyramid levels are not used.
     """
     raster = make_raster_options(scale_factors, chunks)
     channel_options = make_channel_options(
@@ -217,7 +222,7 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
                 raster=raster,
             )
             _insert_unique(images, f"{plan.name}{suffix}_image", image, stack=stack)
-            _insert_unique(tables, f"{plan.name}{suffix}_table", make_channel_table(channels), stack=stack)
+            tables[f"{plan.name}{suffix}_table"] = make_channel_table(channels)
             versions.update(channel.source.software_version for channel in channels)
 
     result = SpatialData(images=images, tables=tables)

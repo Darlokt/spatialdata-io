@@ -45,7 +45,7 @@ Every channel file must contain exactly one OME image with one plane (`SizeC`, `
 | ROI | `ROI ID` | `RoiId` |
 | Exposure | `Exposure time`, `Exposure time unit` | `ExposureTime`, `ExposureTimeUnit` |
 
-The well is the external identifier of the OME plate well; a file may record at most one well and, for software major 0, at most one screen reagent. Acquisition types become `stain`, `bleach` or `autofluorescence`; bleach images append `_background` to the marker name. The marker name, cycle and acquisition type are required. Cycles and ROI IDs are non-negative decimal integers (`001` is ROI 1), and exposure times are finite, non-negative milliseconds. A key the reader uses must not carry different values in different annotation groups; both version keys may be present when they name the same version, with or without a leading `v`. Unsupported software majors, units or values fail with the reader, artifact and file path, and the detected software version once it is known.
+The well is the external identifier of the OME plate well; a file may record at most one well and, for software major 0, at most one screen reagent. Acquisition types become `stain`, `bleach` or `autofluorescence`; bleach images append `_background` to the marker name. The marker name, cycle and acquisition type are required. Cycles and ROI IDs are non-negative decimal integers from 0 through 9,223,372,036,854,775,807 (the signed int64 maximum; `001` is ROI 1), and exposure times are finite, non-negative milliseconds. A key the reader uses must not carry different values in different annotation groups; both version keys may be present when they name the same version, with or without a leading `v`. Unsupported software majors, units or values, including integers above this bound, fail with `ReaderFormatError` carrying the reader, artifact and file path, and the detected software version once it is known.
 
 ## Elements and coordinates
 
@@ -71,10 +71,10 @@ Each table has no observations, `X=None` and one `var` row per image channel, wi
 | Column | Type | Content |
 | --- | --- | --- |
 | `name` | string | Marker name; bleach images end in `_background`. |
-| `cycle` | int64 | Acquisition cycle. |
+| `cycle` | int64 | Acquisition cycle from 0 through the signed int64 maximum. |
 | `imagetype` | string | `stain`, `bleach` or `autofluorescence`. |
 | `well` | string | Plate well, or missing. |
-| `ROI` | nullable integer | Exact ROI number, or missing; integers retain precision alongside missing values. |
+| `ROI` | nullable Int64 | Exact ROI number from 0 through the signed int64 maximum, or missing; integers retain precision alongside missing values. |
 | `fluorophore` | string | Fluorophore, or missing. |
 | `clone` | string | Antibody clone, or missing. |
 | `exposure` | float64 | Exposure time in milliseconds, or NaN. |
@@ -85,7 +85,7 @@ The reader name and, when all returned channels agree, the MACSiQView software v
 
 `scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. Vendor-written pyramid levels are not used.
 
-Each TIFF is inspected once; construction reads metadata only and executes no pixel tasks. MACSima exports store one row per TIFF strip, so whole strips are read in bands of at most 16 MiB, and computing a small region decodes only the bands it intersects. The source files must remain available for later raster computation.
+Each TIFF is inspected once; construction reads metadata only and executes no pixel tasks. The shared TIFF reader initially follows native tiles or whole-row bands targeting 16 MiB of decoded pixels. A native strip larger than that target is kept whole, so a source with one whole-plane strip can require whole-plane decoding. Output rechunking, including the default chunks, can make a small region depend on neighboring tiles or bands beyond those it directly intersects. The target is not a hard allocation cap. The source files must remain available for later raster computation.
 
 ## Python and command line
 
@@ -99,7 +99,7 @@ sdata.write("experiment.zarr")
 The CLI mirrors the reader. Repeat list options, and pass `none` to never split nuclei channels:
 
 ```bash
-spatialdata_io macsima --input experiment --output experiment.zarr \
+python -m spatialdata_io macsima --input experiment --output experiment.zarr \
     --parsing-style processed_multiple_folders --exclude-cycles 15 --split-threshold-nuclei-channel none
 ```
 

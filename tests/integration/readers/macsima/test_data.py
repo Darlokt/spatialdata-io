@@ -193,6 +193,7 @@ class TestMacsimaData:
             _image(result, f"{tmp_path.name}_image").data.compute(), tifffile.imread(source)[np.newaxis]
         )
 
+    @pytest.mark.cli
     @pytest.mark.parametrize("dataset", ["macsima_omap10", "macsima_omap23"])
     def test_cli(
         self, tmp_path: Path, runner: CliRunner, dataset: str, require_test_dataset: Callable[[str], Path]

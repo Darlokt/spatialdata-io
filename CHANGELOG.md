@@ -66,6 +66,8 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Fixed
 
+- MACSima reports cycle and ROI values outside signed int64 storage with
+  contextual format errors before table construction.
 - Xenium tables retain all selected source feature annotations, including HDF5
   `genome` and additional feature tags. Protein panel annotations reject
   conflicting source column names instead of overwriting them.

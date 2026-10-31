@@ -28,7 +28,7 @@ _READER_CASES = (
     _ReaderCase("spatialdata_io.readers.curio", "curio", "curio"),
     _ReaderCase("spatialdata_io.readers.dbit", "dbit", "dbit"),
     _ReaderCase("spatialdata_io.readers.iss", "iss", "iss"),
-    _ReaderCase("spatialdata_io.readers.macsima", "macsima", "macsima"),
+    pytest.param(_ReaderCase("spatialdata_io.readers.macsima", "macsima", "macsima"), marks=pytest.mark.macsima),
     _ReaderCase("spatialdata_io.readers.mcmicro", "mcmicro", "mcmicro"),
     _ReaderCase("spatialdata_io.readers.merscope", "merscope", "merscope"),
     _ReaderCase("spatialdata_io.readers.seqfish", "seqfish", "seqfish"),

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from spatialdata.models import TableModel
 
 from spatialdata_io.readers._utils.image import TiffMetadata
@@ -79,10 +80,12 @@ class TestMakeChannelTable:
         assert isinstance(table.var, pd.DataFrame)
         pd.testing.assert_frame_equal(table.var, expected)
 
-    def test_nullable_roi_preserves_large_integer_before_storage_inference(self) -> None:
-        source = replace(_STAIN, roi=2**53 + 1)
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**63 - 1])
+    def test_nullable_roi_preserves_large_integer_before_storage_inference(self, value: int) -> None:
+        source = replace(_STAIN, cycle=value, roi=value)
         table = make_channel_table([_channel("stain", source), _channel("bleach", _BLEACH)])
-        assert table.var["ROI"].iloc[0] == 2**53 + 1
+        assert table.var["cycle"].iloc[0] == value
+        assert table.var["ROI"].iloc[0] == value
         assert pd.isna(table.var["ROI"].iloc[1])
         assert str(table.var["ROI"].dtype) == "Int64"
 

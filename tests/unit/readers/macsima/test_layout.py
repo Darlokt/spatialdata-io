@@ -64,11 +64,10 @@ class TestDiscoverSingleFolder:
 
         layout = discover_layout(root, parsing_style="processed_single_folder", exclude_folder_names=frozenset())
 
-        assert layout.root == root.resolve()
         (stack,) = layout.stacks
         assert stack.name == "my_run"
-        assert stack.directory == layout.root
-        assert [path.relative_to(layout.root).as_posix() for path in stack.files] == [
+        assert stack.directory == root.resolve()
+        assert [path.relative_to(root.resolve()).as_posix() for path in stack.files] == [
             "a.OME.TIFF",
             "b.tif",
             "nested/c.tiff",

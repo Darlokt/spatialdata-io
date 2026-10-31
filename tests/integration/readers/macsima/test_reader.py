@@ -193,6 +193,7 @@ class TestMacsima:
                 _image(result, "run_image").data.compute(),
             )
 
+    @pytest.mark.cli
     def test_cli_writes_a_store(self, tmp_path: Path, runner: CliRunner) -> None:
         write_stack(tmp_path / "run", V0_CHANNELS, version=0)
 
@@ -216,6 +217,30 @@ class TestMacsima:
 class TestMacsimaRejects:
     """Scientifically inconsistent or ambiguous inputs fail before pixel work."""
 
+    @pytest.mark.parametrize(
+        "channel",
+        [
+            pytest.param(replace(V1_CHANNELS[0], cycle=2**63), id="cycle"),
+            pytest.param(replace(V1_CHANNELS[0], roi=2**63), id="roi"),
+        ],
+    )
+    def test_integer_metadata_above_int64_fails_with_artifact_context(
+        self, tmp_path: Path, channel: ChannelSpec
+    ) -> None:
+        source = tmp_path / "run" / "channel.tif"
+        write_channel(source.parent, channel, version=1, index=0, stored_name=source.name)
+        executed: list[object] = []
+
+        with Callback(posttask=lambda *args: executed.append(args)), pytest.raises(ReaderFormatError) as caught:
+            macsima(source.parent)
+
+        assert not executed
+        assert caught.value.context.reader == "macsima"
+        assert caught.value.context.artifact == "channel image"
+        assert caught.value.context.detected_version == "1.1.1"
+        assert caught.value.path == source
+        assert str(2**63) in caught.value.found
+
     def test_stacks_mixing_wells(self, tmp_path: Path) -> None:
         write_stack(tmp_path / "run" / "a", V1_CHANNELS[:2], version=1)
         other_well = tuple(replace(spec, well="D02") for spec in V1_CHANNELS[2:])
@@ -224,20 +249,23 @@ class TestMacsimaRejects:
         with pytest.raises(ReaderFormatError, match="one well per stack"):
             macsima(tmp_path / "run")
 
-    def test_generated_element_names_that_collide(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("nuclei_folder", "other_folder", "duplicate_name"),
+        [
+            pytest.param("a", "a_nuclei", "a_nuclei_image", id="exact-lower"),
+            pytest.param("A", "A_nuclei", "A_nuclei_image", id="exact-upper"),
+            pytest.param("a", "A_nuclei", "a_nuclei_image", id="casefold-parent-last"),
+            pytest.param("A", "a_nuclei", "a_nuclei_image", id="casefold-parent-first"),
+        ],
+    )
+    def test_generated_element_names_that_collide(
+        self, tmp_path: Path, nuclei_folder: str, other_folder: str, duplicate_name: str
+    ) -> None:
         nuclei = tuple(ChannelSpec("DAPI", cycle, "DAPI") for cycle in (1, 2, 3))
-        write_stack(tmp_path / "a", nuclei, version=1)
-        write_stack(tmp_path / "a_nuclei", V1_CHANNELS[:1], version=1)
+        write_stack(tmp_path / nuclei_folder, nuclei, version=1)
+        write_stack(tmp_path / other_folder, V1_CHANNELS[:1], version=1)
 
-        with pytest.raises(ReaderFormatError, match="element name 'a_nuclei_image' generated twice"):
-            macsima(tmp_path, parsing_style="processed_multiple_folders")
-
-    def test_generated_element_names_that_differ_only_in_case(self, tmp_path: Path) -> None:
-        nuclei = tuple(ChannelSpec("DAPI", cycle, "DAPI") for cycle in (1, 2, 3))
-        write_stack(tmp_path / "a", nuclei, version=1)
-        write_stack(tmp_path / "A_nuclei", V1_CHANNELS[:1], version=1)
-
-        with pytest.raises(ReaderFormatError, match="'a_nuclei_image' generated twice, ignoring case"):
+        with pytest.raises(ReaderFormatError, match=f"element name '{duplicate_name}' generated twice, ignoring case"):
             macsima(tmp_path, parsing_style="processed_multiple_folders")
 
     def test_folder_without_ome_channels(self, tmp_path: Path) -> None:
