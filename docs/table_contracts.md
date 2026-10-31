@@ -217,7 +217,8 @@ Inherited `spatialdata_attrs` is rejected. See the
 CSV and FCS inputs return events in source order with positional string names
 `"0"`, `"1"`, … . Only complete `cycNNN_chNNN` names become features, in
 source order. `X` contains marker intensities, including valid negative and
-fractional values; CSV becomes float64, and FCS numerical widths follow the
+fractional values. CSV uses a common real dtype, preserving integer storage
+when possible and rejecting lossy promotion; FCS numerical widths follow the
 source. Complete Akoya `short_name:long_label` CSV headers are normalized at
 the first colon, with duplicate short names rejected; long marker labels become
 `var["marker"]`. Feature names remain cycle/channel IDs. FCS can add the same
@@ -225,15 +226,25 @@ textual marker annotation aligned from its metadata.
 
 All other source columns remain in `obs`, including integer `cell_id`
 (int64 or uint64 as needed), categorical `region`, and numerical pixel `x`/`y`.
-CSV coordinates are float64 and additional CSV annotations remain text; FCS
-metadata retain their native primitive types. Optional annotations may be
-missing. Native XY remains in `obs["x"]`/`obs["y"]`. Canonical float64
+Integral decimal and exponent spellings of CSV cell IDs normalize exactly.
+Positive integral region values normalize to string names; nonempty names
+remain names. CSV coordinates retain integer storage when possible. Additional
+CSV annotations preserve exact strings, including leading zeros, numeric-looking
+values, `NA`, `NULL` and explicit empty strings; physically absent fields fail.
+Only expression, defined coordinates, regions and IDs receive numerical
+interpretation. FCS annotations retain their native primitive types. Native XY
+remains in `obs["x"]`/`obs["y"]`. Canonical float64
 `obsm["spatial"]` exists only with an explicit or supported associated physical
-calibration; its declaration identifies the source metric and frame. Circles
-are linked by
+calibration; its declaration identifies the source metric and frame. Physical
+conversion rejects nonfinite products and, defensively, nonzero coordinates
+rounded to zero by an exceptionally small scale. Circles are linked by
 `(region, cell_id)` to their generated index; no independent segmentation
 population is inferred. No layers, `raw` or additional embeddings are created.
-See the [API](generated/spatialdata_io.codex.rst) for CSV/FCS selection.
+CSV numerical batches allow at most 10,000 rows with a width-aware 32 MiB
+target and a one-row minimum. One sufficiently wide row may exceed the target;
+header, parser and string buffers, retained annotations, final sparse output
+and eager FCS decoding have separate costs. See the
+[API](generated/spatialdata_io.codex.rst) for CSV/FCS selection.
 
 ### ISS
 

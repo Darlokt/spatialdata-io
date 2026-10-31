@@ -20,6 +20,7 @@ from spatialdata_io.readers.codex._schemas import (
     normalize_csv_numbers,
     normalize_fcs_metadata,
     region_name,
+    validate_csv_fields,
 )
 
 if TYPE_CHECKING:
@@ -88,7 +89,7 @@ class TestNormalizeCsvNumbers:
             dtype=STRING_DTYPE,
         )
 
-        normalize_csv_numbers(frame, frame.columns.tolist(), ArtifactFile(tmp_path / "cells.csv"))
+        normalize_csv_numbers(frame, ["integer", "float", "optional"], ArtifactFile(tmp_path / "cells.csv"))
 
         assert frame["cell_id"].tolist() == ["002", str(2**53 + 1)]
         assert frame["integer"].tolist() == [2**53 + 1, 0]
@@ -106,14 +107,30 @@ class TestNormalizeCsvNumbers:
                 pd.DataFrame({"value": [token]}, dtype=STRING_DTYPE), ["value"], ArtifactFile(tmp_path / "cells.csv")
             )
 
-    def test_nul_cannot_truncate_source_text(self, tmp_path: Path) -> None:
-        """Reject embedded NUL while the original CSV text remains available."""
+
+class TestValidateCsvFields:
+    """Validate every original lexical field before semantic conversion."""
+
+    @pytest.mark.parametrize("column", ["cell_id", "region", "x", "y", "cyc001_ch001", "note"])
+    def test_nul_cannot_truncate_source_text(self, tmp_path: Path, column: str) -> None:
+        """Reject NULs in identifiers, scientific values, and unknown annotations."""
+        frame = pd.DataFrame({column: ["1\x00suffix"]}, dtype=STRING_DTYPE)
         with pytest.raises(ReaderFormatError, match="NUL"):
-            normalize_csv_numbers(
-                pd.DataFrame({"cell_id": ["1\x00suffix"]}, dtype=STRING_DTYPE),
-                ["cell_id"],
-                ArtifactFile(tmp_path / "cells.csv"),
-            )
+            validate_csv_fields(frame, ArtifactFile(tmp_path / "cells.csv"))
+
+    def test_physically_missing_field_is_rejected(self, tmp_path: Path) -> None:
+        """A missing CSV field remains distinct from an explicitly empty string."""
+        frame = pd.DataFrame({"note": ["", None]}, dtype=STRING_DTYPE)
+        with pytest.raises(ReaderFormatError, match="row width"):
+            validate_csv_fields(frame, ArtifactFile(tmp_path / "cells.csv"))
+
+    def test_literal_text_and_empty_fields_are_unchanged(self, tmp_path: Path) -> None:
+        frame = pd.DataFrame({"note": ["0042", "", "NA", "NULL", "1e-400"]}, dtype=STRING_DTYPE)
+        original = frame.copy()
+
+        validate_csv_fields(frame, ArtifactFile(tmp_path / "cells.csv"))
+
+        pd.testing.assert_frame_equal(frame, original, check_exact=True)
 
 
 class TestNormalizeFcsMetadata:

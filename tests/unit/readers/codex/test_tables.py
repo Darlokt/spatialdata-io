@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.codex import _tables, codex
@@ -57,7 +58,7 @@ class TestReadCellTable:
         assert result.X.dtype == np.dtype(np.int64)
         np.testing.assert_array_equal(result.X.data, [] if spelling == "-0" else [1])
 
-    @pytest.mark.parametrize("column", ["cell_id", "note", "cyc001_ch001"])
+    @pytest.mark.parametrize("column", ["cell_id", "region", "x", "y", "note", "cyc001_ch001"])
     def test_nul_rejected_in_every_source_field(self, tmp_path: Path, column: str) -> None:
         """Reject NULs rather than allowing the CSV decoder to truncate source values."""
         frame = cell_frame()
@@ -141,6 +142,18 @@ class TestReadCellTable:
         ):
             _read_cell_table(ArtifactFile(path))
 
+    @pytest.mark.parametrize("column", ["x", "y", "cyc002_ch001"])
+    @pytest.mark.parametrize("value", ["1e-400", "-1e-400"])
+    def test_required_scientific_fields_reject_underflow(self, tmp_path: Path, column: str, value: str) -> None:
+        """Lexical preservation of unknown fields must not weaken numerical promises."""
+        frame = cell_frame()
+        frame[column] = value
+        path = tmp_path / "cells.csv"
+        write_csv(path, frame)
+
+        with pytest.raises(ReaderFormatError, match="precision"):
+            _read_cell_table(ArtifactFile(path))
+
     @pytest.mark.parametrize("source_format", ["csv", "fcs"])
     def test_empty_cells(self, tmp_path: Path, source_format: str) -> None:
         """Reject an empty population for both supported table containers."""
@@ -177,7 +190,8 @@ class TestReadCellTable:
 
         result, _ = _read_cell_table(ArtifactFile(path))
 
-        assert result.obs["note"].isna().all()
+        assert result.obs["note"].tolist() == [""]
+        assert not result.obs["note"].isna().any()
 
         path.write_text("cell_id,region,x,y,cyc001_ch001,note\n1,1,0,0,1\n", encoding="utf-8")
 
@@ -291,6 +305,51 @@ class TestReadCellTable:
         assert isinstance(result.X, sparse.csr_array)
         np.testing.assert_array_equal(result.X.data, [-1.0, float(2**63)])
 
+    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("all_zero", [False, True])
+    def test_single_and_multiple_blocks_preserve_canonical_sparse_values(
+        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, *, all_zero: bool
+    ) -> None:
+        """Retain CSR shape, values, dtype and row order even when all signals are zero."""
+        frame = cell_frame()
+        frame[["cyc002_ch001", "cyc001_ch002"]] = 0 if all_zero else [[0, 2], [-3, 0], [4, 5]]
+        write_csv(tmp_path / "cells.csv", frame)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
+
+        result, _ = _read_cell_table(ArtifactFile(tmp_path / "cells.csv"))
+
+        assert isinstance(result.X, sparse.csr_array)
+        assert not isinstance(result.X, sparse.spmatrix)
+        assert result.X.has_canonical_format
+        assert result.X.shape == (3, 2)
+        assert result.X.dtype == np.dtype(np.int64)
+        np.testing.assert_array_equal(result.X.data, [] if all_zero else [2, -3, 4, 5])
+        np.testing.assert_array_equal(result.X.indices, [] if all_zero else [1, 0, 0, 1])
+        np.testing.assert_array_equal(result.X.indptr, [0, 0, 0, 0] if all_zero else [0, 1, 2, 4])
+        assert result.obs["cell_id"].tolist() == [7, 2, 11]
+
+    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    def test_defined_scientific_fields_normalize_population_wide(
+        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int
+    ) -> None:
+        """Region meaning and coordinate dtypes do not depend on a lexical batch boundary."""
+        path = tmp_path / "cells.csv"
+        path.write_text(
+            "cell_id,region,x,y,cyc001_ch001\n7,001,1,-2,0\n2,+1,2.5,0,-3\n11,1.0,-4,3.5,4\n",
+            encoding="utf-8",
+        )
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
+
+        result, coordinates = _read_cell_table(ArtifactFile(path))
+
+        assert result.obs["region"].tolist() == ["1"] * 3
+        assert str(result.obs["x"].dtype) == "double[pyarrow]"
+        assert str(result.obs["y"].dtype) == "double[pyarrow]"
+        np.testing.assert_array_equal(coordinates, [[1, -2], [2.5, 0], [-4, 3.5]])
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.dtype == np.dtype(np.int64)
+        np.testing.assert_array_equal(result.X.data, [-3, 4])
+
 
 class TestSetPositions:
     """Physical finalization borrows native XY and preserves owned expression."""
@@ -305,3 +364,74 @@ class TestSetPositions:
         assert table.X is expression
         np.testing.assert_array_equal(coordinates, original)
         assert not np.shares_memory(table.obsm["spatial"], coordinates)
+
+    @pytest.mark.parametrize(
+        ("coordinate", "scale"),
+        [
+            (1e-100, 1e-300),
+            (-1e-100, 1e-300),
+            (0.25, float.fromhex("0x0.0000000000001p-1022")),
+            (-0.25, float.fromhex("0x0.0000000000001p-1022")),
+            (2.0, 1e308),
+        ],
+    )
+    def test_invalid_conversion_precedes_mutation(self, tmp_path: Path, coordinate: float, scale: float) -> None:
+        """Reject zero loss and overflow before replacing positions or their metadata."""
+        path = tmp_path / "cells.csv"
+        write_csv(path)
+        table, _ = _read_cell_table(ArtifactFile(path))
+        coordinates = np.full((3, 2), coordinate, dtype=np.float64)
+        original = coordinates.copy()
+        expression = table.X
+        previous_positions = np.arange(6, dtype=np.float64).reshape(3, 2)
+        previous_metadata = {"sentinel": "existing position metadata"}
+        table.obsm["spatial"] = previous_positions
+        table.uns[POSITIONS_KEY] = previous_metadata
+
+        with np.errstate(over="ignore", under="ignore"), pytest.raises(ValueError, match="physical"):
+            _set_positions(table, coordinates, pixel_size_um=scale, calibration="Caller metric.")
+
+        assert table.obsm["spatial"] is previous_positions
+        assert table.uns[POSITIONS_KEY] is previous_metadata
+        assert table.X is expression
+        np.testing.assert_array_equal(coordinates, original)
+
+    @pytest.mark.parametrize(
+        ("coordinate", "scale", "expected"),
+        [
+            (0.0, 1e-300, 0.0),
+            (-0.0, float.fromhex("0x0.0000000000001p-1022"), -0.0),
+            (float.fromhex("0x1p-1022"), 0.5, float.fromhex("0x0.8p-1022")),
+            (-float.fromhex("0x1p-1022"), 0.5, -float.fromhex("0x0.8p-1022")),
+            (
+                float.fromhex("0x0.0000000000001p-1022"),
+                0.75,
+                float.fromhex("0x0.0000000000001p-1022"),
+            ),
+            (
+                -float.fromhex("0x0.0000000000001p-1022"),
+                0.75,
+                -float.fromhex("0x0.0000000000001p-1022"),
+            ),
+            (-3.0, 0.5, -1.5),
+        ],
+    )
+    def test_zero_subnormal_and_negative_positions(
+        self, tmp_path: Path, coordinate: float, scale: float, expected: float
+    ) -> None:
+        """Keep true zero, representable subnormals, and ordinary negative coordinates."""
+        path = tmp_path / "cells.csv"
+        write_csv(path)
+        table, _ = _read_cell_table(ArtifactFile(path))
+        coordinates = np.full((3, 2), coordinate, dtype=np.float64)
+        original = coordinates.copy()
+
+        with np.errstate(under="ignore"):
+            _set_positions(table, coordinates, pixel_size_um=scale, calibration="Caller metric.")
+
+        np.testing.assert_array_equal(table.obsm["spatial"], np.full((3, 2), expected))
+        physical = table.obsm["spatial"]
+        assert isinstance(physical, np.ndarray)
+        np.testing.assert_array_equal(np.signbit(physical), np.signbit(np.full((3, 2), expected)))
+        np.testing.assert_array_equal(coordinates, original)
+        assert table.obsm["spatial"].dtype == np.dtype(np.float64)

@@ -26,6 +26,7 @@ from spatialdata_io.readers.codex._schemas import (
     normalize_fcs_metadata,
     region_name,
     schema_error,
+    validate_csv_fields,
     validate_observations,
 )
 
@@ -97,9 +98,7 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
                 if frame.empty:
                     continue
 
-                if frame.isna().any(axis=None):
-                    raise schema_error(path, found="inconsistent CSV row width", expected="one field per header column")
-
+                validate_csv_fields(frame, path)
                 normalize_csv_numbers(frame, features, path)
                 expression, obs = _split_cells(frame, features, metadata, path)
 
@@ -115,12 +114,12 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
         for block in blocks:
             check_integer_promotion(block.data, path)
 
-    expression = sparse.vstack(blocks, format="csr")
+    expression = blocks[0] if len(blocks) == 1 else sparse.vstack(blocks, format="csr")
 
-    # Preserve lexical metadata until concatenation so integer promotion and
-    # missingness cannot depend on arbitrary CSV block boundaries.
-    obs = pd.concat(observations)
-    normalize_csv_numbers(obs, metadata, path)
+    # Normalize scientific fields across the population, independently of batch
+    # boundaries. Unknown annotations retain their original lexical values.
+    obs = observations[0] if len(observations) == 1 else pd.concat(observations)
+    normalize_csv_numbers(obs, ["region", "x", "y"], path)
 
     var = pd.DataFrame(index=features)
     if labels is not None:
@@ -196,6 +195,10 @@ def _set_positions(
     if not np.isfinite(physical).all():
         message = "pixel_size_um produces nonfinite physical cell coordinates."
         raise ValueError(message)
+    if np.any((coordinates != 0) & (physical == 0)):
+        message = "pixel_size_um underflows nonzero physical cell coordinates to zero."
+        raise ValueError(message)
+
     table.obsm["spatial"] = physical
     descriptions: PositionsMetadata = {
         "schema_version": 1,

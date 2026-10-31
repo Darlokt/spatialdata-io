@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 import tifffile
+from spatialdata.transformations import Identity
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.image import make_raster_options
@@ -73,7 +74,14 @@ class TestReadImage:
         path.write_bytes(b"invalid TIFF")
 
         with pytest.raises(ValueError, match="TIFF") as caught:
-            _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+            _read_image(
+                ArtifactFile(path),
+                data_axes=None,
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
 
         assert any("codex" in note and "stitched image" in note for note in caught.value.__notes__)
 
@@ -81,7 +89,14 @@ class TestReadImage:
         path = tmp_path / "image.tif"
         image = write_image(path)
 
-        result = _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+        result = _read_image(
+            ArtifactFile(path),
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
 
         assert isinstance(result, DataArray)
         # Default tiles exceed the image, so each chunk is one whole channel.
@@ -93,7 +108,12 @@ class TestReadImage:
         image = write_image(path)
 
         result = _read_image(
-            ArtifactFile(path), data_axes=None, tiff_series=None, raster=make_raster_options((2, 2), (1, 8, 8))
+            ArtifactFile(path),
+            data_axes=None,
+            tiff_series=None,
+            raster=make_raster_options((2, 2), (1, 8, 8)),
+            frame="image_pixels",
+            transformation=Identity(),
         )
 
         assert isinstance(result, DataTree)
@@ -108,7 +128,14 @@ class TestReadImage:
         path = tmp_path / "image.tif"
         tifffile.imwrite(path, np.ones((2, 3), dtype=np.uint8), metadata={"axes": "YX"})
 
-        result = _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+        result = _read_image(
+            ArtifactFile(path),
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
 
         assert isinstance(result, DataArray)
         assert result.shape == (1, 2, 3)
@@ -121,7 +148,14 @@ class TestReadImage:
             path, np.zeros((channels, 8, 10), dtype=np.uint16), metadata={"axes": "CYX"}, photometric="minisblack"
         )
 
-        result = _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+        result = _read_image(
+            ArtifactFile(path),
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
 
         assert result.coords["c"].to_numpy().tolist() == list(range(channels))
 
@@ -130,7 +164,14 @@ class TestReadImage:
         image = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
         tifffile.imwrite(path, image, photometric="rgb")
 
-        result = _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+        result = _read_image(
+            ArtifactFile(path),
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
 
         np.testing.assert_array_equal(result.data.compute(), image.transpose(2, 0, 1))
 
@@ -141,9 +182,23 @@ class TestReadImage:
         )
 
         with pytest.raises(ValueError, match="Axis 'q'"):
-            _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+            _read_image(
+                ArtifactFile(path),
+                data_axes=None,
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
 
-        result = _read_image(ArtifactFile(path), data_axes="CYX", tiff_series=None, raster=DEFAULT_OPTIONS)
+        result = _read_image(
+            ArtifactFile(path),
+            data_axes="CYX",
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
 
         assert result.shape == (2, 8, 10)
 
@@ -164,7 +219,14 @@ class TestReadImage:
         tifffile.imwrite(
             path, source, ome=True, photometric="minisblack", metadata={"axes": "CYX", "Channel": {"Name": names}}
         )
-        result = _read_image(ArtifactFile(path), data_axes=None, tiff_series=None, raster=DEFAULT_OPTIONS)
+        result = _read_image(
+            ArtifactFile(path),
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
         assert result.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(result.data.compute(), source)
 
@@ -173,4 +235,11 @@ class TestReadImage:
         write_image(path)
 
         with pytest.raises(ValueError, match="duplicate"):
-            _read_image(ArtifactFile(path), data_axes="YYX", tiff_series=None, raster=DEFAULT_OPTIONS)
+            _read_image(
+                ArtifactFile(path),
+                data_axes="YYX",
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )

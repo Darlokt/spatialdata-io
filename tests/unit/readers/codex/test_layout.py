@@ -23,7 +23,6 @@ class TestDiscoverLayout:
 
         layout = _discover_layout(tmp_path, cell_table_file=None, image_file=None)
 
-        assert layout.root == tmp_path.resolve()
         assert layout.cell_table == (tmp_path / "cells.CSV").resolve()
         assert layout.image is None
         assert not hasattr(layout, "__dict__")

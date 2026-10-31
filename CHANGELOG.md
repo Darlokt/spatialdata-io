@@ -26,6 +26,11 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Changed
 
+- **Breaking:** CODEX additional CSV observation annotations retain exact strings,
+  including numeric-looking values, leading zeros, `NA`, `NULL` and explicit
+  empty strings. Physically missing fields remain errors. Expression, native
+  coordinates, region normalization and exact cell IDs retain their numerical
+  contracts; FCS annotations retain native numerical types.
 - **Breaking:** Visium position grid fields `in_tissue`, `array_row` and
   `array_col` require integer tokens; decimal/exponent spellings such as `2.0`
   and `2e0` are rejected. Fractional pixel coordinates remain supported.
@@ -66,6 +71,11 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Fixed
 
+- CODEX defensively rejects physical coordinate conversion that rounds a nonzero
+  native value to zero under an exceptionally small calibration scale.
+- CODEX documentation now describes integer-preserving CSV expression and native
+  coordinates, and the width-aware 32 MiB numerical batch target with its one-row
+  minimum and separate parser, annotation and output costs.
 - MACSima reports cycle and ROI values outside signed int64 storage with
   contextual format errors before table construction.
 - Xenium tables retain all selected source feature annotations, including HDF5

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
-    DatasetRoot,
     normalize_dataset_root,
     optional_unique_path,
     require_caller_file,
@@ -28,7 +27,6 @@ _IMAGE_SUFFIXES = frozenset({".tif", ".tiff", ".btf"})
 class _CodexLayout:
     """Hold canonical validated source paths without open resources or loaded data."""
 
-    root: DatasetRoot
     cell_table: ArtifactFile
     image: ArtifactFile | None
     experiment: ArtifactFile | None
@@ -80,4 +78,4 @@ def _discover_layout(
         if experiment_file is None
         else require_caller_file(root, experiment_file, context=ReaderErrorContext("codex", "experiment calibration"))
     )
-    return _CodexLayout(root, cell_table, image, experiment)
+    return _CodexLayout(cell_table, image, experiment)

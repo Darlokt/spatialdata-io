@@ -3,8 +3,8 @@
 Required cell fields are named and unordered; every extra non-cycle field is
 preserved. Only complete cycNNN_chNNN names denote expression. CSV identifiers
 remain lexical until exact signed/unsigned 64-bit normalization. FCS primitive
-numeric widths are retained. Optional metadata may be missing; required IDs,
-coordinates, regions, and compensated intensities must be valid.
+numeric widths are retained. Unknown CSV annotations retain exact text;
+required IDs, coordinates, regions, and compensated intensities must be valid.
 """
 
 from __future__ import annotations
@@ -147,22 +147,27 @@ def region_name(regions: pd.Series, path: ArtifactFile) -> str:
     raise schema_error(path, found=f"region {region!r}", expected="a positive integer region or nonempty name")
 
 
-def normalize_csv_numbers(frame: pd.DataFrame, columns: list[str], path: ArtifactFile) -> None:
-    """Normalize lexical CSV columns into explicit Arrow primitive storage.
+def validate_csv_fields(frame: pd.DataFrame, path: ArtifactFile) -> None:
+    """Reject missing physical fields and NULs before converting lexical values."""
+    if frame.isna().any(axis=None):
+        raise schema_error(path, found="inconsistent CSV row width", expected="one field per header column")
 
-    Cell IDs remain lexical until population-wide integer normalization. Extra
-    metadata remains text when it is not wholly numeric. Empty numeric fields
-    become missing, while physically absent fields have already failed parsing.
-    """
-    for column in columns:
-        source = frame[column]
-        if source.str.contains("\x00", regex=False).any():
+    for column in frame:
+        if frame[column].str.contains("\x00", regex=False).any():
             raise schema_error(
                 path, found=f"NUL character in {column!r}", expected="text fields without NUL characters"
             )
-        if column == "cell_id":
-            continue
 
+
+def normalize_csv_numbers(frame: pd.DataFrame, columns: list[str], path: ArtifactFile) -> None:
+    """Normalize defined numerical fields into explicit Arrow primitive storage.
+
+    Nonnumeric regions retain their names. Expression and coordinate consumers
+    reject nonnumeric values. Empty numeric fields become missing; unknown
+    annotations and cell IDs never pass through this conversion.
+    """
+    for column in columns:
+        source = frame[column]
         try:
             numeric = pd.to_numeric(source)
         except ValueError:

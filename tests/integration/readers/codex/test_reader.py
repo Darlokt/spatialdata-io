@@ -71,8 +71,7 @@ class TestCodex:
         assert isinstance(whole.obs, pd.DataFrame)
         assert isinstance(partitioned.obs, pd.DataFrame)
         pd.testing.assert_frame_equal(partitioned.obs, whole.obs, check_exact=True)
-        assert partitioned.obs["extra_integer"].dtype == np.dtype(np.uint64)
-        np.testing.assert_array_equal(partitioned.obs["extra_integer"], [2**63 - 1, large])
+        assert partitioned.obs["extra_integer"].tolist() == [str(2**63 - 1), str(large)]
         assert isinstance(whole.X, sparse.csr_array)
         assert isinstance(partitioned.X, sparse.csr_array)
         np.testing.assert_array_equal(partitioned.X.data, whole.X.data)
@@ -104,13 +103,53 @@ class TestCodex:
         assert loaded.obs["cell_id"].tolist() == table.obs["cell_id"].tolist()
         assert loaded.var_names.tolist() == table.var_names.tolist()
         if source_format == "csv":
-            np.testing.assert_array_equal(loaded.obs["optional"], [0.25, np.nan, 0.75])
+            assert loaded.obs["optional"].tolist() == ["0.25", "", "0.75"]
             assert loaded.obs["note"].tolist() == ["NA", "NULL", "sample"]
         else:
             assert loaded.var["marker"].tolist() == ["CD45", "DNA"]
         assert isinstance(table.X, sparse.csr_array)
         assert isinstance(loaded.X, sparse.csr_matrix | sparse.csr_array)
         np.testing.assert_array_equal(loaded.X.data, table.X.data)
+
+    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    def test_unknown_csv_annotations_remain_exact_lexemes(
+        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, storage: str
+    ) -> None:
+        """Preserve unknown values and explicit empties across batches and persistence."""
+        lexemes = ["0042", "42", "18446744073709551615", "1e-400", "NA", "NULL", "mixed text", ""]
+        frame = pd.DataFrame(
+            {
+                "cell_id": np.arange(1, len(lexemes) + 1),
+                "region": 1,
+                "x": np.arange(len(lexemes)),
+                "y": 0,
+                "cyc001_ch001": 0,
+                "note": lexemes,
+                "numeric_note": ["0042"] * len(lexemes),
+                "underflow_note": ["1e-400"] * len(lexemes),
+            }
+        )
+        write_csv(tmp_path / "cells.csv", frame)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
+
+        table = codex(tmp_path).tables["table"]
+        destination = tmp_path / f"lexemes.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            loaded = ad.read_h5ad(destination)
+        else:
+            table.write_zarr(destination)
+            loaded = ad.read_zarr(destination)
+
+        for observation_frame in (table.obs, loaded.obs):
+            assert observation_frame["note"].tolist() == lexemes
+            assert not observation_frame["note"].isna().any()
+            assert observation_frame["numeric_note"].tolist() == ["0042"] * len(lexemes)
+            assert observation_frame["underflow_note"].tolist() == ["1e-400"] * len(lexemes)
+            assert observation_frame["cell_id"].tolist() == list(range(1, len(lexemes) + 1))
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.nnz == 0
 
     @pytest.mark.parametrize("source_format", ["csv", "fcs"])
     @pytest.mark.parametrize("image_mode", ["none", "plain", "deflate"])
@@ -498,3 +537,13 @@ class TestCodexCalibration:
         write_csv(tmp_path / "cells.csv")
         with np.errstate(over="ignore"), pytest.raises(ValueError, match="nonfinite physical"):
             codex(tmp_path, pixel_size_um=1e308)
+
+    @pytest.mark.parametrize("coordinate", [1e-100, -1e-100])
+    def test_physical_underflow(self, tmp_path: Path, coordinate: float) -> None:
+        """A calibrated reader must reject a nonzero native position becoming zero."""
+        frame = cell_frame()
+        frame["x"] = coordinate
+        write_csv(tmp_path / "cells.csv", frame)
+
+        with np.errstate(under="ignore"), pytest.raises(ValueError, match="physical"):
+            codex(tmp_path, pixel_size_um=1e-300)

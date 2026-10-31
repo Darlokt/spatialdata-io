@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+import pandas as pd
 from spatialdata import SpatialData
 from spatialdata.transformations import Affine, Identity, Scale
 from spatialdata.transformations import Sequence as TransformSequence
@@ -21,8 +22,6 @@ from spatialdata_io.readers.codex._tables import _read_cell_table, _set_position
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
-
-    import pandas as pd
 
 
 def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boundary typed.
@@ -104,24 +103,28 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     SpatialData
         ``tables['table']`` contains eager, finite canonical CSR sparse-array
         expression in source row and feature order. CSV blocks contain at most
-        10,000 rows and at most 32 MiB of dense numerical expression, with parser
-        text buffers and retained sparse/annotation outputs accounted separately.
+        10,000 rows with a width-aware 32 MiB numerical target and a one-row
+        minimum. One sufficiently wide row may exceed the target. Header,
+        parser/string buffers and retained sparse/annotation outputs have
+        separate costs; this is not a whole-process or raw-record memory bound.
         FCS decoding materializes the event population with readfcs; expression
         keeps native NumPy storage before sparse construction.
         Intensities retain real numeric dtype and negative compensated signals.
         FCS PnN supplies feature IDs. Available PnS labels become ``var['marker']``.
         All non-cycle columns remain observation metadata, and observation names
         are zero-based source positions.
-        CSV features are normalized within each bounded block. Observation
-        metadata remains lexical until all blocks are concatenated, so metadata
-        dtypes and exact integer values are independent of batch boundaries.
+        CSV features use a common real dtype, preserving integer storage when
+        possible. Defined observation fields are normalized across the complete
+        population, so coordinates and region meaning are independent of batch
+        boundaries. Unknown CSV annotations retain exact strings, including
+        leading zeros, numeric-looking values, literal ``NA``/``NULL`` and
+        explicit empty strings. Physically missing fields are rejected.
         New numeric and string annotations use explicit Arrow storage during
         processing and one final AnnData compatibility conversion per frame.
-        Returned numeric metadata uses NumPy storage, nullable integer metadata
-        uses pandas nullable storage, and strings use pandas nullable strings.
-        Empty numeric metadata fields become missing, represented by NaN for
-        floats; missing required coordinates, IDs, or intensities are rejected.
-        Literal text such as ``NA`` and ``NULL`` remains text. Fractional ID
+        Returned numeric metadata uses NumPy storage and strings use pandas
+        nullable strings. FCS annotations retain native numerical widths;
+        optional missing floats are represented by NaN. Missing required
+        coordinates, IDs, or intensities are rejected. Fractional ID
         values, overflow, floating underflow, and lossy large-number promotion
         are rejected; integral decimal ID tokens such as ``2.0`` remain exact.
 
@@ -132,8 +135,9 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         calibration there is no canonical ``obsm['spatial']``; circles use the
         native ``table_pixels`` frame. With calibration, ``spatial`` contains
         float64 XY micrometres at the source cell positions, with native origin
-        and orientation, and circles transform to physical ``global``. Position
-        meaning, units, frame and calibration are declared in
+        and orientation, and circles transform to physical ``global``. Nonfinite
+        physical products and nonzero coordinates rounded to zero are rejected.
+        Position meaning, units, frame and calibration are declared in
         ``uns['spatialdata_io_positions']``. Radius-one circles are display
         geometry in source pixels, not measured cell boundaries.
         Images use a separate ``image_pixels`` frame unless ``image_to_table``
@@ -200,7 +204,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         )
 
     table, coordinates = _read_cell_table(layout.cell_table)
-    shapes = _make_shapes(table, coordinates, frame=frame, transformation=transform)
+    identifiers = pd.Index(table.obs["cell_id"].to_numpy(), name="cell_id")
+    shapes = _make_shapes(identifiers, coordinates, frame=frame, transformation=transform)
     if pixel_size_um is not None:
         _set_positions(table, coordinates, pixel_size_um=pixel_size_um, calibration=calibration)
     region = str(table.obs["region"].iloc[0])

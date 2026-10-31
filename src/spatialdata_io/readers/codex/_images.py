@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel
-from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
@@ -39,8 +38,8 @@ def _read_image(  # noqa: PLR0913, RUF100 - Explicit raster and registration sta
     data_axes: str | None,
     tiff_series: int | None,
     raster: RasterOptions,
-    frame: str = "image_pixels",
-    transformation: BaseTransformation | None = None,
+    frame: str,
+    transformation: BaseTransformation,
 ) -> DataArray | DataTree:
     """Build a level-zero image with declared axes and task-local TIFF ownership."""
     try:
@@ -90,5 +89,5 @@ def _read_image(  # noqa: PLR0913, RUF100 - Explicit raster and registration sta
         scale_factors=raster.model_scale_factors,
         chunks=raster.image_chunks(),
         rgb=False,
-        transformations={frame: Identity() if transformation is None else transformation},
+        transformations={frame: transformation},
     )
