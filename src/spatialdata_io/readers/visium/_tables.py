@@ -41,16 +41,6 @@ class PreparedTable:
     positions: pd.DataFrame
 
 
-@dataclass(frozen=True, slots=True)
-class TableOptions:
-    """Validated reader state needed to construct the owned table."""
-
-    dataset_id: str
-    metadata: CountMetadata
-    scale_factors: ScaleFactors
-    make_var_names_unique: bool
-
-
 def _context(artifact: str) -> ReaderErrorContext:
     """Identify a Visium table artifact for contextual errors."""
     return ReaderErrorContext(reader="visium", artifact=artifact)
@@ -65,6 +55,8 @@ def read_positions(layout: VisiumLayout) -> pd.DataFrame:
                 read_options=pacsv.ReadOptions(
                     column_names=list(POSITION_COLUMNS) if layout.position_format == "headerless" else None,
                 ),
+                # Quoted barcodes may span native Arrow CSV block boundaries.
+                parse_options=pacsv.ParseOptions(newlines_in_values=True),
                 convert_options=pacsv.ConvertOptions(
                     column_types=POSITION_SOURCE_SCHEMA,
                     include_columns=list(POSITION_COLUMNS),
@@ -101,14 +93,17 @@ def _read_counts(counts: CountsLayout, *, make_var_names_unique: bool) -> AnnDat
     )
 
 
-def prepare_table(
+def prepare_table(  # noqa: PLR0913 - Explicit reader-owned table construction inputs.
     layout: VisiumLayout,
     positions: pd.DataFrame,
     *,
-    options: TableOptions,
+    dataset_id: str,
+    metadata: CountMetadata,
+    scale_factors: ScaleFactors,
+    make_var_names_unique: bool,
 ) -> PreparedTable:
     """Read sparse counts and align position metadata without filtering spots."""
-    adata = _read_counts(layout.counts, make_var_names_unique=options.make_var_names_unique)
+    adata = _read_counts(layout.counts, make_var_names_unique=make_var_names_unique)
     if not adata.obs_names.is_unique:
         duplicates = tuple(adata.obs_names[adata.obs_names.duplicated()].unique()[:5])
         raise ReaderFormatError(
@@ -135,8 +130,8 @@ def prepare_table(
 
     obs[INSTANCE_KEY] = pd.Series(adata.obs_names, dtype=SPOT_ID_DTYPE).array
     obs[REGION_KEY] = pd.Categorical(
-        np.repeat(options.dataset_id, adata.n_obs),
-        categories=[options.dataset_id],
+        np.repeat(dataset_id, adata.n_obs),
+        categories=[dataset_id],
     )
 
     # Vendor CSV coordinates are row/column, while SpatialData uses x/y.
@@ -153,7 +148,7 @@ def prepare_table(
             "spatial_pixels": {
                 "axes": ["x", "y"],
                 "units": "pixel",
-                "frame": options.dataset_id,
+                "frame": dataset_id,
                 "position": "full-resolution spot centre",
             }
         },
@@ -163,30 +158,30 @@ def prepare_table(
     source_metadata = {
         key: value
         for key, value in (
-            ("chemistry_description", options.metadata.chemistry_description),
-            ("software_version", options.metadata.software_version),
+            ("chemistry_description", metadata.chemistry_description),
+            ("software_version", metadata.software_version),
         )
         if value is not None
     }
     adata.uns["spatial"] = {
-        options.dataset_id: {
+        dataset_id: {
             "metadata": source_metadata,
-            "scalefactors": dict(options.scale_factors.values),
+            "scalefactors": scale_factors.values,  # noqa: PD011 - Owned JSON mapping, not a pandas object.
         }
     }
 
     return PreparedTable(adata=adata, positions=aligned)
 
 
-def link_table(prepared: PreparedTable, *, dataset_id: str, shape_index: pd.Index) -> AnnData:
+def link_table(adata: AnnData, *, dataset_id: str, shape_index: pd.Index) -> AnnData:
     """Validate exact circle membership and parse the table exactly once."""
     # The shared count readers return in-memory frames; AnnData's annotations
     # additionally cover Dataset2D, used only for backed tables.
-    prepare_anndata_dataframe(cast("pd.DataFrame", prepared.adata.obs), context=_context("observation annotations"))
-    prepare_anndata_dataframe(cast("pd.DataFrame", prepared.adata.var), context=_context("feature annotations"))
+    prepare_anndata_dataframe(cast("pd.DataFrame", adata.obs), context=_context("observation annotations"))
+    prepare_anndata_dataframe(cast("pd.DataFrame", adata.var), context=_context("feature annotations"))
 
     return parse_linked_table(
-        prepared.adata,
+        adata,
         TableLinkage(regions=(dataset_id,), region_key=REGION_KEY, instance_key=INSTANCE_KEY),
         context=_context("linked table"),
         expected_instance_ids={dataset_id: shape_index},

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import TYPE_CHECKING
 
 import h5py
@@ -54,8 +55,17 @@ def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile)
             path=path,
         )
 
-    result = float(value)
-    if not np.isfinite(result) or result <= 0:
+    try:
+        result = float(value)
+    except OverflowError as error:
+        raise ReaderFormatError(
+            context=_context("scale factors"),
+            found=f"{key!r}={value!r}",
+            expected=f"a finite positive numeric {key!r}",
+            path=path,
+        ) from error
+
+    if not isfinite(result) or result <= 0:
         raise ReaderFormatError(
             context=_context("scale factors"),
             found=f"{key!r}={value!r}",
@@ -69,10 +79,31 @@ def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile)
 def read_scale_factors(path: ArtifactFile) -> ScaleFactors:
     """Read and validate the Space Ranger scale-factor object."""
     values = read_json_object(path, context=_context("scale factors"))
+    hires = _positive_number(values, HIRES_SCALE, path=path)
+    lowres = _positive_number(values, LOWRES_SCALE, path=path)
+    spot_diameter = _positive_number(values, SPOT_DIAMETER, path=path)
+
+    # Source positivity alone does not guarantee representable inverse transforms.
+    for key, inverse in ((HIRES_SCALE, 1.0 / hires), (LOWRES_SCALE, 1.0 / lowres)):
+        if not isfinite(inverse):
+            raise ReaderFormatError(
+                context=_context("scale factors"),
+                found=f"nonfinite inverse of {key!r}",
+                expected="a finite positive inverse scale",
+                path=path,
+            )
+    if spot_diameter / 2.0 == 0:
+        raise ReaderFormatError(
+            context=_context("scale factors"),
+            found=f"{SPOT_DIAMETER!r} underflows when divided by two",
+            expected="a positive representable circle radius",
+            path=path,
+        )
+
     return ScaleFactors(
-        hires=_positive_number(values, HIRES_SCALE, path=path),
-        lowres=_positive_number(values, LOWRES_SCALE, path=path),
-        spot_diameter=_positive_number(values, SPOT_DIAMETER, path=path),
+        hires=hires,
+        lowres=lowres,
+        spot_diameter=spot_diameter,
         values=values,
     )
 

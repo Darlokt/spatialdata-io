@@ -141,6 +141,7 @@ def _assert_table_contract(result: SpatialData) -> None:
 
     assert table.obs_names.tolist() == ["barcode-a", "barcode-b", "barcode-c"]
     assert table.var_names.tolist() == ["gene-a", "gene-b", "protein-a"]
+    assert table.var["gene_ids"].tolist() == ["gene-id-a", "gene-id-b", "antibody-id"]
     assert table.var["feature_types"].tolist() == ["Gene Expression", "Gene Expression", "Antibody Capture"]
     assert table.obs["in_tissue"].tolist() == [1, 1, 1]
     assert table.obs["spot_id"].tolist() == ["barcode-a", "barcode-b", "barcode-c"]
@@ -153,6 +154,79 @@ def _assert_table_contract(result: SpatialData) -> None:
 
 class TestVisiumSyntheticWorkflow:
     """Prove every supported count and position layout through the public API."""
+
+    def test_rejects_mex_legacy_selector_before_silent_feature_relabeling(self, tmp_path: Path) -> None:
+        mex = tmp_path / "filtered_feature_bc_matrix"
+        _write_mex(mex, compressed=False)
+        _write_spatial(tmp_path, version="v2")
+        conflict = mex / "genes.tsv"
+        conflict.write_text("wrong-id-a\twrong-a\nwrong-id-b\twrong-b\nwrong-id-c\twrong-c\n", encoding="utf-8")
+
+        with pytest.raises(ReaderFormatError, match=r"genes\.tsv") as caught:
+            visium(tmp_path, dataset_id="sample")
+
+        assert caught.value.context.reader == "visium"
+        assert caught.value.context.artifact == "count matrix"
+        assert str(conflict) in str(caught.value)
+
+    def test_mex_retains_exact_feature_identity_with_benign_legacy_named_artifacts(self, tmp_path: Path) -> None:
+        mex = tmp_path / "filtered_feature_bc_matrix"
+        _write_mex(mex, compressed=True)
+        _write_spatial(tmp_path, version="v2")
+        (mex / "genes.tsv").mkdir()
+        (mex / "genes.tsv.gz").write_bytes(gzip.compress(b"wrong-id\twrong-name\n"))
+        (mex / "other_genes.tsv").write_text("wrong-id\twrong-name\n", encoding="utf-8")
+
+        result = visium(tmp_path, dataset_id="sample")
+
+        _assert_table_contract(result)
+
+    @pytest.mark.parametrize(("version", "barcode_index"), [("v1", 0), ("v1", 1), ("v2", 1)])
+    def test_preserves_quoted_multiline_barcodes(
+        self, tmp_path: Path, version: Literal["v1", "v2"], barcode_index: int
+    ) -> None:
+        counts = tmp_path / "filtered_feature_bc_matrix.h5"
+        _write_h5(counts)
+        _write_spatial(tmp_path, version=version)
+        barcodes = ["barcode-a", "barcode-b", "barcode-c"]
+        barcodes[barcode_index] += "\ncontinued"
+        with h5py.File(counts, "r+") as source:
+            del source["matrix/barcodes"]
+            source.create_dataset("matrix/barcodes", data=np.asarray([barcode.encode() for barcode in barcodes]))
+        filename = "tissue_positions_list.csv" if version == "v1" else "tissue_positions.csv"
+        positions = tmp_path / "spatial" / filename
+        header = "" if version == "v1" else positions.read_text(encoding="utf-8").splitlines()[0] + "\n"
+        rows = [
+            f'"{barcode}",1,{index},{2 - index},{10 + 20 * index},{20 + 20 * index}\n'
+            for index, barcode in enumerate(barcodes)
+        ]
+        positions.write_text(header + "".join(rows), encoding="utf-8")
+
+        result = visium(tmp_path)
+
+        table = result.tables["table"]
+        assert table.obs_names.tolist() == barcodes
+        assert table.obs["spot_id"].tolist() == barcodes
+        assert result.shapes["sample"].index.tolist() == barcodes
+        assert get_table_keys(table) == ("sample", "region", "spot_id")
+        assert isinstance(table.X, sparse.csr_array)
+        np.testing.assert_array_equal(table.X.data, np.asarray([1, 5, 2, 3, 4, 6], dtype=np.float32))
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[20, 10], [40, 30], [60, 50]])
+
+    @pytest.mark.parametrize("key", ["tissue_hires_scalef", "tissue_lowres_scalef"])
+    def test_rejects_scales_that_would_return_nonfinite_image_transform(self, tmp_path: Path, key: str) -> None:
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+        path = tmp_path / "spatial" / "scalefactors_json.json"
+        values = json.loads(path.read_text(encoding="utf-8"))
+        values[key] = float(np.nextafter(0.0, 1.0))
+        path.write_text(json.dumps(values), encoding="utf-8")
+
+        with pytest.raises(ReaderFormatError, match=key) as caught:
+            visium(tmp_path)
+
+        assert caught.value.path == path
+        assert caught.value.context.artifact == "scale factors"
 
     @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
     def test_rejects_malformed_duplicate_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:

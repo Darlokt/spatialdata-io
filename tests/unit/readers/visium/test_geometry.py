@@ -54,6 +54,7 @@ class TestMakeCircles:
 
         assert circles.index.tolist() == ["a", "b"]
         assert circles.index.name == "spot_id"
+        assert positions.index.name == "barcode"
         np.testing.assert_array_equal(circles.geometry.x, np.asarray([20.0, 40.0]))
         np.testing.assert_array_equal(circles.geometry.y, np.asarray([10.0, 30.0]))
         np.testing.assert_array_equal(circles["radius"], np.asarray([3.0, 3.0]))

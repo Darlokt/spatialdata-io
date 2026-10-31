@@ -15,7 +15,7 @@ from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, LazyRaster
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, DatasetRoot
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium._geometry import VisiumTransforms, make_transforms
 from spatialdata_io.readers.visium._images import ImageOptions, make_image_options, read_images
 from spatialdata_io.readers.visium._layout import H5Counts, VisiumLayout
@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 def _layout(root: Path, *, fullres: Path | None, hires: Path | None = None, lowres: Path | None = None) -> VisiumLayout:
     placeholder = ArtifactFile(root / "placeholder")
     return VisiumLayout(
-        root=DatasetRoot(ArtifactDirectory(root)),
         counts=H5Counts(placeholder, None),
         positions=placeholder,
         position_format="headered",
@@ -237,7 +236,7 @@ class TestReadImages:
         raster = LazyRaster(da.zeros(shape, chunks=shape), axes)
         mocker.patch("spatialdata_io.readers.visium._images._read_raster", return_value=raster)
 
-        with pytest.raises(ValueError, match="no supported spatial or channel meaning"):
+        with pytest.raises(ValueError, match="absent from target_axes"):
             read_images(
                 _layout(tmp_path, fullres=path),
                 dataset_id="sample",
@@ -283,8 +282,9 @@ class TestReadImages:
         ("shape", "axes", "match"),
         [
             ((3, 5, 7), ("y", "x"), "rank"),
-            ((3, 5, 7), ("c", "y", "y"), "unique X and Y"),
-            ((2, 3, 5, 7), ("c", "s", "y", "x"), "at most one channel"),
+            ((3, 5, 7), ("c", "y", "y"), "duplicate axes"),
+            ((3, 5, 7), ("c", "z", "x"), "must both contain"),
+            ((2, 3, 5, 7), ("c", "s", "y", "x"), "duplicate axes"),
         ],
     )
     def test_rejects_invalid_axis_declarations(
@@ -318,7 +318,7 @@ class TestReadImages:
         raster = LazyRaster(da.zeros((3, 5, 7), chunks=(3, 5, 7)), ("Q", "Y", "X"))
         mocker.patch("spatialdata_io.readers.visium._images._read_raster", return_value=raster)
 
-        with pytest.raises(ValueError, match="explicit data_axes"):
+        with pytest.raises(ValueError, match="absent from target_axes"):
             read_images(
                 _layout(tmp_path, fullres=path),
                 dataset_id="sample",
@@ -335,10 +335,14 @@ class TestReadImages:
 
         assert images["sample_full_image"].shape == (3, 5, 7)
 
-    def test_drops_named_singleton_dimensions(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    @pytest.mark.parametrize("axes", [("Z", "C", "Y", "X"), ("Z", "S", "Y", "X")])
+    def test_drops_named_singleton_dimensions(
+        self, tmp_path: Path, mocker: MockerFixture, axes: tuple[str, ...]
+    ) -> None:
         path = tmp_path / "full.tif"
         path.touch()
-        raster = LazyRaster(da.zeros((1, 3, 5, 7), chunks=(1, 3, 5, 7)), ("Z", "C", "Y", "X"))
+        values = np.arange(3 * 5 * 7, dtype=np.uint16).reshape(1, 3, 5, 7)
+        raster = LazyRaster(da.from_array(values, chunks=values.shape), axes)
         mocker.patch("spatialdata_io.readers.visium._images._read_raster", return_value=raster)
 
         images = read_images(
@@ -349,6 +353,7 @@ class TestReadImages:
         )
 
         assert images["sample_full_image"].shape == (3, 5, 7)
+        np.testing.assert_array_equal(images["sample_full_image"].data.compute(), values[0])
 
     def test_requires_selection_for_multiple_tiff_series(self, tmp_path: Path) -> None:
         path = tmp_path / "series.tif"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,7 +56,6 @@ type CountsLayout = H5Counts | MtxCounts
 class VisiumLayout:
     """Closed immutable paths and format decisions for one Visium dataset."""
 
-    root: DatasetRoot
     counts: CountsLayout
     positions: ArtifactFile
     position_format: PositionFormat
@@ -102,6 +102,18 @@ def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | No
         )
 
     prefix, compressed = variants[0]
+    legacy_name = f"{prefix or ''}genes.tsv"
+    legacy_path = path / legacy_name
+    # Defensive check for mixed directories; no conflict was observed in vendor exports.
+    # Scanpy uses this file as its legacy-family selector, even beside features.tsv.
+    if legacy_name in names and legacy_path.is_file():
+        raise ReaderFormatError(
+            context=context,
+            found=f"competing legacy feature selector {legacy_name!r}",
+            expected=f"the selected modern {prefix or ''}features.tsv{'.gz' if compressed else ''} family only",
+            path=legacy_path,
+        )
+
     return MtxCounts(
         path=path,
         prefix=prefix,
@@ -172,23 +184,27 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
 
 
 def _position_format(path: ArtifactFile) -> PositionFormat:
-    """Read the first line and classify its named or positional schema."""
+    """Read the first logical CSV record and classify its field contract."""
     context = _context("tissue positions")
     try:
-        with path.open("rb") as stream:
-            first_line = stream.readline()
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            columns = next(csv.reader(stream, strict=True), [])
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise
-
-    try:
-        row = first_line.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise ReaderFormatError(
             context=context, path=path, found="invalid UTF-8 header", expected="UTF-8 position CSV"
         ) from error
+    except csv.Error as error:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="malformed first CSV row",
+            expected="a valid header or six-field data row",
+        ) from error
 
-    return classify_position_row(row, path=path)
+    return classify_position_row(columns, path=path)
 
 
 def _discover_positions(root: DatasetRoot, override: str | Path | None) -> tuple[ArtifactFile, PositionFormat]:
@@ -229,7 +245,6 @@ def discover_layout(
     lowres = None if spatial is None else optional_file(spatial / LOWRES_IMAGE, context=_context("lowres image"))
 
     return VisiumLayout(
-        root=root,
         counts=_discover_counts(root, counts_source),
         positions=positions,
         position_format=position_format,

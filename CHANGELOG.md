@@ -26,6 +26,9 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Changed
 
+- **Breaking:** Visium position grid fields `in_tissue`, `array_row` and
+  `array_col` require integer tokens; decimal/exponent spellings such as `2.0`
+  and `2e0` are rejected. Fractional pixel coordinates remain supported.
 - **Breaking:** `to_legacy_anndata()` preserves table positions by default and
   offers explicit `position_source="centroids"` with ID-aligned linked targets,
   one selected coordinate frame and preservation of replaced physical positions.
@@ -60,6 +63,14 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
   equally to the image and its labels, replacing `image_scale_factors` and
   `labels_scale_factors` (CLI `--scale-factors`). Generated label pyramids
   still require labels of at most 32 bits.
+
+### Fixed
+
+- Visium rejects a competing matching-prefix `genes.tsv` in a modern MEX
+  directory, preventing the count parser from silently replacing feature IDs,
+  names and types. Position discovery reads the first logical CSV record,
+  including quoted multiline barcodes. Scale metadata fails contextually when
+  an inverse scale is nonfinite or the circle radius would underflow to zero.
 
 ### Removed
 

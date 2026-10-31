@@ -7,10 +7,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.visium._layout import H5Counts, MtxCounts, VisiumLayout, discover_layout
+from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.visium._layout import H5Counts, MtxCounts, VisiumLayout, _position_format, discover_layout
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pytest_mock import MockerFixture
 
 
 def _write_required_spatial(root: Path, *, current: bool = True) -> None:
@@ -81,6 +84,44 @@ class TestDiscoverLayout:
         assert counts.prefix == "sample_"
         assert counts.compressed is compressed
         assert counts.filename_prefix is None
+
+    @pytest.mark.parametrize("prefix", ["", "sample_"])
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_rejects_matching_legacy_gene_selector(self, tmp_path: Path, prefix: str, *, compressed: bool) -> None:
+        _write_required_spatial(tmp_path)
+        mex = tmp_path / "filtered_feature_bc_matrix"
+        _write_mex(mex, prefix=prefix, compressed=compressed)
+        conflict = mex / f"{prefix}genes.tsv"
+        conflict.touch()
+
+        with pytest.raises(ReaderFormatError, match=r"genes\.tsv") as caught:
+            _discover(tmp_path)
+
+        assert caught.value.context.reader == "visium"
+        assert caught.value.context.artifact == "count matrix"
+        assert str(conflict) in str(caught.value)
+        assert "features.tsv" in str(caught.value)
+
+    @pytest.mark.parametrize("prefix", ["", "sample_"])
+    @pytest.mark.parametrize("compressed", [False, True])
+    @pytest.mark.parametrize("extra", ["unrelated", "gzip", "directory"])
+    def test_ignores_artifacts_that_do_not_select_legacy_genes(
+        self, tmp_path: Path, prefix: str, extra: str, *, compressed: bool
+    ) -> None:
+        _write_required_spatial(tmp_path)
+        mex = tmp_path / "filtered_feature_bc_matrix"
+        _write_mex(mex, prefix=prefix, compressed=compressed)
+        if extra == "directory":
+            (mex / f"{prefix}genes.tsv").mkdir()
+        else:
+            name = "other_genes.tsv" if extra == "unrelated" else f"{prefix}genes.tsv.gz"
+            (mex / name).touch()
+
+        counts = _discover(tmp_path).counts
+
+        assert isinstance(counts, MtxCounts)
+        assert counts.prefix == (prefix or None)
+        assert counts.compressed is compressed
 
     @pytest.mark.parametrize("kind", ["h5", "mex"])
     def test_legacy_prefixed_count_source_infers_dataset_prefix(self, tmp_path: Path, kind: str) -> None:
@@ -187,3 +228,47 @@ class TestDiscoverLayout:
             _discover(tmp_path)
 
         assert error.value.filename == str(tmp_path / "filtered_feature_bc_matrix.h5")
+
+
+class TestPositionFormat:
+    """Classify logical CSV records while owning and closing the source."""
+
+    @pytest.mark.parametrize("bom", ["", "\ufeff"])
+    def test_reads_complete_multiline_first_record(self, tmp_path: Path, bom: str, mocker: MockerFixture) -> None:
+        path = tmp_path / "positions.csv"
+        path.write_text(f'{bom}"barcode\ncontinued",1,0,0,1,2\n', encoding="utf-8")
+        opened = mocker.spy(type(path), "open")
+
+        result = _position_format(ArtifactFile(path))
+
+        assert result == "headerless"
+        assert opened.spy_return.closed
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"", b'"unterminated,1,0,0,1,2\n', b'"barcode"bad,1,0,0,1,2\n', b"\xff,1,0,0,1,2\n"],
+        ids=["empty", "unclosed-quote", "trailing-quote-data", "encoding"],
+    )
+    def test_rejects_bad_first_record_and_closes_source(
+        self, tmp_path: Path, content: bytes, mocker: MockerFixture
+    ) -> None:
+        path = tmp_path / "positions.csv"
+        path.write_bytes(content)
+        opened = mocker.spy(type(path), "open")
+
+        with pytest.raises(ReaderFormatError) as caught:
+            _position_format(ArtifactFile(path))
+
+        assert caught.value.path == path
+        assert caught.value.context.reader == "visium"
+        assert caught.value.context.artifact == "tissue positions"
+        assert opened.spy_return.closed
+
+    def test_preserves_source_failure_with_artifact_context(self, tmp_path: Path) -> None:
+        path = tmp_path / "missing.csv"
+
+        with pytest.raises(FileNotFoundError) as caught:
+            _position_format(ArtifactFile(path))
+
+        assert caught.value.filename == str(path)
+        assert any("visium" in note and "tissue positions" in note for note in caught.value.__notes__)

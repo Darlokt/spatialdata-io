@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import csv
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -13,6 +12,7 @@ import pyarrow as pa
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 type PositionFormat = Literal["headered", "headerless"]
@@ -39,17 +39,12 @@ def position_error(path: Path, found: str, expected: str) -> ReaderFormatError:
     )
 
 
-def classify_position_row(row: str, *, path: Path) -> PositionFormat:
+def classify_position_row(columns: Sequence[str], *, path: Path) -> PositionFormat:
     """Recognize named fields before CSV parsers can repair duplicate headers.
 
     Named fields may be reordered and extended; additional fields are projected
     away. Headerless input retains exactly six positional fields.
     """
-    try:
-        columns = next(csv.reader([row], strict=True))
-    except csv.Error as error:
-        raise position_error(path, "malformed first CSV row", "a valid header or six-field data row") from error
-
     if any(column in POSITION_COLUMNS for column in columns):
         if any(not column for column in columns) or len(set(columns)) != len(columns):
             raise position_error(path, "empty or duplicate column names", "nonempty unique column names")
@@ -64,41 +59,21 @@ def classify_position_row(row: str, *, path: Path) -> PositionFormat:
 
 
 def _grid_column(source: pd.Series, *, path: Path) -> pd.Series:
-    """Parse ordinary grid integers natively and decimal variants exactly."""
+    """Parse integer tokens exactly, without accepting decimal/exponent spellings."""
     if source.isna().any():
         raise position_error(path, f"null values in {source.name!r}", "finite numeric values")
 
     try:
         numeric = source.astype("int64[pyarrow]")
-    except pa.ArrowInvalid:
-        # Space Ranger uses integer tokens. Accept decimal/exponent variants
-        # through exact decimal arithmetic, never a rounded float intermediate.
-        values = [_grid_value(text, column=str(source.name), path=path) for text in source]
-        return pd.Series(values, index=source.index, dtype="int64[pyarrow]", name=source.name)
+    except pa.ArrowInvalid as error:
+        raise position_error(
+            path, f"invalid integer token or overflow in {source.name!r}", "integer tokens fitting int64"
+        ) from error
 
     if (numeric < 0).any():
         raise position_error(path, f"negative values in {source.name!r}", "nonnegative integer values")
 
     return numeric
-
-
-def _grid_value(text: str, *, column: str, path: Path) -> int:
-    """Validate an uncommon numeric token before constructing an exact int64."""
-    try:
-        value = Decimal(text)
-    except InvalidOperation as error:
-        raise position_error(path, f"nonnumeric values in {column!r}", "finite numeric values") from error
-
-    if not value.is_finite():
-        raise position_error(path, f"nonfinite values in {column!r}", "finite numeric values")
-    if value != value.to_integral_value():
-        raise position_error(path, f"fractional values in {column!r}", "integer values")
-    if value < 0:
-        raise position_error(path, f"negative values in {column!r}", "nonnegative integer values")
-    if value > np.iinfo(np.int64).max:
-        raise position_error(path, f"overflow in {column!r}", "integer values fitting int64")
-
-    return int(value)
 
 
 def _pixel_column(source: pd.Series, *, path: Path) -> pd.Series:

@@ -155,10 +155,23 @@ ownership, library selection and persistence examples.
 Space Ranger headerless/headered position layouts and HDF5/plain or compressed
 MTX counts share the same table contract. Matrix barcodes determine observation
 names and order; every matrix row, including off-tissue spots, is retained.
+MEX directories require one consistently compressed or uncompressed modern
+`matrix`/`barcodes`/`features` triplet. A matching-prefix uncompressed
+`genes.tsv` file is rejected because it would change the delegated parser's
+feature-family selection.
 All source feature classes and their order are kept. Feature symbols are made
 unique unless disabled; stable IDs are in textual `var["gene_ids"]`. Modern inputs also supply
-textual `feature_types` and available additional feature metadata; legacy
+textual `feature_types` and available additional feature metadata; legacy HDF5
 inputs do not fabricate them.
+
+Position CSV files support quoted logical records, including embedded newlines
+in barcodes. `in_tissue`, `array_row` and `array_col` require integer tokens
+fitting int64; decimal/exponent spellings such as `2.0` and `2e0` are rejected.
+Grid indices must be nonnegative and `in_tissue` must be zero or one. Pixel
+coordinates remain finite nonnegative float64 values and may be fractional;
+their precision and underflow checks are independent of the grid grammar.
+Image scale factors must have finite inverses, and the display diameter must
+produce a positive representable circle radius.
 
 `X` contains source counts, with the dtype returned by Scanpy (int32 HDF5
 usually becomes float32; MTX is float32). `obs` adds int64 `in_tissue`,

@@ -13,11 +13,11 @@ from scipy import sparse
 from spatialdata.models import get_table_keys
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, DatasetRoot
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium._layout import H5Counts, VisiumLayout
 from spatialdata_io.readers.visium._metadata import CountMetadata, ScaleFactors
 from spatialdata_io.readers.visium._schemas import POSITION_COLUMNS
-from spatialdata_io.readers.visium._tables import TableOptions, link_table, prepare_table, read_positions
+from spatialdata_io.readers.visium._tables import link_table, prepare_table, read_positions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,7 +31,6 @@ def _layout(root: Path, positions: Path, *, headered: bool) -> VisiumLayout:
     scales = root / "scales.json"
     scales.touch(exist_ok=True)
     return VisiumLayout(
-        root=DatasetRoot(ArtifactDirectory(root)),
         counts=H5Counts(ArtifactFile(counts), None),
         positions=ArtifactFile(positions),
         position_format="headered" if headered else "headerless",
@@ -46,15 +45,6 @@ def _position_rows() -> str:
     return "b,0,1,2,30.5,40.5\na,1,0,3,10,20\nextra,1,2,1,50,60\n"
 
 
-def _options() -> TableOptions:
-    return TableOptions(
-        dataset_id="sample",
-        metadata=CountMetadata("sample", "chemistry", "spaceranger-2.1.0"),
-        scale_factors=ScaleFactors(0.5, 0.25, 6.0, {"spot_diameter_fullres": 6.0}),
-        make_var_names_unique=True,
-    )
-
-
 class TestReadPositions:
     """Validate both vendor CSV schemas and all coordinate columns."""
 
@@ -67,7 +57,7 @@ class TestReadPositions:
             writer = csv.writer(stream)
             if headered:
                 writer.writerow(POSITION_COLUMNS)
-            writer.writerow([barcode, "1", "9007199254740993.0", "2e0", "0.10000000000000002", "20"])
+            writer.writerow([barcode, "1", "9007199254740993", "2", "0.10000000000000002", "20"])
 
         result = read_positions(_layout(tmp_path, path, headered=headered))
 
@@ -75,6 +65,30 @@ class TestReadPositions:
         assert result["array_row"].tolist() == [2**53 + 1]
         assert result["array_col"].tolist() == [2]
         assert result["pxl_row_in_fullres"].tolist() == [float("0.10000000000000002")]
+
+    @pytest.mark.parametrize("newline_offset", [(1 << 20) - 1, 1 << 20], ids=["before-block", "at-block"])
+    def test_preserves_multiline_barcode_across_default_arrow_block(self, tmp_path: Path, newline_offset: int) -> None:
+        """Preserve identities at boundaries that can otherwise truncate or split quoted records."""
+        path = tmp_path / "positions.csv"
+        header = (",".join((*POSITION_COLUMNS, "extension")) + "\n").encode()
+        record = b"spot-00000000,1,2,3,4.25,5.125," + b"x" * 96 + b"\n"
+        barcode = "m" * 40 + "\n" + "l" * 80
+        quote_offset = newline_offset - 41
+        count = (quote_offset - len(header)) // len(record) - 1
+        barcodes = [f"spot-{index:08d}" for index in range(count)]
+        prefix = header + b"".join(name.encode() + b",1,2,3,4.25,5.125," + b"x" * 96 + b"\n" for name in barcodes)
+        padding = quote_offset - len(prefix) - len(b"pad,1,2,3,4,5,\n")
+        prefix += b"pad,1,2,3,4,5," + b"x" * padding + b"\n"
+        assert len(prefix) == quote_offset
+        source = prefix + b'"' + barcode.encode() + b'",1,2,3,4.25,5.125,tail\n'
+        assert source.find(b"\n", quote_offset) == newline_offset
+        path.write_bytes(source)
+
+        result = read_positions(_layout(tmp_path, path, headered=True))
+
+        assert result.index.tolist() == [*barcodes, "pad", barcode]
+        assert "extension" not in result.columns
+        np.testing.assert_array_equal(result.loc[barcode, ["array_row", "array_col"]], [2, 3])
 
     @pytest.mark.parametrize("row", ["a,1,0,0,10,20", "a,1,0,0,10,20,extra,surplus"])
     def test_rejects_inconsistent_record_widths(self, tmp_path: Path, row: str) -> None:
@@ -123,7 +137,14 @@ class TestPrepareTable:
         )
         mocker.patch("spatialdata_io.readers.visium._tables._read_counts", return_value=adata)
 
-        result = prepare_table(layout, positions, options=_options())
+        result = prepare_table(
+            layout,
+            positions,
+            dataset_id="sample",
+            metadata=CountMetadata("sample", "chemistry", "spaceranger-2.1.0"),
+            scale_factors=ScaleFactors(0.5, 0.25, 6.0, {"spot_diameter_fullres": 6.0}),
+            make_var_names_unique=True,
+        )
 
         assert sparse.issparse(result.adata.X)
         assert isinstance(result.adata.X, sparse.sparray)
@@ -155,7 +176,14 @@ class TestPrepareTable:
         mocker.patch("spatialdata_io.readers.visium._tables._read_counts", return_value=adata)
 
         with pytest.raises(ReaderFormatError, match="absent from tissue positions"):
-            prepare_table(layout, read_positions(layout), options=_options())
+            prepare_table(
+                layout,
+                read_positions(layout),
+                dataset_id="sample",
+                metadata=CountMetadata("sample", None, None),
+                scale_factors=ScaleFactors(0.5, 0.25, 6.0, {}),
+                make_var_names_unique=True,
+            )
 
 
 class TestLinkTable:
@@ -171,9 +199,16 @@ class TestLinkTable:
             var=pd.DataFrame(index=["gene"]),
         )
         mocker.patch("spatialdata_io.readers.visium._tables._read_counts", return_value=adata)
-        prepared = prepare_table(layout, read_positions(layout), options=_options())
+        prepared = prepare_table(
+            layout,
+            read_positions(layout),
+            dataset_id="sample",
+            metadata=CountMetadata("sample", None, None),
+            scale_factors=ScaleFactors(0.5, 0.25, 6.0, {}),
+            make_var_names_unique=True,
+        )
 
-        result = link_table(prepared, dataset_id="sample", shape_index=pd.Index(["a"], name="spot_id"))
+        result = link_table(prepared.adata, dataset_id="sample", shape_index=pd.Index(["a"], name="spot_id"))
 
         assert result is adata
         assert get_table_keys(result) == ("sample", "region", "spot_id")
@@ -184,7 +219,14 @@ class TestLinkTable:
         layout = _layout(tmp_path, path, headered=False)
         adata = AnnData(X=sparse.csr_array([[1]]), obs=pd.DataFrame(index=["a"]), var=pd.DataFrame(index=["g"]))
         mocker.patch("spatialdata_io.readers.visium._tables._read_counts", return_value=adata)
-        prepared = prepare_table(layout, read_positions(layout), options=_options())
+        prepared = prepare_table(
+            layout,
+            read_positions(layout),
+            dataset_id="sample",
+            metadata=CountMetadata("sample", None, None),
+            scale_factors=ScaleFactors(0.5, 0.25, 6.0, {}),
+            make_var_names_unique=True,
+        )
 
         with pytest.raises(ReaderFormatError, match="target-instance membership"):
-            link_table(prepared, dataset_id="sample", shape_index=pd.Index(["other"]))
+            link_table(prepared.adata, dataset_id="sample", shape_index=pd.Index(["other"]))

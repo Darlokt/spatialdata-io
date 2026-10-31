@@ -16,7 +16,7 @@ from spatialdata_io.readers.visium._metadata import (
     read_scale_factors,
     resolve_dataset_id,
 )
-from spatialdata_io.readers.visium._tables import TableOptions, link_table, prepare_table, read_positions
+from spatialdata_io.readers.visium._tables import link_table, prepare_table, read_positions
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -45,6 +45,8 @@ def visium(  # noqa: PLR0913, RUF100
     standard filtered HDF5 file first, then the standard filtered MEX directory,
     then one legacy dataset-prefixed source. Pass ``counts_source`` explicitly
     to select raw counts or MEX when both representations exist.
+    A matching-prefix uncompressed ``genes.tsv`` file conflicts with the
+    selected modern ``features.tsv[.gz]`` family and is rejected before import.
 
     The automatically discovered layout is::
 
@@ -65,9 +67,14 @@ def visium(  # noqa: PLR0913, RUF100
     legacy files, and 2.0+ ``tissue_positions.csv`` are supported. Named fields
     may be reordered and additional columns are ignored. Headerless files
     require exactly six positional fields. Ambiguous duplicate headers fail.
-    Position files must contain valid CSV. The Arrow decoder checks complete
-    record widths but does not enforce strict quoting; malformed quotes may be
-    accepted and interpreted as different field values.
+    Position files must contain valid CSV. Discovery classifies the first
+    logical CSV record, preserving quoted newlines in barcodes. The Arrow
+    decoder checks complete record widths but does not enforce strict quoting
+    after that first record; malformed quotes may be accepted and interpreted
+    as different field values. Grid fields ``in_tissue``, ``array_row``, and
+    ``array_col`` require nonnegative integer tokens fitting int64; decimal
+    and exponent spellings are rejected. ``in_tissue`` must be zero or one.
+    Fractional full-resolution pixel coordinates remain supported.
     Position rows are aligned to count barcodes without filtering ``in_tissue``. Count
     and feature order are preserved, and expression is returned as a finite
     canonical CSR sparse array. All count feature types are retained in source
@@ -149,6 +156,8 @@ def visium(  # noqa: PLR0913, RUF100
     pixels remain path-backed and lazy. Coordinates are full-resolution pixels
     with ``x=pxl_col_in_fullres`` and ``y=pxl_row_in_fullres``. The scale-factor
     value ``spot_diameter_fullres`` is divided by two to construct circle radii.
+    Both image scale reciprocals must be finite, and the derived circle radius
+    must remain positive and representable in float64.
     This is a visualization diameter, distinct from the physical capture spot;
     it is not used as a micrometre ruler. Arbitrary selected full-resolution
     images do not prove original acquisition calibration, so coordinates retain
@@ -192,12 +201,10 @@ def visium(  # noqa: PLR0913, RUF100
     prepared = prepare_table(
         layout,
         positions,
-        options=TableOptions(
-            dataset_id=resolved_id,
-            metadata=count_metadata,
-            scale_factors=vendor_scales,
-            make_var_names_unique=make_var_names_unique,
-        ),
+        dataset_id=resolved_id,
+        metadata=count_metadata,
+        scale_factors=vendor_scales,
+        make_var_names_unique=make_var_names_unique,
     )
 
     # Space Ranger reports spot diameter, while ShapesModel stores circle radius.
@@ -207,7 +214,7 @@ def visium(  # noqa: PLR0913, RUF100
         radius=vendor_scales.spot_diameter / 2.0,
         transforms=transforms,
     )
-    table = link_table(prepared, dataset_id=resolved_id, shape_index=circles.index)
+    table = link_table(prepared.adata, dataset_id=resolved_id, shape_index=circles.index)
 
     result = SpatialData(images=images, shapes={resolved_id: circles}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="visium", format_version=count_metadata.software_version)

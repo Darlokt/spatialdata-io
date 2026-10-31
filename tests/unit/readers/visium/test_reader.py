@@ -49,3 +49,7 @@ class TestVisium:
     def test_rejects_nonboolean_uniqueness_before_filesystem_work(self) -> None:
         with pytest.raises(TypeError, match="make_var_names_unique"):
             visium("missing", make_var_names_unique=cast("bool", 1))
+
+    def test_rejects_invalid_axes_before_filesystem_work(self) -> None:
+        with pytest.raises(ValueError, match="data_axes contains duplicate axes"):
+            visium("missing", data_axes=("x", "x"))

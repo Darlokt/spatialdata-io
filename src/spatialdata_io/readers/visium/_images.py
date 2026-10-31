@@ -33,7 +33,6 @@ PNG_SUFFIXES = frozenset({".png"})
 JPEG_SUFFIXES = frozenset({".jpeg", ".jpg"})
 VALID_IMAGE_SUFFIXES = TIFF_SUFFIXES | PNG_SUFFIXES | JPEG_SUFFIXES
 TARGET_AXES = ("c", "y", "x")
-CHANNEL_AXES = frozenset({"c", "s"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,45 +116,20 @@ def _read_raster(path: ArtifactFile, *, options: ImageOptions) -> LazyRaster:
     raise ValueError(message)
 
 
-def _source_axes(raster: LazyRaster, *, override: tuple[str, ...] | None = None) -> tuple[str, ...]:
-    axes = tuple(axis.lower() for axis in (raster.axes if override is None else override))
-    if len(axes) != raster.data.ndim:
-        message = f"Image axes rank {len(axes)} does not match raster shape {raster.data.shape}. Found {axes!r}."
-        raise ValueError(message)
-    if len(set(axes)) != len(axes) or axes.count("x") != 1 or axes.count("y") != 1:
-        message = f"Visium tissue images require unique X and Y axes. Found {axes!r}."
-        raise ValueError(message)
-
-    channel_indices = [index for index, axis in enumerate(axes) if axis in CHANNEL_AXES]
-    if len(channel_indices) > 1:
-        message = f"Visium tissue images permit at most one channel or sample axis. Found {axes!r}."
-        raise ValueError(message)
-    channel_index = channel_indices[0] if channel_indices else None
-    for index, (axis, size) in enumerate(zip(axes, raster.data.shape, strict=True)):
-        if axis in {"x", "y"} or index == channel_index or size == 1:
-            continue
-        message = (
-            f"Visium tissue image axis {axis!r} has length {size} and no supported spatial or channel meaning. "
-            "Provide explicit data_axes for an ambiguous TIFF or select a spatially 2D series."
-        )
-        raise ValueError(message)
-
-    return tuple("c" if index == channel_index else axis for index, axis in enumerate(axes))
-
-
 def _parse_image(
     raster: LazyRaster,
     *,
-    source_axes: Sequence[str],
+    source_axes: tuple[str, ...],
     transformations: dict[str, BaseTransformation],
     chunks: dict[str, int],
     scale_factors: list[int] | None = None,
 ) -> DataArray | DataTree:
+    axes = tuple("c" if axis == "s" else axis for axis in map(str.lower, source_axes))
     normalized = normalize_raster_axes(
         raster.data,
-        source_axes,
+        axes,
         target_axes=TARGET_AXES,
-        add_missing=("c",) if "c" not in {axis.lower() for axis in source_axes} else (),
+        add_missing=("c",),
     )
 
     return Image2DModel.parse(
@@ -186,7 +160,7 @@ def read_images(
         raster = _read_raster(layout.fullres_image, options=options)
         images[f"{dataset_id}_full_image"] = _parse_image(
             raster,
-            source_axes=_source_axes(raster, override=options.data_axes),
+            source_axes=raster.axes if options.data_axes is None else options.data_axes,
             transformations={dataset_id: transforms.fullres},
             chunks=chunks,
             scale_factors=options.raster.model_scale_factors,
@@ -200,7 +174,7 @@ def read_images(
         raster = read_png(layout.hires_image)
         images[f"{dataset_id}_hires_image"] = _parse_image(
             raster,
-            source_axes=_source_axes(raster),
+            source_axes=raster.axes,
             transformations={
                 f"{dataset_id}_downscaled_hires": Identity(),
                 dataset_id: transforms.hires.inverse(),
@@ -212,7 +186,7 @@ def read_images(
         raster = read_png(layout.lowres_image)
         images[f"{dataset_id}_lowres_image"] = _parse_image(
             raster,
-            source_axes=_source_axes(raster),
+            source_axes=raster.axes,
             transformations={
                 f"{dataset_id}_downscaled_lowres": Identity(),
                 dataset_id: transforms.lowres.inverse(),

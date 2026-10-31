@@ -15,12 +15,12 @@ _PATH = Path("positions.csv")
 
 
 def _frame() -> pd.DataFrame:
-    """Construct lexical input with ordinary and decimal grid representations."""
+    """Construct lexical input with integer grid fields and fractional pixels."""
     return pd.DataFrame(
         {
             "barcode": ["002-1", "001-1"],
             "in_tissue": ["1", "0"],
-            "array_row": ["2", "1.0"],
+            "array_row": ["2", "1"],
             "array_col": ["3", "0"],
             "pxl_row_in_fullres": ["30.5", "10"],
             "pxl_col_in_fullres": ["40.5", "20"],
@@ -35,27 +35,27 @@ class TestClassifyPositionRow:
     @pytest.mark.parametrize("columns", [POSITION_COLUMNS, tuple(reversed(POSITION_COLUMNS))])
     def test_named_fields_accept_order_and_extensions(self, columns: tuple[str, ...]) -> None:
         """Named fields accept order and extensions."""
-        assert classify_position_row(",".join(("quality", *columns)), path=_PATH) == "headered"
+        assert classify_position_row(("quality", *columns), path=_PATH) == "headered"
 
     def test_headerless_fields_have_positional_meaning(self) -> None:
         """Headerless fields have positional meaning."""
-        assert classify_position_row("002-1,1,0,0,20,30", path=_PATH) == "headerless"
+        assert classify_position_row(("002-1", "1", "0", "0", "20", "30"), path=_PATH) == "headerless"
 
     @pytest.mark.parametrize(
-        ("row", "message"),
+        ("columns", "message"),
         [
-            ("barcode,x,y", "required columns"),
-            (",".join((*POSITION_COLUMNS, "barcode")), "duplicate column"),
-            (",".join((*POSITION_COLUMNS, "")), "empty or duplicate"),
-            ("a,1,0,0,2", "six positional"),
-            ("a,1,0,0,2,3,4", "six positional"),
-            ('"barcode,in_tissue', "malformed first"),
+            (("barcode", "x", "y"), "required columns"),
+            ((*POSITION_COLUMNS, "barcode"), "duplicate column"),
+            ((*POSITION_COLUMNS, ""), "empty or duplicate"),
+            (("a", "1", "0", "0", "2"), "six positional"),
+            (("a", "1", "0", "0", "2", "3", "4"), "six positional"),
+            ((), "six positional"),
         ],
     )
-    def test_rejects_ambiguous_and_malformed_fields(self, row: str, message: str) -> None:
+    def test_rejects_ambiguous_and_malformed_fields(self, columns: tuple[str, ...], message: str) -> None:
         """Rejects ambiguous and malformed fields."""
         with pytest.raises(ReaderFormatError, match=message):
-            classify_position_row(row, path=_PATH)
+            classify_position_row(columns, path=_PATH)
 
 
 class TestNormalizePositions:
@@ -78,10 +78,7 @@ class TestNormalizePositions:
         ("token", "expected"),
         [
             ("9007199254740993", 2**53 + 1),
-            ("9007199254740993.0", 2**53 + 1),
             ("9223372036854775807", 2**63 - 1),
-            ("9223372036854775807.0", 2**63 - 1),
-            ("1e3", 1000),
         ],
     )
     def test_grid_integers_never_round_through_float(self, token: str, expected: int) -> None:
@@ -101,23 +98,23 @@ class TestNormalizePositions:
             ("barcode", "001-1", "duplicate barcodes"),
             ("barcode", "a\x00b", "NUL"),
             ("barcode", None, "null"),
-            ("array_row", "nan", "finite numeric"),
+            ("array_row", "nan", "integer tokens"),
             ("array_row", None, "finite numeric"),
-            ("array_row", "not-a-number", "finite numeric"),
-            ("array_row", "-1.0", "nonnegative integer"),
+            ("array_row", "not-a-number", "integer tokens"),
+            ("array_row", "-1.0", "integer tokens"),
             ("array_col", "-1", "nonnegative integer"),
             ("pxl_row_in_fullres", None, "finite numeric"),
-            ("array_row", "inf", "finite numeric"),
+            ("array_row", "inf", "integer tokens"),
             ("array_row", "-1", "nonnegative integer"),
-            ("array_row", "0.5", "integer values"),
+            ("array_row", "0.5", "integer tokens"),
             ("array_row", "9223372036854775808", "fitting int64"),
             ("array_col", "9223372036854775808", "fitting int64"),
-            ("array_row", "9007199254740993.5", "integer values"),
+            ("array_row", "9007199254740993.5", "integer tokens"),
             ("array_row", "9223372036854775808.0", "fitting int64"),
-            ("array_row", "1.00000000000000001", "integer values"),
-            ("array_row", "9007199254740990.5", "integer values"),
-            ("array_row", "-1e-400", "integer values"),
-            ("array_row", "1e-400", "integer values"),
+            ("array_row", "1.00000000000000001", "integer tokens"),
+            ("array_row", "9007199254740990.5", "integer tokens"),
+            ("array_row", "-1e-400", "integer tokens"),
+            ("array_row", "1e-400", "integer tokens"),
             ("pxl_row_in_fullres", "1e-400", "precision loss"),
             ("pxl_row_in_fullres", "nonnumeric", "finite numeric"),
             ("pxl_row_in_fullres", "inf", "finite numeric"),
@@ -141,6 +138,15 @@ class TestNormalizePositions:
         """Rejects empty positions."""
         with pytest.raises(ReaderFormatError, match="zero rows"):
             normalize_positions(_frame().iloc[:0], path=_PATH)
+
+    @pytest.mark.parametrize("column", ["in_tissue", "array_row", "array_col"])
+    @pytest.mark.parametrize("token", ["1.0", "1e0", "9007199254740993.0"])
+    def test_rejects_decimal_and_exponent_grid_tokens(self, column: str, token: str) -> None:
+        frame = _frame()
+        frame.loc[0, column] = token
+
+        with pytest.raises(ReaderFormatError, match="integer tokens"):
+            normalize_positions(frame, path=_PATH)
 
     def test_float_text_conversion_uses_correct_rounding(self) -> None:
         """Float text conversion uses correct rounding."""

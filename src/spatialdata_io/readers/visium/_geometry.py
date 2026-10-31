@@ -12,7 +12,6 @@ from spatialdata.transformations import Identity, Scale
 
 if TYPE_CHECKING:
     import pandas as pd
-    from spatialdata.transformations import BaseTransformation
 
     from spatialdata_io.readers.visium._metadata import ScaleFactors
 
@@ -21,9 +20,9 @@ if TYPE_CHECKING:
 class VisiumTransforms:
     """Named full-resolution and downsampled coordinate transformations."""
 
-    fullres: BaseTransformation
-    hires: BaseTransformation
-    lowres: BaseTransformation
+    fullres: Identity
+    hires: Scale
+    lowres: Scale
 
 
 def make_transforms(scale_factors: ScaleFactors) -> VisiumTransforms:
