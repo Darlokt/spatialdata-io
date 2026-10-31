@@ -76,7 +76,9 @@ def _read_raster(path: ArtifactFile, *, target_axes: tuple[str, ...]) -> tuple[A
     return array, metadata
 
 
-def _require_agreement(declared: tuple[float | None, ...], reference: tuple[float | None, ...], path: Path) -> None:
+def _require_agreement(
+    declared: tuple[float | None, float | None], reference: tuple[float | None, float | None], path: Path
+) -> None:
     """Reject two present XY sizes that disagree; an absent size never conflicts."""
     for axis, size, expected in zip("XY", declared, reference, strict=True):
         if size is not None and expected is not None and not isclose(size, expected, rel_tol=1e-12):
@@ -99,11 +101,12 @@ def _spacing(
             found=f"images.csv dimensions {metadata.shape} versus raster {shape}",
             expected="unchanged emitted image and mask dimensions matching images.csv",
         )
-    image_sizes = ome_pixel_sizes_um(image, series=0, axes=("x", "y"), context=_CALIBRATION)
-    label_sizes = ome_pixel_sizes_um(labels, series=0, axes=("x", "y"), context=_CALIBRATION)
+    x, y = ome_pixel_sizes_um(image, series=0, axes=("x", "y"), context=_CALIBRATION)
+    label_x, label_y = ome_pixel_sizes_um(labels, series=0, axes=("x", "y"), context=_CALIBRATION)
+    image_sizes = (x, y)
+    label_sizes = (label_x, label_y)
 
     # IMC acquisition extents take precedence; complete image OME sizes are the alternative.
-    x, y = image_sizes
     spacing = metadata.spacing_um if metadata is not None else None
     if spacing is None and x is not None and y is not None:
         spacing = (x, y)

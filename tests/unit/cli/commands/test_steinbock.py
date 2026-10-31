@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+@pytest.mark.steinbock
 class TestSteinbockCommand:
     """Align explicit defaults, source selection, sequence values, and chunk cardinality."""
 

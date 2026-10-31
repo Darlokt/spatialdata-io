@@ -14,18 +14,17 @@ from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.steinbock._schemas import (
+    LabelGrid,
     _centroid_columns,
     _format_error,
     _instance_identifiers,
     _metadata_columns,
     _validate_centroids,
-    _validate_output_column,
     _validate_position_destinations,
     _validate_table,
     image_metadata_columns,
     normalize_image_metadata,
 )
-from tests.unit.readers.steinbock.test_tables import _sample
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -72,21 +71,6 @@ class TestValidateTable:
             _validate_table(table, ArtifactFile(tmp_path / "cells.h5ad"))
 
 
-class TestValidateOutputColumn:
-    """Never treat float-promoted or boolean IDs as equal to exact integers."""
-
-    @pytest.mark.parametrize("existing", [2**63, float(2**63), None, True])
-    def test_exact_collision(self, tmp_path: Path, existing: float | None) -> None:
-        """Exact collision."""
-        with pytest.raises(ReaderFormatError, match="conflicting reserved"):
-            _validate_output_column(
-                pd.DataFrame({"cell_id": [existing]}),
-                "cell_id",
-                pd.Series([2**63 + 1], dtype="uint64[pyarrow]"),
-                path=ArtifactFile(tmp_path / "cells.h5ad"),
-            )
-
-
 class TestFormatError:
     """Retain table-specific reader and artifact identity in schema failures."""
 
@@ -121,7 +105,9 @@ class TestInstanceIdentifiers:
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[observation])
 
         with pytest.raises(ReaderFormatError):
-            _instance_identifiers(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
+            _instance_identifiers(
+                obs, {"sample": LabelGrid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
+            )
 
     def test_dtype_bounds_are_sample_local(self, tmp_path: Path) -> None:
         """Dtype bounds are sample local."""
@@ -132,7 +118,7 @@ class TestInstanceIdentifiers:
         with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
             _instance_identifiers(
                 obs,
-                {"small": _sample(dtype="uint8"), "large": _sample(dtype="uint64")},
+                {"small": LabelGrid((8, 12), np.dtype("uint8")), "large": LabelGrid((8, 12), np.dtype("uint64"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -144,14 +130,20 @@ class TestInstanceIdentifiers:
         )
 
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
-            _instance_identifiers(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
+            _instance_identifiers(
+                obs, {"sample": LabelGrid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
+            )
 
     def test_missing_discovered_sample(self, tmp_path: Path) -> None:
         """Missing discovered sample."""
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=["Object 1 in sample.tiff"])
 
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
-            _instance_identifiers(obs, {"sample": _sample(), "other": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
+            _instance_identifiers(
+                obs,
+                {"sample": LabelGrid((8, 12), np.dtype("uint16")), "other": LabelGrid((8, 12), np.dtype("uint16"))},
+                ArtifactFile(tmp_path / "cells.h5ad"),
+            )
 
 
 class TestValidateCentroids:
@@ -166,7 +158,7 @@ class TestValidateCentroids:
             _validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"sample": _sample()},
+                {"sample": LabelGrid((8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -179,7 +171,7 @@ class TestValidateCentroids:
             _validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"sample": _sample()},
+                {"sample": LabelGrid((8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -191,7 +183,7 @@ class TestValidateCentroids:
             _validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"small": _sample(shape=(4, 4)), "large": _sample(shape=(8, 12))},
+                {"small": LabelGrid((4, 4), np.dtype("uint16")), "large": LabelGrid((8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -311,32 +303,32 @@ class TestNormalizeImageMetadata:
     )
     def test_invalid_selected_values(self, tmp_path: Path, field: str, value: str) -> None:
         values = {
-            "image": ["s.tiff"],
-            "width_px": ["12"],
-            "height_px": ["8"],
-            "acquisition_width_um": ["6"],
-            "acquisition_height_um": ["20"],
+            "image": "s.tiff",
+            "width_px": "12",
+            "height_px": "8",
+            "acquisition_width_um": "6",
+            "acquisition_height_um": "20",
         }
-        values[field] = [value]
+        values[field] = value
         with pytest.raises(ReaderFormatError):
-            normalize_image_metadata(values, {"s.tiff"}, ArtifactFile(tmp_path))
+            normalize_image_metadata(iter([values]), {"s.tiff"}, ArtifactFile(tmp_path))
 
     @pytest.mark.parametrize("names", [[""], ["s.tiff", "s.tiff"]])
     def test_invalid_identities(self, tmp_path: Path, names: list[str]) -> None:
         with pytest.raises(ReaderFormatError, match="image names"):
-            normalize_image_metadata({"image": names}, {"s.tiff"}, ArtifactFile(tmp_path))
+            normalize_image_metadata(({"image": name} for name in names), set(), ArtifactFile(tmp_path))
 
     def test_ratios_are_independent_of_decimal_context(self, tmp_path: Path) -> None:
-        columns = {
-            "image": ["s.tiff"],
-            "width_px": ["11"],
-            "height_px": ["13"],
-            "acquisition_width_um": ["3"],
-            "acquisition_height_um": ["7"],
+        row = {
+            "image": "s.tiff",
+            "width_px": "11",
+            "height_px": "13",
+            "acquisition_width_um": "3",
+            "acquisition_height_um": "7",
         }
         with localcontext() as context:
             context.prec = 2
-            metadata = normalize_image_metadata(columns, {"s.tiff"}, ArtifactFile(tmp_path))
+            metadata = normalize_image_metadata(iter([row]), {"s.tiff"}, ArtifactFile(tmp_path))
         assert metadata["s.tiff"].spacing_um == (3 / 11, 7 / 13)
 
 

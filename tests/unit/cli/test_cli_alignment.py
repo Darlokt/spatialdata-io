@@ -34,7 +34,9 @@ _READER_CASES = (
     _ReaderCase("spatialdata_io.readers.mcmicro", "mcmicro", "mcmicro"),
     pytest.param(_ReaderCase("spatialdata_io.readers.merscope", "merscope", "merscope"), marks=pytest.mark.merscope),
     _ReaderCase("spatialdata_io.readers.seqfish", "seqfish", "seqfish"),
-    _ReaderCase("spatialdata_io.readers.steinbock", "steinbock", "steinbock"),
+    pytest.param(
+        _ReaderCase("spatialdata_io.readers.steinbock", "steinbock", "steinbock"), marks=pytest.mark.steinbock
+    ),
     _ReaderCase("spatialdata_io.readers.stereoseq", "stereoseq", "stereoseq"),
     _ReaderCase("spatialdata_io.readers.visium", "visium", "visium"),
     _ReaderCase("spatialdata_io.readers.visium_hd", "visium_hd", "visium-hd"),
@@ -111,6 +113,40 @@ class TestIssCommandContract:
         assert "TestCliAlignment::test_raster_options_use_the_central_defaults[iss]" in completed.stdout
         assert "TestIssCommandWorkflow::test_writes_linked_spatialdata_zarr" in completed.stdout
         assert "TestIss::" not in completed.stdout
+
+
+@pytest.mark.steinbock
+class TestSteinbockCommandContract:
+    """Keep the Steinbock CLI selector inclusive of its complete public workflow."""
+
+    def test_reader_cli_conjunction_collects_command_alignment_and_workflow_tests(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "--no-cov",
+                "-q",
+                "-m",
+                "steinbock and cli",
+                "tests/unit/cli/commands/test_steinbock.py",
+                "tests/unit/cli/test_cli_alignment.py",
+                "tests/integration/readers/steinbock",
+            ],
+            cwd=Path(__file__).parents[3],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert "TestSteinbockCommand::test_defaults_and_output_writing" in completed.stdout
+        assert "TestCliAlignment::test_vendor_command_and_reader_parameter_names_agree[steinbock]" in completed.stdout
+        assert "TestCliAlignment::test_raster_options_use_the_central_defaults[steinbock]" in completed.stdout
+        assert "TestSteinbockCommandWorkflow::test_writes_linked_spatialdata_zarr" in completed.stdout
+        assert "TestSteinbock::" not in completed.stdout
+        assert "test_reader.py::" not in completed.stdout
+        assert "test_positions.py::" not in completed.stdout
 
 
 @pytest.mark.generic

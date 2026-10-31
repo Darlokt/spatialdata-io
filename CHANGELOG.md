@@ -26,12 +26,19 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Fixed
 
+- Steinbock rejects integer duplicate sums in imported H5AD `X` and `counts`
+  when they exceed the preserved source dtype, with the H5AD path and expression
+  slot in the error context. Safe duplicate sums retain their source dtype.
 - ISS rejects integer duplicate sums in imported H5AD `X` and `counts` when
   they exceed the preserved source dtype, with the H5AD path and expression
   slot in the error context. Safe duplicate sums retain their source dtype.
 
 ### Changed
 
+- **Breaking:** Steinbock rejects imported `obs['cell_id']` and `obs['region']`
+  even when they equal the generated values; these names are reserved output
+  destinations. Equal redundant source `Image` and `image` columns remain
+  supported.
 - **Breaking:** Curio cluster labels, metric values and defining-feature
   annotations retain their literal strings instead of inferring numerical
   types. Cluster categories follow first occurrence in H5AD row order. Empty

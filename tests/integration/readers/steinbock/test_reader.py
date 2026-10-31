@@ -553,12 +553,90 @@ class TestSteinbock:
             source.obs[field] = [1, 1 if conflicting else 2]
         source.write_h5ad(path)
 
-        if conflicting:
-            with pytest.raises(ReaderFormatError, match="conflicting reserved"):
-                steinbock(tmp_path)
+        before = path.read_bytes()
+        with pytest.raises(ReaderFormatError, match=f"occupied.*{field}"):
+            steinbock(tmp_path)
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize("case", [("int8", 100), ("uint8", 150)])
+    def test_integer_duplicate_overflow_rejected_before_reduction(
+        self, tmp_path: Path, mocker: MockerFixture, slot: str, storage: str, case: tuple[str, int]
+    ) -> None:
+        """Reject actual H5AD duplicate sums independently in each expression slot."""
+        dtype, value = case
+        _write_layout(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        expression = constructor(
+            (
+                np.asarray([value, value, 7], dtype=dtype),
+                np.asarray([0, 0, 1], dtype=np.int64),
+                np.asarray([0, 2, 3], dtype=np.int64),
+            ),
+            shape=(2, 2),
+        )
+        if slot == "X":
+            source.X = expression
         else:
-            result = steinbock(tmp_path)
-            assert result.tables["table"].obs[field].tolist() == source.obs[field].tolist()
+            source.layers[slot] = expression
+        source.write_h5ad(path)
+        imported = ad.read_h5ad(path)
+        actual = imported.X if slot == "X" else imported.layers[slot]
+        assert isinstance(actual, (sparse.csr_matrix, sparse.csc_matrix, sparse.csr_array, sparse.csc_array))
+        assert not actual.has_canonical_format
+        np.testing.assert_array_equal(actual.data, [value, value, 7])
+        before = path.read_bytes()
+        for container in (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix):
+            mocker.patch.object(container, "toarray", side_effect=AssertionError("expression densified"))
+
+        with pytest.raises(ValueError, match="integer duplicate sum") as caught:
+            steinbock(tmp_path)
+
+        assert any("steinbock" in note and slot in note and str(path) in note for note in caught.value.__notes__)
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize(("dtype", "value"), [("int16", 100), ("uint64", 2**53 + 1)])
+    def test_safe_integer_duplicates_preserve_exact_values_and_dtype(
+        self, tmp_path: Path, slot: str, storage: str, dtype: str, value: int
+    ) -> None:
+        """Canonicalize safe imported duplicates without float promotion or widening."""
+        _write_layout(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        expression = constructor(
+            (
+                np.asarray([value, value, 7], dtype=dtype),
+                np.asarray([0, 0, 1], dtype=np.int64),
+                np.asarray([0, 2, 3], dtype=np.int64),
+            ),
+            shape=(2, 2),
+        )
+        if slot == "X":
+            source.X = expression
+        else:
+            source.layers[slot] = expression
+        source.write_h5ad(path)
+        imported = ad.read_h5ad(path)
+        actual = imported.X if slot == "X" else imported.layers[slot]
+        assert isinstance(actual, (sparse.csr_matrix, sparse.csc_matrix, sparse.csr_array, sparse.csc_array))
+        assert not actual.has_canonical_format
+
+        table = steinbock(tmp_path).tables["table"]
+
+        result = table.X if slot == "X" else table.layers[slot]
+        assert isinstance(result, sparse.csr_array)
+        assert not isinstance(result, sparse.spmatrix)
+        assert result.has_canonical_format
+        assert result.dtype == np.dtype(dtype)
+        np.testing.assert_array_equal(result.data, np.asarray([2 * value, 7], dtype=dtype))
+        np.testing.assert_array_equal(result.indices, [0, 1])
+        np.testing.assert_array_equal(result.indptr, [0, 1, 2])
 
     @pytest.mark.parametrize("dtype", ["Int64", "UInt64"])
     def test_nullable_numeric_centroid_annotations(self, tmp_path: Path, dtype: str) -> None:

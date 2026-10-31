@@ -3,8 +3,8 @@
 Required observation fields are named and unordered; additional obs/var fields
 retain their original storage and missingness. Centroids are finite numeric
 pixel coordinates in regionprops YX order. Generated IDs use exact signed or
-unsigned 64-bit integers; region IDs are categorical strings. Conflicting
-reserved output metadata and ambiguous annotation names are rejected.
+unsigned 64-bit integers; region IDs are categorical strings. Occupied
+generated output columns and ambiguous annotation names are rejected.
 """
 
 from __future__ import annotations
@@ -19,12 +19,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.table import validate_integer_duplicate_sums
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     import anndata as ad
 
@@ -76,6 +78,27 @@ def _validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
     required = REQUIRED_OBSERVATION_COLUMNS
     if not required.issubset(obs.columns):
         raise _format_error(path, found=f"columns {obs.columns.tolist()}", expected=f"columns {sorted(required)}")
+
+    occupied = [name for name in ("cell_id", "region") if name in obs]
+    if occupied:
+        raise _format_error(
+            path,
+            found=f"occupied generated observation columns {occupied!r}",
+            expected="unoccupied cell_id and region destinations",
+        )
+
+    # Check only declared integer expression before SciPy can reduce duplicates
+    # in the source dtype. Final normalization owns floating/dense validation.
+    for slot, expression in (("X", table.X), ("counts", table.layers.get("counts"))):
+        if (
+            isinstance(expression, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix))
+            and expression.dtype.kind in "iu"
+        ):
+            try:
+                validate_integer_duplicate_sums(expression)
+            except (TypeError, ValueError) as error:
+                add_reader_context(error, context=ReaderErrorContext("steinbock", f"cell table {slot}"), path=path)
+                raise
 
 
 def _instance_identifiers(obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path: ArtifactFile) -> list[int]:
@@ -184,26 +207,6 @@ def _metadata_columns(obs: pd.DataFrame, var: pd.DataFrame, path: ArtifactFile) 
     return columns
 
 
-def _validate_output_column(obs: pd.DataFrame, key: str, values: pd.Series, *, path: ArtifactFile) -> None:
-    """Reject conflicting reserved metadata using exact scalar comparisons.
-
-    Equal existing values are accepted; the generated field takes its declared
-    output storage. Python scalar comparison avoids float promotion of uint64 IDs.
-    """
-    if key in obs and any(
-        not pd.api.types.is_scalar(left)
-        or pd.isna(left)
-        or isinstance(left, bool) != isinstance(right, bool)
-        or left != right
-        for left, right in zip(obs[key].tolist(), values.tolist(), strict=True)
-    ):
-        raise _format_error(
-            path,
-            found=f"conflicting reserved observation column {key!r}",
-            expected="absent or semantically equal reader output metadata",
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class ImageMetadata:
     """Own one selected emitted image's dimensions and optional IMC XY spacing."""
@@ -266,27 +269,29 @@ def _metadata_number(text: str, path: ArtifactFile, *, image: str, field: str, i
 
 
 def normalize_image_metadata(
-    columns: Mapping[str, Sequence[str]], selected: set[str], path: ArtifactFile
+    records: Iterable[Mapping[str, str]], selected: set[str], path: ArtifactFile
 ) -> dict[str, ImageMetadata]:
-    """Validate identities globally and selected rows' emitted dimensions and extent pairs."""
-    names = columns["image"]
-    if len(set(names)) != len(names) or any(not name for name in names):
-        raise ReaderFormatError(
-            context=_IMAGE_METADATA_CONTEXT,
-            path=path,
-            found="empty or duplicate image names",
-            expected="unique exact image basenames",
-        )
+    """Validate identities once while retaining only normalized selected records."""
+    seen: set[str] = set()
     result: dict[str, ImageMetadata] = {}
-    for index, name in enumerate(names):
+    for row in records:
+        name = row["image"]
+        if not name or name in seen:
+            raise ReaderFormatError(
+                context=_IMAGE_METADATA_CONTEXT,
+                path=path,
+                found="empty or duplicate image names",
+                expected="unique exact image basenames",
+            )
+        seen.add(name)
         if name not in selected:
             continue
-        width = int(_metadata_number(columns["width_px"][index], path, image=name, field="width_px", integral=True))
-        height = int(_metadata_number(columns["height_px"][index], path, image=name, field="height_px", integral=True))
+        width = int(_metadata_number(row["width_px"], path, image=name, field="width_px", integral=True))
+        height = int(_metadata_number(row["height_px"], path, image=name, field="height_px", integral=True))
         spacing = None
-        if "acquisition_width_um" in columns:
-            x = columns["acquisition_width_um"][index]
-            y = columns["acquisition_height_um"][index]
+        if "acquisition_width_um" in row:
+            x = row["acquisition_width_um"]
+            y = row["acquisition_height_um"]
             if bool(x) != bool(y):
                 raise ReaderFormatError(
                     context=_IMAGE_METADATA_CONTEXT,

@@ -10,6 +10,8 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers.steinbock._schemas import image_metadata_columns, normalize_image_metadata
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.steinbock._schemas import ImageMetadata
 
@@ -17,40 +19,13 @@ _CONTEXT = ReaderErrorContext("steinbock", "IMC images.csv")
 
 
 def read_image_metadata(path: ArtifactFile, selected: set[str]) -> dict[str, ImageMetadata]:
-    """Project source text under one file owner and enforce full CSV record widths."""
+    """Consume projected records inside their file owner, retaining selected metadata."""
     try:
         with (
             path.open("rb") as source,
             io.TextIOWrapper(source, encoding="utf-8-sig", newline="") as text,
         ):
-            records = csv.reader(text, strict=True)
-            header = next(records, [])
-            if any("\x00" in field for field in header):
-                raise ReaderFormatError(
-                    context=_CONTEXT,
-                    path=path,
-                    found="NUL-containing metadata",
-                    expected="text fields without NUL bytes",
-                )
-            positions = image_metadata_columns(header, path)
-            columns: dict[str, list[str]] = {name: [] for name in positions}
-            for row in records:
-                if any("\x00" in field for field in row):
-                    raise ReaderFormatError(
-                        context=_CONTEXT,
-                        path=path,
-                        found="NUL-containing metadata",
-                        expected="text fields without NUL bytes",
-                    )
-                if len(row) != len(header):
-                    raise ReaderFormatError(
-                        context=_CONTEXT,
-                        path=path,
-                        found=f"record {records.line_num} with {len(row)} fields",
-                        expected=f"exactly {len(header)} fields in every images.csv record",
-                    )
-                for name, index in positions.items():
-                    columns[name].append(row[index])
+            return normalize_image_metadata(_metadata_records(text, path), selected, path)
     except (UnicodeError, csv.Error) as error:
         raise ReaderFormatError(
             context=_CONTEXT, path=path, found=str(error), expected="well-formed UTF-8 CSV metadata"
@@ -58,4 +33,27 @@ def read_image_metadata(path: ArtifactFile, selected: set[str]) -> dict[str, Ima
     except OSError as error:
         add_reader_context(error, context=_CONTEXT, path=path)
         raise
-    return normalize_image_metadata(columns, selected, path)
+
+
+def _metadata_records(text: Iterable[str], path: ArtifactFile) -> Iterator[dict[str, str]]:
+    """Project each record after checking all fields, including unselected extras."""
+    records = csv.reader(text, strict=True)
+    header = next(records, [])
+    if any("\x00" in field for field in header):
+        raise ReaderFormatError(
+            context=_CONTEXT, path=path, found="NUL-containing metadata", expected="text fields without NUL bytes"
+        )
+    positions = image_metadata_columns(header, path)
+    for row in records:
+        if any("\x00" in field for field in row):
+            raise ReaderFormatError(
+                context=_CONTEXT, path=path, found="NUL-containing metadata", expected="text fields without NUL bytes"
+            )
+        if len(row) != len(header):
+            raise ReaderFormatError(
+                context=_CONTEXT,
+                path=path,
+                found=f"record {records.line_num} with {len(row)} fields",
+                expected=f"exactly {len(header)} fields in every images.csv record",
+            )
+        yield {name: row[index] for name, index in positions.items()}

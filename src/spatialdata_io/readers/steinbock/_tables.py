@@ -17,7 +17,6 @@ from spatialdata_io.readers.steinbock._schemas import (
     _instance_identifiers,
     _metadata_columns,
     _validate_centroids,
-    _validate_output_column,
     _validate_position_destinations,
     _validate_table,
 )
@@ -47,8 +46,15 @@ def _read_table(path: ArtifactFile, samples: Mapping[str, LabelGrid]) -> ad.AnnD
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")
     _set_instance_ids(obs, samples, path)
-    table.obsm["spatial_pixels"] = _centroids(obs, samples, path)
-    _clean_metadata(obs, var, path)
+
+    coordinates = np.column_stack(_centroid_columns(obs, path))
+    _validate_centroids(coordinates, obs, samples, path)
+    table.obsm["spatial_pixels"] = coordinates
+
+    columns = _metadata_columns(obs, var, path)
+    if "Image" in obs:
+        del obs["Image"]
+    var.columns = columns
 
     return table
 
@@ -62,28 +68,8 @@ def _set_instance_ids(obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path:
         pd.Categorical(obs["image"].map({f"{name}.tiff": f"{name}_labels" for name in samples})), index=obs.index
     )
 
-    _validate_output_column(obs, "cell_id", cell_ids, path=path)
-    _validate_output_column(obs, "region", regions, path=path)
-
     obs["cell_id"] = cell_ids
     obs["region"] = regions
-
-
-def _centroids(obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path: ArtifactFile) -> np.ndarray:
-    """Extract XY coordinates from regionprops row/column fields."""
-    coordinates = np.column_stack(_centroid_columns(obs, path))
-    _validate_centroids(coordinates, obs, samples, path)
-
-    return coordinates
-
-
-def _clean_metadata(obs: pd.DataFrame, var: pd.DataFrame, path: ArtifactFile) -> None:
-    """Apply validated export-name cleanup without recasting imported annotations."""
-    columns = _metadata_columns(obs, var, path)
-
-    if "Image" in obs:
-        del obs["Image"]
-    var.columns = columns
 
 
 def _set_positions(table: ad.AnnData, samples: Mapping[str, _SampleRasters], path: ArtifactFile) -> None:

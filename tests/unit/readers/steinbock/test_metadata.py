@@ -75,3 +75,43 @@ class TestReadImageMetadata:
         metadata = read_image_metadata(ArtifactFile(path), {"s.tiff"})
         assert metadata["s.tiff"].shape == (8, 12)
         assert metadata["s.tiff"].spacing_um is None
+
+    @pytest.mark.parametrize("selected_first", [True, False])
+    def test_selected_values_are_independent_of_unselected_row_order(
+        self, tmp_path: Path, *, selected_first: bool
+    ) -> None:
+        selected = b"s.tiff,12,8,6,20\n"
+        unselected = b"other.tiff,unused,unused,unused,unused\n"
+        path = tmp_path / "images.csv"
+        path.write_bytes(_HEADER + (selected + unselected if selected_first else unselected + selected))
+
+        metadata = read_image_metadata(ArtifactFile(path), {"s.tiff", "absent.tiff"})
+
+        assert set(metadata) == {"s.tiff"}
+        assert metadata["s.tiff"].shape == (8, 12)
+        assert metadata["s.tiff"].spacing_um == (0.5, 2.5)
+
+    @pytest.mark.parametrize(
+        "row",
+        [b"other.tiff,12,8,6\n", b'"other.tiff,12,8,6,20\n', b"other.tiff,12,8,6,20\x00\n"],
+    )
+    def test_unselected_records_still_require_valid_csv(self, tmp_path: Path, row: bytes) -> None:
+        path = tmp_path / "images.csv"
+        path.write_bytes(_HEADER + b"s.tiff,12,8,6,20\n" + row)
+        with pytest.raises(ReaderFormatError):
+            read_image_metadata(ArtifactFile(path), {"s.tiff"})
+
+    @pytest.mark.parametrize("name", [b"", b"other.tiff"])
+    def test_unselected_empty_or_duplicate_identities_fail(self, tmp_path: Path, name: bytes) -> None:
+        path = tmp_path / "images.csv"
+        row = name + b",unused,unused,unused,unused\n"
+        path.write_bytes(_HEADER + b"s.tiff,12,8,6,20\n" + row + row)
+        with pytest.raises(ReaderFormatError, match="image names"):
+            read_image_metadata(ArtifactFile(path), {"s.tiff"})
+
+    def test_semantic_failure_closes_stream(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        owner = io.BytesIO(_HEADER + b"other.tiff,unused,unused,unused,unused\ns.tiff,12.5,8,6,20\n")
+        mocker.patch("pathlib.Path.open", return_value=owner)
+        with pytest.raises(ReaderFormatError, match="integral dimensions"):
+            read_image_metadata(ArtifactFile(tmp_path / "images.csv"), {"s.tiff"})
+        assert owner.closed

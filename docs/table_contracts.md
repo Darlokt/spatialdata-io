@@ -286,7 +286,10 @@ H5AD row/feature order and expression dtype remain. Source `image`,
 redundant `Image` column is removed. Generated integer `cell_id` (int64 or
 uint64) and categorical `region` link to `<image_stem>_labels`. IDs derive
 from compound observation names and are range-checked against the selected
-label dtype, without checking pixel membership.
+label dtype, without checking pixel membership. Imported `obs['cell_id']` or
+`obs['region']` is rejected, even when its values equal the generated output:
+both names are reserved output destinations. The source `Image` column remains
+accepted only when equal to `image`.
 
 Active feature metadata column spaces become underscores, including
 `Final Concentration / Dilution` becoming `Final_Concentration`; values retain
@@ -296,8 +299,12 @@ A displaced imported embedding is retained exactly as `spatial_source`.
 Complete per-sample calibration creates float64 micrometre `spatial` using
 `(source_xy + 0.5) * spacing_xy_um`, in the unchanged raster frame. Independent
 samples use categorical row frames. Mixed or absent calibration omits canonical
-`spatial` for the aggregate. Other mappings and metadata remain. `X` and optional `counts` become
-CSR; other layers and `raw` retain their values and representation. Renaming
+`spatial` for the aggregate. Other mappings and metadata remain. `X` and optional
+`counts` become canonical CSR sparse arrays. Integer duplicate sums that cannot
+fit the preserved source dtype are rejected before canonicalization, with the
+H5AD path and expression slot in the error context. Safe duplicate sums,
+including signed cancellation, retain the source dtype. Other layers and `raw`
+retain their values and representation. Renaming
 active feature columns does not rename `raw.var` columns. Inherited
 `spatialdata_attrs` is rejected. See the
 [API](generated/spatialdata_io.steinbock.rst) for sample layouts.
@@ -551,10 +558,9 @@ Float32 cannot exactly represent every integer above 2²⁴. Scanpy's conversion
 may round large counts before the reader sees them; a later cast cannot recover
 them. HD nucleus output has the same final float32 limitation after guarded
 int64 accumulation. SciPy's dtype-preserving duplicate summation of noncanonical integer
-imported H5AD expression can overflow. Curio, DBiT, ISS and Stereo-seq analysis reject
+imported H5AD expression can overflow. Curio, DBiT, ISS, Steinbock and Stereo-seq analysis reject
 duplicate sums that cannot fit the preserved source dtype; raw Stereo-seq and
-HD retain their documented accumulation guards. Steinbock's imported expression
-retains the duplicate-overflow limitation. Other inherited layers and `raw`
+HD retain their documented accumulation guards. Other inherited layers and `raw`
 keep their source numerical semantics. No unrestricted exact-count guarantee is
 made for those imported or float32 paths.
 

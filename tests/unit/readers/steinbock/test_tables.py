@@ -15,8 +15,6 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.steinbock._schemas import LabelGrid
 from spatialdata_io.readers.steinbock._tables import (
-    _centroids,
-    _clean_metadata,
     _read_table,
     _set_instance_ids,
 )
@@ -142,6 +140,58 @@ class TestReadTable:
         with pytest.raises(TypeError, match="eager DataFrames"):
             _read_table(ArtifactFile(tmp_path / "cells.h5ad"), {"sample-a": _sample()})
 
+    @pytest.mark.parametrize("field", ["cell_id", "region"])
+    def test_occupied_generated_columns_fail_before_annotation_mutation(
+        self, tmp_path: Path, mocker: MockerFixture, field: str
+    ) -> None:
+        path = _write_table(tmp_path / "cells.h5ad")
+        source = ad.read_h5ad(path)
+        source.obs[field] = ["reserved"] * 4
+        assert isinstance(source.obs, pd.DataFrame)
+        before = source.obs.copy()
+        spatial = source.obsm["spatial"]
+        mocker.patch("spatialdata_io.readers.steinbock._tables.ad.read_h5ad", return_value=source)
+
+        with pytest.raises(ReaderFormatError, match=f"occupied.*{field}"):
+            _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+
+        pd.testing.assert_frame_equal(source.obs, before, check_exact=True)
+        assert source.obsm["spatial"] is spatial
+        assert "spatial_pixels" not in source.obsm
+        assert source.var.columns.tolist() == ["Channel Name"]
+
+    def test_xy_order_and_frame_edges(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "cells.h5ad")
+        ad.AnnData(
+            X=np.ones((3, 1)),
+            obs=pd.DataFrame(
+                {"image": ["sample.tiff"] * 3, "centroid-0": [1.5, 0, 7], "centroid-1": [8.5, 0, 11]},
+                index=[f"Object {number} in sample.tiff" for number in (1, 2, 3)],
+            ),
+        ).write_h5ad(path)
+
+        table = _read_table(path, {"sample": _sample()})
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[8.5, 1.5], [0, 0], [11, 7]])
+
+    @pytest.mark.parametrize("duplicate", [False, True])
+    def test_optional_duplicate_and_legacy_feature_columns(self, tmp_path: Path, *, duplicate: bool) -> None:
+        path = _write_table(tmp_path / "cells.h5ad")
+        source = ad.read_h5ad(path)
+        assert isinstance(source.obs, pd.DataFrame)
+        if duplicate:
+            source.obs["Image"] = source.obs["image"]
+        else:
+            del source.obs["Image"]
+        source.var["Final Concentration / Dilution"] = ["1:100", "1:200"]
+        with ad.settings.override(disallow_forward_slash_in_h5ad=False):
+            source.write_h5ad(path)
+
+        table = _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+
+        assert "Image" not in table.obs
+        assert table.var.columns.tolist() == ["Channel_Name", "Final_Concentration"]
+        assert table.var["Final_Concentration"].tolist() == ["1:100", "1:200"]
+
 
 class TestSetInstanceIds:
     """Parse exact sample-local integers without float conversion or filename rewriting."""
@@ -167,30 +217,3 @@ class TestSetInstanceIds:
 
         assert int(obs["cell_id"].iloc[0]) == identifier
         assert str(obs["cell_id"].dtype) == ("uint64[pyarrow]" if identifier >= 2**63 else "int64[pyarrow]")
-
-
-class TestCentroids:
-    """Keep asymmetric XY order and validate each sample's inspected pixel frame."""
-
-    def test_xy_order_and_frame_edges(self, tmp_path: Path) -> None:
-        obs = pd.DataFrame({"image": ["sample.tiff"] * 3, "centroid-0": [1.5, 0, 7], "centroid-1": [8.5, 0, 11]})
-
-        coordinates = _centroids(obs, {"sample": _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
-        np.testing.assert_array_equal(coordinates, [[8.5, 1.5], [0, 0], [11, 7]])
-
-
-class TestCleanMetadata:
-    """Remove only redundant metadata and reject lossy name normalization."""
-
-    @pytest.mark.parametrize("duplicate", [False, True])
-    def test_optional_duplicate_and_legacy_feature_columns(self, tmp_path: Path, *, duplicate: bool) -> None:
-        obs = pd.DataFrame({"image": ["sample.tiff"]})
-        if duplicate:
-            obs["Image"] = obs["image"]
-        var = pd.DataFrame({"Channel Name": ["DNA"], "Final Concentration / Dilution": ["1:100"]})
-
-        _clean_metadata(obs, var, ArtifactFile(tmp_path / "cells.h5ad"))
-
-        assert obs.columns.tolist() == ["image"]
-        assert var.columns.tolist() == ["Channel_Name", "Final_Concentration"]
-        assert var["Final_Concentration"].tolist() == ["1:100"]

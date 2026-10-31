@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
-    DatasetRoot,
     normalize_dataset_root,
     optional_file,
     require_metadata_directory,
@@ -34,9 +33,8 @@ class _SampleLayout:
 
 @dataclass(frozen=True, slots=True)
 class _SteinbockLayout:
-    """Hold the validated dataset root, owned-table source, and sorted sample pairs."""
+    """Hold the owned-table source, sorted sample pairs, and optional sidecar."""
 
-    root: DatasetRoot
     table: ArtifactFile
     samples: tuple[_SampleLayout, ...]
     image_metadata: ArtifactFile | None
@@ -101,7 +99,6 @@ def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilas
     context = ReaderErrorContext("steinbock", "IMC images.csv")
     image_metadata = optional_file(root / "images.csv", context=context)
     return _SteinbockLayout(
-        root,
         table,
         tuple(_SampleLayout(name, image, masks[name]) for name, image in images.items()),
         require_metadata_file(root, image_metadata, context=context) if image_metadata is not None else None,

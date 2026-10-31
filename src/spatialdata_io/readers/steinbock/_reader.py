@@ -92,7 +92,9 @@ def steinbock(
         ``tables['table']`` contains owned, eager, finite canonical CSR
         sparse-array expression in source row/feature order and dtype. The
         optional ``counts`` layer is normalized likewise. Other layers, pairwise
-        arrays, and annotations are retained. ``obs['image']`` must contain
+        arrays, and annotations are retained. Integer duplicate sums in ``X``
+        and ``counts`` must fit the source dtype; unsafe sums raise before
+        reduction rather than wrapping or widening. ``obs['image']`` must contain
         source names including ``.tiff`` and observation names must follow
         ``Object <id> in <image>``. IDs are strictly positive exact integers
         within each mask's dtype. Zero is background. Final linkage uses
@@ -126,8 +128,8 @@ def steinbock(
         ``Final Concentration / Dilution`` key becomes ``Final_Concentration``.
         Named columns accept arbitrary order and additional H5AD annotations
         retain their source dtypes and missingness. Duplicate annotation names
-        and conflicting reserved region/cell_id values fail. Equal reserved
-        values are accepted and normalized to output storage. Conflicting
+        and occupied generated ``region``/``cell_id`` columns fail, including
+        values equal to the generated output. Conflicting
         destination names fail. Caller-owned state is not mutated.
 
         Raster construction executes no pixel tasks. Computing a selection

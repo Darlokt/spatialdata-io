@@ -37,7 +37,6 @@ class TestDiscoverLayout:
 
         layout = _discover_layout(tmp_path, labels_kind=kind)
 
-        assert layout.root == tmp_path.resolve()
         assert layout.table == tmp_path / "cells.h5ad"
         assert [sample.name for sample in layout.samples] == ["sample-a", "sample-b"]
         assert not hasattr(layout, "__dict__")
