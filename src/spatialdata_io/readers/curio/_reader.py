@@ -44,9 +44,11 @@ def curio(path: str | Path) -> SpatialData:
     SpatialData
         ``tables['table']`` contains owned, eager, finite canonical CSR sparse
         array expression with source dtype, observation order, and feature order.
+        Integer duplicate sums must fit the source dtype; unsafe sums raise.
         Other layers retain their source representation. Cluster assignments are
-        aligned by bead ID and stored as categorical ``obs['cluster']``.
-        Metric categories become dictionaries in ``uns``. Metric and value
+        aligned by bead ID and stored as lexical categorical ``obs['cluster']``,
+        with categories in first-occurrence order in the final H5AD row order.
+        Metric categories become dictionaries of lexical values in ``uns``. Metric and value
         occupy the first two positional columns, whose names may vary;
         ``Category`` is a named trailing column. Extra metric columns are ignored.
         The cluster-feature
@@ -57,7 +59,10 @@ def curio(path: str | Path) -> SpatialData:
         source statistics are rejected.
         Headerless cluster files have exactly two fields: lexical bead ID and
         cluster label. Defining-feature fields retain source column order and
-        additional annotations; optional ``gene`` values remain lexical strings.
+        additional annotations as lexical strings. Numerical-looking labels,
+        booleans, leading zeros and exponent spellings remain literal text in
+        clusters, metrics and defining features; only Moran statistics are
+        parsed numerically. Empty metric values remain empty strings.
         Duplicate or empty named headers and NUL characters are rejected.
         Imported H5AD annotations retain their source representations. Imported
         ``cluster``, ``region``, ``instance_id``, or
@@ -75,8 +80,8 @@ def curio(path: str | Path) -> SpatialData:
         pixels, indexed by observation ID, scaled by 0.647 to ``global``
         micrometres. This approximate manufacturer calibration applies to
         Seeker Primary Analysis Pipeline output; it establishes no image
-        registration. Required ``X_spatial`` is finite XY, losslessly
-        representable in float64. Optional ``spatial`` must agree exactly.
+        registration. Required ``X_spatial`` and optional ``spatial`` must be
+        finite real XY, losslessly representable in float64, and agree exactly.
         Native dtype, orientation and origin remain in ``spatial_pixels``;
         ``spatial`` is float64 XY micrometres. Both are described in
         ``uns['spatialdata_io_positions']``. Occupied output destinations fail.

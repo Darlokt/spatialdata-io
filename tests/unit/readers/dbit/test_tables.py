@@ -36,15 +36,16 @@ class TestExpressionArray:
     """Require exact, representable duplicate sums before sparse canonicalization."""
 
     @pytest.mark.parametrize("storage", [sparse.csr_array, sparse.csr_matrix, sparse.csc_array, sparse.csc_matrix])
-    @pytest.mark.parametrize("values", [[100, 100], [-100, -100]])
+    @pytest.mark.parametrize(("dtype", "values"), [("int8", [100, 100]), ("int8", [-100, -100]), ("uint8", [150, 150])])
     def test_rejects_integer_overflow(
         self,
         storage: type[sparse.csr_array | sparse.csr_matrix | sparse.csc_array | sparse.csc_matrix],
+        dtype: str,
         values: list[int],
     ) -> None:
-        expression = storage((np.array(values, dtype=np.int8), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))
+        expression = storage((np.array(values, dtype=dtype), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))
 
-        with pytest.raises(ValueError, match="overflow source dtype int8"):
+        with pytest.raises(ValueError, match="source dtype"):
             _expression_array(expression)
 
     @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
@@ -54,7 +55,7 @@ class TestExpressionArray:
             (np.array([maximum, 1], dtype=dtype), np.array([0, 0]), np.array([0, 2])), shape=(1, 1)
         )
 
-        with pytest.raises(ValueError, match="overflow"):
+        with pytest.raises(ValueError, match="source dtype"):
             _expression_array(expression)
 
         # One less in the source makes the duplicate sum exactly representable.
@@ -83,6 +84,38 @@ class TestExpressionArray:
 
 class TestReadTable:
     """Preserve auxiliary annotations while validating expression and identifiers."""
+
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    def test_integer_overflow_retains_artifact_context(self, tmp_path: Path, slot: str) -> None:
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        expression = sparse.csr_array(
+            (np.array([150, 150], dtype=np.uint8), np.array([0, 0]), np.array([0, 2, 2])), shape=(2, 2)
+        )
+        if slot == "X":
+            source.X = expression
+        else:
+            source.layers[slot] = expression
+        source.write_h5ad(path)
+
+        with pytest.raises(ValueError, match="source dtype") as raised:
+            _read(tmp_path)
+
+        assert any(str(path) in note and "expression table" in note for note in raised.value.__notes__)
+
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    def test_malformed_integer_storage_retains_artifact_context(self, tmp_path: Path, slot: str) -> None:
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        with h5py.File(path, "r+") as source:
+            group = "X" if slot == "X" else "layers/counts"
+            source[f"{group}/indices"][0] = 2
+
+        with pytest.raises(ValueError, match="active indices") as raised:
+            _read(tmp_path)
+
+        assert any(str(path) in note and "expression table" in note for note in raised.value.__notes__)
 
     @pytest.mark.parametrize("destination", ["spatial_source", "spatial_grid", "spatialdata_io_positions"])
     def test_coordinate_destinations_reject_collisions(self, tmp_path: Path, destination: str) -> None:

@@ -23,7 +23,6 @@ class TestDiscoverLayout:
 
         layout = _discover_layout(tmp_path)
 
-        assert layout.root == tmp_path.resolve()
         assert layout.counts == (tmp_path / "sample_anndata.h5ad").resolve()
         assert not hasattr(layout, "__dict__")
 

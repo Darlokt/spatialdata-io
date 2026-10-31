@@ -11,7 +11,7 @@ from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.table import as_csr_array
+from spatialdata_io.readers._utils.table import as_csr_array, validate_integer_duplicate_sums
 from spatialdata_io.readers.dbit._schemas import (
     BARCODE_LENGTH,
     GRID_DTYPE,
@@ -33,24 +33,8 @@ def _expression_array(
     values: npt.NDArray[np.generic] | sparse.sparray | sparse.spmatrix,
 ) -> sparse.csr_array:
     """Canonicalize expression without overflowing duplicate integer entries."""
-    if (
-        isinstance(values, (sparse.csr_array, sparse.csr_matrix, sparse.csc_array, sparse.csc_matrix))
-        and values.dtype.kind in "iu"
-        and not values.has_canonical_format
-    ):
-        # H5AD compressed sparse buffers may contain duplicate entries. Their
-        # sum must fit the declared source dtype. SciPy otherwise wraps silently.
-        # Canonical input never enters this exact-integer fallback or allocates it.
-        limits = np.iinfo(values.dtype)
-        for start, stop in zip(values.indptr[:-1], values.indptr[1:], strict=True):
-            totals: dict[int, int] = {}
-            for index, value in zip(values.indices[start:stop], values.data[start:stop], strict=True):
-                key = int(index)
-                totals[key] = totals.get(key, 0) + int(value)
-
-            if any(total < limits.min or total > limits.max for total in totals.values()):
-                message = f"Duplicate expression entries overflow source dtype {values.dtype}. Use a wider count dtype."
-                raise ValueError(message)
+    if isinstance(values, (sparse.csr_array, sparse.csr_matrix, sparse.csc_array, sparse.csc_matrix)):
+        validate_integer_duplicate_sums(values)
 
     return as_csr_array(values)
 

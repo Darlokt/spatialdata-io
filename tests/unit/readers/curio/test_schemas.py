@@ -15,12 +15,13 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.curio._schemas import (
     DEFINING_FEATURES_KEY,
     STRING_DTYPE,
-    normalize_metadata,
+    normalize_moran,
     validate_clusters,
     validate_counts,
     validate_header,
     validate_metrics,
     validate_moran,
+    validate_text,
 )
 
 if TYPE_CHECKING:
@@ -41,68 +42,80 @@ class TestValidateHeader:
         validate_header(["", "arbitrary_statistic"], ArtifactFile(tmp_path / "moran.tsv"), feature_ids=True)
 
 
-class TestNormalizeMetadata:
-    """Retain lexical identifiers and normalize dynamic primitive fields exactly."""
+class TestValidateText:
+    """Validate lexical fields without interpreting their spellings."""
 
-    def test_explicit_dtypes_and_missing_values(self, tmp_path: Path) -> None:
-        """Normalize dynamic primitives while retaining exact integers and lexical IDs."""
+    def test_preserves_lexical_values_and_missingness(self, tmp_path: Path) -> None:
+        frame = pd.DataFrame({"note": ["0007", "TRUE", "1e999", "NA", "", None]}, dtype=STRING_DTYPE)
+        expected = frame.copy()
+
+        assert validate_text(frame, ArtifactFile(tmp_path / "features.tsv")) is None
+
+        pd.testing.assert_frame_equal(frame, expected)
+
+    def test_nul_identifier_is_rejected(self, tmp_path: Path) -> None:
+        """Reject embedded NUL before it can change identifier meaning."""
+        with pytest.raises(ReaderFormatError, match="NUL"):
+            validate_text(
+                pd.DataFrame({"gene": ["gene\x00suffix"]}, dtype=STRING_DTYPE),
+                ArtifactFile(tmp_path / "features.tsv"),
+            )
+
+
+class TestNormalizeMoran:
+    """Parse only required statistics, preserving their exact numerical meaning."""
+
+    def test_explicit_numeric_dtypes(self, tmp_path: Path) -> None:
+        """Keep integers exact and parse scientific floating/boolean statistics."""
         frame = pd.DataFrame(
             {
-                "gene": ["001", "NA"],
                 "integer": [str(2**53 + 1), "2"],
                 "unsigned": [str(2**64 - 1), "2"],
-                "float": ["0.10000000000000002", None],
-                "boolean": ["TRUE", None],
-                "extra": ["NULL", "retained"],
+                "float": ["0.10000000000000002", "-2.5e-1"],
+                "boolean": ["TRUE", "FALSE"],
             },
             dtype=STRING_DTYPE,
         )
 
-        normalized = normalize_metadata(frame, ArtifactFile(tmp_path / "features.tsv"), strings=("gene",))
+        assert normalize_moran(frame, ArtifactFile(tmp_path / "moran.tsv")) is None
 
-        assert normalized is frame
-        assert normalized["gene"].tolist() == ["001", "NA"]
-        assert normalized["integer"].tolist() == [2**53 + 1, 2]
-        assert normalized["unsigned"].tolist() == [2**64 - 1, 2]
-        assert normalized["float"].iloc[0] == float("0.10000000000000002")
-        assert normalized["float"].isna().tolist() == [False, True]
-        assert normalized["boolean"].iloc[0]
-        assert normalized["boolean"].isna().tolist() == [False, True]
-        assert normalized["extra"].tolist() == ["NULL", "retained"]
-        assert normalized.dtypes.tolist() == [
-            STRING_DTYPE,
+        assert frame["integer"].tolist() == [2**53 + 1, 2]
+        assert frame["unsigned"].tolist() == [2**64 - 1, 2]
+        assert frame["float"].tolist() == [float("0.10000000000000002"), -0.25]
+        assert frame["boolean"].tolist() == [True, False]
+        assert frame.dtypes.tolist() == [
             pd.ArrowDtype(pa.int64()),
             pd.ArrowDtype(pa.uint64()),
             pd.ArrowDtype(pa.float64()),
             pd.ArrowDtype(pa.bool_()),
-            STRING_DTYPE,
         ]
 
     @pytest.mark.parametrize("token", ["9007199254740993.0", "1e-1000"])
     def test_numeric_precision_loss(self, tmp_path: Path, token: str) -> None:
         """Reject decimal rounding and underflow at the annotation boundary."""
         with pytest.raises(ReaderFormatError, match="precision"):
-            normalize_metadata(
-                pd.DataFrame({"stat": [token]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv")
+            normalize_moran(pd.DataFrame({"stat": [token]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv"))
+
+    @pytest.mark.parametrize(
+        "token", ["NA", "NaN", "text", "", "inf", "-inf", "1e999", "18446744073709551617", " 0.25 "]
+    )
+    def test_invalid_statistic(self, tmp_path: Path, token: str) -> None:
+        with pytest.raises(ReaderFormatError, match=r"Moran statistic|precision"):
+            normalize_moran(pd.DataFrame({"I": [token]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv"))
+
+    def test_boolean_and_numeric_tokens_cannot_mix(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="nonnumeric"):
+            normalize_moran(
+                pd.DataFrame({"I": ["TRUE", "1"]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv")
             )
 
-    def test_nonnumeric_and_overflow_lexemes_remain_text(self, tmp_path: Path) -> None:
-        """Preserve text that cannot be represented as finite primitive numeric metadata."""
-        frame = pd.DataFrame({"cluster": ["NaN", "1"], "extra": ["1e999", "2"]}, dtype=STRING_DTYPE)
+    def test_zero_float_statistics(self, tmp_path: Path) -> None:
+        frame = pd.DataFrame({"I": ["0.0", "-0.0"]}, dtype=STRING_DTYPE)
 
-        normalize_metadata(frame, ArtifactFile(tmp_path / "features.tsv"))
+        normalize_moran(frame, ArtifactFile(tmp_path / "moran.tsv"))
 
-        assert frame["cluster"].tolist() == ["NaN", "1"]
-        assert frame["extra"].tolist() == ["1e999", "2"]
-
-    def test_nul_identifier_is_rejected(self, tmp_path: Path) -> None:
-        """Reject embedded NUL before it can change identifier meaning."""
-        with pytest.raises(ReaderFormatError, match="NUL"):
-            normalize_metadata(
-                pd.DataFrame({"gene": ["gene\x00suffix"]}, dtype=STRING_DTYPE),
-                ArtifactFile(tmp_path / "features.tsv"),
-                strings=("gene",),
-            )
+        np.testing.assert_array_equal(frame["I"], [0.0, 0.0])
+        assert frame["I"].dtype == pd.ArrowDtype(pa.float64())
 
 
 class TestValidateCounts:

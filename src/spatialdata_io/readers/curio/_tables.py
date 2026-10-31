@@ -7,18 +7,21 @@ from typing import TYPE_CHECKING, cast
 
 import anndata as ad
 import pandas as pd
+from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io.readers._utils.table import validate_integer_duplicate_sums
 from spatialdata_io.readers.curio._schemas import (
     DEFINING_FEATURES_KEY,
     STRING_DTYPE,
-    normalize_metadata,
+    normalize_moran,
     schema_error,
     validate_clusters,
     validate_counts,
     validate_header,
     validate_metrics,
     validate_moran,
+    validate_text,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +63,7 @@ def _read_named_table(path: ArtifactFile, *, delimiter: str, feature_ids: bool =
     if not isinstance(frame.index, pd.RangeIndex) or frame.isna().any(axis=None):
         raise schema_error(path, found="inconsistent row width", expected="one field per enrichment header column")
 
+    validate_text(frame, path)
     return frame
 
 
@@ -72,6 +76,12 @@ def _read_table(layout: _CurioLayout) -> ad.AnnData:
         raise
 
     validate_counts(table, layout.counts)
+    if isinstance(table.X, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
+        try:
+            validate_integer_duplicate_sums(table.X)
+        except (TypeError, ValueError) as error:
+            add_reader_context(error, context=ReaderErrorContext("curio", "counts X"), path=layout.counts)
+            raise
 
     try:
         clusters = pd.read_csv(
@@ -80,19 +90,19 @@ def _read_table(layout: _CurioLayout) -> ad.AnnData:
 
         validate_clusters(clusters, table.obs_names, layout.clusters)
         clusters.columns = ["bead_id", "cluster"]
-        normalize_metadata(clusters, layout.clusters, strings=("bead_id",))
+        validate_text(clusters, layout.clusters)
     except (pd.errors.ParserError, pd.errors.EmptyDataError) as error:
         add_reader_context(error, context=ReaderErrorContext("curio", "cluster assignments"), path=layout.clusters)
         raise
 
-    table.obs["cluster"] = pd.Categorical(clusters.set_index("bead_id")["cluster"].reindex(table.obs_names))
+    labels = clusters.set_index("bead_id")["cluster"].reindex(table.obs_names)
+    table.obs["cluster"] = pd.Categorical(labels, categories=labels.unique())
 
     _enrich_metrics(table, layout.metrics)
 
     try:
         defining = _read_named_table(layout.cluster_features, delimiter="\t")
-        defining = defining.replace("", pd.NA)
-        table.uns[DEFINING_FEATURES_KEY] = normalize_metadata(defining, layout.cluster_features, strings=("gene",))
+        table.uns[DEFINING_FEATURES_KEY] = defining.replace("", pd.NA)
     except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
         add_reader_context(error, context=ReaderErrorContext("curio", "cluster features"), path=layout.cluster_features)
         raise
@@ -107,8 +117,7 @@ def _enrich_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
     try:
         metrics = _read_named_table(path, delimiter=",")
         validate_metrics(metrics, path, set(table.uns))
-
-        normalize_metadata(metrics, path, strings=(metrics.columns[0], "Category"))
+        metrics = metrics[[metrics.columns[0], metrics.columns[1], "Category"]]
     except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
         add_reader_context(error, context=ReaderErrorContext("curio", "metrics"), path=path)
         raise
@@ -123,9 +132,9 @@ def _enrich_features(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame
         moran = _read_named_table(path, delimiter="\t", feature_ids=True)
         identifier = moran.columns[0]
 
-        normalize_metadata(moran, path, strings=(identifier,))
         moran = moran.set_index(identifier)
         validate_moran(moran, features, path)
+        normalize_moran(moran, path)
     except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
         add_reader_context(error, context=ReaderErrorContext("curio", "Moran features"), path=path)
         raise

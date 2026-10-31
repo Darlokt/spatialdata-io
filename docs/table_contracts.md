@@ -191,23 +191,32 @@ expression layers or `raw` are created. See the
 The five-file Seeker export returns a bead table and circles named `cells`.
 Rows, names, feature order, expression meaning and dtype come from the H5AD.
 Imported observation and feature annotations retain their types and missingness.
-Categorical `cluster`, categorical `region="cells"` and textual `instance_id`
-are added. Cluster assignments align by exact bead name. The final circle index
+Lexical categorical `cluster`, categorical `region="cells"` and textual `instance_id`
+are added. Cluster assignments align by exact bead name; cluster categories
+follow first occurrence in the final H5AD row order. The final circle index
 matches these names; the target is generated from the same bead population.
 
 Dynamic Moran statistics join into active `var` by feature ID and are missing
 for unlisted features. Their source order follows existing feature annotations.
-Metric categories become dictionaries in `uns`; `Top_cluster_defining_features`
-is an eager DataFrame. Enrichment never changes `raw.var`. The supported Seeker primary profile
-requires `X_spatial` and accepts an
-additional agreeing `spatial` embedding. Exact native XY is retained in
+Metric categories become dictionaries of string values in `uns`;
+`Top_cluster_defining_features` is an eager DataFrame of nullable strings.
+Cluster labels, metric values and defining-feature annotations preserve their
+literal spelling, including leading zeros, booleans, numeric-looking text and
+missing-value words. Empty metric values remain empty strings; empty
+defining-feature fields become missing values. Only Moran statistics are
+converted to numeric or boolean types, preserving exact large integers and
+rejecting nonfinite values and precision loss. Enrichment never changes
+`raw.var`. The supported Seeker primary profile requires `X_spatial` and accepts
+an additional exactly agreeing real numeric `spatial` embedding. Both embeddings
+must be losslessly representable in float64. Exact native XY is retained in
 `obsm["spatial_pixels"]`; canonical float64 `spatial` uses the manufacturer
 approximate 0.647 µm/pixel calibration without reversing stored orientation.
 The circles use the same scale; their radius 10 is a display radius in source
 pixels, rather than a measured bead footprint. Reprocessed, merged and Trekker
 coordinate profiles require separate evidence. Only `X` is converted to
-canonical CSR. Every inherited
-layer, including a layer named `counts`, retains its source representation.
+canonical CSR. Integer duplicate sums outside the preserved source dtype fail
+with H5AD path and `X` context before reduction. Every inherited layer, including
+a layer named `counts`, retains its source representation.
 Other embeddings, aligned mappings, nested metadata and `raw` are preserved.
 Inherited `spatialdata_attrs` is rejected. See the
 [API](generated/spatialdata_io.curio.rst) for the export layout.
@@ -538,7 +547,7 @@ Float32 cannot exactly represent every integer above 2²⁴. Scanpy's conversion
 may round large counts before the reader sees them; a later cast cannot recover
 them. HD nucleus output has the same final float32 limitation after guarded
 int64 accumulation. SciPy's dtype-preserving duplicate summation of noncanonical integer
-imported H5AD expression can overflow. DBiT and Stereo-seq analysis reject
+imported H5AD expression can overflow. Curio, DBiT and Stereo-seq analysis reject
 duplicate sums that cannot fit the preserved source dtype; raw Stereo-seq and
 HD retain their documented accumulation guards. Other imported-H5AD readers
 retain the general duplicate-overflow limitation. No unrestricted exact-count

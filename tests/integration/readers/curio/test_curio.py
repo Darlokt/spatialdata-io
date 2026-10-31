@@ -15,6 +15,7 @@ from spatialdata.models import get_table_keys
 from spatialdata.transformations import Scale, get_transformation
 
 from spatialdata_io import __version__, curio
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from tests.integration.readers.curio._fixtures import write_curio
 
 if TYPE_CHECKING:
@@ -23,6 +24,47 @@ if TYPE_CHECKING:
 
 class TestCurio:
     """Verify scientific values, metadata, geometry, and serialization."""
+
+    def test_lexical_enrichment_and_category_order(self, tmp_path: Path) -> None:
+        """Keep metadata spellings and order without guessing annotation semantics."""
+        write_curio(tmp_path)
+        (tmp_path / "sample_cluster_assignment.txt").write_text(
+            "bead-c\t2\nbead-a\t10\nbead-b\t0007\n", encoding="utf-8"
+        )
+        (tmp_path / "sample_Metrics.csv").write_text(
+            "Metric,Value,Category,Ignored\nReads,0007,QC,1e999\nEmpty,,QC,TRUE\n", encoding="utf-8"
+        )
+        (tmp_path / "sample_variable_features_clusters.txt").write_text(
+            "gene\tcluster\tnote\ngene-c\t0007\tTRUE\ngene-a\t10\tNA\ngene-b\t2\t\n", encoding="utf-8"
+        )
+
+        table = curio(tmp_path).tables["table"]
+
+        assert table.obs["cluster"].tolist() == ["0007", "10", "2"]
+        assert table.obs["cluster"].cat.categories.tolist() == ["0007", "10", "2"]
+        assert table.uns["QC"] == {"Reads": "0007", "Empty": ""}
+        defining = table.uns["Top_cluster_defining_features"]
+        assert defining["cluster"].tolist() == ["0007", "10", "2"]
+        assert defining["note"].iloc[:2].tolist() == ["TRUE", "NA"]
+        assert pd.isna(defining["note"].iloc[2])
+
+    def test_disagreeing_mixed_coordinate_storage(self, tmp_path: Path) -> None:
+        """Reject lossy agreement at the public H5AD boundary."""
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        source = ad.read_h5ad(path)
+        xy = np.zeros((3, 2), dtype=np.float64)
+        xy[0, 0] = 2**53
+        duplicate = np.zeros((3, 2), dtype=np.int64)
+        duplicate[0, 0] = 2**53 + 1
+        source.obsm["X_spatial"] = xy
+        source.obsm["spatial"] = duplicate
+        source.write_h5ad(path)
+
+        with pytest.raises(ReaderFormatError, match=r"precision|disagree"):
+            curio(tmp_path)
+
+        assert "spatial_pixels" not in ad.read_h5ad(path).obsm
 
     @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
     def test_inherited_slots_and_raw_survive_persistence(self, tmp_path: Path, storage: str) -> None:
@@ -116,7 +158,7 @@ class TestCurio:
         assert pd.isna(table.var["selected"].iloc[1])
         defining = table.uns["Top_cluster_defining_features"]
         assert defining.columns.tolist() == ["note", "avg_log2FC", "gene", "cluster"]
-        assert defining.iloc[0].tolist() == ["extra", 2.5, "gene-c", 1]
+        assert defining.iloc[0].tolist() == ["extra", "2.5", "gene-c", "1"]
 
     def test_positional_metric_fields_allow_arbitrary_names_and_trailing_metadata(self, tmp_path: Path) -> None:
         """Retain positional metric semantics with arbitrary names and trailing category metadata."""
@@ -127,7 +169,7 @@ class TestCurio:
 
         table = curio(tmp_path).tables["table"]
 
-        assert table.uns["QC"] == {"Reads": 100, "Beads": 3}
+        assert table.uns["QC"] == {"Reads": "100", "Beads": "3"}
 
     def test_primary_single_embedding_and_manufacturer_landmarks(self, tmp_path: Path) -> None:
         write_curio(tmp_path, duplicate_coordinates=False)
@@ -175,8 +217,9 @@ class TestCurio:
         assert table.obs_names.tolist() == ["bead-b", "bead-a", "bead-c"]
         assert table.var_names.tolist() == ["gene-b", "gene-a", "gene-c"]
         assert table.obs["quality"].tolist() == [3, 2, 1]
-        assert table.obs["cluster"].tolist() == [1, 0, 1]
+        assert table.obs["cluster"].tolist() == ["1", "0", "1"]
         assert isinstance(table.obs["cluster"].dtype, pd.CategoricalDtype)
+        assert table.obs["cluster"].cat.categories.tolist() == ["1", "0"]
         assert table.obs["region"].tolist() == ["cells"] * 3
         assert table.obs["instance_id"].tolist() == table.obs_names.tolist()
         assert get_table_keys(table) == ("cells", "region", "instance_id")
@@ -184,15 +227,15 @@ class TestCurio:
         assert table.var["symbol"].tolist() == ["B", "A", "C"]
         np.testing.assert_array_equal(table.var["MoransI_observed"], [0.4, np.nan, 0.8])
         np.testing.assert_array_equal(table.var["MoransI_p.value"], [0.05, np.nan, 0.01])
-        assert table.uns["Sequencing"] == {"Reads, total": 100}
-        assert table.uns["Mapping"] == {"Beads": 3}
+        assert table.uns["Sequencing"] == {"Reads, total": "100"}
+        assert table.uns["Mapping"] == {"Beads": "3"}
         pd.testing.assert_frame_equal(
             table.uns["Top_cluster_defining_features"],
             pd.DataFrame(
                 {
                     "gene": pd.Series(["gene-c"], dtype=pd.StringDtype(storage="pyarrow")),
-                    "cluster": [1],
-                    "avg_log2FC": [2.5],
+                    "cluster": pd.Series(["1"], dtype=pd.StringDtype(storage="pyarrow")),
+                    "avg_log2FC": pd.Series(["2.5"], dtype=pd.StringDtype(storage="pyarrow")),
                 }
             ),
         )
@@ -250,15 +293,19 @@ class TestCurio:
             "gene-b\t9007199254740993\tFALSE\t0.25\n",
             encoding="utf-8",
         )
-        table = curio(tmp_path).tables["table"]
+        result = curio(tmp_path)
+        table = result.tables["table"]
         destination = tmp_path / f"table.{storage}"
 
         if storage == "h5ad":
             table.write_h5ad(destination)
             loaded = ad.read_h5ad(destination)
-        else:
+        elif storage == "anndata_zarr":
             table.write_zarr(destination)
             loaded = ad.read_zarr(destination)
+        else:
+            result.write(destination)
+            loaded = SpatialData.read(destination).tables["table"]
 
         assert table.var["exact_integer"].dtype == pd.Int64Dtype()
         assert table.var["selected"].dtype == pd.BooleanDtype()
@@ -267,7 +314,10 @@ class TestCurio:
         assert loaded.var["selected"].isna().tolist() == [False, True, False]
         assert loaded.var["precision"].iloc[2] == float("0.10000000000000002")
         assert loaded.obs["instance_id"].tolist() == table.obs_names.tolist()
-        np.testing.assert_array_equal(loaded.uns["Top_cluster_defining_features"]["optional"], [0.25, np.nan, 0.75])
+        defining = loaded.uns["Top_cluster_defining_features"]
+        assert defining["optional"].iloc[[0, 2]].tolist() == ["0.25", "0.75"]
+        assert defining["optional"].isna().tolist() == [False, True, False]
+        assert defining["cluster"].tolist() == ["1", "0", "1"]
 
     def test_lexical_nan_cluster_stays_a_category(self, tmp_path: Path) -> None:
         """Keep a literal NaN label distinct from a missing cluster assignment."""
@@ -287,7 +337,7 @@ class TestCurio:
         table = curio(tmp_path).tables["table"]
 
         assert table.obs_names.tolist() == ["bead-b", "bead-a", "bead-c"]
-        assert table.obs["cluster"].tolist() == [1, 0, 1]
+        assert table.obs["cluster"].tolist() == ["1", "0", "1"]
 
     @pytest.mark.parametrize("identifiers", [["002", "001", "003"], ["NA", "NULL", "nan"]])
     def test_string_identifiers_preserved(self, tmp_path: Path, identifiers: list[str]) -> None:

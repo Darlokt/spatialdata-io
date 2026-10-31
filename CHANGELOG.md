@@ -26,6 +26,11 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Changed
 
+- **Breaking:** Curio cluster labels, metric values and defining-feature
+  annotations retain their literal strings instead of inferring numerical
+  types. Cluster categories follow first occurrence in H5AD row order. Empty
+  defining-feature fields remain missing; empty metric values remain strings.
+  Moran statistics retain their exact numerical and boolean contracts.
 - **Breaking:** CODEX additional CSV observation annotations retain exact strings,
   including numeric-looking values, leading zeros, `NA`, `NULL` and explicit
   empty strings. Physically missing fields remain errors. Expression, native
@@ -71,6 +76,9 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Fixed
 
+- Curio rejects integer duplicate sums in imported `X` that cannot fit its
+  source dtype, and requires exact agreement between optional coordinate
+  embeddings even when their numerical storage types differ.
 - Generic readers and conversion reject empty or whitespace-only coordinate
   frame names before reading sources or stores. Only `None` selects the
   default `global` frame; appending still requires an explicit frame name.

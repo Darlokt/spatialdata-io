@@ -12,7 +12,7 @@ import pyarrow as pa
 from scipy.sparse import csc_array, csc_matrix, csr_array, csr_matrix
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table import validate_compressed_sparse
+from spatialdata_io.readers._utils.table import validate_integer_duplicate_sums
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -280,33 +280,14 @@ def _validate_analysis_sparse(
 ) -> None:
     """Reject malformed storage and duplicate sums that cannot retain the source dtype."""
     try:
-        validate_compressed_sparse(matrix)
+        validate_integer_duplicate_sums(matrix)
     except (TypeError, ValueError) as error:
-        raise format_error(path, slot, str(error), "valid compressed sparse expression storage") from error
-
-    if matrix.dtype.kind not in "iu" or matrix.has_canonical_format:
-        return
-
-    limits = np.iinfo(matrix.dtype)
-    records = int(matrix.indptr[-1])
-    values = matrix.data[:records]
-    # This conservative bound covers ordinary small counts without a Python
-    # traversal. Only an inconclusive bound needs the exact per-coordinate sum.
-    if int(values.min(initial=0)) * records >= limits.min and int(values.max(initial=0)) * records <= limits.max:
-        return
-
-    for start, stop in zip(matrix.indptr[:-1], matrix.indptr[1:], strict=True):
-        totals: dict[int, int] = {}
-        for index, value in zip(matrix.indices[start:stop], matrix.data[start:stop], strict=True):
-            key = int(index)
-            totals[key] = totals.get(key, 0) + int(value)
-
-        # Signed contributions can cancel; only the completed coordinate sum
-        # determines whether dtype-preserving canonicalization is exact.
-        if any(total < limits.min or total > limits.max for total in totals.values()):
-            raise format_error(
-                path, slot, f"integer duplicate sum outside {matrix.dtype}", "sums representable in the source dtype"
-            )
+        raise format_error(
+            path,
+            slot,
+            str(error),
+            "valid compressed sparse storage with integer sums representable in the source dtype",
+        ) from error
 
 
 def validate_analysis_table(table: AnnData, path: ArtifactFile) -> AnalysisSchema:

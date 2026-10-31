@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
-    DatasetRoot,
     normalize_dataset_root,
     require_metadata_file,
     require_unique_path,
@@ -29,9 +28,8 @@ _SUFFIXES = (
 
 @dataclass(frozen=True, slots=True)
 class _CurioLayout:
-    """Hold the validated root and five consistently prefixed export artifact paths."""
+    """Hold the five validated, consistently prefixed export artifacts."""
 
-    root: DatasetRoot
     counts: ArtifactFile
     clusters: ArtifactFile
     metrics: ArtifactFile
@@ -63,4 +61,4 @@ def _discover_layout(path: str | Path) -> _CurioLayout:
             expected="one nonempty sample prefix shared by all five artifacts",
         )
 
-    return _CurioLayout(root, *artifacts)
+    return _CurioLayout(*artifacts)

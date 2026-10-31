@@ -27,7 +27,7 @@ class _ReaderCase:
 _READER_CASES = (
     _ReaderCase("spatialdata_io.readers.codex", "codex", "codex"),
     pytest.param(_ReaderCase("spatialdata_io.readers.cosmx", "cosmx", "cosmx"), marks=pytest.mark.cosmx),
-    _ReaderCase("spatialdata_io.readers.curio", "curio", "curio"),
+    pytest.param(_ReaderCase("spatialdata_io.readers.curio", "curio", "curio"), marks=pytest.mark.curio),
     _ReaderCase("spatialdata_io.readers.dbit", "dbit", "dbit"),
     _ReaderCase("spatialdata_io.readers.iss", "iss", "iss"),
     pytest.param(_ReaderCase("spatialdata_io.readers.macsima", "macsima", "macsima"), marks=pytest.mark.macsima),

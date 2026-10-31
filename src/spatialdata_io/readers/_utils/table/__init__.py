@@ -11,6 +11,7 @@ from spatialdata_io.readers._utils.table._arrays import (
     as_csr_array,
     csr_array_from_triplets,
     validate_compressed_sparse,
+    validate_integer_duplicate_sums,
 )
 from spatialdata_io.readers._utils.table._compat import prepare_anndata_dataframe
 from spatialdata_io.readers._utils.table._linkage import TableLinkage, parse_linked_table
@@ -24,4 +25,5 @@ __all__ = [
     "parse_linked_table",
     "prepare_anndata_dataframe",
     "validate_compressed_sparse",
+    "validate_integer_duplicate_sums",
 ]

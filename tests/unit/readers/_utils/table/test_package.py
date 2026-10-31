@@ -18,4 +18,5 @@ class TestTablePackage:
             "parse_linked_table",
             "prepare_anndata_dataframe",
             "validate_compressed_sparse",
+            "validate_integer_duplicate_sums",
         ]

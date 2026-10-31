@@ -1,8 +1,8 @@
-"""Curio enrichment contracts and lossless Arrow normalization.
+"""Curio lexical enrichment contracts and exact numerical Moran statistics.
 
 Clusters are exactly two positional fields. Metrics retain positional metric
 and value fields with arbitrary names, followed by named Category and optional
-metadata. Defining-feature columns are extensible named annotations; Moran
+metadata. Defining-feature columns are lexical named annotations; Moran
 columns after the first feature-ID field are dynamic finite numeric or boolean
 statistics. Imported H5AD annotations retain their original representations.
 """
@@ -87,54 +87,51 @@ def validate_header(columns: list[str], path: ArtifactFile, *, feature_ids: bool
         raise schema_error(path, found="invalid enrichment header", expected="nonempty unique named columns")
 
 
-def normalize_metadata(frame: pd.DataFrame, path: ArtifactFile, *, strings: tuple[str, ...] = ()) -> pd.DataFrame:
-    """Normalize extensible primitive annotation columns without changing source order.
-
-    Declared identifiers stay lexical strings. Other columns accept integer,
-    floating, boolean, or string tokens. Integer storage is signed/unsigned
-    64-bit; floating text uses Arrow's correctly rounded parser. Large numeric
-    values and underflow must remain exactly representable. Nulls are retained.
-    """
+def validate_text(frame: pd.DataFrame, path: ArtifactFile) -> None:
+    """Reject NUL in parsed lexical fields without inferring annotation types."""
     for column in frame:
-        source = frame[column]
-        if source.str.contains("\x00", regex=False).any():
+        if frame[column].str.contains("\x00", regex=False).any():
             raise schema_error(
                 path, found=f"NUL character in {column!r}", expected="text fields without NUL characters"
             )
-        if column in strings:
-            continue
-
-        frame[column] = _normalize_primitive(source, path)
-
-    return frame
 
 
-def _normalize_primitive(source: pd.Series, path: ArtifactFile) -> pd.Series:
-    """Choose one explicit primitive dtype while preserving nonnumeric lexical metadata."""
-    present = source.dropna()
-    if len(present) and present.isin(["TRUE", "FALSE", "True", "False", "true", "false"]).all():
+def normalize_moran(frame: pd.DataFrame, path: ArtifactFile) -> None:
+    """Parse supplied statistic columns in place, retaining exact integer values."""
+    for column in frame:
+        frame[column] = _parse_statistic(frame[column], path)
+
+
+def _parse_statistic(source: pd.Series, path: ArtifactFile) -> pd.Series:
+    """Parse one finite numerical or boolean column without rounding large integers."""
+    if len(source) and source.isin(["TRUE", "FALSE", "True", "False", "true", "false"]).all():
         return source.map(
             {"TRUE": True, "FALSE": False, "True": True, "False": False, "true": True, "false": False}
         ).astype(BOOLEAN_DTYPE)
 
     try:
         numeric = pd.to_numeric(source)
-    except ValueError:
-        return source
+    except ValueError as error:
+        raise schema_error(
+            path, found=f"nonnumeric Moran statistic {source.name!r}", expected="finite numeric or boolean statistics"
+        ) from error
     if numeric.dtype.kind in _INTEGER_DTYPES:
         return numeric.astype(_INTEGER_DTYPES[numeric.dtype.kind])
 
     try:
         numeric = source.astype(FLOAT_DTYPE)
-    except (pa.ArrowInvalid, ValueError):
-        return source
+    except (pa.ArrowInvalid, ValueError) as error:
+        raise schema_error(
+            path, found=f"invalid Moran statistic {source.name!r}", expected="finite numeric or boolean statistics"
+        ) from error
 
     values = numeric.to_numpy(dtype=np.float64, na_value=np.nan)
-    nonfinite = np.flatnonzero(~np.isfinite(values) & source.notna().to_numpy())
-    if any(Decimal(source.iloc[row]).is_finite() for row in nonfinite):
-        return source
+    if not np.isfinite(values).all():
+        raise schema_error(
+            path, found=f"nonfinite Moran statistic {source.name!r}", expected="finite numeric or boolean statistics"
+        )
 
-    candidates = np.isfinite(values) & ((np.abs(values) >= 2**53) | (values == 0)) & source.notna().to_numpy()
+    candidates = (np.abs(values) >= 2**53) | (values == 0)
     for row in np.flatnonzero(candidates):
         if Decimal(source.iloc[row]) != Decimal(float(values[row])):
             raise schema_error(
@@ -190,7 +187,7 @@ def validate_metrics(metrics: pd.DataFrame, path: ArtifactFile, uns_keys: set[st
 
 
 def validate_moran(moran: pd.DataFrame, features: pd.DataFrame, path: ArtifactFile) -> None:
-    """Require unique known feature IDs and finite dynamic numeric/boolean statistics."""
+    """Require known unique feature IDs and nonconflicting statistic columns."""
     if moran.shape[1] == 0:
         raise schema_error(path, found="missing Moran statistics", expected="feature IDs followed by Moran statistics")
     identifiers = moran.index
@@ -210,15 +207,4 @@ def validate_moran(moran: pd.DataFrame, features: pd.DataFrame, path: ArtifactFi
             path,
             found="overlapping H5AD variable columns",
             expected="Moran statistic columns distinct from existing variable metadata",
-        )
-    if len(moran) and any(
-        not (pd.api.types.is_numeric_dtype(moran[column].dtype) or pd.api.types.is_bool_dtype(moran[column].dtype))
-        or moran[column].isna().any()
-        or not np.isfinite(moran[column].to_numpy()).all()
-        for column in moran
-    ):
-        raise schema_error(
-            path,
-            found="nonnumeric or nonfinite Moran statistics",
-            expected="finite numeric or boolean statistics for each listed feature",
         )

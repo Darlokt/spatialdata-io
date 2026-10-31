@@ -6,6 +6,7 @@ import csv
 from typing import TYPE_CHECKING
 
 import anndata as ad
+import h5py
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -27,6 +28,69 @@ if TYPE_CHECKING:
 
 class TestReadTable:
     """Validate owned H5AD and eager enrichment schemas."""
+
+    def test_malformed_sparse_storage_retains_count_context(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        with h5py.File(path, "r+") as source:
+            source["X/indices"][0] = 3
+
+        with pytest.raises(ValueError, match="active indices") as raised:
+            _read_table(_discover_layout(tmp_path))
+
+        assert any(str(path) in note and "X" in note for note in raised.value.__notes__)
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize(("dtype", "values"), [("int8", [100, 100]), ("uint8", [150, 150])])
+    def test_integer_duplicate_overflow(self, tmp_path: Path, storage: str, dtype: str, values: list[int]) -> None:
+        """Reject ordinary count sums that cannot retain their imported storage dtype."""
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        table = ad.read_h5ad(path)
+        buffers = (np.array(values, dtype=dtype), np.array([0, 0]), np.array([0, 2, 2, 2]))
+        table.X = (
+            sparse.csr_array(buffers, shape=(3, 3)) if storage == "csr" else sparse.csc_array(buffers, shape=(3, 3))
+        )
+        table.write_h5ad(path)
+
+        with pytest.raises(ValueError, match="source dtype") as raised:
+            curio(tmp_path)
+
+        assert any(str(path) in note and "X" in note for note in raised.value.__notes__)
+        unchanged = ad.read_h5ad(path).X
+        assert isinstance(unchanged, (sparse.csr_matrix, sparse.csc_matrix))
+        np.testing.assert_array_equal(unchanged.data, values)
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize(
+        ("dtype", "values", "expected"), [("int16", [100, 100], 200), ("int8", [127, 127, -127], 127)]
+    )
+    def test_safe_integer_duplicates(
+        self, tmp_path: Path, storage: str, dtype: str, values: list[int], expected: int
+    ) -> None:
+        """Accept exact completed sums, preserving dtype, sparsity and source storage."""
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        table = ad.read_h5ad(path)
+        buffers = (
+            np.array(values, dtype=dtype),
+            np.zeros(len(values), dtype=np.int32),
+            np.array([0, len(values), len(values), len(values)]),
+        )
+        table.X = (
+            sparse.csr_array(buffers, shape=(3, 3)) if storage == "csr" else sparse.csc_array(buffers, shape=(3, 3))
+        )
+        table.write_h5ad(path)
+
+        result = curio(tmp_path).tables["table"].X
+
+        assert isinstance(result, sparse.csr_array)
+        assert result.dtype == np.dtype(dtype)
+        assert result.has_canonical_format
+        assert result[0, 0] == expected
+        unchanged = ad.read_h5ad(path).X
+        assert isinstance(unchanged, (sparse.csr_matrix, sparse.csc_matrix))
+        np.testing.assert_array_equal(unchanged.data, values)
 
     @pytest.mark.parametrize(
         "rows",
@@ -131,6 +195,16 @@ class TestReadTable:
         with pytest.raises(ReaderFormatError, match="header"):
             curio(tmp_path)
 
+    def test_invalid_quoted_defining_header_context(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        path = tmp_path / "sample_variable_features_clusters.txt"
+        path.write_text('"gene\tcluster\n', encoding="utf-8")
+
+        with pytest.raises(csv.Error) as raised:
+            _read_table(_discover_layout(tmp_path))
+
+        assert any(str(path) in note and "cluster features" in note for note in raised.value.__notes__)
+
     def test_nul_cannot_truncate_a_bead_identifier(self, tmp_path: Path) -> None:
         """Prevent parser truncation from aligning a different bead identifier."""
         write_curio(tmp_path)
@@ -140,6 +214,15 @@ class TestReadTable:
 
         with pytest.raises(ReaderFormatError, match="bead IDs"):
             curio(tmp_path)
+
+    def test_nul_cluster_label_is_rejected(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        (tmp_path / "sample_cluster_assignment.txt").write_text(
+            "bead-b\t1\x00suffix\nbead-a\t0\nbead-c\t1\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ReaderFormatError, match="NUL"):
+            _read_table(_discover_layout(tmp_path))
 
     @pytest.mark.parametrize("row", ['"bead-b"suffix\t1\n', 'bead-b\t"unterminated\n'])
     def test_malformed_cluster_quoting_is_rejected(self, tmp_path: Path, row: str) -> None:
@@ -204,14 +287,13 @@ class TestReadNamedTable:
         with pytest.raises(ReaderFormatError, match="malformed enrichment rows"):
             _read_named_table(ArtifactFile(path), delimiter="\t")
 
-    def test_nul_is_preserved_for_semantic_rejection(self, tmp_path: Path) -> None:
-        """Preserve embedded NUL instead of truncating a lexical feature annotation."""
+    def test_nul_is_rejected_without_truncation(self, tmp_path: Path) -> None:
+        """Reject embedded NUL at ingestion instead of truncating a lexical annotation."""
         path = tmp_path / "features.tsv"
         path.write_text("gene\tannotation\n001\tbefore\x00after\n", encoding="utf-8")
 
-        frame = _read_named_table(ArtifactFile(path), delimiter="\t")
-
-        assert frame.iloc[0].tolist() == ["001", "before\x00after"]
+        with pytest.raises(ReaderFormatError, match="NUL"):
+            _read_named_table(ArtifactFile(path), delimiter="\t")
 
     @pytest.mark.parametrize("content", ["gene\tI\ngene\n"])
     def test_malformed_artifact(self, tmp_path: Path, content: str) -> None:
@@ -249,6 +331,15 @@ class TestReadNamedTable:
 
 class TestEnrichMetrics:
     """Validate metric names and category dictionaries."""
+
+    def test_ignored_fields_still_reject_nul(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        (tmp_path / "sample_Metrics.csv").write_text(
+            "Metric,Value,Category,Ignored\nReads,100,QC,before\x00after\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ReaderFormatError, match="NUL"):
+            _enrich_metrics(ad.AnnData(), _discover_layout(tmp_path).metrics)
 
     @pytest.mark.parametrize(
         "rows",

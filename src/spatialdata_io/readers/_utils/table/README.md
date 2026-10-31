@@ -122,6 +122,25 @@ order, remain valid. Unsigned 64-bit indices/pointers are rejected before
 canonicality inspection: SciPy's compressed kernels cannot safely dispatch that
 storage. Expression value dtypes are unaffected.
 
+`validate_integer_duplicate_sums()` adds a read-only preserved-dtype safety
+check for compressed CSR/CSC integer arrays and matrices before canonicalization.
+Curio's primary expression, DBiT's `X`/`counts`, and Stereo-seq's imported
+expression slots require the same invariant: completed duplicate sums must fit
+the source integer dtype.
+The validator first checks compressed storage. Canonical integers return without
+scanning count magnitudes; noninteger inputs retain their existing policy.
+For noncanonical integers, a conservative min/max bound handles ordinary small
+counts. If that bound is inconclusive, Python integers accumulate exact completed
+coordinate sums one row or column at a time, allowing signed cancellation and
+the full int64/uint64 range. Unused capacity is ignored. An out-of-range sum
+raises `ValueError`; the reader supplies artifact and slot context.
+
+This eager validator does not choose an accumulation dtype, widen values, convert
+through floating point, densify, or mutate borrowed buffers. Its exact fallback
+uses workspace proportional to the distinct active indices in one compressed
+span. It does not change `as_csr_array()` or triplet construction automatically;
+readers select the expression slots and call it before normalization.
+
 ## Owned AnnData normalization
 
 Third-party readers such as `read_h5ad()` and Scanpy can return an in-memory

@@ -14,34 +14,26 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 
 if TYPE_CHECKING:
     import anndata as ad
+    from numpy.typing import NDArray
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 
-def _read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
-    """Normalize primary-pipeline pixels and construct radius-10 pixel bead geometry."""
-    context = ReaderErrorContext("curio", "spatial coordinates")
-    if "spatial_pixels" in table.obsm or POSITIONS_KEY in table.uns or "X_SPATIAL" in table.obsm:
+def _validate_xy(
+    xy: object, n_obs: int, context: ReaderErrorContext, path: ArtifactFile
+) -> NDArray[np.integer | np.floating]:
+    """Validate one borrowed embedding without converting its native buffer."""
+    if (
+        not isinstance(xy, np.ndarray)
+        or xy.shape != (n_obs, 2)
+        or xy.dtype.kind not in "iuf"
+        or not np.isfinite(xy).all()
+    ):
         raise ReaderFormatError(
             context=context,
             path=path,
-            found="occupied coordinate destination or unsupported uppercase profile",
-            expected="Seeker-primary X_spatial with optional agreeing spatial and unoccupied output destinations",
-        )
-    xy = table.obsm.get("X_spatial")
-    duplicate = table.obsm.get("spatial")
-    if (
-        not isinstance(xy, np.ndarray)
-        or xy.shape != (table.n_obs, 2)
-        or xy.dtype.kind not in "iuf"
-        or not np.isfinite(xy).all()
-        or (duplicate is not None and (not isinstance(duplicate, np.ndarray) or not np.array_equal(xy, duplicate)))
-    ):
-        raise ReaderFormatError(
-            context=ReaderErrorContext("curio", "spatial coordinates"),
-            path=path,
-            found="missing, invalid, or disagreeing spatial arrays",
-            expected="finite numeric X_spatial of shape (n_obs, 2), ordered (x, y), and agreeing optional spatial",
+            found="missing or invalid spatial array",
+            expected="finite real numeric coordinates of shape (n_obs, 2), ordered (x, y)",
         )
 
     # Shapely stores float64 coordinates. Reject a lossy conversion before geometry construction.
@@ -56,11 +48,37 @@ def _read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
 
     if loss:
         raise ReaderFormatError(
-            context=ReaderErrorContext("curio", "spatial coordinates"),
+            context=context,
             path=path,
             found="spatial coordinates lose precision in float64 geometry",
             expected="coordinates losslessly representable as float64",
         )
+    return xy
+
+
+def _read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
+    """Normalize primary-pipeline pixels and construct radius-10 pixel bead geometry."""
+    context = ReaderErrorContext("curio", "spatial coordinates")
+    if "spatial_pixels" in table.obsm or POSITIONS_KEY in table.uns or "X_SPATIAL" in table.obsm:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="occupied coordinate destination or unsupported uppercase profile",
+            expected="Seeker-primary X_spatial with optional agreeing spatial and unoccupied output destinations",
+        )
+    xy = _validate_xy(table.obsm.get("X_spatial"), table.n_obs, context, path)
+    duplicate = table.obsm.get("spatial")
+    if duplicate is not None:
+        duplicate = _validate_xy(duplicate, table.n_obs, context, path)
+        # Both sources are exactly float64-representable, so mixed-dtype
+        # promotion cannot hide distinct integer coordinates during comparison.
+        if not np.array_equal(xy, duplicate):
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found="disagreeing spatial arrays",
+                expected="X_spatial and optional spatial with exactly equal coordinates",
+            )
 
     # The manufacturer calibrates primary-pipeline pixels approximately; retain
     # their exact dtype, orientation and origin before creating physical XY once.
