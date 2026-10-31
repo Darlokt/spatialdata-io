@@ -5,14 +5,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import anndata as ad
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
+import tifffile
 from scipy import sparse
 
+from spatialdata_io import iss, stereoseq
 from spatialdata_io.readers._utils.table import normalize_owned_anndata
+from tests.integration.readers.stereoseq._fixtures import write_analysis
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -84,3 +89,61 @@ class TestNormalizeOwnedAnndata:
             table.file.close()
 
         conversion.assert_not_called()
+
+
+class TestCompressedSparseIntegrity:
+    """Reject malformed artifacts in normalization and concrete public readers."""
+
+    @pytest.mark.parametrize("factory", [sparse.csr_matrix, sparse.csc_matrix])
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    def test_h5ad_normalization_rejects_bad_indices(
+        self,
+        tmp_path: Path,
+        factory: Callable[[np.ndarray], sparse.csr_matrix | sparse.csc_matrix],
+        slot: str,
+    ) -> None:
+        source = ad.AnnData(sparse.csr_array(np.eye(2, dtype=np.int16)))
+        expression = factory(np.eye(2, dtype=np.int16))
+        if slot == "X":
+            source.X = expression
+        else:
+            source.layers[slot] = expression
+        path = tmp_path / "expression.h5ad"
+        source.write_h5ad(path)
+        with h5py.File(path, "r+") as handle:
+            handle[f"{slot if slot == 'X' else 'layers/' + slot}/indices"][0] = 2
+        table = ad.read_h5ad(path)
+
+        with pytest.raises(ValueError, match="active indices") as error:
+            normalize_owned_anndata(table, expression_layers=() if slot == "X" else (slot,))
+
+        assert any(slot in note for note in error.value.__notes__)
+
+    def test_stereoseq_rejects_malformed_analysis(self, tmp_path: Path) -> None:
+        path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
+        with h5py.File(path, "r+") as handle:
+            handle["X/indices"][0] = 2
+
+        with pytest.raises(ValueError, match="active indices"):
+            stereoseq(tmp_path, analysis_files=(path,))
+
+    def test_iss_rejects_malformed_expression(self, tmp_path: Path) -> None:
+        tifffile.imwrite(
+            tmp_path / "raw.tiff",
+            np.zeros((2, 4, 4), dtype=np.uint16),
+            photometric="minisblack",
+            metadata={"axes": "CYX"},
+        )
+        tifffile.imwrite(tmp_path / "labels.tiff", np.ones((4, 4), dtype=np.uint16), photometric="minisblack")
+        source = ad.AnnData(
+            sparse.csr_array(np.ones((2, 3), dtype=np.int16)),
+            obs=pd.DataFrame(index=["7", "2"]),
+            var=pd.DataFrame(index=["a", "b", "c"]),
+        )
+        path = tmp_path / "cells.h5ad"
+        source.write_h5ad(path)
+        with h5py.File(path, "r+") as handle:
+            handle["X/indices"][0] = 3
+
+        with pytest.raises(ValueError, match="active indices"):
+            iss(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")

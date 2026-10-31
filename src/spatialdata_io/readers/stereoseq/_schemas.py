@@ -12,12 +12,15 @@ import pyarrow as pa
 from scipy.sparse import csc_array, csc_matrix, csr_array, csr_matrix
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.table import validate_compressed_sparse
 
 if TYPE_CHECKING:
     import numpy.typing as npt
     from anndata import AnnData
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
+
+EXPRESSION_LAYERS = ("exon", "counts", "log1p")
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +275,40 @@ def _analysis_integer(value: object, path: ArtifactFile, name: str) -> int:
     return int(value)
 
 
+def _validate_analysis_sparse(
+    matrix: csr_array | csc_array | csr_matrix | csc_matrix, path: ArtifactFile, slot: str
+) -> None:
+    """Reject malformed storage and duplicate sums that cannot retain the source dtype."""
+    try:
+        validate_compressed_sparse(matrix)
+    except (TypeError, ValueError) as error:
+        raise format_error(path, slot, str(error), "valid compressed sparse expression storage") from error
+
+    if matrix.dtype.kind not in "iu" or matrix.has_canonical_format:
+        return
+
+    limits = np.iinfo(matrix.dtype)
+    records = int(matrix.indptr[-1])
+    values = matrix.data[:records]
+    # This conservative bound covers ordinary small counts without a Python
+    # traversal. Only an inconclusive bound needs the exact per-coordinate sum.
+    if int(values.min(initial=0)) * records >= limits.min and int(values.max(initial=0)) * records <= limits.max:
+        return
+
+    for start, stop in zip(matrix.indptr[:-1], matrix.indptr[1:], strict=True):
+        totals: dict[int, int] = {}
+        for index, value in zip(matrix.indices[start:stop], matrix.data[start:stop], strict=True):
+            key = int(index)
+            totals[key] = totals.get(key, 0) + int(value)
+
+        # Signed contributions can cancel; only the completed coordinate sum
+        # determines whether dtype-preserving canonicalization is exact.
+        if any(total < limits.min or total > limits.max for total in totals.values()):
+            raise format_error(
+                path, slot, f"integer duplicate sum outside {matrix.dtype}", "sums representable in the source dtype"
+            )
+
+
 def validate_analysis_table(table: AnnData, path: ArtifactFile) -> AnalysisSchema:
     """Validate native Stereopy annotations without changing the owned table."""
     obs, var = table.obs, table.var
@@ -290,6 +327,13 @@ def validate_analysis_table(table: AnnData, path: ArtifactFile) -> AnalysisSchem
     values = matrix if isinstance(matrix, np.ndarray) else matrix.data
     if values.dtype.kind not in "iuf":
         raise format_error(path, "X", "nonnumerical values", "numerical analysis expression")
+    expressions = (
+        ("X", matrix),
+        *((f"layers/{name}", table.layers[name]) for name in EXPRESSION_LAYERS if name in table.layers),
+    )
+    for slot, expression in expressions:
+        if isinstance(expression, (csr_array, csc_array, csr_matrix, csc_matrix)):
+            _validate_analysis_sparse(expression, path, slot)
     # X is unchanged until final linkage, whose bounded normalization also
     # validates finiteness in every declared expression layer.
 

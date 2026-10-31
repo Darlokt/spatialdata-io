@@ -17,7 +17,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.stereoseq._layout import DistanceMask, GridImage
+from spatialdata_io.readers.stereoseq._layout import ImageSource
 from spatialdata_io.readers.stereoseq._rasters import read_image, read_mask
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ class TestReadImage:
         # Chunks equal to the stored tiles; default tiles would merge them all.
         with Callback(posttask=tasks):
             image = read_image(
-                GridImage(ArtifactFile(path), "registered"), raster=make_raster_options(chunks=(1, 32, 32))
+                ImageSource(ArtifactFile(path), "registered", "image"), raster=make_raster_options(chunks=(1, 32, 32))
             )
         assert isinstance(image, DataArray)
         tasks.assert_not_called()
@@ -61,7 +61,9 @@ class TestReadImage:
         pixels = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
         tifffile.imwrite(path, pixels, metadata={"axes": axes}, photometric="rgb" if axes == "YXS" else "minisblack")
 
-        image = read_image(GridImage(ArtifactFile(path), "registered"), raster=make_raster_options(chunks=(1, 8, 8)))
+        image = read_image(
+            ImageSource(ArtifactFile(path), "registered", "image"), raster=make_raster_options(chunks=(1, 8, 8))
+        )
         assert isinstance(image, DataArray)
         expected = pixels.transpose(2, 0, 1) if axes == "YXS" else pixels[0] if axes == "TCYX" else pixels
         assert_array_equal(image.data.compute(), expected)
@@ -74,7 +76,7 @@ class TestReadImage:
         pixels = np.arange(16 * 24 * 3, dtype=np.uint8).reshape(16, 24, 3)
         tifffile.imwrite(path, pixels, photometric="rgb", tile=(16, 16))
 
-        image = read_image(GridImage(ArtifactFile(path), "registered"), raster=DEFAULT_OPTIONS)
+        image = read_image(ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
         # Default tiles exceed the image, so each chunk is one whole channel.
@@ -86,7 +88,9 @@ class TestReadImage:
         pixels = np.arange(16 * 24, dtype=np.uint16).reshape(16, 24)
         tifffile.imwrite(path, pixels, metadata={"axes": "YX"})
 
-        image = read_image(GridImage(ArtifactFile(path), "registered"), raster=make_raster_options((2, 2), (1, 8, 8)))
+        image = read_image(
+            ImageSource(ArtifactFile(path), "registered", "image"), raster=make_raster_options((2, 2), (1, 8, 8))
+        )
 
         assert isinstance(image, DataTree)
         assert list(image.children) == ["scale0", "scale1", "scale2"]
@@ -103,7 +107,7 @@ class TestReadImage:
             writer.write(np.zeros((6, 7), dtype=np.uint8), metadata={"axes": "YX"})
 
         with pytest.raises(ReaderFormatError, match="series"):
-            read_image(GridImage(ArtifactFile(path), "registered"), raster=DEFAULT_OPTIONS)
+            read_image(ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS)
 
     def test_rejects_unknown_nonsingleton_axis(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_regist.tif"
@@ -112,7 +116,7 @@ class TestReadImage:
         )
 
         with pytest.raises(ValueError, match=r"[Qq]"):
-            read_image(GridImage(ArtifactFile(path), "registered"), raster=DEFAULT_OPTIONS)
+            read_image(ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS)
 
 
 class TestReadMask:
@@ -126,7 +130,9 @@ class TestReadMask:
         reads = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
-            labels = read_mask(GridImage(ArtifactFile(path), "mask"), raster=make_raster_options(chunks=(1, 32, 32)))
+            labels = read_mask(
+                ImageSource(ArtifactFile(path), "mask", "labels"), raster=make_raster_options(chunks=(1, 32, 32))
+            )
         assert isinstance(labels, DataArray)
         tasks.assert_not_called()
         reads.assert_not_called()
@@ -143,7 +149,9 @@ class TestReadMask:
         pixels[::2, ::2] = 255
         tifffile.imwrite(path, pixels, metadata={"axes": "YX"})
 
-        labels = read_mask(GridImage(ArtifactFile(path), "tissue_cut"), raster=make_raster_options((2, 2), (1, 8, 8)))
+        labels = read_mask(
+            ImageSource(ArtifactFile(path), "tissue_cut", "labels"), raster=make_raster_options((2, 2), (1, 8, 8))
+        )
 
         assert isinstance(labels, DataTree)
         assert list(labels.children) == ["scale0", "scale1", "scale2"]
@@ -162,7 +170,9 @@ class TestReadMask:
         pixels = (np.arange(16 * 24).reshape(16, 24) % 5).astype(dtype)
         tifffile.imwrite(path, pixels, metadata={"axes": "YX"})
 
-        labels = read_mask(DistanceMask(ArtifactFile(path), "HE", 10), raster=make_raster_options((2,), 8))
+        labels = read_mask(
+            ImageSource(ArtifactFile(path), "HE_distance_mask_10", "labels"), raster=make_raster_options((2,), 8)
+        )
 
         assert isinstance(labels, DataTree)
         scale0 = labels["scale0"]["image"]
@@ -174,7 +184,7 @@ class TestReadMask:
         pixels = np.arange(16 * 24, dtype=np.uint16).reshape(1, 16, 24)
         tifffile.imwrite(path, pixels, metadata={"axes": "CYX"}, photometric="minisblack")
 
-        labels = read_mask(GridImage(ArtifactFile(path), "mask"), raster=DEFAULT_OPTIONS)
+        labels = read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS)
 
         assert isinstance(labels, DataArray)
         assert labels.dims == ("y", "x")
@@ -185,20 +195,20 @@ class TestReadMask:
         tifffile.imwrite(path, np.zeros((16, 24, 3), dtype=np.uint8), photometric="rgb")
 
         with pytest.raises(ValueError, match=r"[Ss]"):
-            read_mask(GridImage(ArtifactFile(path), "mask"), raster=DEFAULT_OPTIONS)
+            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS)
 
     def test_rejects_floating_point(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_mask.tif"
         tifffile.imwrite(path, np.zeros((16, 24), dtype=np.float32), metadata={"axes": "YX"})
 
         with pytest.raises(ReaderFormatError, match="float32"):
-            read_mask(GridImage(ArtifactFile(path), "mask"), raster=DEFAULT_OPTIONS)
+            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS)
 
     def test_64_bit_values_require_single_scale(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_mask.tif"
         pixels = np.full((16, 24), 2**60 + 1, dtype=np.uint64)
         tifffile.imwrite(path, pixels, metadata={"axes": "YX"})
-        source = GridImage(ArtifactFile(path), "mask")
+        source = ImageSource(ArtifactFile(path), "mask", "labels")
 
         with pytest.raises(ValueError, match="32-bit"):
             read_mask(source, raster=make_raster_options((2,), 8))

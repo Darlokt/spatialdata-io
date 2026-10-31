@@ -177,7 +177,9 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         paths are allowed. Flat counts require explicit paths.
     analysis_files
         Exact native SAW H5AD paths. Preserve analysis values, source order,
-        annotations, embeddings and raw. A matching selected GEF validates
+        annotations, embeddings and raw. Sparse integer duplicates are summed
+        only when their exact total fits the source dtype; overflow raises a
+        contextual ``ReaderFormatError``. A matching selected GEF validates
         filtered membership and coordinates by source keys. Analysis-only
         requires native spatial metadata and constructs its own point target.
     image_roles
@@ -279,7 +281,7 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         analysis_files=analyses,
         image_roles=roles,
     )
-    square_counts = tuple(product for source in layout.squares for product in read_square(source))
+    square_counts = read_square(layout.square) if layout.square is not None else ()
     cell_counts = tuple(read_cells(source, read_borders=cell_geometry == "polygons") for source in layout.cells)
     products: tuple[SquareCounts | CellCounts, ...] = (*square_counts, *cell_counts)
     _validate_frames(products, layout.sample_id, layout.root)
@@ -364,8 +366,8 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
             raise
 
     result = SpatialData(
-        images={source.name: read_image(source, raster=raster) for source in layout.images if not source.is_mask},
-        labels={source.name: read_mask(source, raster=raster) for source in layout.images if source.is_mask},
+        images={source.name: read_image(source, raster=raster) for source in layout.images if source.kind == "image"},
+        labels={source.name: read_mask(source, raster=raster) for source in layout.images if source.kind == "labels"},
         points=points,
         shapes=shapes,
         tables=tables,

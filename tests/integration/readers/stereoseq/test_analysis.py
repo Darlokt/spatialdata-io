@@ -14,6 +14,7 @@ from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
 
 from spatialdata_io import stereoseq
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from tests.integration.readers.stereoseq._fixtures import write_analysis
 
 if TYPE_CHECKING:
@@ -96,3 +97,95 @@ class TestStereoseqAnalysisResolution:
         with pytest.raises(ValueError, match="finite values") as caught:
             stereoseq(tmp_path, analysis_files=(path,))
         assert any(str(path) in note and "stereoseq" in note for note in caught.value.__notes__)
+
+
+class TestStereoseqAnalysisExpression:
+    """Imported duplicates retain exact values and the declared numerical dtype."""
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize("slot", ["X", "counts", "log1p", "exon"])
+    @pytest.mark.parametrize(("dtype", "values"), [("uint8", [200, 100]), ("int8", [-100, -100])])
+    def test_unrepresentable_duplicate_sum_fails_with_artifact_and_slot(
+        self, tmp_path: Path, storage: str, slot: str, dtype: str, values: list[int]
+    ) -> None:
+        path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
+        source = ad.read_h5ad(path)
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        matrix = constructor(
+            (np.array([*values, 22], dtype=dtype), np.array([0, 0, 1]), np.array([0, 2, 3])), shape=(2, 2)
+        )
+        if slot == "X":
+            source.X = matrix
+        else:
+            source.layers[slot] = matrix
+        source.write_h5ad(path)
+
+        with pytest.raises(ReaderFormatError, match=r"duplicate.*sum") as caught:
+            stereoseq(tmp_path, analysis_files=(path,))
+
+        message = str(caught.value)
+        assert str(path) in message
+        assert ("X" if slot == "X" else f"layers/{slot}") in message
+        assert dtype in message
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize("slot", ["X", "counts", "log1p", "exon"])
+    @pytest.mark.parametrize(
+        ("dtype", "values"),
+        [("uint8", (2, 4)), ("uint8", (200, 55)), ("int8", (127, 127, -127))],
+    )
+    def test_safe_unsorted_duplicates_and_stored_zeros_survive_h5ad(
+        self, tmp_path: Path, storage: str, slot: str, dtype: str, values: tuple[int, ...]
+    ) -> None:
+        path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
+        source = ad.read_h5ad(path)
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        matrix = constructor(
+            (
+                np.array([0, *values, 0, 22], dtype=dtype),
+                np.array([1, *([0] * len(values)), 0, 1]),
+                np.array([0, len(values) + 1, len(values) + 3]),
+            ),
+            shape=(2, 2),
+        )
+        if slot == "X":
+            source.X = matrix
+        else:
+            source.layers[slot] = matrix
+        source.write_h5ad(path)
+        result = stereoseq(tmp_path, analysis_files=(path,))
+        table = next(iter(result.tables.values()))
+        output = table.X if slot == "X" else table.layers[slot]
+        assert isinstance(output, sparse.csr_array)
+        assert output.has_canonical_format
+        destination = tmp_path / "normalized.h5ad"
+        table.write_h5ad(destination)
+        restored = ad.read_h5ad(destination)
+        stored = restored.X if slot == "X" else restored.layers[slot]
+        for actual in (output, stored):
+            assert isinstance(actual, sparse.csr_array | sparse.csr_matrix)
+            assert actual.dtype == np.dtype(dtype)
+            np.testing.assert_array_equal(actual.data, [sum(values), 0, 0, 22])
+            np.testing.assert_array_equal(actual.indices, [0, 1, 0, 1])
+            np.testing.assert_array_equal(actual.indptr, [0, 2, 4])
+        assert table.obs_names.equals(source.obs_names)
+        assert table.var_names.equals(source.var_names)
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], source.obsm["spatial"])
+
+    def test_safe_signed_duplicates_survive_spatialdata_zarr(self, tmp_path: Path) -> None:
+        path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
+        source = ad.read_h5ad(path)
+        source.X = sparse.csr_array(
+            (np.array([127, 127, -127, 22], dtype=np.int8), np.array([0, 0, 0, 1]), np.array([0, 3, 4])),
+            shape=(2, 2),
+        )
+        source.write_h5ad(path)
+        result = stereoseq(tmp_path, analysis_files=(path,))
+        destination = tmp_path / "analysis.zarr"
+        result.write(destination)
+        restored = read_zarr(destination).tables["cells_analysis_r0_5_table"]
+        assert isinstance(restored.X, sparse.csr_array | sparse.csr_matrix)
+        assert restored.X.dtype == np.int8
+        np.testing.assert_array_equal(restored.X.data, [127, 22])
+        np.testing.assert_array_equal(restored.X.indices, [0, 1])
+        np.testing.assert_array_equal(restored.X.indptr, [0, 1, 2])

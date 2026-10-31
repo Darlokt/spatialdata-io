@@ -17,4 +17,5 @@ class TestTablePackage:
             "normalize_owned_anndata",
             "parse_linked_table",
             "prepare_anndata_dataframe",
+            "validate_compressed_sparse",
         ]

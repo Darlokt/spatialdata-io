@@ -80,6 +80,91 @@ def _canonicalize_csr(data: sparse.csr_array, *, owns_data: bool) -> sparse.csr_
     return result
 
 
+def validate_compressed_sparse(
+    data: sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix,
+    /,
+) -> None:
+    """Validate borrowed two-dimensional CSR or CSC storage without mutation.
+
+    Parameters
+    ----------
+    data
+        In-memory SciPy CSR or CSC array or matrix. Its data, indices and row
+        or column pointers must be one-dimensional NumPy arrays. Index and
+        pointer storage must have integer dtypes safely representable by
+        signed int64, as required by SciPy's compressed sparse kernels.
+
+    Raises
+    ------
+    TypeError
+        If the container, buffers, index dtypes or shape are unsupported.
+    ValueError
+        If the shape, buffer dimensions, lengths, pointers or active indices
+        violate the compressed sparse structure.
+
+    Notes
+    -----
+    This eager, read-only inspection does not canonicalize, inspect expression
+    values, call SciPy's mutating ``check_format()``, or trust cached sorting
+    and canonicality flags. Unsorted indices and duplicates are valid. Equal
+    data/index capacity beyond the terminal pointer is permitted; unused
+    indices are not inspected. Scans use bounded temporary boolean arrays and
+    never copy expression storage or construct another sparse object.
+    """
+    if not isinstance(data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
+        message = f"data must be a SciPy CSR or CSC array or matrix; found {type(data).__name__}."
+        raise TypeError(message)
+    _validate_two_dimensions(data)
+    shape = _validate_shape(data.shape)
+    for name, buffer in (("data", data.data), ("indices", data.indices), ("indptr", data.indptr)):
+        if not isinstance(buffer, np.ndarray):
+            message = f"{name} must be a NumPy ndarray; found {type(buffer).__name__}."
+            raise TypeError(message)
+        if buffer.ndim != 1:
+            message = f"{name} must be one-dimensional; found shape {buffer.shape}."
+            raise ValueError(message)
+    for name, indices in (("indices", data.indices), ("indptr", data.indptr)):
+        if indices.dtype.kind not in "iu" or not np.can_cast(indices.dtype, np.int64, casting="safe"):
+            message = f"{name} must have an integer dtype safely representable by int64; found {indices.dtype}."
+            raise TypeError(message)
+    if data.data.size != data.indices.size:
+        message = f"data and indices must have equal lengths; found {data.data.size} and {data.indices.size}."
+        raise ValueError(message)
+    major_size, minor_size = shape if isinstance(data, (sparse.csr_array, sparse.csr_matrix)) else shape[::-1]
+    terminal = _validate_compressed_pointers(data.indptr, major_size=major_size, capacity=data.data.size)
+    for start in range(0, terminal, _FINITE_VALIDATION_CHUNK_SIZE):
+        indices = data.indices[start : min(start + _FINITE_VALIDATION_CHUNK_SIZE, terminal)]
+        if int(indices.min()) < 0 or int(indices.max()) >= minor_size:
+            message = f"active indices must be in [0, {minor_size})."
+            raise ValueError(message)
+
+
+def _validate_compressed_pointers(
+    indptr: np.ndarray[tuple[int, ...], np.dtype[np.integer[Any]]],
+    *,
+    major_size: int,
+    capacity: int,
+) -> int:
+    """Check the compressed span partition without subtraction or mutation."""
+    if indptr.size != major_size + 1:
+        message = f"indptr must have length {major_size + 1}; found {indptr.size}."
+        raise ValueError(message)
+    if int(indptr[0]) != 0:
+        message = "indptr must start at zero."
+        raise ValueError(message)
+    terminal = int(indptr[-1])
+    if terminal < 0 or terminal > capacity:
+        message = f"indptr terminal extent must be in [0, {capacity}]; found {terminal}."
+        raise ValueError(message)
+    for start in range(0, major_size, _FINITE_VALIDATION_CHUNK_SIZE):
+        stop = min(start + _FINITE_VALIDATION_CHUNK_SIZE, major_size)
+        # Adjacent comparisons cannot overflow, unlike subtracting pointers.
+        if np.any(indptr[start + 1 : stop + 1] < indptr[start:stop]):
+            message = "indptr must be nondecreasing."
+            raise ValueError(message)
+    return terminal
+
+
 def as_csr_array(
     data: np.ndarray[tuple[int, ...], np.dtype[np.generic]] | sparse.sparray | sparse.spmatrix,
     /,
@@ -117,7 +202,8 @@ def as_csr_array(
         If ``data`` is not a supported in-memory container or has an unsupported
         dtype.
     ValueError
-        If ``data`` is not two-dimensional or contains non-finite values.
+        If ``data`` is not two-dimensional, contains non-finite values, or has
+        malformed CSR/CSC storage.
 
     Notes
     -----
@@ -130,7 +216,10 @@ def as_csr_array(
         # object accepted by scipy.sparse.issparse has this runtime contract.
         sparse_data = cast("sparse.sparray | sparse.spmatrix", data)
         sparse_metadata = cast("_ShapedArray", sparse_data)
-        _validate_two_dimensions(sparse_metadata)
+        if isinstance(sparse_data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
+            validate_compressed_sparse(sparse_data)
+        else:
+            _validate_two_dimensions(sparse_metadata)
         _validate_value_dtype(sparse_metadata.dtype, parameter="data")
 
         if isinstance(sparse_data, sparse.csr_array):

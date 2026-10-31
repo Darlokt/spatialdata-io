@@ -103,9 +103,7 @@ class TestReadAnalysis:
         raw = _counts()
         result = read_analysis(_source(path), counts={"cells": raw})
         assert result.name == "cells_analysis_r0_5"
-        assert result.origin == (5, 6)
         assert result.resolution == 500
-        assert result.sample_id == "sample"
         assert result.table.obs_names.tolist() == original.obs_names.tolist()
         assert result.table.var_names.tolist() == ["g_a", "g_z"]
         assert result.instance_ids.tolist() == original.obs_names.tolist()
@@ -143,7 +141,6 @@ class TestReadAnalysis:
         _analysis(path)
         result = read_analysis(_source(path, resolution=None), counts={})
         assert result.name == "cells_analysis"
-        assert result.origin is None
         assert result.resolution == 500
 
     def test_resolves_historical_square_population_from_native_metadata(self, tmp_path: Path) -> None:

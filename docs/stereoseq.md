@@ -170,6 +170,8 @@ Every linked table has categorical `obs["region"]` and an `obs["instance_id"]` t
 
 Analysis preserves H5AD values, observation and feature order, additional annotations, embeddings, layers and imported `raw`. It does not replace raw GEF counts or rerun vendor analysis. Returned `X` is a canonical CSR sparse array with its numerical dtype retained. Documented expression layers `counts`, `log1p` and `exon` are normalized to sparse arrays; other layers retain their imported representation. Imported `raw` remains the source analysis snapshot rather than the reader's canonical raw GEF product.
 
+Imported CSR/CSC storage must have valid pointers and indices. Duplicate integer entries in `X` and the documented expression layers are combined only when their exact sum fits the source dtype; otherwise a contextual `ReaderFormatError` identifies the file and expression slot. Safe duplicates and unsorted unique entries remain supported without dtype promotion. Canonical integer input needs no duplicate-sum check. Raw GEF counts retain their separate uint64 accumulation contract.
+
 ```python
 analysis = stereoseq(
     "task",

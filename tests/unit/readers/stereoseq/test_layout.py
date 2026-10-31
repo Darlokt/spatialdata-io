@@ -13,9 +13,6 @@ from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile,
 from spatialdata_io.readers.stereoseq import _layout
 from spatialdata_io.readers.stereoseq._layout import (
     AnalysisSource,
-    DistanceMask,
-    GridImage,
-    StainedImage,
     _analysis_source,
     _count_sample,
     _image_identity,
@@ -166,6 +163,26 @@ class TestImageIdentity:
 class TestInventory:
     """One bounded inventory identifies structural layout independently from release."""
 
+    @pytest.mark.parametrize(
+        ("directory", "expected"),
+        [
+            ("02.count", "compact_numbered"),
+            ("03.count", "numbered"),
+            ("feature_expression", "outs"),
+            ("outs/feature_expression", "outs"),
+            (".", "flat"),
+        ],
+    )
+    def test_detects_structural_family_and_exact_artifacts(
+        self, tmp_path: Path, directory: str, expected: Family
+    ) -> None:
+        file = _file(tmp_path / directory / "sample.gef")
+
+        family, files = _inventory(DatasetRoot(ArtifactDirectory(tmp_path)))
+
+        assert family == expected
+        assert files == (file,)
+
     @pytest.mark.parametrize("directory", ["02.count", "03.count", "feature_expression"])
     def test_scans_known_directory_once(self, tmp_path: Path, mocker: MockerFixture, directory: str) -> None:
         _file(tmp_path / directory / "sample.gef")
@@ -231,9 +248,9 @@ class TestDiscoverLayout:
             image_roles=("registered", "mask"),
         )
 
-        assert result.family == "compact_numbered"
         assert result.sample_id == "sample"
-        assert [source.file for source in result.squares] == [tmp_path / paths[1]]
+        assert result.square is not None
+        assert result.square.file == tmp_path / paths[1]
         assert [source.file for source in result.cells] == [tmp_path / paths[2]]
         assert [source.file for source in result.analyses] == [tmp_path / name for name in paths[3:5]]
         assert [source.population for source in result.analyses] == [None, "cells"]
@@ -271,9 +288,9 @@ class TestDiscoverLayout:
             image_roles=("registered", "mask", "tissue_cut", "distance_mask"),
         )
 
-        assert result.family == "numbered"
         assert result.sample_id == "sample"
-        assert [source.file for source in result.squares] == [tmp_path / count_paths[1]]
+        assert result.square is not None
+        assert result.square.file == tmp_path / count_paths[1]
         assert [source.file for source in result.cells] == [tmp_path / name for name in count_paths[2:]]
         assert [source.file for source in result.analyses] == [tmp_path / name for name in analysis_paths]
         assert [source.population for source in result.analyses] == [200, "cells", "adjusted_cells"]
@@ -323,9 +340,9 @@ class TestDiscoverLayout:
             image_roles=("registered", "mask", "tissue_cut", "distance_mask"),
         )
 
-        assert result.family == "outs"
         assert result.sample_id == "sample"
-        assert [source.file for source in result.squares] == [outs / count_paths[1]]
+        assert result.square is not None
+        assert result.square.file == outs / count_paths[1]
         assert [source.file for source in result.cells] == [outs / name for name in count_paths[2:]]
         assert [source.file for source in result.analyses] == [outs / name for name in analysis_paths]
         assert [source.population for source in result.analyses] == [20, "cells", "adjusted_cells"]
@@ -339,25 +356,25 @@ class TestDiscoverLayout:
         ]
 
     @pytest.mark.parametrize(
-        ("directory", "family", "filename"),
+        ("directory", "filename"),
         [
-            ("04.tissuecut", "compact_numbered", "chip.v2.gef"),
-            ("02.count", "compact_numbered", "chip.v2.gef"),
-            ("05.tissuecut", "numbered", "chip.v2.tissue.gef"),
-            ("03.count", "numbered", "chip.v2.gef"),
-            ("outs/feature_expression", "outs", "chip.v2.tissue.gef"),
-            ("feature_expression", "outs", "chip.v2.tissue.gef"),
+            ("04.tissuecut", "chip.v2.gef"),
+            ("02.count", "chip.v2.gef"),
+            ("05.tissuecut", "chip.v2.tissue.gef"),
+            ("03.count", "chip.v2.gef"),
+            ("outs/feature_expression", "chip.v2.tissue.gef"),
+            ("feature_expression", "chip.v2.tissue.gef"),
         ],
     )
-    def test_reads_only_square_selection(self, tmp_path: Path, directory: str, family: Family, filename: str) -> None:
+    def test_reads_only_square_selection(self, tmp_path: Path, directory: str, filename: str) -> None:
         path = _file(tmp_path / directory / filename)
 
         result = _discover(tmp_path, bins=(1, 50))
 
-        assert result.family == family
         assert result.sample_id == "chip.v2"
-        assert result.squares[0].file == path
-        assert result.squares[0].bins == (1, 50)
+        assert result.square is not None
+        assert result.square.file == path
+        assert result.square.bins == (1, 50)
         assert result.cells == result.analyses == result.images == ()
 
     @pytest.mark.parametrize("directory", ["041.cellcut", "051.cellcut", "outs/feature_expression"])
@@ -368,7 +385,8 @@ class TestDiscoverLayout:
         result = _discover(tmp_path, cell_bins="both")
 
         assert [(source.file, source.kind) for source in result.cells] == [(raw, "unadjusted"), (adjusted, "adjusted")]
-        assert result.squares == result.analyses == result.images == ()
+        assert result.square is None
+        assert result.analyses == result.images == ()
 
     def test_requires_sample_selector_for_multiple_samples(self, tmp_path: Path) -> None:
         _file(tmp_path / "03.count" / "sample.gef")
@@ -377,7 +395,9 @@ class TestDiscoverLayout:
         with pytest.raises(ReaderFormatError, match="sample_id"):
             _discover(tmp_path, bins=(1,))
 
-        assert _discover(tmp_path, sample_id="other", bins="all").squares[0].file == chosen
+        selected = _discover(tmp_path, sample_id="other", bins="all").square
+        assert selected is not None
+        assert selected.file == chosen
 
     def test_missing_selected_artifact_uses_precise_path_error(self, tmp_path: Path) -> None:
         _file(tmp_path / "03.count" / "sample.raw.gef")
@@ -409,8 +429,8 @@ class TestDiscoverLayout:
         spy = mocker.spy(_layout, "require_caller_file")
         result = _discover(root, bins=(1,), square_counts_file=file.name if relative else file)
 
-        assert result.family == "flat"
-        assert result.squares[0].file == file
+        assert result.square is not None
+        assert result.square.file == file
         spy.assert_called_once()
 
     def test_flat_automatic_count_discovery_requires_explicit_source(self, tmp_path: Path) -> None:
@@ -447,7 +467,8 @@ class TestDiscoverLayout:
         override = _file(tmp_path / f"chip.v2.{qualifier}.gef")
         result = _discover(tmp_path, sample_id="chip.v2", bins=(1,), square_counts_file=override)
         assert result.sample_id == "chip.v2"
-        assert result.squares[0].file == override
+        assert result.square is not None
+        assert result.square.file == override
 
     @pytest.mark.parametrize("suffix", [".cellbin.gef", ".tissue.gef", ".raw.gef"])
     def test_explicit_square_override_keeps_strong_suffix_sample_checks(self, tmp_path: Path, suffix: str) -> None:
@@ -467,7 +488,8 @@ class TestDiscoverLayout:
 
         assert result.sample_id == "chip.v2"
         assert result.analyses == (AnalysisSource(ArtifactFile(path), "adjusted_cells", Decimal("0.5"), "chip.v2"),)
-        assert result.cells == result.squares == result.images == ()
+        assert result.square is None
+        assert result.cells == result.images == ()
 
     def test_rejects_selected_analysis_sample_disagreement(self, tmp_path: Path) -> None:
         path = _file(tmp_path / "other.cell.cluster.h5ad")
@@ -491,11 +513,38 @@ class TestDiscoverLayout:
         (tmp_path / "051.cellcut").mkdir()
         result = _discover(tmp_path)
         assert result.sample_id is None
-        assert result.squares == result.cells == result.analyses == result.images == ()
+        assert result.square is None
+        assert result.cells == result.analyses == result.images == ()
 
 
 class TestImages:
     """All stains for selected roles load deterministically with distinct scientific names."""
+
+    def test_all_product_names_and_image_label_dispatch(self, tmp_path: Path) -> None:
+        names = (
+            "sample_HE_regist.tif",
+            "sample_HE_mask.tif",
+            "sample_HE_tissue_cut.tif",
+            "sample_HE_mask_edm_dis_10.tif",
+            "bin1_img.tif",
+            "bin1_img_tissue_cut.tif",
+        )
+        for name in names:
+            _file(tmp_path / name)
+
+        result = _discover(
+            tmp_path,
+            image_roles=("registered", "mask", "tissue_cut", "distance_mask", "expression"),
+        )
+
+        assert [(source.name, source.kind) for source in result.images] == [
+            ("HE_distance_mask_10", "labels"),
+            ("HE_mask", "labels"),
+            ("HE_registered", "image"),
+            ("HE_tissue_cut", "labels"),
+            ("expression", "image"),
+            ("expression_tissue_cut", "labels"),
+        ]
 
     @pytest.mark.parametrize(
         ("directory", "prefix", "name"),
@@ -516,6 +565,16 @@ class TestImages:
         assert result.sample_id == "chip_v2"
         assert result.images[0].file == path
         assert result.images[0].name == name
+
+    def test_grid_alias_preserves_the_resolved_source_name(self, tmp_path: Path) -> None:
+        target = _file(tmp_path / "data" / "pixels.tif")
+        (tmp_path / "bin1_img_tissue_cut.tif").symlink_to(target)
+
+        result = _discover(tmp_path, image_roles=("tissue_cut",))
+
+        assert result.images[0].file == target
+        assert result.images[0].name == "tissue_cut"
+        assert result.images[0].kind == "labels"
 
     def test_selected_stains_are_sorted_and_other_samples_ignored(self, tmp_path: Path) -> None:
         for name in ("HE_sample_regist.tif", "DAPI_sample_regist.tif", "HE_other_regist.tif", "readme.txt"):
@@ -547,9 +606,8 @@ class TestImages:
 
         source = _discover(tmp_path, image_roles=("distance_mask",)).images[0]
 
-        assert isinstance(source, DistanceMask)
+        assert source.kind == "labels"
         assert source.file == path
-        assert source.distance == 10
         assert source.name == "HE_distance_mask_10"
 
     def test_distance_mask_without_stain_is_unsupported(self, tmp_path: Path) -> None:
@@ -589,28 +647,3 @@ class TestImages:
 
         with pytest.raises(ReaderFormatError, match="missing image roles"):
             _discover(tmp_path, image_roles=("registered",))
-
-
-class TestImageNames:
-    """Normalized descriptor names retain role and stain without sample prefixes."""
-
-    def test_stained_grid_and_distance_names(self) -> None:
-        file = ArtifactFile(Path("sample_HE_mask.tif"))
-        assert StainedImage(file, "mask", "HE").name == "HE_mask"
-        assert GridImage(file, "mask").name == "mask"
-        assert DistanceMask(file, "HE", 25).name == "HE_distance_mask_25"
-
-
-class TestIsMask:
-    """Mask roles, including the expression tissue cut, are read as labels."""
-
-    def test_roles(self) -> None:
-        file = ArtifactFile(Path("sample_HE_regist.tif"))
-        assert not StainedImage(file, "registered", "HE").is_mask
-        assert StainedImage(file, "mask", "HE").is_mask
-        assert StainedImage(file, "tissue_cut", "HE").is_mask
-        assert not GridImage(file, "registered").is_mask
-        assert not GridImage(file, "expression").is_mask
-        assert GridImage(file, "mask").is_mask
-        assert GridImage(ArtifactFile(Path("bin1_img_tissue_cut.tif")), "tissue_cut").is_mask
-        assert DistanceMask(file, "HE", 25).is_mask

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from numpy.testing import assert_array_equal
+from scipy import sparse
 from scipy.sparse import csr_array
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -448,3 +449,110 @@ class TestValidateAnalysisTable:
 
         with pytest.raises(ReaderFormatError, match="pandas observation"):
             _schemas.validate_analysis_table(table, ArtifactFile(Path("analysis.h5ad")))
+
+
+class TestValidateAnalysisSparse:
+    """Compressed analysis checks preserve source storage and exact integer sums."""
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize("legacy", [False, True])
+    @pytest.mark.parametrize(
+        ("dtype", "values", "fits"),
+        [
+            ("uint8", (200, 100), False),
+            ("uint8", (200, 55), True),
+            ("int8", (100, 100), False),
+            ("int8", (-100, -100), False),
+            ("int8", (127, 127, -127), True),
+            ("int8", (-128, -128, 127, 1), True),
+            ("int16", (100, 100), True),
+            ("uint32", (2**32 - 1, 1), False),
+            ("int32", (-(2**31), -1), False),
+            ("uint64", (2**64 - 1, 1), False),
+            ("uint64", (2**64 - 2, 1), True),
+            ("int64", (2**63 - 1, 1), False),
+            ("int64", (-(2**63), -1), False),
+            ("int64", (2**63 - 1, 2**63 - 1, -(2**63 - 1)), True),
+        ],
+    )
+    def test_exact_final_sums_without_mutation(
+        self, storage: str, dtype: str, values: tuple[int, ...], *, legacy: bool, fits: bool
+    ) -> None:
+        if storage == "csr":
+            constructor = sparse.csr_matrix if legacy else sparse.csr_array
+        else:
+            constructor = sparse.csc_matrix if legacy else sparse.csc_array
+        matrix = constructor(
+            (
+                np.array([*values, 22], dtype=dtype),
+                np.array([0] * len(values) + [1]),
+                np.array([0, len(values), len(values) + 1]),
+            ),
+            shape=(2, 2),
+        )
+        original = tuple(buffer.copy() for buffer in (matrix.data, matrix.indices, matrix.indptr))
+        path = ArtifactFile(Path("analysis.h5ad"))
+        limits = np.iinfo(dtype)
+        assert (limits.min <= sum(values) <= limits.max) == fits
+        if fits:
+            _schemas._validate_analysis_sparse(matrix, path, "X")
+        else:
+            with pytest.raises(ReaderFormatError, match=r"duplicate.*sum") as caught:
+                _schemas._validate_analysis_sparse(matrix, path, "X")
+            assert "analysis.h5ad" in str(caught.value)
+            assert dtype in str(caught.value)
+        for actual, expected in zip((matrix.data, matrix.indices, matrix.indptr), original, strict=True):
+            assert_array_equal(actual, expected, strict=True)
+
+    @pytest.mark.parametrize("dtype", ["int8", "uint8", "int64", "uint64"])
+    def test_canonical_extrema_reuse_the_owned_buffers(self, dtype: str) -> None:
+        limits = np.iinfo(dtype)
+        matrix = sparse.csr_array(
+            (np.array([limits.min, limits.max], dtype=dtype), np.array([0, 1]), np.array([0, 1, 2])), shape=(2, 2)
+        )
+        original = (matrix.data, matrix.indices, matrix.indptr)
+        _schemas._validate_analysis_sparse(matrix, ArtifactFile(Path("analysis.h5ad")), "X")
+        assert all(
+            actual is expected
+            for actual, expected in zip((matrix.data, matrix.indices, matrix.indptr), original, strict=True)
+        )
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    def test_unsorted_unique_entries_and_separate_spans_are_not_added(self, storage: str) -> None:
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        matrix = constructor(
+            (np.array([200, 200, 200], dtype=np.uint8), np.array([1, 0, 0]), np.array([0, 2, 3])), shape=(2, 2)
+        )
+        _schemas._validate_analysis_sparse(matrix, ArtifactFile(Path("analysis.h5ad")), "layers/counts")
+        assert_array_equal(matrix.data, [200, 200, 200])
+        assert_array_equal(matrix.indices, [1, 0, 0])
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    def test_empty_spans_zeros_and_floating_input(self, storage: str) -> None:
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        for dtype in (np.int16, np.float32, np.bool_):
+            matrix = constructor(
+                (np.array([0, 2, 4], dtype=dtype), np.array([2, 1, 1]), np.array([0, 0, 3, 3])), shape=(3, 3)
+            )
+            _schemas._validate_analysis_sparse(matrix, ArtifactFile(Path("analysis.h5ad")), "layers/counts")
+            assert matrix.nnz == 3
+        _schemas._validate_analysis_sparse(constructor((0, 0)), ArtifactFile(Path("analysis.h5ad")), "X")
+
+    def test_structural_failure_has_artifact_and_slot_context(self) -> None:
+        matrix = sparse.csr_array(np.eye(2, dtype=np.int16))
+        matrix.indices[0] = 2
+        with pytest.raises(ReaderFormatError, match="layers/counts") as caught:
+            _schemas._validate_analysis_sparse(matrix, ArtifactFile(Path("analysis.h5ad")), "layers/counts")
+        assert "analysis.h5ad" in str(caught.value)
+        assert caught.value.__cause__ is not None
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    def test_wide_sparse_input_is_never_densified(self, storage: str, mocker: MockerFixture) -> None:
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        matrix = constructor(
+            (np.ones(20_000, dtype=np.uint16), np.full(20_000, 5), np.arange(0, 20_001, 2)),
+            shape=(10_000, 10_000),
+        )
+        mocker.patch.object(constructor, "toarray", side_effect=AssertionError("Expression must remain sparse"))
+        _schemas._validate_analysis_sparse(matrix, ArtifactFile(Path("analysis.h5ad")), "X")
+        assert matrix.nnz == 20_000

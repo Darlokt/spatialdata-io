@@ -93,6 +93,39 @@ class TestReadCells:
         assert isinstance(result.table.X, csr_array)
         assert result.table.X.has_canonical_format
 
+    @pytest.mark.parametrize("mutate_exon", [False, True])
+    def test_count_and_exon_storage_remain_independent_after_zero_elimination(
+        self, tmp_path: Path, *, mutate_exon: bool
+    ) -> None:
+        path = write_cell_gef(tmp_path / "s.gef")
+        with h5py.File(path, "a") as handle:
+            expression = handle["cellBin/cellExp"][:]
+            expression["count"] = [0, 22]
+            handle["cellBin/cellExp"][:] = expression
+            handle["cellBin/cellExpExon"][:] = [0, 6]
+
+        result = read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+        counts = result.table.X
+        exons = result.table.layers["exon"]
+        assert isinstance(counts, csr_array)
+        assert isinstance(exons, csr_array)
+        assert_array_equal(counts.data, [0, 22])
+        assert_array_equal(exons.data, [0, 6])
+        mutated, retained = (exons, counts) if mutate_exon else (counts, exons)
+        data = retained.data.copy()
+        indices = retained.indices.copy()
+        indptr = retained.indptr.copy()
+
+        mutated.eliminate_zeros()
+
+        assert mutated.nnz == 1
+        assert retained.nnz == 2
+        assert_array_equal(retained.data, data)
+        assert_array_equal(retained.indices, indices)
+        assert_array_equal(retained.indptr, indptr)
+        assert retained[0, 0] == 0
+        assert retained[1, 1] == (22 if mutate_exon else 6)
+
     @pytest.mark.parametrize(
         "failure", ["duplicate_ids", "bad_span", "trailing_records", "feature_bounds", "duplicates"]
     )

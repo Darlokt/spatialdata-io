@@ -101,6 +101,27 @@ assert isinstance(x, sparse.csr_array)
 assert sparse.issparse(x) and x.format == "csr"
 ```
 
+CSR and CSC arrays and matrices have their compressed buffers validated before
+conversion or canonicality shortcuts. `validate_compressed_sparse()` exposes
+the same read-only structural check when a reader must inspect compressed
+spans before final normalization. It checks one-dimensional NumPy buffers,
+integer indices/pointers safely representable by int64, equal data/index
+capacity, pointer length and initial zero, nondecreasing pointers, terminal
+extent, and active minor-axis bounds.
+Unsorted indices and duplicates are valid; reader-specific count and aggregate
+policies remain reader-owned.
+
+The validator preserves borrowed buffers and cached flags, does not call
+SciPy's mutating `check_format()`, and does not copy expression or construct a
+second matrix. Equal unused data/index capacity after the terminal pointer is
+valid; inactive indices are not inspected. Pointer comparisons and active-index
+scans use bounded workspace. Structural validation never trusts sorting or
+canonicality flags, which do not establish that external indices are in bounds.
+Signed and unsigned integer widths supported by SciPy, including nonnative byte
+order, remain valid. Unsigned 64-bit indices/pointers are rejected before
+canonicality inspection: SciPy's compressed kernels cannot safely dispatch that
+storage. Expression value dtypes are unaffected.
+
 ## Owned AnnData normalization
 
 Third-party readers such as `read_h5ad()` and Scanpy can return an in-memory
@@ -366,6 +387,8 @@ allocates no expression-sized validation array and performs no dataframe
 Canonical integer CSR arrays are reused. Canonical floating CSR arrays are also
 reused, but their mutable stored values are rescanned for finiteness because no
 trustworthy normalization marker is retained.
+Compressed structure is similarly revalidated on each public conversion call,
+including calls from owned-AnnData normalization and final linkage.
 
 ## Extending the package
 

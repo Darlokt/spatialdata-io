@@ -7,7 +7,11 @@ aggregation meaning, and SpatialData model construction.
 
 from __future__ import annotations
 
-from spatialdata_io.readers._utils.table._arrays import as_csr_array, csr_array_from_triplets
+from spatialdata_io.readers._utils.table._arrays import (
+    as_csr_array,
+    csr_array_from_triplets,
+    validate_compressed_sparse,
+)
 from spatialdata_io.readers._utils.table._compat import prepare_anndata_dataframe
 from spatialdata_io.readers._utils.table._linkage import TableLinkage, parse_linked_table
 from spatialdata_io.readers._utils.table._normalize import normalize_owned_anndata
@@ -19,4 +23,5 @@ __all__ = [
     "normalize_owned_anndata",
     "parse_linked_table",
     "prepare_anndata_dataframe",
+    "validate_compressed_sparse",
 ]

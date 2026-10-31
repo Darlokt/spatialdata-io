@@ -439,6 +439,10 @@ Only `X` and present `counts`, `log1p`, `exon` layers become CSR. Other
 layers and aligned mappings retain their storage. Final `region` and
 `instance_id` link to analysis points. Nonfinite expression fails during
 bounded final normalization with the H5AD path attached to the error.
+Compressed sparse pointers and indices are validated before duplicate
+reduction. Integer duplicates in `X` and the declared expression layers must
+have exact sums representable in their source dtype; unsafe sums fail with
+the H5AD path and expression slot. Safe duplicates retain the numerical dtype.
 
 ### Xenium
 
@@ -522,10 +526,12 @@ contract.
 Float32 cannot exactly represent every integer above 2²⁴. Scanpy's conversion
 may round large counts before the reader sees them; a later cast cannot recover
 them. HD nucleus output has the same final float32 limitation after guarded
-int64 accumulation. Generic SciPy duplicate summation of noncanonical narrow
-integer imported H5AD expression can overflow; DBiT, raw Stereo-seq and HD have
-their documented guards. No unrestricted exact-count guarantee is made for
-these imported or float32 paths.
+int64 accumulation. SciPy's dtype-preserving duplicate summation of noncanonical integer
+imported H5AD expression can overflow. DBiT and Stereo-seq analysis reject
+duplicate sums that cannot fit the preserved source dtype; raw Stereo-seq and
+HD retain their documented accumulation guards. Other imported-H5AD readers
+retain the general duplicate-overflow limitation. No unrestricted exact-count
+guarantee is made for those imported or float32 paths.
 
 Shared HDF5 validation checks nonnegative/integral entries retained by Scanpy
 before local duplicate reduction; filtering may remove unselected records.

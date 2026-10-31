@@ -46,6 +46,25 @@ def _assert_csr_unchanged(actual: sparse.csr_array, expected: sparse.csr_array) 
 class TestParseLinkedTable:
     """Compose linkage with the installed public TableModel parser."""
 
+    def test_rejects_malformed_expression_before_public_model_parsing(self) -> None:
+        expression = sparse.csr_array(np.eye(2, dtype=np.int16))
+        adata = _adata(["cells", "cells"], np.asarray([1, 2], dtype=np.int64), expression=expression)
+        expression.has_canonical_format = True
+        expression.indices[0] = 2
+
+        with pytest.raises(ValueError, match="active indices") as error:
+            parse_linked_table(
+                adata,
+                TableLinkage(("cells",), "region", "instance"),
+                context=_CONTEXT,
+                expected_instance_ids={"cells": pd.Index([1, 2])},
+            )
+
+        assert adata.X is expression
+        assert expression.indices[0] == 2
+        assert TableModel.ATTRS_KEY not in adata.uns
+        assert "while normalizing adata.X" in error.value.__notes__
+
     def test_single_region_normalizes_expression_and_layer(self) -> None:
         adata = _adata(
             ["cells", "cells"],

@@ -90,72 +90,21 @@ class AnalysisSource:
 
 
 @dataclass(frozen=True, slots=True)
-class StainedImage:
-    """An already registered stain and its derived image products."""
+class ImageSource:
+    """Hold one validated raster's output name and model kind."""
 
     file: ArtifactFile
-    role: Literal["registered", "mask", "tissue_cut"]
-    stain: str
-
-    @property
-    def name(self) -> str:
-        """Return the output name, independent of the sample selector."""
-        return f"{self.stain}_{self.role}"
-
-    @property
-    def is_mask(self) -> bool:
-        """Return whether the product is a mask, read as labels."""
-        return self.role != "registered"
-
-
-@dataclass(frozen=True, slots=True)
-class GridImage:
-    """An expression image, tissue mask, or historical raster without a stain name."""
-
-    file: ArtifactFile
-    role: Literal["registered", "mask", "tissue_cut", "expression"]
-
-    @property
-    def name(self) -> str:
-        """Return the distinct unstained product name."""
-        return "expression_tissue_cut" if self.file.name == "bin1_img_tissue_cut.tif" else self.role
-
-    @property
-    def is_mask(self) -> bool:
-        """Return whether the product is a mask, read as labels."""
-        return self.role in ("mask", "tissue_cut")
-
-
-@dataclass(frozen=True, slots=True)
-class DistanceMask:
-    """An expanded binary mask with its documented distance in pixels."""
-
-    file: ArtifactFile
-    stain: str
-    distance: int
-
-    @property
-    def name(self) -> str:
-        """Return a name retaining the expansion distance."""
-        return f"{self.stain}_distance_mask_{self.distance}"
-
-    @property
-    def is_mask(self) -> bool:
-        """Return ``True``: expanded masks are always read as labels."""
-        return True
-
-
-type ImageSource = StainedImage | GridImage | DistanceMask
+    name: str
+    kind: Literal["image", "labels"]
 
 
 @dataclass(frozen=True, slots=True)
 class StereoseqLayout:
-    """Carry selected paths only, with structural family separate from release."""
+    """Carry the selected validated artifacts and independent product choices."""
 
     root: DatasetRoot
-    family: Family
     sample_id: str | None
-    squares: tuple[SquareSource, ...]
+    square: SquareSource | None
     cells: tuple[CellSource, ...]
     analyses: tuple[AnalysisSource, ...]
     images: tuple[ImageSource, ...]
@@ -405,15 +354,15 @@ def _images(
         if stem and inferred != sample:
             continue
         file = require_metadata_file(root, path, context=ReaderErrorContext("stereoseq", role))
-        source: ImageSource
         if role == "distance_mask":
             if not stain:
                 raise _error(path, "distance mask without stain", "a documented stain/sample distance-mask name")
-            source = DistanceMask(file, stain, distance)
+            name = f"{stain}_distance_mask_{distance}"
         elif stain and role != "expression":
-            source = StainedImage(file, role, stain)
+            name = f"{stain}_{role}"
         else:
-            source = GridImage(file, role)
+            name = "expression_tissue_cut" if file.name == "bin1_img_tissue_cut.tif" else role
+        source = ImageSource(file, name, "image" if role in ("registered", "expression") else "labels")
         if source.name in selected:
             raise _error(path, f"duplicate image {source.name!r}", "one image per stain/role/distance")
         selected[source.name] = source
@@ -485,7 +434,7 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selec
 
     # Resolve only requested count populations; missing unselected products are
     # irrelevant to this invocation.
-    squares: tuple[SquareSource, ...] = ()
+    square: SquareSource | None = None
     if bins:
         file = _count_file(
             root,
@@ -496,7 +445,7 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selec
             artifact="square_counts_file",
             family=family,
         )
-        squares = (SquareSource(file, bins),)
+        square = SquareSource(file, bins)
 
     cells: list[CellSource] = []
     cell_choices: tuple[tuple[Literal["unadjusted", "adjusted"], ArtifactFile | None, str, str], ...] = (
@@ -512,6 +461,6 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selec
 
     images = _images(root, family, files, sample, image_roles)
     calibration = (
-        _calibration_sources(root, family, files, sample) if images and not (squares or cells or analyses) else ()
+        _calibration_sources(root, family, files, sample) if images and not (square or cells or analyses) else ()
     )
-    return StereoseqLayout(root, family, sample, squares, tuple(cells), analyses, images, calibration)
+    return StereoseqLayout(root, sample, square, tuple(cells), analyses, images, calibration)

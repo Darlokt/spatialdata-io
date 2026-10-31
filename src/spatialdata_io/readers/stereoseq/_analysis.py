@@ -34,8 +34,6 @@ class AnalysisResult:
     instance_ids: pd.Index
     name: str
     population: str
-    sample_id: str
-    origin: tuple[int, int] | None
     resolution: int
 
 
@@ -83,7 +81,6 @@ def read_analysis(source: AnalysisSource, *, counts: Mapping[str, SquareCounts |
 
     population_name = _population_name(source, schema)
     matching = counts.get(population_name)
-    origin: tuple[int, int] | None = None
     physical_resolution = schema.resolution
     if matching is not None:
         _match_counts(table, schema, matching, source)
@@ -95,7 +92,6 @@ def read_analysis(source: AnalysisSource, *, counts: Mapping[str, SquareCounts |
                 f"matching GEF pitch {matching.resolution} nm",
             )
         physical_resolution = matching.resolution
-        origin = matching.origin
 
     if physical_resolution is None:
         raise _schemas.format_error(
@@ -118,8 +114,6 @@ def read_analysis(source: AnalysisSource, *, counts: Mapping[str, SquareCounts |
         instance_ids=table.obs_names.copy(),
         name=analysis_name,
         population=population_name,
-        sample_id=source.sample_id,
-        origin=origin,
         resolution=physical_resolution,
     )
 

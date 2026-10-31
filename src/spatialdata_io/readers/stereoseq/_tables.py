@@ -10,6 +10,7 @@ import pandas as pd
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
+from spatialdata_io.readers.stereoseq._schemas import EXPRESSION_LAYERS
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -89,6 +90,6 @@ def link_table(table: ad.AnnData, target: str, index: pd.Index) -> ad.AnnData:
         table,
         TableLinkage((target,), "region", "instance_id"),
         context=context,
-        expression_layers=tuple(name for name in ("exon", "counts", "log1p") if name in table.layers),
+        expression_layers=tuple(name for name in EXPRESSION_LAYERS if name in table.layers),
         expected_instance_ids={target: index},
     )
