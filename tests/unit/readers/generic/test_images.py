@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, cast
 import dask.array as da
 import numpy as np
 import pytest
+import tifffile
 
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import LazyRaster
 from spatialdata_io.readers.generic import image
 
@@ -21,6 +23,39 @@ if TYPE_CHECKING:
 
 class TestImage:
     """Validate axes, dispatch, chunks, and lazy model construction."""
+
+    @pytest.mark.parametrize("coordinate_system", ["", " ", "\t\n"])
+    def test_rejects_blank_coordinate_system_before_reading(self, coordinate_system: str) -> None:
+        with pytest.raises(ValueError, match="coordinate_system"):
+            image("missing.tif", "yx", coordinate_system)
+
+    @pytest.mark.parametrize("coordinate_system", [None, 3])
+    def test_rejects_nonstring_coordinate_system_before_reading(self, coordinate_system: object) -> None:
+        with pytest.raises(TypeError, match="coordinate_system"):
+            image("missing.tif", "yx", cast("str", coordinate_system))
+
+    def test_rejects_ome_spatial_dimension_disagreeing_with_base_raster(self, tmp_path: Path) -> None:
+        path = tmp_path / "contradictory.ome.tif"
+        tifffile.imwrite(
+            path,
+            np.zeros((16, 24), dtype=np.uint16),
+            photometric="minisblack",
+            metadata={"axes": "YX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 2.0},
+        )
+        description = tifffile.tiffcomment(path)
+        assert isinstance(description, str)
+        tifffile.tiffcomment(path, description.replace('SizeX="24"', 'SizeX="25"'))
+
+        # tifffile falls back to the real raster shape; Generic owns rejecting
+        # the resulting contradiction with the still-declared OME dimensions.
+        with pytest.raises(ReaderFormatError) as error:
+            image(path, "yx", "sample")
+
+        assert error.value.context.reader == "generic"
+        assert error.value.context.artifact == "OME calibration"
+        assert error.value.path == path
+        assert error.value.found == "OME X dimension 25 disagrees with its base raster"
+        assert error.value.expected == "matching source and OME spatial dimensions"
 
     @pytest.mark.parametrize(
         ("source_axes", "shape", "expected_dims", "expected_shape"),

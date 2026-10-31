@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,8 +81,33 @@ class TestCliAlignment:
             assert command[name].default == default
 
 
+@pytest.mark.generic
 class TestGenericCommandContract:
     """Check the fully migrated Generic command boundary."""
+
+    def test_reader_cli_conjunction_collects_command_and_workflow_tests(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "--no-cov",
+                "-q",
+                "-m",
+                "generic and cli",
+                "tests/unit/cli/commands/test_generic.py",
+                "tests/integration/readers/generic",
+            ],
+            cwd=Path(__file__).parents[3],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert "TestGenericCommand::test_forwards_options_and_reports_new_output" in completed.stdout
+        assert "TestReadGenericWrapper::test_writes_selected_tiff_series" in completed.stdout
+        assert "TestImage::" not in completed.stdout
 
     def test_uses_typed_paths_and_exact_chunk_cardinality(self) -> None:
         options = {parameter.name: parameter for parameter in generic_command.params}

@@ -69,7 +69,12 @@ if TYPE_CHECKING:
         "one channel and one plane per chunk."
     ),
 )
-@click.option("--coordinate-system", "-c", type=str, help="Target coordinate system.")
+@click.option(
+    "--coordinate-system",
+    "-c",
+    type=str,
+    help="Frame name containing a non-whitespace character; required when appending. No registration is inferred.",
+)
 @click.option(
     "--invalid-geometries",
     type=click.Choice(["keep", "drop", "raise"]),

@@ -69,7 +69,8 @@ def geojson(
     path
         GeoJSON file containing polygons or multipolygons.
     coordinate_system
-        Source coordinate system receiving an identity transformation. Units
+        Source frame name containing a non-whitespace character, preserved
+        literally and receiving an identity transformation. Units
         are those of the input; geographic coordinates are not reprojected.
     invalid_geometries
         Keep invalid topology unchanged, drop entire invalid features, or
@@ -86,6 +87,8 @@ def geojson(
 
     Raises
     ------
+    TypeError
+        The frame name is not a string.
     ValueError
         Options, document structure or geometry violate the supported contract.
     OSError
@@ -99,6 +102,13 @@ def geojson(
     geometry is closed, rounded or repaired. A single geometry
     or Feature document is unsupported. No caller-owned object is mutated.
     """
+    if not isinstance(coordinate_system, str):
+        message = "coordinate_system must be a string."
+        raise TypeError(message)
+    if not coordinate_system.strip():
+        message = "coordinate_system must contain a non-whitespace character."
+        raise ValueError(message)
+
     policy = validate_invalid_geometry_policy(invalid_geometries)
     source_path = Path(path)
     try:

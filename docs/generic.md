@@ -38,8 +38,11 @@ cannot represent exactly. Open rings are rejected, never closed or repaired;
 coordinates are never rounded. Dropping every feature also fails. Nondefault polygon policies are
 invalid for image inputs.
 
-The default frame name for a new element is `global`. A name does not prove
-registration: calibrated images use micrometres while GeoJSON may use pixels
+`generic()` defaults to the frame `global` when `coordinate_system` is omitted
+or `None`; `image()` and `geojson()` require an explicit name. Explicit names
+must be strings containing at least one non-whitespace character; accepted
+names are preserved literally. A name does not prove registration: calibrated
+images use micrometres while GeoJSON may use pixels
 or other units. Appending with `generic_to_zarr()` therefore requires an
 explicit `coordinate_system`, including when called through the CLI. Choose
 a distinct frame for unrelated coordinates; choosing a shared name asserts

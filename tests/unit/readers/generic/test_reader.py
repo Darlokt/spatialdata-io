@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -10,12 +10,29 @@ from spatialdata_io.readers.generic._reader import generic
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from typing import Literal
 
     from pytest_mock import MockerFixture
 
 
 class TestGeneric:
     """Validate format routing and option ownership."""
+
+    @pytest.mark.parametrize("coordinate_system", ["", " ", "\t\n"])
+    def test_rejects_blank_frame_before_io(self, tmp_path: Path, coordinate_system: str) -> None:
+        with pytest.raises(ValueError, match="coordinate_system"):
+            generic(tmp_path / "missing.tif", data_axes="yx", coordinate_system=coordinate_system)
+
+    def test_rejects_nonstring_frame_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="coordinate_system"):
+            generic(tmp_path / "missing.tif", data_axes="yx", coordinate_system=cast("str", 1))
+
+    @pytest.mark.parametrize("policy", ["drop", "raise"])
+    def test_rejects_polygon_policy_for_images_before_io(
+        self, tmp_path: Path, policy: Literal["drop", "raise"]
+    ) -> None:
+        with pytest.raises(ValueError, match="only applicable to GeoJSON"):
+            generic(tmp_path / "missing.tif", data_axes="yx", invalid_geometries=policy)
 
     def test_routes_images_with_normalized_defaults(
         self,

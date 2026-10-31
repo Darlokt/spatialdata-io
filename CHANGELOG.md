@@ -49,9 +49,9 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 - Reimplemented the existing generic reader as a package over the centralized
   lazy raster utilities. Its Python source argument is now `path`, image options
   are keyword-only, custom chunks can be passed through every generic image
-  entry point, and the default requested chunk size is 1024 on the spatial axes
-  only. Channel and depth axes retain their source chunks unless the caller
-  explicitly describes them.
+  entry point. Requested default chunks are `(1, 1024, 1024)` for CYX and
+  `(1, 1, 1024, 1024)` for CZYX: one channel and one plane per chunk with
+  1024-pixel Y/X tiles. Source decoding still follows native tiles or strips.
 - Generic GeoJSON inputs now reject image-only options instead of warning and
   ignoring them. `generic_to_zarr()` no longer writes status messages to
   standard output; the CLI continues to report successful writes.
@@ -71,6 +71,9 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Fixed
 
+- Generic readers and conversion reject empty or whitespace-only coordinate
+  frame names before reading sources or stores. Only `None` selects the
+  default `global` frame; appending still requires an explicit frame name.
 - CODEX defensively rejects physical coordinate conversion that rounds a nonzero
   native value to zero under an exceptionally small calibration scale.
 - CODEX documentation now describes integer-preserving CSV expression and native

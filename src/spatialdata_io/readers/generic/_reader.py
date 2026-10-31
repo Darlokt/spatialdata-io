@@ -18,8 +18,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers.generic._images import Chunks
 
-_DEFAULT_COORDINATE_SYSTEM = "global"
-
 
 # Explicit public options keep format and model contracts inspectable.
 def generic(  # noqa: PLR0913, RUF100
@@ -47,7 +45,9 @@ def generic(  # noqa: PLR0913, RUF100
     data_axes
         Explicit image axes. Required for images and invalid for GeoJSON.
     coordinate_system
-        Coordinate system for the returned element. Defaults to ``"global"``.
+        Coordinate system for the returned element. ``None`` selects
+        ``"global"``. Explicit names must contain a non-whitespace character
+        and are preserved literally.
         Images use micrometres under complete applicable OME calibration,
         otherwise pixels. GeoJSON retains source units without reprojection.
     tiff_series
@@ -78,13 +78,21 @@ def generic(  # noqa: PLR0913, RUF100
     Raises
     ------
     TypeError
-        If image scale factors or chunk sizes are not integers.
+        If a frame name is not a string, or image scale factors or chunk sizes
+        are not integers.
     ValueError
-        If the suffix or format-specific arguments are invalid.
+        If the frame name is blank, or the suffix or format-specific arguments are invalid.
     """
+    target_coordinate_system = "global" if coordinate_system is None else coordinate_system
+    if not isinstance(target_coordinate_system, str):
+        message = "coordinate_system must be a string or None."
+        raise TypeError(message)
+    if not target_coordinate_system.strip():
+        message = "coordinate_system must contain a non-whitespace character."
+        raise ValueError(message)
+
     normalized_path = Path(path)
     suffix = normalized_path.suffix.lower()
-    target_coordinate_system = coordinate_system or _DEFAULT_COORDINATE_SYSTEM
 
     if suffix in VALID_SHAPE_TYPES:
         if data_axes is not None:

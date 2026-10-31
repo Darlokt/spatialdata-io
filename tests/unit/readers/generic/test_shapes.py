@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -25,6 +25,16 @@ if TYPE_CHECKING:
 
 class TestGeojson:
     """Validate the shape-model boundary."""
+
+    @pytest.mark.parametrize("coordinate_system", ["", " ", "\t\n"])
+    def test_rejects_blank_frame_before_io(self, tmp_path: Path, coordinate_system: str) -> None:
+        with pytest.raises(ValueError, match="coordinate_system"):
+            geojson(tmp_path / "missing.geojson", coordinate_system)
+
+    @pytest.mark.parametrize("coordinate_system", [None, 1])
+    def test_rejects_nonstring_frame_before_io(self, tmp_path: Path, coordinate_system: object) -> None:
+        with pytest.raises(TypeError, match="coordinate_system"):
+            geojson(tmp_path / "missing.geojson", cast("str", coordinate_system))
 
     def test_parses_path_with_owned_transformation(
         self,
@@ -76,6 +86,18 @@ class TestGeojson:
         assert result.index.tolist() == ([0, 2] if policy == "drop" else [0, 1, 2])
         if policy == "keep":
             assert shapely.equals_exact(result.geometry.iloc[1], invalid, 0)
+
+    @pytest.mark.parametrize("policy", ["drop", "raise"])
+    def test_valid_features_retain_geometry_and_identity(
+        self, tmp_path: Path, policy: Literal["drop", "raise"]
+    ) -> None:
+        source = [Polygon([(0, 0), (2, 0), (0, 2)]), Polygon([(3, 0), (5, 0), (3, 2)])]
+        path = write_geojson(tmp_path / "shapes.geojson", source)
+
+        result = geojson(path, "source", invalid_geometries=policy)
+
+        assert result.index.tolist() == [0, 1]
+        assert shapely.equals_exact(result.geometry, source, 0).all()
 
     @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
     @pytest.mark.parametrize(

@@ -6,14 +6,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
-from spatialdata._docs import docstring_parameter
 
 from spatialdata_io.readers._utils.image import DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers.generic import (
-    VALID_IMAGE_TYPES,
-    VALID_SHAPE_TYPES,
-    generic,
-)
+from spatialdata_io.readers.generic import generic
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,10 +18,6 @@ if TYPE_CHECKING:
 __all__ = ["generic_to_zarr"]
 
 
-@docstring_parameter(
-    valid_image_types=", ".join(VALID_IMAGE_TYPES),
-    valid_shape_types=", ".join(VALID_SHAPE_TYPES),
-)
 # Explicit public options mirror the reader and CLI without an opaque options mapping.
 def generic_to_zarr(  # noqa: PLR0913, RUF100
     path: str | Path,
@@ -46,8 +37,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     Parameters
     ----------
     path
-        Image or GeoJSON input. Supported image extensions are
-        {valid_image_types}; supported shape extensions are {valid_shape_types}.
+        Image or GeoJSON input supported by :func:`generic`.
     output
         Destination SpatialData Zarr store. A missing store is created and an
         existing store receives one new element.
@@ -56,9 +46,10 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     data_axes
         Explicit image axes. Required for images and invalid for GeoJSON.
     coordinate_system
-        Target frame name, defaulting to ``"global"`` for a new store. An
-        explicit name is required when appending: it asserts the intended
-        correspondence to an existing frame, or names a separate frame.
+        Target frame name. ``None`` selects ``"global"`` for a new store.
+        Explicit names must contain a non-whitespace character and are
+        preserved literally. A name is required when appending: it asserts
+        the intended correspondence to an existing frame, or names a separate frame.
         Calibrated images use micrometres; GeoJSON retains source units.
         Naming a shared frame does not convert or register GeoJSON coordinates.
     tiff_series
@@ -81,7 +72,8 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     Raises
     ------
     TypeError
-        If image scale factors or chunk sizes are not integers.
+        If a frame name is not a string, or image scale factors or chunk sizes
+        are not integers.
     ValueError
         If the input options are invalid or ``name`` already exists.
 
@@ -90,6 +82,14 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     The function writes no status text to standard output. CLI presentation is
     owned by the command wrapper.
     """
+    if coordinate_system is not None:
+        if not isinstance(coordinate_system, str):
+            message = "coordinate_system must be a string or None."
+            raise TypeError(message)
+        if not coordinate_system.strip():
+            message = "coordinate_system must contain a non-whitespace character."
+            raise ValueError(message)
+
     input_path = Path(path)
     output_path = Path(output)
     element_name = input_path.stem if name is None else name

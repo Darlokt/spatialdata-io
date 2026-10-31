@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+@pytest.mark.generic
 class TestGenericCommand:
     """Verify Click conversion to the Generic converter contract."""
 

@@ -45,22 +45,21 @@ _IMAGE_3D_GRAYSCALE_AXES = frozenset(("x", "y", "z"))
 
 
 def _physical_transform(
-    raster: LazyRaster, metadata: TiffMetadata | None, axes: Sequence[str], *, series: int, level: int
+    raster: LazyRaster, metadata: TiffMetadata | None, axes: tuple[str, ...], *, series: int, level: int
 ) -> Identity | Scale:
     """Calibrate retained spatial axes from complete level-zero OME sizes, otherwise keep pixels."""
     if level != 0 or metadata is None or metadata.ome is None:
         return Identity()
     # An explicit reinterpretation of spatial axes breaks their OME association.
     declared = tuple(axis.lower() for axis in raster.axes)
-    interpreted = tuple(axis.lower() for axis in axes)
     if tuple(axis if axis in "xyz" else "" for axis in declared) != tuple(
-        axis if axis in "xyz" else "" for axis in interpreted
+        axis if axis in "xyz" else "" for axis in axes
     ):
         return Identity()
 
     pixels = metadata.ome.images[series].pixels
     dimensions = {"x": pixels.size_x, "y": pixels.size_y, "z": pixels.size_z}
-    spatial_axes: tuple[Literal["x", "y", "z"], ...] = tuple(axis for axis in ("x", "y", "z") if axis in interpreted)
+    spatial_axes: tuple[Literal["x", "y", "z"], ...] = tuple(axis for axis in ("x", "y", "z") if axis in axes)
     context = ReaderErrorContext("generic", "OME calibration")
     for axis in spatial_axes:
         if dimensions[axis] != raster.data.shape[declared.index(axis)]:
@@ -77,13 +76,12 @@ def _physical_transform(
     return Scale(sizes, axes=spatial_axes) if len(sizes) == len(spatial_axes) else Identity()
 
 
-def _canonical_axes(data_axes: Sequence[str]) -> tuple[str, ...]:
-    axes = tuple(axis.lower() for axis in data_axes)
+def _canonical_axes(axes: tuple[str, ...]) -> tuple[str, ...]:
     if any(len(axis) != 1 or not axis.isalpha() for axis in axes):
-        message = f"Invalid data_axes {tuple(data_axes)!r}. Expected single alphabetic names."
+        message = f"Invalid data_axes {axes!r}. Expected single alphabetic names."
         raise ValueError(message)
     if len(set(axes)) != len(axes):
-        message = f"data_axes contains duplicate axes: {tuple(data_axes)!r}."
+        message = f"data_axes contains duplicate axes: {axes!r}."
         raise ValueError(message)
 
     axis_set = frozenset(axes)
@@ -105,16 +103,12 @@ def _validate_tiff_selection(tiff_series: int, tiff_level: int) -> None:
         raise ValueError(message)
 
 
-def _default_chunks(axes: tuple[str, ...]) -> dict[str, int]:
-    # One channel and, for volumes, one plane per chunk with the shared y/x tiles.
-    channel, tile_y, tile_x = DEFAULT_CHUNKS
-    sizes = {"c": channel, "z": 1, "y": tile_y, "x": tile_x}
-    return {axis: sizes[axis] for axis in axes}
-
-
 def _normalize_chunks(chunks: Chunks | None, *, axes: tuple[str, ...]) -> dict[str, int]:
     if chunks is None:
-        return _default_chunks(axes)
+        # One channel and, for volumes, one plane with the shared y/x tiles.
+        channel, tile_y, tile_x = DEFAULT_CHUNKS
+        defaults = {"c": channel, "z": 1, "y": tile_y, "x": tile_x}
+        return {axis: defaults[axis] for axis in axes}
 
     sizes: tuple[object, ...]
     if isinstance(chunks, Mapping):
@@ -191,7 +185,8 @@ def image(  # noqa: PLR0913, RUF100
     data_axes
         Explicit axes of the decoded source array.
     coordinate_system
-        Target frame name. Complete level-zero OME calibration maps retained
+        Target frame name containing a non-whitespace character, preserved
+        literally. Complete level-zero OME calibration maps retained
         spatial axes into micrometres; otherwise coordinates remain pixels.
         Sizes in µm, nm and mm are supported. No stage origin is inferred.
         Explicitly reinterpreted spatial axes, incomplete calibration and
@@ -221,19 +216,27 @@ def image(  # noqa: PLR0913, RUF100
     Raises
     ------
     TypeError
-        If scale factors or chunk sizes are not integers, including irregular
-        per-axis partitions and ``None`` sizes.
+        If the frame name is not a string, or scale factors or chunk sizes are
+        not integers, including irregular per-axis partitions and ``None`` sizes.
     ValueError
-        If axes, TIFF selection, scale factors, chunks, or the suffix are
-        invalid.
+        If the frame name is blank, or axes, TIFF selection, scale factors,
+        chunks, or the suffix are invalid.
 
     Notes
     -----
     This function does not mutate caller-owned mappings or arrays. TIFF
     metadata inspection is eager and bounded. Raster pixel decoding is lazy.
     """
+    if not isinstance(coordinate_system, str):
+        message = "coordinate_system must be a string."
+        raise TypeError(message)
+    if not coordinate_system.strip():
+        message = "coordinate_system must contain a non-whitespace character."
+        raise ValueError(message)
+
     _validate_tiff_selection(tiff_series, tiff_level)
-    target_axes = _canonical_axes(data_axes)
+    source_axes = tuple(axis.lower() for axis in data_axes)
+    target_axes = _canonical_axes(source_axes)
     chunks_by_axis = _normalize_chunks(chunks, axes=target_axes)
     # Generic chunks are axis-aware and validated above; the shared options own the factors.
     model_scale_factors = make_raster_options(scale_factors).model_scale_factors
@@ -241,9 +244,9 @@ def image(  # noqa: PLR0913, RUF100
     raster, metadata = _read_raster(Path(path), tiff_series=tiff_series, tiff_level=tiff_level)
     normalized = normalize_raster_axes(
         raster.data,
-        data_axes,
+        source_axes,
         target_axes=target_axes,
-        add_missing=("c",) if "c" not in {axis.lower() for axis in data_axes} else (),
+        add_missing=("c",) if "c" not in source_axes else (),
     )
 
     # Model chunking rechunks the lazy source graph without decoding pixels here.
@@ -252,7 +255,7 @@ def image(  # noqa: PLR0913, RUF100
         normalized,
         dims=target_axes,
         transformations={
-            coordinate_system: _physical_transform(raster, metadata, data_axes, series=tiff_series, level=tiff_level)
+            coordinate_system: _physical_transform(raster, metadata, source_axes, series=tiff_series, level=tiff_level)
         },
         scale_factors=model_scale_factors,
         chunks=chunks_by_axis,
