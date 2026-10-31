@@ -8,6 +8,7 @@ import anndata as ad
 import h5py
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 import shapely
 from anndata.tests.helpers import assert_equal
@@ -34,8 +35,8 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from spatialdata import SpatialData
 
-PROFILES = [fx.XOA_1_0, fx.XOA_1_3, fx.XOA_1_9, fx.XOA_2_0, fx.XOA_3_0, fx.XOA_4_0, fx.FORMAT_6_1]
-PROFILE_IDS = ["xoa-1.0", "xoa-1.3", "xoa-1.9", "xoa-2.0", "xoa-3.0", "xoa-4.0", "format-6.1"]
+PROFILES = [fx.XOA_1_0, fx.XOA_1_2, fx.XOA_1_3, fx.XOA_1_9, fx.XOA_2_0, fx.XOA_3_0, fx.XOA_4_0, fx.FORMAT_6_1]
+PROFILE_IDS = ["xoa-1.0", "xoa-1.2", "xoa-1.3", "xoa-1.9", "xoa-2.0", "xoa-3.0", "xoa-4.0", "format-6.1"]
 DEFAULT_TYPES = ("Gene Expression", "Protein Expression")
 HALF = fx.PIXEL_SIZE / 2
 STORE_COLUMNS = ("label_id", "nucleus_centroid_x", "nucleus_centroid_y")
@@ -174,6 +175,16 @@ class TestXenium:
         assert experiment["pixel_size"] == fx.PIXEL_SIZE
         assert "images" not in experiment
         assert "xenium_explorer_files" not in experiment
+
+    @pytest.mark.parametrize("profile", [fx.XOA_1_2, fx.XOA_4_0], ids=["integer", "protein"])
+    def test_source_feature_annotations(self, tmp_path: Path, profile: fx.Profile) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+        table = xenium(bundle.root).tables["table"]
+
+        selected = [i for i, kind in enumerate(bundle.feature_types) if kind in DEFAULT_TYPES]
+        assert table.var["genome"].tolist() == ["Unknown"] * len(selected)
+        assert table.var["probe_annotation"].tolist() == [f"panel-{i}" for i in selected]
+        np.testing.assert_array_equal(table.var["is_target"], np.asarray(selected) % 2 == 0)
 
     @pytest.mark.parametrize("profile", PROFILES, ids=PROFILE_IDS)
     def test_registered_vertices_fall_on_their_mask_pixels(self, tmp_path: Path, profile: fx.Profile) -> None:
@@ -355,6 +366,18 @@ class TestXenium:
         assert not _array(result.labels["nucleus_labels"]).data.compute().any()
         assert result.tables["table"].obs["nucleus_count"].tolist() == [0, 0, 0, 0]
 
+    def test_empty_nucleus_set_rejects_nonempty_boundaries(self, tmp_path: Path) -> None:
+        imported = fx.write_xenium_bundle(tmp_path / "imported", fx.XOA_3_0, fx.Options(import_kind="cells_only"))
+        normal = fx.write_xenium_bundle(tmp_path / "normal", fx.XOA_3_0)
+        pq.write_table(
+            pq.read_table(normal.root / "nucleus_boundaries.parquet"), imported.root / "nucleus_boundaries.parquet"
+        )
+
+        with pytest.raises(ReaderFormatError, match="owned by other cells") as error:
+            xenium(imported.root)
+        assert error.value.context.reader == "xenium"
+        assert error.value.context.artifact == "nucleus boundaries"
+
     @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_1_9, fx.XOA_3_0], ids=["integer", "hex", "polygon-sets"])
     def test_stripped_deposit_equals_the_full_bundle(self, tmp_path: Path, profile: fx.Profile) -> None:
         stripped = fx.write_xenium_bundle(
@@ -456,19 +479,22 @@ class TestXenium:
         np.testing.assert_array_equal(labels["scale0"]["image"].data.compute(), bundle.cell_mask)
 
     @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
-    def test_position_description_and_values_survive_table_storage(self, tmp_path: Path, storage: str) -> None:
+    def test_annotations_and_positions_survive_table_storage(self, tmp_path: Path, storage: str) -> None:
         bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_4_0)
         result = xenium(bundle.root, include_transcripts=False)
         table = result.tables["table"]
         destination = tmp_path / f"table.{storage}"
+        # Disable AnnData's optional categorical conversion to check exact source
+        # dtypes and nullable panel strings as well as values and missingness.
         if storage == "h5ad":
-            table.write_h5ad(destination)
+            table.write_h5ad(destination, convert_strings_to_categoricals=False)
             restored = ad.read_h5ad(destination)
         else:
-            table.write_zarr(destination)
+            table.write_zarr(destination, convert_strings_to_categoricals=False)
             restored = ad.read_zarr(destination)
         assert_equal(restored.uns["spatialdata_io_positions"], table.uns["spatialdata_io_positions"], exact=True)
         assert_equal(restored.obsm["spatial"], table.obsm["spatial"], exact=True)
+        assert_equal(restored.var, table.var, exact=True)
         assert get_table_keys(restored) == get_table_keys(table)
 
     def test_zarr_round_trip_through_the_cli(self, tmp_path: Path) -> None:
@@ -488,6 +514,12 @@ class TestXenium:
         assert len(restored.points["transcripts"]) == len(bundle.transcripts.x)
         assert restored.shapes["nucleus_boundaries"].index.tolist() == list(bundle.nucleus_labels)
         assert restored.attrs["xenium"]["protein"] == {"scaling_factor": 10, "metric": "MEAN_PER_CELL_STAIN"}
+        selected = [i for i, kind in enumerate(bundle.feature_types) if kind in DEFAULT_TYPES]
+        assert table.var["probe_annotation"].tolist() == [f"panel-{i}" for i in selected]
+        np.testing.assert_array_equal(table.var["is_target"], np.asarray(selected) % 2 == 0)
+        assert table.var["long_name"].tolist()[3:] == ["PD-1 protein", "VISTA protein"]
+        assert table.var["long_name"].isna().tolist() == [True, True, True, False, False]
+        assert table.var["codeword_index"].isna().tolist() == [True, True, True, False, False]
         translation = _transform(restored.shapes["cell_boundaries"])
         assert isinstance(translation, Translation)
         np.testing.assert_array_equal(translation.translation, [HALF, HALF])

@@ -16,6 +16,7 @@ import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
+from spatialdata_io.readers._utils.counts import read_10x_h5
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 from spatialdata_io.readers.xenium._cells import read_cells_store
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
     from spatialdata_io.readers.xenium._layout import TableTarget
+    from spatialdata_io.readers.xenium._tables import FeatureSelection
 
 PANEL = ProteinPanel(
     {"name": "panel"},
@@ -57,6 +59,60 @@ def _forbid_densification(mocker: MockerFixture) -> None:
 
 class TestReadCounts:
     """Counts keep source order, select feature types and scale protein exactly."""
+
+    @pytest.mark.parametrize("feature_types", [None, "all", ("Protein Expression", "Gene Expression")])
+    @pytest.mark.parametrize("panel", [None, PANEL], ids=["without-panel", "with-panel"])
+    def test_preserves_selected_feature_annotations(
+        self, tmp_path: Path, feature_types: FeatureSelection, panel: ProteinPanel | None
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"), gex_only=False)
+        source_var = cast("pd.DataFrame", source.var)
+        selected = (
+            np.ones(len(bundle.features), dtype=bool)
+            if feature_types == "all"
+            else np.isin(bundle.feature_types, ("Gene Expression", "Protein Expression"))
+        )
+
+        counts = read_counts(_h5(bundle), feature_types, panel)
+        var = cast("pd.DataFrame", counts.table.var)
+
+        pd.testing.assert_frame_equal(var[source_var.columns], source_var.loc[selected])
+        assert var["probe_annotation"].tolist() == [f"panel-{i}" for i in np.flatnonzero(selected)]
+        np.testing.assert_array_equal(var["is_target"], np.flatnonzero(selected) % 2 == 0)
+        expected = bundle.counts[:, selected].astype(np.float32)
+        proteins = np.asarray(bundle.feature_types)[selected] == "Protein Expression"
+        expected[:, proteins] /= np.float32(fx.PROTEIN_FACTOR)
+        np.testing.assert_array_equal(_dense(counts.table.X), expected)
+        assert list(var.columns[: len(source_var.columns)]) == list(source_var.columns)
+
+    def test_preserves_missing_annotations_from_the_count_boundary(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"), gex_only=False)
+        # The reader preserves the owned decoder result, including missing values;
+        # Scanpy currently stringifies nonboolean additional HDF5 feature tags.
+        source.var["score"] = np.asarray([0.5, np.nan, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+        expected = cast("pd.DataFrame", source.var).iloc[:3]
+        mocker.patch("spatialdata_io.readers.xenium._tables.read_10x_h5", return_value=source)
+
+        table = read_counts(_h5(bundle), None, None).table
+
+        pd.testing.assert_frame_equal(cast("pd.DataFrame", table.var), expected)
+
+    @pytest.mark.parametrize("column", ["long_name", "clone", "codeword_index"])
+    def test_panel_annotations_never_overwrite_source_columns(self, tmp_path: Path, column: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        values = np.asarray([f"source-{i}" for i in range(len(bundle.features))], dtype="S16")
+        with h5py.File(_h5(bundle).file, "r+") as handle:
+            handle["matrix/features"].create_dataset(column, data=values)
+
+        with pytest.raises(ReaderFormatError, match=f"reserved protein annotation columns.*{column}"):
+            read_counts(_h5(bundle), None, PANEL)
+
+        # These names are source annotations when no panel enrichment takes place.
+        np.testing.assert_array_equal(read_counts(_h5(bundle), "all", None).table.var[column], values.astype(np.str_))
+        genes = read_counts(_h5(bundle), ("Gene Expression",), PANEL).table
+        np.testing.assert_array_equal(genes.var[column], values[:3].astype(np.str_))
 
     def test_default_selects_gene_expression_and_protein(self, tmp_path: Path, mocker: MockerFixture) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
@@ -109,7 +165,12 @@ class TestReadCounts:
             table = read_counts(source, "all", None).table
             np.testing.assert_array_equal(_dense(table.X), _dense(reference.X))
             assert table.obs_names.equals(reference.obs_names)
-            assert cast("pd.DataFrame", table.var).equals(cast("pd.DataFrame", reference.var))
+            assert table.var_names.equals(reference.var_names)
+            common = ["gene_ids", "feature_types"]
+            pd.testing.assert_frame_equal(
+                cast("pd.DataFrame", table.var)[common], cast("pd.DataFrame", reference.var)[common]
+            )
+            assert "genome" not in table.var
 
     def test_protein_needs_the_h5_factor_and_metric(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0, fx.Options(counts=("h5", "mtx")))

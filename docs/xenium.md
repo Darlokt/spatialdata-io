@@ -83,7 +83,9 @@ Every element is in the `global` coordinate system in micrometres, with its orig
 
 MatrixMarket archives must contain exactly one of each required `cell_feature_matrix/{features,barcodes}.tsv.gz` and `cell_feature_matrix/matrix.mtx.gz`. Transcript-only reads extract the two metadata files without writing the matrix to temporary storage; traversing the compressed archive may still be necessary.
 
-`X` is an eager canonical CSR sparse array (float32 for official int32 HDF5 and MTX inputs) in the feature order of `cell_feature_matrix`. `feature_types=None` selects Gene Expression and, when present, Protein Expression; `"all"` keeps every feature type (negative controls, unassigned and deprecated codewords, genomic controls); a sequence selects exactly the named types, each of which must exist. Observation names are the matrix barcodes. `var` holds `gene_ids` and `feature_types`; protein features add `long_name`, `clone` and `codeword_index` from `protein_panel.json`.
+`X` is an eager canonical CSR sparse array (float32 for official int32 HDF5 and MTX inputs) in the feature order of `cell_feature_matrix`. `feature_types=None` selects Gene Expression and, when present, Protein Expression; `"all"` keeps every feature type (negative controls, unassigned and deprecated codewords, genomic controls); a sequence selects exactly the named types, each of which must exist. Observation names are the matrix barcodes. Source feature names must be unique; duplicates raise rather than being renamed. `var` retains all selected source feature annotations, including `gene_ids`, `feature_types`, and available HDF5 fields such as `genome`. MatrixMarket sources supply only their own feature annotations.
+
+Selected protein features add `long_name`, `clone` and `codeword_index` from `protein_panel.json`. If any of those columns already exists in the source, panel enrichment raises rather than overwriting it. Without panel enrichment, those source columns are retained unchanged.
 
 Float32 count storage retains its precision limits: integers above 2²⁴ may already have rounded in Scanpy. Negative and fractional entries retained by Scanpy fail before local duplicate summation. MatrixMarket inputs must declare integer coordinate records, but upstream parsing can truncate malformed tokens or sum invalid duplicates before returning; see [table numerical limits](table_contracts.md#persistence-ownership-and-numerical-limits). Alternate HDF5 dtypes follow Scanpy; protein division requires floating storage.
 
@@ -172,7 +174,7 @@ sdata.write("outs.zarr")
 ```
 
 ```bash
-spatialdata_io xenium --input outs --output outs.zarr --feature-types all --no-include-transcripts
+python -m spatialdata_io xenium --input outs --output outs.zarr --feature-types all --no-include-transcripts
 ```
 
 ## Changes from earlier releases

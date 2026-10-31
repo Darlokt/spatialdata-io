@@ -1,7 +1,7 @@
 """Materialize ``cells.zarr.zip`` identities, label mappings and summary columns.
 
-One ``ZipStore`` is opened, its small arrays are copied and validated, and it is
-closed on success and failure. Masks are described, not read.
+One ``ZipStore`` is opened, its small arrays are materialized and validated, and
+it is closed on success and failure. Masks are described, not read.
 
 Store layout by family (cells ``N``, polygons ``P_k`` in set ``k``)::
 
@@ -53,25 +53,18 @@ _TRANSFORM_RTOL = 4 * float(np.finfo(np.float32).eps)
 
 
 @dataclass(frozen=True, slots=True)
-class Nuclei:
-    """Nucleus mask labels and the row of the cell owning each nucleus."""
-
-    labels: NDArray[np.uint32]
-    cells: NDArray[np.int64]
-
-
-@dataclass(frozen=True, slots=True)
 class CellStore:
     """Owned, validated arrays of one closed ``cells.zarr.zip``.
 
-    ``nuclei`` is ``None`` when the bundle has no nucleus polygon set (Xenium
-    Ranger transcript-assignment imports). ``masks`` holds only usable masks;
+    ``nucleus_cells`` maps nuclei to owning cell rows and is ``None`` when the
+    bundle has no nucleus polygon set (Xenium Ranger transcript-assignment imports).
+    An empty array represents a present but empty nucleus set. ``masks`` holds only usable masks;
     ``cell_methods`` and ``nucleus_counts`` exist only where the store has them.
     """
 
     cell_ids: pd.Index
     cell_labels: NDArray[np.uint32]
-    nuclei: Nuclei | None
+    nucleus_cells: NDArray[np.int64] | None
     cell_methods: NDArray[np.str_] | None
     nucleus_centroids: NDArray[np.float64]
     nucleus_counts: NDArray[np.int64] | None
@@ -109,7 +102,7 @@ def _labels(store: _Store, values: np.ndarray, name: str) -> NDArray[np.uint32]:
     """Require unique positive uint32 mask labels."""
     if len(np.unique(values)) != len(values) or (values <= 0).any() or values.max(initial=0) > np.iinfo(np.uint32).max:
         raise store.error(found=f"duplicate, zero or out-of-range {name}", expected=f"unique positive uint32 {name}")
-    return values.astype(np.uint32)
+    return values.astype(np.uint32, copy=False)
 
 
 def _hex_ids(store: _Store) -> pd.Index:
@@ -145,8 +138,8 @@ def _polygon_set_roles(store: _Store) -> dict[MaskRole, int]:
     return {role: names.index(role) for role in _SET_NAMES if role in names}
 
 
-def _polygon_sets(store: _Store, n_cells: int) -> tuple[NDArray[np.uint32], Nuclei | None, NDArray[np.str_]]:
-    """Return cell labels, nuclei and cell segmentation methods of the polygon-set family."""
+def _polygon_sets(store: _Store, n_cells: int) -> tuple[NDArray[np.uint32], NDArray[np.int64] | None, NDArray[np.str_]]:
+    """Return cell labels, nucleus owners and cell segmentation methods of the polygon-set family."""
     roles = _polygon_set_roles(store)
     cell_set = f"polygon_sets/{roles['cell']}"
     cell_index = store.read(f"{cell_set}/cell_index", ndim=1, kind="ui")
@@ -172,13 +165,13 @@ def _polygon_sets(store: _Store, n_cells: int) -> tuple[NDArray[np.uint32], Nucl
     cell_methods = np.empty(n_cells, dtype=object)
     cell_methods[cell_index] = np.asarray(methods, dtype=object)[method_index.astype(np.int64)]
 
-    nuclei = None
+    nucleus_cells = None
     if "nucleus" in roles:
         owners = store.read(f"polygon_sets/{roles['nucleus']}/cell_index", ndim=1, kind="ui")
         if (owners < 0).any() or (owners >= n_cells).any():
             raise store.error(found="nuclei owned by unknown cells", expected="nucleus cell_index values below N")
-        nuclei = Nuclei(np.arange(1, len(owners) + 1, dtype=np.uint32), owners.astype(np.int64))
-    return cell_labels, nuclei, cell_methods.astype(np.str_)
+        nucleus_cells = owners.astype(np.int64)
+    return cell_labels, nucleus_cells, cell_methods.astype(np.str_)
 
 
 def _summary(store: _Store, n_cells: int) -> tuple[NDArray[np.float64], NDArray[np.int64] | None]:
@@ -262,7 +255,7 @@ def read_cells_store(
             )
 
         cell_methods = None
-        nuclei: Nuclei | None = None
+        nucleus_cells: NDArray[np.int64] | None = None
         if family == "integer_ids":
             raw = store.read("cell_id", ndim=1, kind="ui")
             cell_ids = pd.Index(raw.astype(np.int64))
@@ -275,16 +268,16 @@ def read_cells_store(
                     raise store.error(found=f"{len(values)} seg_mask_value entries", expected=f"{len(cell_ids)} labels")
                 cell_labels = _labels(store, values, "seg_mask_value labels")
             else:
-                cell_labels, nuclei, cell_methods = _polygon_sets(store, len(cell_ids))
+                cell_labels, nucleus_cells, cell_methods = _polygon_sets(store, len(cell_ids))
 
         masks = _masks(store, pixel_size)
         if family != "polygon_sets":
             # Strict 1:1 nuclei labelled like their cell.
-            nuclei = Nuclei(cell_labels, np.arange(len(cell_ids), dtype=np.int64))
-        elif nuclei is None:
+            nucleus_cells = np.arange(len(cell_ids), dtype=np.int64)
+        elif nucleus_cells is None:
             # Transcript-assignment imports have one polygon set and masks that 10x
             # documents as absent or empty; they are never offered as labels.
             masks = dict[MaskRole, MaskSource]()
         nucleus_centroids, nucleus_counts = _summary(store, len(cell_ids))
 
-    return CellStore(cell_ids, cell_labels, nuclei, cell_methods, nucleus_centroids, nucleus_counts, masks)
+    return CellStore(cell_ids, cell_labels, nucleus_cells, cell_methods, nucleus_centroids, nucleus_counts, masks)

@@ -445,7 +445,8 @@ bounded final normalization with the H5AD path attached to the error.
 Integer-ID, hexadecimal-ID and polygon-set layouts share the table meaning;
 source schema generations determine optional annotations. `include_table=False`
 returns no table. Matrix barcodes determine row names/order and selected
-features retain source order. Symbols become unique. Default selection keeps
+features retain source order. Source feature names must be unique; duplicates
+raise rather than being renamed. Default selection keeps
 Gene Expression and available Protein Expression; `"all"` includes source
 controls, and a sequence selects explicit feature types.
 
@@ -456,6 +457,9 @@ source dtypes follow Scanpy; protein division currently requires floating
 storage. Required textual `var` fields are `gene_ids`, `feature_types`;
 modern source feature metadata are retained. Protein annotation adds nullable
 text `long_name`/`clone` and nullable int64 `codeword_index`.
+When a protein panel enriches selected protein features, pre-existing source
+columns with those names raise rather than being overwritten. Without that
+enrichment, the source columns are retained.
 
 Required `obs` fields are `cell_id` (int64 for early IDs, text otherwise),
 float64 µm `x_centroid`/`y_centroid`, µm² `cell_area`/`nucleus_area`, and

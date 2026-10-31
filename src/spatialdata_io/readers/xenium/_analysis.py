@@ -32,7 +32,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 
 from spatialdata_io.readers.xenium._layout import AnalysisDirectory
-from spatialdata_io.readers.xenium._schemas import schema_error, text_series
+from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, schema_error, text_series, validate_analysis_header
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -43,14 +43,10 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers.xenium._layout import AnalysisSource
 
-BARCODE = "Barcode"
-CLUSTER = "Cluster"
 _MEMBER = re.compile(
     r"(?:analysis/)?(?P<kind>clustering|pca|umap)/(?P<method>[A-Za-z0-9_.-]+)/(?P<file>clusters|projection)\.csv"
 )
 _FILES = {"clustering": "clusters", "pca": "projection", "umap": "projection"}
-_PREFIXES = {"pca": "PC", "umap": "UMAP"}
-_MIN_PROJECTION_COLUMNS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,16 +169,11 @@ def read_analysis(source: AnalysisSource, barcodes: pd.Index) -> Analysis:
     with closing(_members(source)) as members:
         for kind, method, handle, path in members:
             header = _header(handle, path)
+            validate_analysis_header(header, kind, path=path)
             if kind == "clustering":
-                if header != [BARCODE, CLUSTER]:
-                    raise schema_error(path, "analysis", found=f"header {header!r}", expected="Barcode,Cluster")
                 clusters[method] = _clusters(_table(handle, header, pa.int64(), path), barcodes, path)
                 continue
 
-            prefix = _PREFIXES[kind]
-            expected = [BARCODE, *(f"{prefix}-{index}" for index in range(1, len(header)))]
-            if len(header) < _MIN_PROJECTION_COLUMNS or header != expected:
-                raise schema_error(path, "analysis", found=f"header {header!r}", expected=f"Barcode,{prefix}-1,...")
             projections[f"{kind}_{method}"] = _projection(
                 _table(handle, header, pa.float64(), path), header, barcodes, path
             )

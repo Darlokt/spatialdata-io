@@ -192,6 +192,14 @@ def _selected_types(available: tuple[str, ...], feature_types: FeatureSelection,
 
 def _protein_annotations(var: pd.DataFrame, is_protein: NDArray[np.bool_], panel: ProteinPanel, path: Path) -> None:
     """Add 1:1 protein panel annotations; other features stay missing."""
+    conflicts = [name for name in ("long_name", "clone", "codeword_index") if name in var]
+    if conflicts:
+        raise schema_error(
+            path,
+            "cell-feature matrix",
+            found=f"reserved protein annotation columns {conflicts!r}",
+            expected="no source columns named long_name, clone or codeword_index when adding protein panel annotations",
+        )
     ids = var["gene_ids"].to_numpy(dtype=np.str_)
     missing = [str(identifier) for identifier in ids[is_protein] if identifier not in panel.targets]
     if missing:
@@ -216,7 +224,8 @@ def read_counts(source: CountSource, feature_types: FeatureSelection, panel: Pro
     ReaderFormatError
         If feature names or barcodes repeat, count values are malformed,
         an explicit feature type is absent, protein is selected
-        without a valid HDF5 factor and metric, or a protein lacks a panel entry.
+        without a valid HDF5 factor and metric, a protein lacks a panel entry,
+        or source columns conflict with the protein panel annotations.
     """
     source_table = _read_matrix(source)
     path = _source_path(source)
@@ -235,7 +244,7 @@ def read_counts(source: CountSource, feature_types: FeatureSelection, panel: Pro
     selected = np.isin(types, _selected_types(tuple(dict.fromkeys(types)), feature_types, path))
     if not selected.all():
         matrix = matrix[:, selected]
-    var = source_var.loc[selected, ["gene_ids", "feature_types"]]
+    var = source_var.loc[selected]
 
     protein: dict[str, object] | None = None
     is_protein = types[selected] == PROTEIN_EXPRESSION

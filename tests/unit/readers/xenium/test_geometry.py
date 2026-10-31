@@ -46,6 +46,7 @@ STRUCTURAL_DEFECTS: dict[str, tuple[str, Change, str]] = {
     "interleaved": ("label_id", lambda values: [*values[:2], values[5], *values[3:]], "interleaved polygon rows"),
     "several-cells": ("cell_id", lambda values: [values[0], "zzzzzzzz-1", *values[2:]], "spanning several cells"),
     "zero-label": ("label_id", lambda values: [0] * 5 + values[5:], "uint32 labels from 1"),
+    "oversized-label": ("label_id", lambda values: [2**32] * 5 + values[5:], "uint32 labels from 1"),
 }
 
 
@@ -103,6 +104,18 @@ class TestReadPolygons:
 
         np.testing.assert_array_equal(polygons.labels, [1, 2, 3, 4])
 
+    @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_1_9])
+    def test_legacy_nucleus_boundaries_accept_explicit_labels(self, tmp_path: Path, profile: fx.Profile) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+        path = bundle.root / "nucleus_boundaries.parquet"
+        table = pq.read_table(path)
+        labels = pa.array(np.repeat([1, 2, 3, 4], 5), type=pa.int64())
+        pq.write_table(table.append_column("label_id", labels), path)
+
+        polygons = read_polygons(_source(bundle, "nucleus"), profile.family, "nucleus", _store(bundle))
+
+        np.testing.assert_array_equal(polygons.labels, [1, 2, 3, 4])
+
     def test_csv_twins_equal_parquet(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(csv_twins=True))
 
@@ -128,19 +141,40 @@ class TestReadPolygons:
         with pytest.raises(ReaderFormatError, match="without label_id"):
             read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
 
-    def test_store_agreement(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("label", "replacement"), [(1, 2), (4, 2), (4, 9)], ids=["first-owner", "last-owner", "outside-owner-range"]
+    )
+    def test_store_agreement(self, tmp_path: Path, label: int, replacement: int) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
         path = bundle.root / "nucleus_boundaries.parquet"
         labels = pq.read_table(path)["label_id"].to_pylist()
 
-        # Swapping the labels of nuclei owned by different cells contradicts cell_index.
-        _rewrite(path, "label_id", [{1: 2, 2: 1}.get(label, label) for label in labels])
+        changed_labels = {label: replacement, replacement: label}
+        _rewrite(path, "label_id", [changed_labels.get(value, value) for value in labels])
         with pytest.raises(ReaderFormatError, match="owned by other cells"):
             read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
 
-        _rewrite(path, "label_id", [9 if label == 4 else {1: 2, 2: 1}.get(label, label) for label in labels])
-        with pytest.raises(ReaderFormatError, match="owned by other cells"):
-            read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
+    def test_nonempty_boundaries_reject_empty_nucleus_owners(self, tmp_path: Path) -> None:
+        imported = fx.write_xenium_bundle(tmp_path / "import", fx.XOA_3_0, fx.Options(import_kind="cells_only"))
+        nuclei = fx.write_xenium_bundle(tmp_path / "nuclei", fx.XOA_3_0)
+        source = _source(nuclei, "nucleus")
+
+        with pytest.raises(ReaderFormatError, match="owned by other cells") as caught:
+            read_polygons(source, "polygon_sets", "nucleus", _store(imported))
+
+        assert caught.value.context == ReaderErrorContext("xenium", "nucleus boundaries")
+        assert caught.value.path == source.file
+
+    def test_empty_boundaries_agree_with_empty_nucleus_owners(self, tmp_path: Path) -> None:
+        imported = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(import_kind="cells_only"))
+
+        polygons = read_polygons(_source(imported, "nucleus"), "polygon_sets", "nucleus", _store(imported))
+
+        assert polygons.cell_ids.empty
+        assert polygons.labels is not None
+        np.testing.assert_array_equal(polygons.labels, np.empty(0, dtype=np.uint32), strict=True)
+        assert polygons.geometries.size == 0
+        assert polygons.degenerate.size == 0
 
     def test_unknown_cells_and_missing_nucleus_set(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)

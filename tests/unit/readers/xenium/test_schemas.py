@@ -23,6 +23,7 @@ from spatialdata_io.readers.xenium._schemas import (
     require_no_nulls,
     text_series,
     transcript_types,
+    validate_analysis_header,
     validate_header,
     vocabulary_codes,
 )
@@ -51,6 +52,81 @@ class TestValidateHeader:
     def test_rejects(self, names: list[str], match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match):
             validate_header(names, ("a", "b"), path=PATH, artifact="cells")
+
+
+class TestValidateAnalysisHeader:
+    """Analysis headers have exact field order and consecutive projection components."""
+
+    def test_clustering_header(self) -> None:
+        validate_analysis_header(["Barcode", "Cluster"], "clustering", path=PATH)
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            [],
+            ["Barcode"],
+            ["Cluster", "Barcode"],
+            ["Barcode", "Cluster", "Extra"],
+            ["Barcode", "Barcode"],
+            ["Barcode", ""],
+        ],
+        ids=["empty", "missing", "reordered", "extra", "duplicate", "empty-name"],
+    )
+    def test_rejects_clustering_headers(self, names: list[str]) -> None:
+        with pytest.raises(ReaderFormatError, match="Barcode,Cluster") as error:
+            validate_analysis_header(names, "clustering", path=PATH)
+
+        assert str(PATH) in str(error.value)
+        assert "analysis" in str(error.value)
+        assert f"header {names!r}" in str(error.value)
+
+    @pytest.mark.parametrize(("kind", "prefix"), [("pca", "PC"), ("umap", "UMAP")])
+    @pytest.mark.parametrize("components", [1, 2, 3])
+    def test_projection_headers(self, kind: str, prefix: str, components: int) -> None:
+        validate_analysis_header(["Barcode", *(f"{prefix}-{i}" for i in range(1, components + 1))], kind, path=PATH)
+
+    @pytest.mark.parametrize(("kind", "prefix"), [("pca", "PC"), ("umap", "UMAP")])
+    @pytest.mark.parametrize(
+        "columns",
+        [
+            [],
+            ["Barcode"],
+            ["barcode", "{prefix}-1"],
+            ["{prefix}-1", "Barcode"],
+            ["Barcode", "{prefix}-2"],
+            ["Barcode", "{prefix}-1", "{prefix}-3"],
+            ["Barcode", "{prefix}-2", "{prefix}-1"],
+            ["Barcode", "{prefix}-1", "{prefix}-1"],
+            ["Barcode", "{prefix}-0"],
+            ["Barcode", "{prefix}-01"],
+            ["Barcode", "other-1"],
+            ["Barcode", "{prefix}-1", "Extra"],
+            ["Barcode", ""],
+        ],
+        ids=[
+            "empty",
+            "missing",
+            "barcode-case",
+            "barcode-order",
+            "missing-first",
+            "gap",
+            "reordered",
+            "duplicate",
+            "zero",
+            "leading-zero",
+            "wrong-prefix",
+            "extra",
+            "empty-name",
+        ],
+    )
+    def test_rejects_projection_headers(self, kind: str, prefix: str, columns: list[str]) -> None:
+        names = [name.format(prefix=prefix) for name in columns]
+        with pytest.raises(ReaderFormatError, match=rf"Barcode,{prefix}-1,\.\.\.") as error:
+            validate_analysis_header(names, kind, path=PATH)
+
+        assert str(PATH) in str(error.value)
+        assert "analysis" in str(error.value)
+        assert f"header {names!r}" in str(error.value)
 
 
 class TestCellTypes:

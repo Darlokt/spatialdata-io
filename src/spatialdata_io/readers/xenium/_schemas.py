@@ -1,10 +1,12 @@
-"""Column contracts of Xenium cells, boundaries and transcript tables.
+"""Column contracts of Xenium cells, boundaries, transcripts and analysis.
 
 Parquet files and their CSV twins share one header per artifact. Named columns may
 appear in any order; documented columns are typed explicitly, and duplicate or
 empty names are rejected before any parser could repair them. Cell identifiers
 are integers in the integer-ID family (XOA 1.0-1.2) and text otherwise; binary
 text (XOA 1.0 feature names, XOA 1.3 cell IDs) is decoded strictly as UTF-8.
+Secondary analysis instead requires exact clustering headers and ordered,
+consecutive PCA/UMAP component columns after its barcode field.
 """
 
 from __future__ import annotations
@@ -46,6 +48,11 @@ CELL_REQUIRED = (CELL_ID, *CELL_FLOATS, *CELL_REQUIRED_COUNTS)
 VERTICES = ("vertex_x", "vertex_y")
 LABEL_ID = "label_id"
 
+BARCODE = "Barcode"
+CLUSTER = "Cluster"
+_ANALYSIS_PROJECTION_PREFIXES = {"pca": "PC", "umap": "UMAP"}
+_MIN_PROJECTION_COLUMNS = 2
+
 # Documented transcript columns; later builds add the optional ones. Unknown
 # columns are not projected, so a new format adds its columns here explicitly.
 TRANSCRIPT_REQUIRED: dict[str, pa.DataType] = {
@@ -79,6 +86,18 @@ def validate_header(names: Sequence[str], required: Sequence[str], *, path: Path
     missing = [name for name in required if name not in names]
     if missing:
         raise schema_error(path, artifact, found=f"missing columns {missing!r}", expected=f"columns {list(required)!r}")
+
+
+def validate_analysis_header(names: list[str], kind: str, *, path: Path) -> None:
+    """Require exact clustering fields or consecutive PCA/UMAP component fields."""
+    if kind == "clustering":
+        if names != [BARCODE, CLUSTER]:
+            raise schema_error(path, "analysis", found=f"header {names!r}", expected="Barcode,Cluster")
+        return
+    prefix = _ANALYSIS_PROJECTION_PREFIXES[kind]
+    expected = [BARCODE, *(f"{prefix}-{index}" for index in range(1, len(names)))]
+    if len(names) < _MIN_PROJECTION_COLUMNS or names != expected:
+        raise schema_error(path, "analysis", found=f"header {names!r}", expected=f"Barcode,{prefix}-1,...")
 
 
 def id_type(family: Family) -> pa.DataType:

@@ -98,9 +98,9 @@ class TestReadCellsStore:
         assert store.cell_ids.dtype == np.int64
         np.testing.assert_array_equal(store.cell_labels, [1, 2, 3, 4])
         assert store.cell_labels.dtype == np.uint32
-        assert store.nuclei is not None
-        np.testing.assert_array_equal(store.nuclei.labels, [1, 2, 3, 4])
-        np.testing.assert_array_equal(store.nuclei.cells, [0, 1, 2, 3])
+        assert store.nucleus_cells is not None
+        np.testing.assert_array_equal(store.nucleus_cells, [0, 1, 2, 3])
+        assert store.nucleus_cells.dtype == np.int64
         assert store.cell_methods is None
         assert store.nucleus_counts is None
         assert set(store.masks) == {"nucleus", "cell"}
@@ -115,9 +115,10 @@ class TestReadCellsStore:
 
         assert store.cell_ids.tolist() == list(fx.HEX_IDS)
         np.testing.assert_array_equal(store.cell_labels, [1, 2, 3, 4])
-        assert store.nuclei is not None
+        assert store.nucleus_cells is not None
         # Strict 1:1 nuclei carry their cell's label.
-        np.testing.assert_array_equal(store.nuclei.labels, store.cell_labels)
+        np.testing.assert_array_equal(store.nucleus_cells, [0, 1, 2, 3])
+        assert store.nucleus_cells.dtype == np.int64
 
     def test_polygon_sets_map_multiple_and_missing_nuclei(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
@@ -125,9 +126,9 @@ class TestReadCellsStore:
         store = _read(bundle)
 
         np.testing.assert_array_equal(store.cell_labels, [1, 2, 3, 4])
-        assert store.nuclei is not None
-        np.testing.assert_array_equal(store.nuclei.labels, [1, 2, 3, 4])
-        np.testing.assert_array_equal(store.nuclei.cells, [0, 1, 2, 2])
+        assert store.nucleus_cells is not None
+        np.testing.assert_array_equal(store.nucleus_cells, [0, 1, 2, 2])
+        assert store.nucleus_cells.dtype == np.int64
         np.testing.assert_array_equal(store.nucleus_counts, [1, 1, 2, 0])
         assert store.cell_methods is not None
         assert store.cell_methods.tolist() == [fx.SEGMENTATION_METHODS[m] for m in fx.CELL_METHODS]
@@ -222,8 +223,8 @@ class TestReadCellsStore:
         np.testing.assert_array_equal(store.cell_labels, np.arange(1, size + 1, dtype=np.uint32))
         assert store.cell_methods is not None
         assert store.cell_methods.tolist() == list(fx.SEGMENTATION_METHODS[:size])
-        assert store.nuclei is not None
-        np.testing.assert_array_equal(store.nuclei.cells, np.zeros(size, dtype=np.int64))
+        assert store.nucleus_cells is not None
+        np.testing.assert_array_equal(store.nucleus_cells, np.zeros(size, dtype=np.int64))
         assert store.nucleus_centroids.shape == (size, 2)
 
     @pytest.mark.parametrize("value", [float(2**63), np.finfo(np.float64).max], ids=["int64-bound", "float64-maximum"])
@@ -250,7 +251,7 @@ class TestReadCellsStore:
 
         store = _read(bundle)
 
-        assert store.nuclei is None
+        assert store.nucleus_cells is None
         assert store.masks == {}
 
     def test_cells_only_import_keeps_an_empty_nucleus_set(self, tmp_path: Path) -> None:
@@ -258,8 +259,9 @@ class TestReadCellsStore:
 
         store = _read(bundle)
 
-        assert store.nuclei is not None
-        assert store.nuclei.labels.size == 0
+        assert store.nucleus_cells is not None
+        assert store.nucleus_cells.size == 0
+        assert store.nucleus_cells.dtype == np.int64
         assert set(store.masks) == {"nucleus", "cell"}
 
     def test_polygon_set_order_follows_names(self, tmp_path: Path) -> None:
@@ -275,8 +277,8 @@ class TestReadCellsStore:
         _rewrite(bundle.root / "cells.zarr.zip", swap)
         store = _read(bundle)
 
-        assert store.nuclei is not None
-        np.testing.assert_array_equal(store.nuclei.cells, [0, 1, 2, 2])
+        assert store.nucleus_cells is not None
+        np.testing.assert_array_equal(store.nucleus_cells, [0, 1, 2, 2])
 
     def test_mask_transform_cross_checks_pixel_size(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)

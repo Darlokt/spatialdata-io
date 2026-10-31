@@ -66,6 +66,11 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Fixed
 
+- Xenium tables retain all selected source feature annotations, including HDF5
+  `genome` and additional feature tags. Protein panel annotations reject
+  conflicting source column names instead of overwriting them.
+- Xenium nucleus boundaries that contradict an empty nucleus set now raise a
+  contextual format error instead of an indexing error.
 - Visium rejects a competing matching-prefix `genes.tsv` in a modern MEX
   directory, preventing the count parser from silently replacing feature IDs,
   names and types. Position discovery reads the first logical CSV record,

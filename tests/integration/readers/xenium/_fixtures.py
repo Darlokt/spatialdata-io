@@ -144,6 +144,7 @@ class Profile:
 
 
 XOA_1_0 = Profile("integer_ids", "1.0", None, "Xenium-1.0.1", "single", ("DAPI",))
+XOA_1_2 = Profile("integer_ids", "1.0", (1, 1, None), "xenium-1.2.0", "single", ("DAPI",))
 XOA_1_3 = Profile("hex_ids", "1.3", (2, 0, None), "xenium-1.3.0.5", "single", ("DAPI",), binary_ids=True)
 XOA_1_9 = Profile("hex_ids", "1.5", (3, 0, 0), "xenium-1.9.0.1", "single", ("DAPI",))
 XOA_2_0 = Profile("polygon_sets", "2.0", (4, 0, 0), "xenium-2.0.0.10", "numbered", FOCUS_FOUR)
@@ -483,6 +484,8 @@ def _write_h5(
         feature_group["_all_tag_keys"] = np.array([b"genome"])
         feature_group["feature_type"] = np.array([feature[2].encode() for feature in features])
         feature_group["genome"] = np.array([b"Unknown"] * len(features))
+        feature_group["probe_annotation"] = np.array([f"panel-{index}".encode() for index in range(len(features))])
+        feature_group["is_target"] = np.arange(len(features)) % 2 == 0
         feature_group["id"] = np.array([feature[0].encode() for feature in features])
         feature_group["name"] = np.array([feature[1].encode() for feature in features])
 

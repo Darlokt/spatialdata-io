@@ -408,6 +408,11 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
           ``obsm["spatial"]``, described as unchanged vendor cell-centroid XY
           micrometres in ``global`` by ``uns["spatialdata_io_positions"]``.
           Nullable nucleus summaries do not replace canonical cell centres.
+          ``var`` retains all selected source feature annotations, including
+          available HDF5 metadata such as ``genome``. Source feature names must
+          be unique. Protein panel enrichment adds ``long_name``, ``clone`` and
+          ``codeword_index``; pre-existing source columns with those names raise
+          when enrichment is requested instead of being overwritten.
 
         Alternate HDF5 numerical dtypes follow Scanpy; protein division requires
         floating storage. Float32 retains its integer precision limits.

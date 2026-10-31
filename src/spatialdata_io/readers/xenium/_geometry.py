@@ -200,14 +200,13 @@ def _store_labels(
     # Polygon sets: label = polygon index + 1 of the named set, owned by cell_index.
     labels = _uint32_labels(file_labels, path, artifact)
     if kind == "cell":
-        agrees = labels == store.cell_labels[rows]
-    elif store.nuclei is None:
+        agrees = np.array_equal(labels, store.cell_labels[rows])
+    elif store.nucleus_cells is None:
         raise schema_error(path, artifact, found="no nucleus polygon set in cells.zarr.zip", expected="a nucleus set")
     else:
-        owners = store.nuclei.cells
-        inside = labels <= len(owners)
-        agrees = inside & (owners[np.where(inside, labels - 1, 0)] == rows)
-    if not agrees.all():
+        owners = store.nucleus_cells
+        agrees = not (labels > len(owners)).any() and np.array_equal(owners[labels - 1], rows)
+    if not agrees:
         raise schema_error(
             path,
             artifact,
