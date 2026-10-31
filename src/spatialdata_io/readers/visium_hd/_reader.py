@@ -17,15 +17,19 @@ from spatialdata_io.readers._utils.geometry import (
 )
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers.visium_hd._bins import read_bin_table
 from spatialdata_io.readers.visium_hd._cells import read_cell_table, read_nucleus_table
 from spatialdata_io.readers.visium_hd._geometry import bin_squares, read_boundaries
 from spatialdata_io.readers.visium_hd._images import make_image_options, read_images
 from spatialdata_io.readers.visium_hd._labels import make_bin_labels
 from spatialdata_io.readers.visium_hd._layout import discover_layout
-from spatialdata_io.readers.visium_hd._metadata import read_bin_scale_factors, read_identity, read_source_metadata
+from spatialdata_io.readers.visium_hd._metadata import (
+    read_bin_scale_factors,
+    read_source_metadata,
+    reconcile_identities,
+)
 from spatialdata_io.readers.visium_hd._positions import fit_slide_frame, read_grid_shape
-from spatialdata_io.readers.visium_hd._tables import link_table
+from spatialdata_io.readers.visium_hd._tables import link_table, read_bin_table
+from spatialdata_io.readers.visium_hd._transforms import SPOT_PITCH_UM
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -244,8 +248,12 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
     Parameters
     ----------
     path
-        Output root containing binned_outputs and feature_slice.h5 (or the
-        older hd_feature_slice.h5). Loose prefixed feature files are accepted.
+        Output root containing binned_outputs. The optional feature_slice.h5
+        (or older hd_feature_slice.h5) is required when no count products are
+        selected or CytAssist is requested. Loose prefixed files are accepted.
+        Selected count matrices and any consumed feature slice must declare
+        the same supported full producer version and compatible known library
+        IDs; missing optional IDs do not establish common origin.
     bin_sizes
         All available sizes by default; a sequence selects exact stored sizes,
         and an empty sequence skips bins. Missing requested sizes raise.
@@ -266,8 +274,11 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         that nucleus and its table row. Geometry is never repaired.
     include_images
         Read available hires, lowres and full-resolution microscope images.
+        Each hires/lowres image uses the root spatial copy when present,
+        otherwise the native 2 µm bin copy.
     include_cytassist_image
-        Return a lazy, exactly projectively warped CytAssist image.
+        Return a lazy, exactly projectively warped CytAssist image, using the
+        root spatial copy when present, otherwise the native 2 µm bin copy.
     fullres_image_file
         Override full-resolution discovery, relative to the root or absolute.
         Otherwise discover one tissue_image TIFF at root or microscope_image/.
@@ -347,9 +358,21 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         fullres_image_file=fullres_image_file,
     )
 
-    identity = read_identity(layout.identity_file)
+    identity_sources = [source.counts for source in layout.bins]
+    if layout.segmentation is not None and layout.segmentation.counts is not None:
+        identity_sources.append(layout.segmentation.counts)
+    if layout.nucleus_counts is not None:
+        identity_sources.append(layout.nucleus_counts.raw_two_micron_counts)
+    if layout.feature_slice is not None:
+        identity_sources.append(layout.feature_slice)
+    identity = reconcile_identities(identity_sources)
+
     metadata = None if layout.feature_slice is None else read_source_metadata(layout.feature_slice)
     scales = read_bin_scale_factors(layout.base_scale_factors, 2)
+    for source in layout.bins:
+        if source.size_um != SPOT_PITCH_UM or source.scale_factors != layout.base_scale_factors:
+            read_bin_scale_factors(source.scale_factors, source.size_um)
+
     shape = read_grid_shape(layout.base_positions) if metadata is None else (metadata.nrows, metadata.ncols)
     frame = fit_slide_frame(layout.base_positions, shape)
 
@@ -363,8 +386,8 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
 
         # Shared counts return eager AnnData; the upstream type also includes backed frames.
         obs = cast("pd.DataFrame", table.obs)
-        rows = obs["array_row"].to_numpy(dtype=np.int64)
-        cols = obs["array_col"].to_numpy(dtype=np.int64)
+        rows = obs["array_row"].to_numpy(dtype=np.uint32)
+        cols = obs["array_col"].to_numpy(dtype=np.uint32)
 
         ids = pd.Index(np.arange(1, table.n_obs + 1, dtype=np.uint32))
         table.obs["instance_id"] = ids
@@ -372,9 +395,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         if bin_geometry == "squares":
             shapes[name] = bin_squares(rows, cols, size, frame, ids)
         else:
-            labels[name] = make_bin_labels(
-                frame, rows.astype(np.uint32), cols.astype(np.uint32), grid, size, options=raster
-            )
+            labels[name] = make_bin_labels(frame, rows, cols, grid, size, options=raster)
 
         tables[f"{name}_table"] = link_table(table, name, ids, position="nominal bin centre")
 

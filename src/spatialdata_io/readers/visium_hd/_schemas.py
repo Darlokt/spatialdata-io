@@ -54,9 +54,6 @@ def parse_bin_barcodes(
 ) -> tuple[NDArray[np.uint32], NDArray[np.uint32]]:
     """Parse exact vendor barcodes without changing source observation order."""
     context = ReaderErrorContext("visium_hd", "matrix barcodes")
-    if not names.is_unique:
-        raise ReaderFormatError(context=context, path=path, found="duplicate barcodes", expected="unique barcodes")
-
     pattern = re.compile(rf"s_{size_um:03d}um_([0-9]{{5}})_([0-9]{{5}})-1")
     rows = np.empty(len(names), dtype=np.uint32)
     cols = np.empty(len(names), dtype=np.uint32)

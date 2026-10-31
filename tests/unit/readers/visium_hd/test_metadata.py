@@ -17,6 +17,8 @@ from tests.integration.readers.visium_hd._fixtures import write_bundle
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
+
 
 def _source(tmp_path: Path) -> ArtifactFile:
     return ArtifactFile(tmp_path / "feature_slice.h5")
@@ -43,15 +45,8 @@ class TestReadSourceMetadata:
             values["hd_layout_json"] = layout
         _replace_metadata(path, json.dumps(values))
         actual = metadata.read_source_metadata(path)
-        assert (actual.nrows, actual.ncols, actual.sample_id, actual.spot_pitch) == (
-            expected.nrows,
-            expected.ncols,
-            expected.sample_id,
-            expected.spot_pitch,
-        )
-        assert actual.microscope is not None
-        assert expected.microscope is not None
-        np.testing.assert_array_equal(actual.microscope.spot_to_image, expected.microscope.spot_to_image)
+        assert (actual.nrows, actual.ncols) == (expected.nrows, expected.ncols)
+        np.testing.assert_array_equal(actual.cytassist, expected.cytassist)
 
     @pytest.mark.parametrize("null", [None, "microscope", "cytassist"])
     def test_metadata(self, tmp_path: Path, null: str | None) -> None:
@@ -63,18 +58,15 @@ class TestReadSourceMetadata:
                 values["transform_matrices"][f"{null}_colrow_to_spot_colrow"] = None
                 handle.attrs["metadata_json"] = json.dumps(values)
         result = metadata.read_source_metadata(_source(tmp_path))
-        assert (result.nrows, result.ncols, result.sample_id, result.spot_pitch) == (17, 17, "synthetic", 2.0)
-        assert (result.microscope is None) == (null == "microscope")
+        assert (result.nrows, result.ncols) == (17, 17)
         assert (result.cytassist is None) == (null == "cytassist")
-        for pair in (result.microscope, result.cytassist):
-            if pair is not None:
-                assert not pair.spot_to_image.flags.writeable
-                assert not pair.image_to_spot.flags.writeable
-                np.testing.assert_allclose(pair.spot_to_image @ pair.image_to_spot, np.eye(3), rtol=0, atol=1e-12)
+        if result.cytassist is not None:
+            assert not result.cytassist.flags.writeable
+            np.testing.assert_array_equal(result.cytassist, [[2, 0, 2], [0, 2, 3], [0, 0, 1]])
         with h5py.File(_source(tmp_path), "r+"):
             pass
 
-    @pytest.mark.parametrize("text", ["[]", "{", '{"a":1,"a":2}', '"string"', "{}", ""])
+    @pytest.mark.parametrize("text", ["[]", "{", '{"a":1,"a":2}', '{"a":1e309}', '"string"', "{}", ""])
     def test_bad_json(self, tmp_path: Path, text: str) -> None:
         write_bundle(tmp_path)
         _replace_metadata(_source(tmp_path), text)
@@ -152,32 +144,6 @@ class TestReadSourceMetadata:
             metadata.read_source_metadata(path)
 
 
-class TestReadScaleFactors:
-    """Verify read scale factors contracts."""
-
-    def test_values_and_optional_bin(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path)
-        path = ArtifactFile(tmp_path / "binned_outputs/square_002um/spatial/scalefactors_json.json")
-        result = metadata.read_scale_factors(path)
-        assert result.bin_size_um == 2
-        assert result.hires == 0.5
-        assert result.lowres == 0.25
-        values = json.loads(path.read_text())
-        del values["bin_size_um"]
-        path.write_text(json.dumps(values))
-        assert metadata.read_scale_factors(path).bin_size_um is None
-
-    @pytest.mark.parametrize("value", [None, True, "2", 0, -1, float("inf")])
-    def test_bad_values(self, tmp_path: Path, value: object) -> None:
-        write_bundle(tmp_path)
-        path = ArtifactFile(tmp_path / "binned_outputs/square_002um/spatial/scalefactors_json.json")
-        values = json.loads(path.read_text())
-        values["microns_per_pixel"] = value
-        path.write_text(json.dumps(values))
-        with pytest.raises(ReaderFormatError):
-            metadata.read_scale_factors(path)
-
-
 class TestReadIdentity:
     """Verify read identity contracts."""
 
@@ -219,6 +185,36 @@ class TestReadIdentity:
 class TestReadBinScaleFactors:
     """Verify read bin scale factors contracts."""
 
+    def test_values(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path)
+        path = ArtifactFile(tmp_path / "binned_outputs/square_002um/spatial/scalefactors_json.json")
+        assert metadata.read_bin_scale_factors(path, 2) == metadata.ScaleFactors(
+            hires=0.5, lowres=0.25, microns_per_pixel=0.5
+        )
+
+    @pytest.mark.parametrize(
+        "field",
+        ["tissue_hires_scalef", "tissue_lowres_scalef", "spot_diameter_fullres", "microns_per_pixel", "bin_size_um"],
+    )
+    @pytest.mark.parametrize("value", [None, True, "2", 0, -1, float("inf")])
+    def test_bad_values(self, tmp_path: Path, field: str, value: object) -> None:
+        write_bundle(tmp_path)
+        path = ArtifactFile(tmp_path / "binned_outputs/square_002um/spatial/scalefactors_json.json")
+        values = json.loads(path.read_text())
+        values[field] = value
+        path.write_text(json.dumps(values))
+        with pytest.raises(ReaderFormatError):
+            metadata.read_bin_scale_factors(path, 2)
+
+    def test_missing_bin_size(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path)
+        path = ArtifactFile(tmp_path / "binned_outputs/square_002um/spatial/scalefactors_json.json")
+        values = json.loads(path.read_text())
+        del values["bin_size_um"]
+        path.write_text(json.dumps(values))
+        with pytest.raises(ReaderFormatError, match="bin_size_um"):
+            metadata.read_bin_scale_factors(path, 2)
+
     @pytest.mark.parametrize("mode", ["valid", "size", "diameter"])
     def test_calibration(self, tmp_path: Path, mode: str) -> None:
         write_bundle(tmp_path)
@@ -230,7 +226,63 @@ class TestReadBinScaleFactors:
             values["spot_diameter_fullres"] = 9
         path.write_text(json.dumps(values))
         if mode == "valid":
-            assert metadata.read_bin_scale_factors(path, 2).bin_size_um == 2
+            assert metadata.read_bin_scale_factors(path, 2).microns_per_pixel == 0.5
         else:
             with pytest.raises(ReaderFormatError):
                 metadata.read_bin_scale_factors(path, 2)
+
+
+class TestReconcileIdentities:
+    """Every consumed source must belong to one coherent producer export."""
+
+    @staticmethod
+    def _write(path: ArtifactFile, version: str, library_id: str | None) -> None:
+        with h5py.File(path, "w") as handle:
+            handle.attrs["software_version"] = version
+            if library_id is not None:
+                handle.attrs["library_ids"] = np.array([library_id.encode()])
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_missing_ids_and_normalized_versions(self, tmp_path: Path, *, reverse: bool) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("feature_slice.h5", "counts.h5")]
+        self._write(paths[0], "spaceranger-4.0.1", None)
+        self._write(paths[1], "4.0.1", "sample")
+        if reverse:
+            paths.reverse()
+        assert metadata.reconcile_identities(paths) == metadata.Identity("4.0.1", "sample")
+
+    def test_all_missing_ids_and_distinct_path_reads(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("raw.h5", "feature_slice.h5")]
+        for path in paths:
+            self._write(path, "3.1.2", None)
+        spy = mocker.spy(metadata, "read_identity")
+        assert metadata.reconcile_identities([paths[0], paths[1], paths[0]]) == metadata.Identity("3.1.2", None)
+        assert spy.call_count == 2
+        assert [call.args[0] for call in spy.call_args_list] == paths
+
+    @pytest.mark.parametrize("version", ["2.0.0", "4.1.0", "4.0.2"])
+    def test_nonfirst_version_conflict(self, tmp_path: Path, version: str) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("first.h5", "second.h5")]
+        self._write(paths[0], "4.0.1", "sample")
+        self._write(paths[1], version, "sample")
+        with pytest.raises(ReaderFormatError) as caught:
+            metadata.reconcile_identities(paths)
+        assert caught.value.path == paths[1]
+        assert caught.value.context.reader == "visium_hd"
+        assert caught.value.context.artifact == "count identity"
+        assert caught.value.context.detected_version == version
+
+    def test_known_library_conflict_after_unknown(self, tmp_path: Path) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("unknown.h5", "first.h5", "second.h5")]
+        for path, library_id in zip(paths, (None, "sample", "other"), strict=True):
+            self._write(path, "4.0.1", library_id)
+        with pytest.raises(ReaderFormatError) as caught:
+            metadata.reconcile_identities(paths)
+        assert caught.value.path == paths[2]
+        assert caught.value.context.detected_version == "4.0.1"
+        assert "sample" in caught.value.expected
+        assert "other" in caught.value.found
+
+    def test_empty_sources(self) -> None:
+        with pytest.raises(ReaderFormatError, match="identity-bearing"):
+            metadata.reconcile_identities([])

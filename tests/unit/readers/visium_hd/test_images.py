@@ -33,7 +33,7 @@ from spatialdata_io.readers.visium_hd._layout import ImageLayout, discover_layou
 from spatialdata_io.readers.visium_hd._metadata import (
     ScaleFactors,
     SourceMetadata,
-    read_scale_factors,
+    read_bin_scale_factors,
     read_source_metadata,
 )
 from spatialdata_io.readers.visium_hd._positions import fit_slide_frame
@@ -62,7 +62,7 @@ def _bundle(root: Path) -> tuple[ImageLayout, SlideFrame, ScaleFactors, SourceMe
     return (
         layout.images,
         fit_slide_frame(layout.base_positions, (17, 17)),
-        read_scale_factors(layout.base_scale_factors),
+        read_bin_scale_factors(layout.base_scale_factors, 2),
         read_source_metadata(layout.feature_slice),
     )
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
+import h5py
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -15,13 +17,35 @@ from numpy.testing import assert_allclose, assert_array_equal
 from scipy.sparse import csr_array, csr_matrix, spmatrix
 from spatialdata import read_zarr
 from spatialdata.transformations import get_transformation
+from xarray import DataArray
 
 from spatialdata_io import visium_hd
 from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers.visium_hd import _metadata, _reader
 from tests.integration.readers.visium_hd._fixtures import CELL_IDS, write_bundle
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pytest_mock import MockerFixture
+
+
+def _library(path: Path, value: str) -> None:
+    with h5py.File(path, "r+") as source:
+        source.attrs["library_ids"] = np.asarray([value], dtype="S32")
+
+
+def _version(path: Path, value: str | None) -> None:
+    with h5py.File(path, "r+") as source:
+        if value is None:
+            del source.attrs["software_version"]
+        else:
+            source.attrs["software_version"] = f"spaceranger-{value}"
+
+
+def _remove_counts(root: Path) -> None:
+    for path in root.glob("**/*matrix.h5"):
+        path.unlink()
 
 
 def _invalidate(root: Path, kind: str, ids: tuple[int, ...]) -> None:
@@ -41,6 +65,7 @@ class TestVisiumHD:
         ("version", "segmented", "sizes", "prefix", "feature_slice_name", "null_pair"),
         [
             ("3.0.0", False, (2, 8, 16), "", "hd_feature_slice.h5", None),
+            ("3.1.0", False, (2, 8, 16), "", "feature_slice.h5", None),
             ("4.0.1", True, (2, 8, 16), "", "feature_slice.h5", None),
             ("4.1.0", True, (2, 6), "", "feature_slice.h5", None),
             ("4.1.0", False, (2, 8), "sample_", "feature_slice.h5", None),
@@ -73,6 +98,8 @@ class TestVisiumHD:
         assert set(result.tables) == {f"{name}_table" for name in bin_names} | ({"cell_table"} if segmented else set())
         assert set(result.shapes) == bin_names | ({"cell_boundaries", "nucleus_boundaries"} if segmented else set())
         assert result.coordinate_systems == ["global"]
+        assert result.attrs["visium_hd"]["library_id"] is None
+        assert result.attrs["spatialdata_io_format_version"] == version
         for size in sizes:
             table = result.tables[f"square_{size:03d}um_table"]
             assert isinstance(table.X, csr_array)
@@ -171,6 +198,213 @@ class TestVisiumHD:
         table = result.tables["square_008um_table"]
         assert isinstance(table.X, csr_array)
         assert_array_equal(table.X.toarray(), bundle.raw[8][bundle.filtered_rows[8]])
+
+    @pytest.mark.parametrize("version", ["4.2.0", "4.0.1"])
+    def test_nonfirst_count_version_rejected_before_calibration(
+        self, tmp_path: Path, mocker: MockerFixture, version: str
+    ) -> None:
+        write_bundle(tmp_path, segmented=False)
+        conflicting = tmp_path / "binned_outputs/square_016um/filtered_feature_bc_matrix.h5"
+        _version(conflicting, version)
+        fit = mocker.patch.object(_reader, "fit_slide_frame", side_effect=AssertionError("identity before fitting"))
+        with pytest.raises(ReaderFormatError) as error:
+            visium_hd(tmp_path, bin_sizes=(8, 16), include_images=False)
+        assert str(conflicting) in str(error.value)
+        assert version in str(error.value)
+        if version == "4.0.1":
+            assert "4.1.0" in str(error.value)
+        fit.assert_not_called()
+
+    def test_selected_bin_calibration_rejected_before_fitting(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        write_bundle(tmp_path, segmented=False)
+        path = tmp_path / "binned_outputs/square_008um/spatial/scalefactors_json.json"
+        calibration = json.loads(path.read_text())
+        calibration["bin_size_um"] = 16
+        path.write_text(json.dumps(calibration))
+        fit = mocker.patch.object(_reader, "fit_slide_frame", side_effect=AssertionError("calibration before fitting"))
+        with pytest.raises(ReaderFormatError, match="bin_size_um") as error:
+            visium_hd(tmp_path, bin_sizes=(8,), include_images=False)
+        assert str(path) in str(error.value)
+        fit.assert_not_called()
+
+    def test_coarse_bin_cannot_reuse_native_calibration(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path, segmented=False)
+        native = tmp_path / "binned_outputs/square_002um/spatial/scalefactors_json.json"
+        coarse = tmp_path / "binned_outputs/square_008um/spatial/scalefactors_json.json"
+        coarse.unlink()
+        coarse.symlink_to(native)
+        with pytest.raises(ReaderFormatError, match="bin_size_um=8") as error:
+            visium_hd(tmp_path, bin_sizes=(8,), include_images=False)
+        assert str(native) in str(error.value)
+
+    @pytest.mark.parametrize(
+        "relative",
+        [
+            "binned_outputs/square_016um/filtered_feature_bc_matrix.h5",
+            "segmented_outputs/filtered_feature_cell_matrix.h5",
+            "binned_outputs/square_002um/raw_feature_bc_matrix.h5",
+        ],
+        ids=["bin", "cell", "raw-nucleus"],
+    )
+    def test_selected_library_conflict_before_calibration(
+        self, tmp_path: Path, mocker: MockerFixture, relative: str
+    ) -> None:
+        write_bundle(tmp_path)
+        _library(tmp_path / "binned_outputs/square_008um/filtered_feature_bc_matrix.h5", "expected-library")
+        conflicting = tmp_path / relative
+        _library(conflicting, "other-library")
+        fit = mocker.patch.object(_reader, "fit_slide_frame", side_effect=AssertionError("identity before fitting"))
+        with pytest.raises(ReaderFormatError) as error:
+            visium_hd(tmp_path, bin_sizes=(8, 16), include_images=False, include_nucleus_table=True)
+        message = str(error.value)
+        assert str(conflicting) in message
+        assert "expected-library" in message
+        assert "other-library" in message
+        fit.assert_not_called()
+
+    @pytest.mark.parametrize("conflict", ["version", "library", "missing-version"])
+    def test_consumed_feature_identity_before_calibration(
+        self, tmp_path: Path, mocker: MockerFixture, conflict: str
+    ) -> None:
+        write_bundle(tmp_path, segmented=False)
+        feature = tmp_path / "feature_slice.h5"
+        _library(tmp_path / "binned_outputs/square_008um/filtered_feature_bc_matrix.h5", "expected-library")
+        if conflict == "library":
+            _library(feature, "other-library")
+        else:
+            _version(feature, "4.0.1" if conflict == "version" else None)
+        fit = mocker.patch.object(_reader, "fit_slide_frame", side_effect=AssertionError("identity before fitting"))
+        with pytest.raises(ReaderFormatError) as error:
+            visium_hd(tmp_path, bin_sizes=(8,), include_images=False)
+        message = str(error.value)
+        assert str(feature) in message
+        if conflict == "library":
+            assert "expected-library" in message
+            assert "other-library" in message
+        elif conflict == "version":
+            assert "4.0.1" in message
+            assert "4.1.0" in message
+        fit.assert_not_called()
+
+    @pytest.mark.parametrize("sizes", [(8, 16), (16, 8)])
+    @pytest.mark.parametrize(
+        "relative",
+        [
+            "binned_outputs/square_016um/filtered_feature_bc_matrix.h5",
+            "segmented_outputs/filtered_feature_cell_matrix.h5",
+            "binned_outputs/square_002um/raw_feature_bc_matrix.h5",
+            "feature_slice.h5",
+        ],
+        ids=["bin", "cell", "raw-nucleus", "feature"],
+    )
+    def test_sole_known_library_is_propagated(self, tmp_path: Path, relative: str, sizes: tuple[int, ...]) -> None:
+        write_bundle(tmp_path)
+        _library(tmp_path / relative, "known-library")
+        result = visium_hd(tmp_path, bin_sizes=sizes, include_images=False, include_nucleus_table=True)
+        assert result.attrs["visium_hd"]["library_id"] == "known-library"
+        assert result.attrs["spatialdata_io_format_version"] == "4.1.0"
+
+    def test_unselected_matrices_do_not_contribute_identity(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path)
+        selected = tmp_path / "binned_outputs/square_008um/filtered_feature_bc_matrix.h5"
+        _library(selected, "selected-library")
+        for path in tmp_path.glob("**/*matrix.h5"):
+            if path != selected:
+                _version(path, "9.0.0")
+                _library(path, "unselected-library")
+        result = visium_hd(
+            tmp_path,
+            bin_sizes=(8,),
+            include_cell_boundaries=False,
+            include_nucleus_boundaries=False,
+            include_images=False,
+        )
+        assert set(result.tables) == {"square_008um_table"}
+        assert result.attrs["visium_hd"]["library_id"] == "selected-library"
+
+    def test_selected_raw_two_micron_identity_is_read_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        write_bundle(tmp_path)
+        raw = tmp_path / "binned_outputs/square_002um/raw_feature_bc_matrix.h5"
+        _library(raw, "raw-library")
+        identity = mocker.spy(_metadata, "read_identity")
+        result = visium_hd(
+            tmp_path, bin_sizes=(2,), bin_counts_kind="raw", include_images=False, include_nucleus_table=True
+        )
+        assert result.attrs["visium_hd"]["library_id"] == "raw-library"
+        paths = [call.args[0] for call in identity.call_args_list]
+        assert paths.count(raw) == 1
+        assert set(paths) == {
+            raw,
+            tmp_path / "segmented_outputs/filtered_feature_cell_matrix.h5",
+            tmp_path / "feature_slice.h5",
+        }
+
+    @pytest.mark.parametrize("nucleus_only", [False, True], ids=["images", "nucleus-geometry"])
+    def test_products_without_count_files(self, tmp_path: Path, *, nucleus_only: bool) -> None:
+        write_bundle(tmp_path, segmented=nucleus_only, images=not nucleus_only)
+        _remove_counts(tmp_path)
+        _library(tmp_path / "feature_slice.h5", "feature-library")
+        result = visium_hd(
+            tmp_path,
+            bin_sizes=(),
+            include_cell_boundaries=False,
+            include_nucleus_boundaries=nucleus_only,
+            include_images=not nucleus_only,
+            include_cytassist_image=not nucleus_only,
+        )
+        assert not result.tables
+        assert set(result.shapes) == ({"nucleus_boundaries"} if nucleus_only else set())
+        assert set(result.images) == (set() if nucleus_only else {"hires_image", "lowres_image", "cytassist_image"})
+        assert result.attrs["visium_hd"]["library_id"] == "feature-library"
+        assert result.attrs["spatialdata_io_format_version"] == "4.1.0"
+
+    @pytest.mark.parametrize("version", [None, "4.2.0"])
+    def test_count_free_feature_requires_supported_identity(self, tmp_path: Path, version: str | None) -> None:
+        write_bundle(tmp_path, segmented=False, images=True)
+        _remove_counts(tmp_path)
+        feature = tmp_path / "feature_slice.h5"
+        _version(feature, version)
+        with pytest.raises(ReaderFormatError) as error:
+            visium_hd(tmp_path, bin_sizes=())
+        assert str(feature) in str(error.value)
+
+    @pytest.mark.parametrize("unused_counts", [False, True], ids=["no-count-files", "unused-count-files"])
+    def test_count_free_read_requires_feature_identity(self, tmp_path: Path, *, unused_counts: bool) -> None:
+        write_bundle(tmp_path, segmented=False, images=True)
+        if not unused_counts:
+            _remove_counts(tmp_path)
+        (tmp_path / "feature_slice.h5").unlink()
+        with pytest.raises(FileNotFoundError, match="feature_slice"):
+            visium_hd(tmp_path, bin_sizes=())
+
+    @pytest.mark.parametrize("split", [False, True], ids=["empty-root", "split-root-and-bin"])
+    def test_partial_root_spatial_keeps_available_images(self, tmp_path: Path, *, split: bool) -> None:
+        write_bundle(tmp_path, segmented=False, images=True)
+        root_spatial = tmp_path / "spatial"
+        root_spatial.mkdir()
+        if split:
+            shutil.move(
+                tmp_path / "binned_outputs/square_002um/spatial/tissue_hires_image.png",
+                root_spatial / "tissue_hires_image.png",
+            )
+        result = visium_hd(tmp_path, bin_sizes=(8,), include_cytassist_image=True)
+        assert set(result.images) == {"hires_image", "lowres_image", "cytassist_image"}
+        hires = result.images["hires_image"]
+        lowres = result.images["lowres_image"]
+        assert isinstance(hires, DataArray)
+        assert isinstance(lowres, DataArray)
+        assert hires.dims == lowres.dims == ("c", "y", "x")
+        assert hires.shape == (3, 48, 48)
+        assert lowres.shape == (3, 24, 24)
+        assert hires.dtype == lowres.dtype == np.uint8
+        assert_array_equal(hires.data[:, 0, 0].compute(), [0, 1, 2])
+        assert_array_equal(lowres.data[:, 0, 0].compute(), [0, 0, 0])
+
+    def test_missing_requested_product_still_fails_without_counts(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path, segmented=False, images=True)
+        _remove_counts(tmp_path)
+        with pytest.raises(FileNotFoundError, match="cell_segmentations"):
+            visium_hd(tmp_path, bin_sizes=(), include_cell_boundaries=True)
 
     def test_empty_product_selection(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, segmented=False)

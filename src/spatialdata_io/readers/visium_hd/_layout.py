@@ -45,9 +45,8 @@ class SegmentationLayout:
 
 @dataclass(frozen=True, slots=True)
 class ImageLayout:
-    """Selected optional rasters and their calibration source."""
+    """Selected optional rasters."""
 
-    scale_factors: ArtifactFile
     hires: ArtifactFile | None
     lowres: ArtifactFile | None
     cytassist: ArtifactFile | None
@@ -66,9 +65,7 @@ class NucleusCountSource:
 class VisiumHDLayout:
     """Validated immutable paths, without live files or parsed metadata."""
 
-    root: DatasetRoot
     feature_slice: ArtifactFile | None
-    identity_file: ArtifactFile
     base_positions: ArtifactFile
     base_scale_factors: ArtifactFile
     bins: tuple[BinLayout, ...]
@@ -105,6 +102,24 @@ def _boundary(directory: Path | None, name: str, *, requested: bool | None) -> A
 
     path = directory / name
     return require_file(path, context=_context(name)) if requested else optional_file(path, context=_context(name))
+
+
+def _image_file(
+    spatial: Path | None,
+    base_spatial: Path,
+    name: str,
+    *,
+    artifact: str,
+    required: bool = False,
+) -> ArtifactFile | None:
+    """Prefer each root image independently, rejecting malformed entries."""
+    context = _context(artifact)
+    if spatial is not None:
+        image = optional_file(spatial / name, context=context)
+        if image is not None:
+            return image
+    path = base_spatial / name
+    return require_file(path, context=context) if required else optional_file(path, context=context)
 
 
 def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path, ...]) -> ArtifactFile | None:
@@ -166,7 +181,7 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
 ) -> VisiumHDLayout:
     """Resolve selected standard and loose-download artifacts without recursion."""
     root = normalize_dataset_root(path, context=_context("dataset root"))
-    entries: tuple[Path, ...] = tuple(root.iterdir())
+    entries: tuple[Path, ...] = tuple(sorted(root.iterdir()))
     directories = _bin_directories(root)
     selected = tuple(sorted(directories)) if bin_sizes == "all" else tuple(bin_sizes)
     absent = set(selected).difference(directories)
@@ -238,29 +253,27 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
             require_file(base / "raw_feature_bc_matrix.h5", context=_context("raw two-micron counts")), mappings
         )
 
-    identity = bins[0].counts if bins else cell_counts
-    if identity is None:
-        identity = require_file(base / "filtered_feature_bc_matrix.h5", context=_context("count identity"))
-    feature = _loose_file(root, ("feature_slice.h5", "hd_feature_slice.h5"), entries, required=include_cytassist_image)
+    feature = _loose_file(
+        root,
+        ("feature_slice.h5", "hd_feature_slice.h5"),
+        entries,
+        required=include_cytassist_image or (not bins and cell_counts is None),
+    )
 
     images = None
     if include_images or include_cytassist_image:
         spatial = optional_directory(root / "spatial", context=_context("image directory"))
-        image_dir = spatial if spatial is not None else base / "spatial"
         images = ImageLayout(
-            base_scale,
-            optional_file(image_dir / "tissue_hires_image.png", context=_context("hires image"))
+            _image_file(spatial, base / "spatial", "tissue_hires_image.png", artifact="hires image")
             if include_images
             else None,
-            optional_file(image_dir / "tissue_lowres_image.png", context=_context("lowres image"))
+            _image_file(spatial, base / "spatial", "tissue_lowres_image.png", artifact="lowres image")
             if include_images
             else None,
-            require_file(image_dir / "cytassist_image.tiff", context=_context("CytAssist image"))
+            _image_file(spatial, base / "spatial", "cytassist_image.tiff", artifact="CytAssist image", required=True)
             if include_cytassist_image
             else None,
             _fullres(root, fullres_image_file, entries) if include_images else None,
         )
 
-    return VisiumHDLayout(
-        root, feature, identity, base_positions, base_scale, bins, segmentation, nucleus_counts, images
-    )
+    return VisiumHDLayout(feature, base_positions, base_scale, bins, segmentation, nucleus_counts, images)

@@ -13,18 +13,19 @@ import numpy as np
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.metadata import read_json_object
+from spatialdata_io.readers.visium_hd._transforms import SPOT_PITCH_UM
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from numpy.typing import NDArray
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-SPOT_PITCH_UM = 2.0
-
 
 @dataclass(frozen=True, slots=True)
 class Identity:
-    """Single-library count identity and normalized Space Ranger version."""
+    """Optional source library identity and normalized Space Ranger version."""
 
     format_version: str
     library_id: str | None
@@ -36,17 +37,7 @@ class ScaleFactors:
 
     hires: float
     lowres: float
-    spot_diameter: float
     microns_per_pixel: float
-    bin_size_um: float | None
-
-
-@dataclass(frozen=True, slots=True)
-class TransformPair:
-    """Validated mutually inverse spot-to-image and image-to-spot matrices."""
-
-    spot_to_image: NDArray[np.float64]
-    image_to_spot: NDArray[np.float64]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,29 +46,28 @@ class SourceMetadata:
 
     nrows: int
     ncols: int
-    spot_pitch: float
-    sample_id: str
-    microscope: TransformPair | None
-    cytassist: TransformPair | None
+    cytassist: NDArray[np.float64] | None
 
 
-def _context(artifact: str) -> ReaderErrorContext:
-    return ReaderErrorContext(reader="visium_hd", artifact=artifact)
+def _context(artifact: str, version: str | None = None) -> ReaderErrorContext:
+    return ReaderErrorContext(reader="visium_hd", artifact=artifact, detected_version=version)
 
 
-def _error(path: ArtifactFile, found: str, expected: str) -> ReaderFormatError:
-    return ReaderFormatError(context=_context("metadata"), found=found, expected=expected, path=path)
+def _error(
+    path: ArtifactFile, found: str, expected: str, *, context: ReaderErrorContext | None = None
+) -> ReaderFormatError:
+    return ReaderFormatError(context=context or _context("metadata"), found=found, expected=expected, path=path)
 
 
-def _text(value: object, *, path: ArtifactFile) -> str:
+def _text(value: object, *, path: ArtifactFile, context: ReaderErrorContext | None = None) -> str:
     if isinstance(value, bytes | np.bytes_):
         try:
             value = bytes(value).decode("utf-8", errors="strict")
         except UnicodeDecodeError as error:
-            raise _error(path, "non-UTF-8 metadata", "UTF-8 text") from error
+            raise _error(path, "non-UTF-8 metadata", "UTF-8 text", context=context) from error
 
     if not isinstance(value, str) or not value:
-        raise _error(path, "missing or empty metadata text", "nonempty UTF-8 text")
+        raise _error(path, "missing or empty metadata text", "nonempty UTF-8 text", context=context)
 
     return value
 
@@ -131,24 +121,19 @@ def _positive(values: dict[str, object], name: str, *, path: ArtifactFile) -> fl
     return float(value)
 
 
-def read_scale_factors(path: ArtifactFile) -> ScaleFactors:
-    """Read one scale-factor object and validate scientific calibration."""
+def read_bin_scale_factors(path: ArtifactFile, size_um: int) -> ScaleFactors:
+    """Read raster scales and validate the expected bin's nominal calibration."""
     values = read_json_object(path, context=_context("scale factors"))
-    return ScaleFactors(
+    factors = ScaleFactors(
         hires=_positive(values, "tissue_hires_scalef", path=path),
         lowres=_positive(values, "tissue_lowres_scalef", path=path),
-        spot_diameter=_positive(values, "spot_diameter_fullres", path=path),
         microns_per_pixel=_positive(values, "microns_per_pixel", path=path),
-        bin_size_um=_positive(values, "bin_size_um", path=path) if "bin_size_um" in values else None,
     )
-
-
-def read_bin_scale_factors(path: ArtifactFile, size_um: int) -> ScaleFactors:
-    """Validate the declared bin pitch and its nominal pixel calibration."""
-    factors = read_scale_factors(path)
-    if factors.bin_size_um != size_um:
-        raise _error(path, f"bin_size_um={factors.bin_size_um!r}", f"bin_size_um={size_um}")
-    if not math.isclose(size_um / factors.spot_diameter, factors.microns_per_pixel, rel_tol=1e-12):
+    diameter = _positive(values, "spot_diameter_fullres", path=path)
+    bin_size = _positive(values, "bin_size_um", path=path)
+    if bin_size != size_um:
+        raise _error(path, f"bin_size_um={bin_size!r}", f"bin_size_um={size_um}")
+    if not math.isclose(size_um / diameter, factors.microns_per_pixel, rel_tol=1e-12):
         raise _error(
             path,
             "inconsistent bin pitch, diameter and microns_per_pixel",
@@ -159,26 +144,68 @@ def read_bin_scale_factors(path: ArtifactFile, size_um: int) -> ScaleFactors:
 
 
 def read_identity(path: ArtifactFile) -> Identity:
-    """Read the Space Ranger 3.0-4.1 count version and optional library ID."""
+    """Read a source's Space Ranger 3.0-4.1 version and optional library ID."""
+    context = _context("count identity")
     try:
         with h5py.File(path, "r") as source:
-            text = _text(source.attrs.get("software_version"), path=path)
+            text = _text(source.attrs.get("software_version"), path=path, context=context)
+            version = text.removeprefix("spaceranger-")
+            context = _context("count identity", version)
             match = re.fullmatch(r"(?:spaceranger-)?((3|4)\.(\d+)\.(\d+))", text)
             if match is None or int(match[3]) > 1:
-                raise _error(path, f"software_version={text!r}", "Space Ranger 3.0-4.1")
-            version = match[1]
+                raise _error(path, f"software_version={text!r}", "Space Ranger 3.0-4.1", context=context)
 
             raw: object = source.attrs.get("library_ids")
             if isinstance(raw, np.ndarray):
                 if raw.size != 1:
-                    raise _error(path, f"{raw.size} library IDs", "exactly one library ID")
+                    raise _error(path, f"{raw.size} library IDs", "exactly one library ID", context=context)
                 raw = raw.reshape(-1)[0]
-            library_id = None if raw is None else _text(raw, path=path)
+            library_id = None if raw is None else _text(raw, path=path, context=context)
     except OSError as error:
-        add_reader_context(error, context=_context("count identity"), path=path)
+        add_reader_context(error, context=context, path=path)
         raise
 
     return Identity(version, library_id)
+
+
+def reconcile_identities(paths: Sequence[ArtifactFile]) -> Identity:
+    """Read each distinct consumed source once and reconcile its export identity."""
+    identity: Identity | None = None
+    for path in dict.fromkeys(paths):
+        candidate = read_identity(path)
+        if identity is None:
+            identity = candidate
+            continue
+
+        context = _context("count identity", candidate.format_version)
+        if candidate.format_version != identity.format_version:
+            raise _error(
+                path,
+                f"software_version={candidate.format_version!r}",
+                f"software_version={identity.format_version!r} shared by all consumed sources",
+                context=context,
+            )
+        if (
+            identity.library_id is not None
+            and candidate.library_id is not None
+            and candidate.library_id != identity.library_id
+        ):
+            raise _error(
+                path,
+                f"library_id={candidate.library_id!r}",
+                f"library_id={identity.library_id!r} shared by all known library IDs",
+                context=context,
+            )
+        if identity.library_id is None and candidate.library_id is not None:
+            identity = candidate
+
+    if identity is None:
+        raise ReaderFormatError(
+            context=_context("count identity"),
+            found="no selected identity source",
+            expected="at least one selected identity-bearing artifact",
+        )
+    return identity
 
 
 def _matrix(value: object, *, path: ArtifactFile, name: str) -> NDArray[np.float64] | None:
@@ -210,8 +237,25 @@ def _dimension(values: dict[str, object], name: str, *, path: ArtifactFile) -> i
     return value
 
 
+def _matrix_pair(values: dict[str, object], frame: str, *, path: ArtifactFile) -> NDArray[np.float64] | None:
+    forward = f"spot_colrow_to_{frame}_colrow"
+    inverse = f"{frame}_colrow_to_spot_colrow"
+    if forward not in values or inverse not in values:
+        raise _error(path, f"incomplete {frame} matrix pair", "both forward and inverse keys")
+
+    first = _matrix(values[forward], path=path, name=forward)
+    second = _matrix(values[inverse], path=path, name=inverse)
+    if (first is None) != (second is None):
+        raise _error(path, f"partly null {frame} matrix pair", "two matrices or two null values")
+    if first is not None and second is not None:
+        product = first @ second
+        if product[2, 2] == 0 or not np.allclose(product / product[2, 2], np.eye(3), rtol=1e-6, atol=1e-6):
+            raise _error(path, f"inconsistent {frame} matrix pair", "mutual inverses")
+    return first
+
+
 def read_source_metadata(path: ArtifactFile) -> SourceMetadata:
-    """Read feature-slice metadata and close its HDF5 owner before return."""
+    """Validate feature metadata, retaining dimensions and the forward CytAssist map."""
     try:
         with h5py.File(path, "r") as source:
             values = _json_object(source.attrs.get("metadata_json"), path=path)
@@ -223,34 +267,16 @@ def read_source_metadata(path: ArtifactFile) -> SourceMetadata:
     if not isinstance(matrices, dict):
         raise _error(path, "missing transform_matrices object", "nullable forward/inverse matrix pairs")
 
-    pairs: list[TransformPair | None] = []
-    for frame in ("microscope", "cytassist"):
-        forward = f"spot_colrow_to_{frame}_colrow"
-        inverse = f"{frame}_colrow_to_spot_colrow"
-        if forward not in matrices or inverse not in matrices:
-            raise _error(path, f"incomplete {frame} matrix pair", "both forward and inverse keys")
-
-        first = _matrix(matrices[forward], path=path, name=forward)
-        second = _matrix(matrices[inverse], path=path, name=inverse)
-        if (first is None) != (second is None):
-            raise _error(path, f"partly null {frame} matrix pair", "two matrices or two null values")
-        if first is not None and second is not None:
-            product = first @ second
-            if product[2, 2] == 0 or not np.allclose(product / product[2, 2], np.eye(3), rtol=1e-6, atol=1e-6):
-                raise _error(path, f"inconsistent {frame} matrix pair", "mutual inverses")
-            pairs.append(TransformPair(first, second))
-        else:
-            pairs.append(None)
+    _matrix_pair(matrices, "microscope", path=path)
+    cytassist = _matrix_pair(matrices, "cytassist", path=path)
 
     pitch = _positive(values, "spot_pitch", path=path)
     if pitch != SPOT_PITCH_UM:
         raise _error(path, f"spot_pitch={pitch!r}", "the supported 2 micrometre HD grid pitch")
+    _text(values.get("sample_id"), path=path)
 
     return SourceMetadata(
         _dimension(values, "nrows", path=path),
         _dimension(values, "ncols", path=path),
-        pitch,
-        _text(values.get("sample_id"), path=path),
-        pairs[0],
-        pairs[1],
+        cytassist,
     )

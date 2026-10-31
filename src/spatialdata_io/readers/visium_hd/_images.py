@@ -213,7 +213,7 @@ def _cytassist_image(
         )
 
     pixels = _normalize(read_tiff(metadata, series=0, level=0))
-    warped, matrix = warp_cytassist(pixels, frame, source.cytassist.spot_to_image, options)
+    warped, matrix = warp_cytassist(pixels, frame, source.cytassist, options)
     image = _parse_image(warped, matrix, options)
     image.attrs["interpolation"] = "bilinear"
     return image

@@ -11,7 +11,7 @@ Space Ranger 3.x produces binned outputs:
 
 ```text
 outs/
-├── hd_feature_slice.h5                 # or feature_slice.h5; optional unless CytAssist requested
+├── hd_feature_slice.h5                 # or feature_slice.h5; required for CytAssist or no selected counts
 ├── binned_outputs/
 │   ├── square_002um/
 │   │   ├── filtered_feature_bc_matrix.h5
@@ -24,14 +24,14 @@ outs/
 │   │       └── cytassist_image.tiff     # optional
 │   ├── square_008um/                   # same structure
 │   └── square_016um/                   # same structure
-└── spatial/                           # optional primary image copies
+└── spatial/                           # optional; each image takes precedence over its 2 µm copy
 ```
 
 Space Ranger 4.x adds segmentation:
 
 ```text
 outs/
-├── feature_slice.h5
+├── feature_slice.h5                    # required for CytAssist or no selected counts; otherwise optional
 ├── binned_outputs/                    # as above
 ├── barcode_mappings.parquet            # alternative: inside segmented_outputs/
 ├── segmented_outputs/
@@ -40,7 +40,7 @@ outs/
 │   ├── cell_segmentations.geojson
 │   ├── nucleus_segmentations.geojson
 │   └── spatial/scalefactors_json.json
-└── spatial/                           # optional image copies
+└── spatial/                           # optional; each image takes precedence over its 2 µm copy
 ```
 
 Stored custom even sizes such as `square_006um/` use the same bin structure.
@@ -53,9 +53,23 @@ resolve against the dataset root; absolute overrides are allowed.
 The 2 µm positions and scale factors calibrate every read, even if only larger
 bins or segmentations are returned. Grid dimensions come from feature-slice
 metadata when present, otherwise from the position columns, followed by exact
-coverage validation. Only selected count populations must be present. Version
-and optional library identity come from the selected HDF5 matrix. Feature-slice
-metadata validates the outer JSON and consumed grid/transform fields; the unused
+coverage validation. Only selected count populations must be present.
+
+Identity is reconciled before calibration from every distinct selected bin and
+cell matrix, the raw 2 µm matrix needed for nucleus counts, and any feature slice
+whose metadata is consumed. Each source must report a supported Space Ranger
+version, and their normalized **full versions must match exactly**. Mixing
+different supported versions raises. Multiple distinct known `library_ids` also
+raise; the sole known ID is retained regardless of selection order. Missing
+optional library IDs are allowed, and all-missing IDs yield no library ID.
+Agreement of missing IDs does not establish a common export origin.
+
+With no count product selected, an identity-bearing feature slice is required,
+including images-only and nucleus-boundary-only reads. Unselected raw or
+filtered matrices are never used as identity fallbacks. A selected count
+workflow can omit the feature slice unless CytAssist is requested. Feature-slice
+`sample_id` is sample text, distinct from `library_ids`. Feature-slice metadata
+validates the outer JSON and consumed grid/transform fields; the unused
 `hd_layout_json` annotation is ignored.
 
 A null microscope matrix pair does not prevent loading: the registration is
@@ -180,6 +194,14 @@ supported files directly inside `microscope_image/`; more than one is ambiguous.
 BigTIFF, including `.btf`; `data_axes` and `tiff_series` resolve explicit source
 selection. The full-resolution/hires longest-side dimensions are checked against
 the vendor scale factor.
+
+Hires, lowres and requested CytAssist images are resolved independently. For
+each artifact, `spatial/` at the dataset root takes precedence over
+`binned_outputs/square_002um/spatial/`; an absent root copy falls back to its
+2 µm copy. An empty or partially populated root directory therefore preserves
+available bin-level images. A malformed higher-priority entry raises instead
+of falling back. Hires and lowres are optional; requested CytAssist is required
+in one of these two locations.
 
 All images use `(c, y, x)`, preserve source channel order and dtype, and use the
 shared [raster options](raster_options.md). `scale_factors` applies only to the

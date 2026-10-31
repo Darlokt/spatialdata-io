@@ -128,7 +128,7 @@ class TestBinSquares:
 
     def test_nominal_full_edge_and_order(self) -> None:
         result = geometry.bin_squares(
-            np.array([2, 0], dtype=np.int64), np.array([2, 1], dtype=np.int64), 16, _frame(), pd.Index([7, 2])
+            np.array([2, 0], dtype=np.uint32), np.array([2, 1], dtype=np.uint32), 16, _frame(), pd.Index([7, 2])
         )
         assert_array_equal(result.index, [7, 2])
         assert_allclose(result.geometry.area, [256, 256])
@@ -136,8 +136,20 @@ class TestBinSquares:
             shapely.get_coordinates(result.geometry.to_numpy())[:5], [[32, 32], [48, 32], [48, 48], [32, 48], [32, 32]]
         )
 
-    def test_empty(self) -> None:
-        with pytest.raises(ReaderFormatError, match="empty bin population"):
-            geometry.bin_squares(
-                np.array([], dtype=np.int64), np.array([], dtype=np.int64), 2, _frame(), pd.Index([], dtype=np.int64)
-            )
+    def test_uint32_indices_and_reflected_frame(self) -> None:
+        matrix = np.array([[0.0, 1.0, 3.0], [1.0, 0.0, -5.0], [0.0, 0.0, 1.0]])
+        frame = SlideFrame(np.eye(3), matrix, np.eye(3), 0, 0)
+        row = 2**31 + 1
+        result = geometry.bin_squares(
+            np.array([row, 0], dtype=np.uint32),
+            np.array([0, 1], dtype=np.uint32),
+            2,
+            frame,
+            pd.Index([7, 2]),
+        )
+        assert_array_equal(result.index, [7, 2])
+        assert_array_equal(result.geometry.area, [4, 4])
+        assert_array_equal(
+            shapely.get_coordinates(result.geometry.to_numpy())[:5],
+            [[2 * row + 3, -5], [2 * row + 3, -3], [2 * row + 5, -3], [2 * row + 5, -5], [2 * row + 3, -5]],
+        )

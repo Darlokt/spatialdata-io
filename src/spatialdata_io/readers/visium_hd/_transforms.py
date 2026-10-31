@@ -46,13 +46,22 @@ def apply_projective(matrix: NDArray[np.float64], xy: NDArray[np.float64]) -> ND
 
 def grid_to_global(frame: SlideFrame, xy: NDArray[np.float64]) -> NDArray[np.float64]:
     """Transform physical grid micrometres to image-oriented global micrometres."""
-    return apply_projective(frame.grid_um_to_global, xy)
+    return xy @ frame.grid_um_to_global[:2, :2].T + frame.grid_um_to_global[:2, 2]
 
 
 def image_to_global(frame: SlideFrame, xy: NDArray[np.float64]) -> NDArray[np.float64]:
     """Exactly reproject full-resolution image coordinates into global micrometres."""
-    spots = apply_projective(np.linalg.inv(frame.spot_to_image), xy)
-    return grid_to_global(frame, SPOT_PITCH_UM * (spots + 0.5))
+    # Finite external vertices and centroids can still overflow during reprojection.
+    with np.errstate(over="ignore", invalid="ignore"):
+        spots = apply_projective(np.linalg.inv(frame.spot_to_image), xy)
+        transformed = grid_to_global(frame, SPOT_PITCH_UM * (spots + 0.5))
+    if not np.isfinite(transformed).all():
+        raise ReaderFormatError(
+            context=ReaderErrorContext("visium_hd", "coordinate transformation"),
+            found="nonfinite transformed coordinates",
+            expected="finite global coordinates representable in float64",
+        )
+    return transformed
 
 
 def bin_centers(

@@ -62,9 +62,7 @@ class TestParseBinBarcodes:
         assert_array_equal(rows, [2, 0])
         assert_array_equal(cols, [1, 3])
 
-    @pytest.mark.parametrize(
-        "names", [["x"], ["s_008um_00004_00000-1"], ["s_008um_00000_00004-1"], ["s_008um_00000_00000-1"] * 2]
-    )
+    @pytest.mark.parametrize("names", [["x"], ["s_008um_00004_00000-1"], ["s_008um_00000_00004-1"]])
     def test_invalid(self, tmp_path: Path, names: list[str]) -> None:
         with pytest.raises(ReaderFormatError):
             parse_bin_barcodes(pd.Index(names), 8, (4, 4), tmp_path)

@@ -70,7 +70,7 @@ class TestVisiumHdCommand:
             "raw",
             "--bin-counts-kind",
             "raw",
-            "--no-include-images",
+            "--include-images",
             "--data-axes",
             "c",
             "--data-axes",
@@ -88,6 +88,8 @@ class TestVisiumHdCommand:
         assert reader.call_args.kwargs["data_axes"] == ("c", "y", "x")
         assert reader.call_args.kwargs["include_cell_boundaries"] is False
         assert reader.call_args.kwargs["include_nucleus_table"] is True
+        assert reader.call_args.kwargs["include_images"] is True
+        assert reader.call_args.kwargs["tiff_series"] == 1
 
     @pytest.mark.parametrize("sizes", [("all", "8"), ("3",), ("0",), ("8", "8"), ("bad",)])
     def test_rejects_bad_sizes(self, tmp_path: Path, runner: CliRunner, sizes: tuple[str, ...]) -> None:

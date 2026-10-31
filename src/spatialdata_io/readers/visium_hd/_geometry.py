@@ -113,20 +113,13 @@ def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cel
 
 
 def bin_squares(
-    rows: NDArray[np.int64],
-    cols: NDArray[np.int64],
+    rows: NDArray[np.uint32],
+    cols: NDArray[np.uint32],
     size_um: int,
     frame: SlideFrame,
     index: pd.Index,
 ) -> gpd.GeoDataFrame:
     """Build nominal full squares, including the documented capture-edge overhang."""
-    if len(rows) == 0:
-        raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "bin squares"),
-            found="empty bin population",
-            expected="at least one bin for a SpatialData shapes element",
-        )
-
     corners = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]])
     geometries = np.empty(len(rows), dtype=object)
 
