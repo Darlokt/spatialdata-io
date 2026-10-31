@@ -39,6 +39,12 @@ class TestReadWorkflow:
     def test_boolean_modes(self, tmp_path: Path, text: str, mode: str) -> None:
         assert read_workflow(_write(tmp_path, text)) == mode
 
+    @pytest.mark.parametrize(
+        "unrelated", ["other: 1\nother: 2\n", "modules: {key: 1, key: 2}\n", "workflow_note: {tma: 1, tma: 2}\n"]
+    )
+    def test_unrelated_duplicate_keys_are_not_interpreted(self, tmp_path: Path, unrelated: str) -> None:
+        assert read_workflow(_write(tmp_path, "workflow: {tma: false}\n" + unrelated)) == "wsi"
+
     def test_unrelated_aliases_are_not_expanded(self, tmp_path: Path) -> None:
         text = "workflow:\n  tma: false\nbomb: &a [*a, *a]\n"
         assert read_workflow(_write(tmp_path, text)) == "wsi"

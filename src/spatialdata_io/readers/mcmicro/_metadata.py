@@ -37,8 +37,9 @@ def _member(node: yaml.Node, key: str, path: ArtifactFile) -> yaml.Node:
 def read_workflow(path: ArtifactFile) -> Literal["wsi", "tma"]:
     """Return the mode recorded by MCMICRO's complete ``qc/params.yml`` dump.
 
-    Only the ``workflow.tma`` path is composed into nodes and interpreted; no
-    other value is constructed, so unrelated aliases cannot expand.
+    The entire document is composed into an inert node graph, but only the
+    ``workflow.tma`` path is interpreted. Unrelated values are not constructed,
+    so their aliases cannot expand.
     """
     expected = "YAML with a boolean workflow.tma"
     try:

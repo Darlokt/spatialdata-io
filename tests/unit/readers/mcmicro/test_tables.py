@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pyarrow.csv as pacsv
 import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
@@ -15,11 +17,12 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro._layout import Quantification, Segmentation
 from spatialdata_io.readers.mcmicro._rasters import ImageGrid
-from spatialdata_io.readers.mcmicro._schemas import STRING_DTYPE, MarkerPanel
-from spatialdata_io.readers.mcmicro._tables import _set_positions, read_table
+from spatialdata_io.readers.mcmicro._schemas import STRING_DTYPE, MarkerPanel, quantification_columns
+from spatialdata_io.readers.mcmicro._tables import _read_measurements, _set_positions, read_table
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from unittest.mock import MagicMock
 
     from pytest_mock import MockerFixture
 
@@ -105,7 +108,6 @@ class TestReadTable:
             (_HEADER + "1,1,0,0,0,1\n", "malformed quantification"),
             (_HEADER + "1,1,0,,0,1,a\n", "nonnumeric 'X_centroid'"),
             (_HEADER + "1,1,0,0,0,big,a\n", "nonnumeric 'Area'"),
-            (_HEADER + "1,1,0,0,0,1,a\n1,2,0,0,0,1,b\n", "outside the label contract"),
             (_HEADER + "300,1,0,0,0,1,a\n", "outside the label contract"),
             ("CellID,A,B,X_centroid,Y_centroid,A\n", "unique nonempty"),
             ("CellID,A,X_centroid,Y_centroid\n1,1,0,0\n", "missing columns"),
@@ -117,6 +119,30 @@ class TestReadTable:
         with pytest.raises(ReaderFormatError, match=match):
             read_table((source,), _panel(), _dtypes(source, dtype=np.uint8), _grids(source))
 
+    @pytest.mark.parametrize("parser_batches", [False, True])
+    def test_duplicate_ids_across_batches_fail_at_final_linkage(
+        self, tmp_path: Path, mocker: MockerFixture, *, parser_batches: bool
+    ) -> None:
+        mocker.patch("spatialdata_io.readers.mcmicro._tables._MAX_BATCH_ROWS", 2)
+        mocker.patch("spatialdata_io.readers.mcmicro._tables._CSV_BLOCK_BYTES", 128 if parser_batches else 1024 * 1024)
+        text = _HEADER + "".join(f"{identifier},1,0,0,0,1,note\n" for identifier in [*range(1, 31), 7])
+        source = _quantification(tmp_path, "s", text)
+        with pytest.raises(ReaderFormatError, match=r"duplicate \(region, instance\) pairs") as caught:
+            read_table((source,), _panel(), _dtypes(source), _grids(source))
+        assert caught.value.context.reader == "mcmicro"
+        assert caught.value.context.artifact == "cell table"
+        assert "s_seg_cell" in caught.value.found
+        assert "7" in caught.value.found
+
+    @pytest.mark.parametrize("token", ['bare"quote', '"closed"suffix'])
+    def test_arrow_permissive_quotes_keep_exact_annotation(self, tmp_path: Path, token: str) -> None:
+        source = _quantification(tmp_path, "s", _HEADER + f"1,1,0,0,0,1,{token}\n")
+        table = read_table((source,), _panel(), _dtypes(source), _grids(source))
+        expected = 'bare"quote' if token.startswith("bare") else "closedsuffix"
+        assert table.obs["note"].tolist() == [expected]
+        assert isinstance(table.X, sparse.csr_array)
+        np.testing.assert_array_equal(table.X.toarray(), [[1, 0]])
+
     def test_tables_share_one_schema(self, tmp_path: Path) -> None:
         first = _quantification(tmp_path, "s1", _HEADER + "1,1,0,0,0,1,a\n")
         second = _quantification(tmp_path, "s2", "CellID,A,B,X_centroid,Y_centroid\n1,1,0,0,0\n")
@@ -127,6 +153,53 @@ class TestReadTable:
         source = _quantification(tmp_path, "s", _HEADER)
         with pytest.raises(ReaderFormatError, match="no quantified cells"):
             read_table((source,), _panel(), _dtypes(source), _grids(source))
+
+
+class TestReadMeasurements:
+    """The source and Arrow streaming reader have one owner on all iteration outcomes."""
+
+    @pytest.mark.parametrize("failure", [None, "numeric", "parser"])
+    def test_source_and_reader_close(self, tmp_path: Path, mocker: MockerFixture, failure: str | None) -> None:
+        text = _HEADER + "".join(f"{i},1,0,0,0,1,a\n" for i in range(1, 21))
+        if failure == "numeric":
+            text += "2,inf,0,0,0,1,a\n"
+        elif failure == "parser":
+            text += "2,1,0,0,0,1\n"
+        source = io.BytesIO(text.encode())
+        path = ArtifactFile(tmp_path / "s.csv")
+        columns = quantification_columns(_HEADER.strip().split(","), ("A", "B"), path)
+        mocker.patch("pathlib.Path.open", return_value=source)
+        mocker.patch("spatialdata_io.readers.mcmicro._tables._CSV_BLOCK_BYTES", 128)
+        actual_open = pacsv.open_csv
+        readers: list[MagicMock] = []
+
+        def track_reader(
+            handle: io.BytesIO,
+            *,
+            read_options: pacsv.ReadOptions,
+            parse_options: pacsv.ParseOptions,
+            convert_options: pacsv.ConvertOptions,
+        ) -> MagicMock:
+            reader = actual_open(
+                handle, read_options=read_options, parse_options=parse_options, convert_options=convert_options
+            )
+            tracked = mocker.MagicMock(wraps=reader)
+            tracked.__enter__.return_value = reader
+            tracked.__exit__.side_effect = reader.__exit__
+            readers.append(tracked)
+            return tracked
+
+        mocker.patch("spatialdata_io.readers.mcmicro._tables.pacsv.open_csv", side_effect=track_reader)
+        if failure is None:
+            assert len(_read_measurements(path, columns, np.dtype(np.uint32)).cell_ids) == 20
+        else:
+            with pytest.raises(ReaderFormatError, match=r"nonfinite|malformed quantification") as caught:
+                _read_measurements(path, columns, np.dtype(np.uint32))
+            assert caught.value.context.reader == "mcmicro"
+            assert caught.value.path == path
+        assert source.closed
+        assert len(readers) == 1
+        readers[0].__exit__.assert_called_once()
 
 
 class TestSetPositions:

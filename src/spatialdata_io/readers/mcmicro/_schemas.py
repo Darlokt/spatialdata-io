@@ -70,7 +70,12 @@ class MarkerPanel:
 def canonical_markers(names: Sequence[str]) -> tuple[str, ...]:
     """Suffix every occurrence of a repeated marker exactly as MCQuant does."""
     counts = Counter(names)
-    return tuple(f"{name}_{names[:i].count(name) + 1}" if counts[name] > 1 else name for i, name in enumerate(names))
+    occurrences: Counter[str] = Counter()
+    features: list[str] = []
+    for name in names:
+        occurrences[name] += 1
+        features.append(f"{name}_{occurrences[name]}" if counts[name] > 1 else name)
+    return tuple(features)
 
 
 def normalize_markers(frame: pd.DataFrame, path: ArtifactFile) -> MarkerPanel:
@@ -111,6 +116,13 @@ def quantification_columns(
 ) -> QuantificationColumns:
     """Select expression by the marker panel, never by numeric appearance."""
     validate_columns(columns, path)
+    conflicts = sorted(set(features).intersection((CELL_ID, *CENTROIDS)))
+    if conflicts:
+        raise schema_error(
+            path,
+            found=f"canonical marker IDs {conflicts!r} overlap required quantification fields",
+            expected="marker IDs distinct from CellID and centroid fields",
+        )
     missing = [name for name in (CELL_ID, *features, *CENTROIDS) if name not in columns]
     if missing:
         raise schema_error(
@@ -138,7 +150,6 @@ def _lexical(column: pa.Array | pa.ChunkedArray) -> pd.Series:
 def float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: str) -> npt.NDArray[np.float64]:
     """Decode correctly rounded finite float64 values without silent underflow."""
     expected = f"finite float64 {name!r} values"
-    lexical = _lexical(column)
     if column.null_count:
         raise schema_error(path, found=f"missing {name!r} values", expected=expected)
     try:
@@ -150,7 +161,7 @@ def float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: s
 
     # A nonzero decimal spelling that decodes to zero would silently change sparsity.
     zero = values == 0
-    if zero.any() and not lexical[zero].str.fullmatch(_LITERAL_ZERO).all():
+    if zero.any() and not _lexical(column)[zero].str.fullmatch(_LITERAL_ZERO).all():
         raise schema_error(path, found=f"{name!r} values that underflow to zero", expected=expected)
     return values
 
@@ -181,8 +192,8 @@ def optional_float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile
 
 
 def cell_ids(column: pa.Array | pa.ChunkedArray, label_dtype: np.dtype[np.generic], path: ArtifactFile) -> pd.Series:
-    """Decode exact positive unique label IDs that fit the segmentation dtype."""
-    expected = f"unique positive integer {CELL_ID!r} values representable as {label_dtype}"
+    """Decode exact positive label IDs that fit the segmentation dtype."""
+    expected = f"positive integer {CELL_ID!r} values representable as {label_dtype}"
     if column.null_count:
         raise schema_error(path, found=f"missing {CELL_ID!r} values", expected=expected)
     try:
@@ -192,7 +203,7 @@ def cell_ids(column: pa.Array | pa.ChunkedArray, label_dtype: np.dtype[np.generi
         raise schema_error(path, found=f"non-integer {CELL_ID!r} values", expected=expected) from error
     # Discovery admits only integer label dtypes; the type string selects their exact range.
     limit = min(np.iinfo(label_dtype.str).max, np.iinfo(np.int64).max)
-    if (identifiers <= 0).any() or (identifiers > limit).any() or len(np.unique(identifiers)) != len(identifiers):
+    if (identifiers <= 0).any() or (identifiers > limit).any():
         raise schema_error(path, found=f"{CELL_ID!r} values outside the label contract", expected=expected)
     return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(identifiers)), dtype=CELL_ID_DTYPE)
 

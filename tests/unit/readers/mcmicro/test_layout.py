@@ -60,7 +60,6 @@ class TestWsiDiscovery:
         )
         layout = discover_layout(root)
         assert isinstance(layout, WsiLayout)
-        assert layout.mode == "wsi"
         assert layout.image_id == "slide_1"
         assert layout.image.name == "slide_1.ome.tif"
         assert [label.key for label in layout.segmentations] == [
@@ -83,6 +82,62 @@ class TestWsiDiscovery:
         layout = discover_layout(_wsi(tmp_path, "raw/cycle.czi", "illumination/cycle-ffp.tif"))
         assert layout.segmentations == ()
         assert layout.quantifications == ()
+
+    @pytest.mark.parametrize("directory", ["segmentation", "quantification"])
+    def test_optional_directory_cannot_escape_when_empty(self, tmp_path: Path, directory: str) -> None:
+        root = _wsi(tmp_path / "run")
+        external = tmp_path / "external"
+        external.mkdir()
+        (root / directory).symlink_to(external, target_is_directory=True)
+        with pytest.raises(ReaderFormatError) as caught:
+            discover_layout(root)
+        assert caught.value.context.reader == "mcmicro"
+        assert "contain" in str(caught.value)
+
+    @pytest.mark.parametrize("directory", ["segmentation", "quantification"])
+    def test_in_root_optional_directory_symlink(self, tmp_path: Path, directory: str) -> None:
+        root = _wsi(tmp_path)
+        target = root / "output"
+        target.mkdir()
+        (root / directory).symlink_to(target, target_is_directory=True)
+        layout = discover_layout(root)
+        assert layout.segmentations == ()
+        assert layout.quantifications == ()
+
+    @pytest.mark.parametrize("directory", ["segmentation", "quantification"])
+    def test_optional_directory_wrong_kind(self, tmp_path: Path, directory: str) -> None:
+        root = _wsi(tmp_path)
+        selected = root / directory
+        selected.write_text("not a directory", encoding="utf-8")
+        with pytest.raises(NotADirectoryError) as caught:
+            discover_layout(root)
+        assert caught.value.filename == str(selected)
+
+    @pytest.mark.parametrize("directory", ["segmentation", "quantification"])
+    def test_optional_dangling_symlink_is_not_absence(self, tmp_path: Path, directory: str) -> None:
+        root = _wsi(tmp_path)
+        selected = root / directory
+        selected.symlink_to(root / "missing", target_is_directory=True)
+        with pytest.raises(FileNotFoundError) as caught:
+            discover_layout(root)
+        assert caught.value.filename == str(selected)
+
+    @pytest.mark.parametrize(
+        "artifact", ["segmentation/unmicst-slide_1/cell.ome.tif", "quantification/slide_1--unmicst_cell.csv"]
+    )
+    def test_selected_artifact_cannot_escape(self, tmp_path: Path, artifact: str) -> None:
+        root = _wsi(
+            tmp_path / "run", "segmentation/unmicst-slide_1/cell.ome.tif", "quantification/slide_1--unmicst_cell.csv"
+        )
+        external = tmp_path / "external"
+        external.write_bytes(b"")
+        selected = root / artifact
+        selected.unlink()
+        selected.symlink_to(external)
+        with pytest.raises(ReaderFormatError) as caught:
+            discover_layout(root)
+        assert caught.value.context.reader == "mcmicro"
+        assert "contain" in str(caught.value)
 
     @pytest.mark.parametrize("name", ["slide.ome.tiff", "slide.tif", "slide.btf"])
     def test_registered_image_id_strips_ome_suffix(self, tmp_path: Path, name: str) -> None:
@@ -157,7 +212,6 @@ class TestTmaDiscovery:
         )
         layout = discover_layout(root)
         assert isinstance(layout, TmaLayout)
-        assert layout.mode == "tma"
         assert layout.tma_map.name == "map.ome.tif"
         assert [(core.number, core.image.name, core.mask.name) for core in layout.cores] == [
             (2, "2.ome.tif", "2_mask.tif"),
@@ -165,6 +219,51 @@ class TestTmaDiscovery:
         ]
         assert [label.key for label in layout.segmentations] == ["core_2_unmicst_cell", "core_10_unmicst_cell"]
         assert [table.target.key for table in layout.quantifications] == ["core_2_unmicst_cell", "core_10_unmicst_cell"]
+
+    def test_many_cores_methods_and_compartments_keep_exact_associations(self, tmp_path: Path) -> None:
+        root = _tma(tmp_path)
+        for number in (21, 1, 3):
+            _touch(root, f"dearray/{number}.ome.tif", f"dearray/masks/{number}_mask.tif")
+        # Creation order deliberately differs from numeric and lexical output order.
+        for number in (21, 10, 3, 2, 1):
+            for method in ("z_method", "a_method"):
+                for compartment in ("nuclei", "cell_mask_ring"):
+                    _touch(
+                        root,
+                        f"segmentation/{method}-{number}/{compartment}.ome.tif",
+                        f"quantification/{number}--{method}_{compartment}.csv",
+                    )
+        layout = discover_layout(root)
+        assert isinstance(layout, TmaLayout)
+        assert [core.number for core in layout.cores] == [1, 2, 3, 10, 21]
+        expected = [
+            "core_1_a_method_cell_mask_ring",
+            "core_1_a_method_nuclei",
+            "core_1_z_method_cell_mask_ring",
+            "core_1_z_method_nuclei",
+            "core_2_a_method_cell_mask_ring",
+            "core_2_a_method_nuclei",
+            "core_2_z_method_cell_mask_ring",
+            "core_2_z_method_nuclei",
+            "core_3_a_method_cell_mask_ring",
+            "core_3_a_method_nuclei",
+            "core_3_z_method_cell_mask_ring",
+            "core_3_z_method_nuclei",
+            "core_10_a_method_cell_mask_ring",
+            "core_10_a_method_nuclei",
+            "core_10_z_method_cell_mask_ring",
+            "core_10_z_method_nuclei",
+            "core_21_a_method_cell_mask_ring",
+            "core_21_a_method_nuclei",
+            "core_21_z_method_cell_mask_ring",
+            "core_21_z_method_nuclei",
+        ]
+        assert [label.key for label in layout.segmentations] == expected
+        assert [table.target.key for table in layout.quantifications] == expected
+        for table, label in zip(layout.quantifications, layout.segmentations, strict=True):
+            assert table.target is label
+            source = label.image_id.removeprefix("core_")
+            assert table.path.name == f"{source}--{label.method}_{label.compartment}.csv"
 
     @pytest.mark.parametrize(
         ("extra", "match"),

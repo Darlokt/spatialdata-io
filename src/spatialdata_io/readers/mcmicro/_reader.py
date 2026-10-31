@@ -57,6 +57,8 @@ def mcmicro(
     Segmentation and quantification are optional, but every quantification
     table must name exactly one discovered label image. Registration must
     contain exactly one TIFF-family image, and cores are positive integers.
+    Discovered artifacts, including present optional output directories, must
+    resolve within the dataset root.
 
     Parameters
     ----------
@@ -123,6 +125,11 @@ def mcmicro(
         row axis to the major axis, between -pi/2 and pi/2. No table is returned
         without quantification.
 
+        Canonical marker IDs in a quantified run must differ from ``CellID``,
+        ``X_centroid`` and ``Y_centroid`` so expression and required observation
+        fields have unambiguous roles. Image-only marker panels have no such
+        restriction.
+
     Raises
     ------
     FileNotFoundError, NotADirectoryError, IsADirectoryError
@@ -136,10 +143,17 @@ def mcmicro(
     Notes
     -----
     Construction executes no pixel tasks and never reads label pixels; table
-    IDs are checked against the label dtype range only. Quantification tables
-    are parsed in bounded batches and never densified as a whole. Source files
-    remain necessary for later raster computation. Caller options are not
-    mutated.
+    IDs are checked for exact positive int64 values, label dtype capacity and
+    uniqueness within each region; membership in label pixels is not checked.
+    Quantification uses an approximately 1 MiB Arrow CSV block target, then
+    numerical blocks of at most 10,000 rows with an 8 MiB target and at least
+    one row. Parser/text buffers, eager annotations, retained CSR blocks and
+    final sparse assembly use additional memory; one wide row can exceed the
+    numerical target. Arrow checks record widths but accepts some malformed
+    quoting. Expression is never densified as a whole. TIFF source bands target
+    16 MiB, with a native-strip exception; output rechunking can fetch adjacent
+    bands. Source files remain necessary for later raster computation. Caller
+    options are not mutated.
     """
     options = make_raster_options(scale_factors, chunks)
     layout = discover_layout(path)

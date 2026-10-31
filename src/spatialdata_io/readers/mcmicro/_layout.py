@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
@@ -70,26 +70,22 @@ class Core:
 class WsiLayout:
     """Describe a whole-slide run with one registered image."""
 
-    root: DatasetRoot
     markers: ArtifactFile
     image_id: str
     image: ArtifactFile
     segmentations: tuple[Segmentation, ...]
     quantifications: tuple[Quantification, ...]
-    mode: Literal["wsi"] = field(default="wsi", init=False)
 
 
 @dataclass(frozen=True, slots=True)
 class TmaLayout:
     """Describe a tissue-microarray run with its registered map and numbered cores."""
 
-    root: DatasetRoot
     markers: ArtifactFile
     tma_map: ArtifactFile
     cores: tuple[Core, ...]
     segmentations: tuple[Segmentation, ...]
     quantifications: tuple[Quantification, ...]
-    mode: Literal["tma"] = field(default="tma", init=False)
 
 
 type McmicroLayout = WsiLayout | TmaLayout
@@ -110,6 +106,14 @@ def _listing(directory: ArtifactDirectory, artifact: str) -> tuple[Path, ...]:
 def _file(root: DatasetRoot, relative: str, artifact: str) -> ArtifactFile:
     """Resolve a discovered artifact and keep it inside the dataset root."""
     return require_metadata_file(root, relative, context=ReaderErrorContext("mcmicro", artifact))
+
+
+def _optional_output_directory(root: DatasetRoot, name: str) -> ArtifactDirectory | None:
+    """Distinguish absent output from malformed or out-of-root output directories."""
+    context = ReaderErrorContext("mcmicro", name)
+    if optional_directory(root / name, context=context) is None:
+        return None
+    return require_metadata_directory(root, name, context=context)
 
 
 def _image_id(name: str) -> str:
@@ -222,10 +226,8 @@ def _segmentations(  # noqa: C901, RUF100 - one ordered pass resolves both segme
     """
     source_ids = tuple(image_ids)
     context = ReaderErrorContext("mcmicro", "segmentation")
-    segmentation_dir = optional_directory(root / "segmentation", context=context)
-    quantification_dir = optional_directory(
-        root / "quantification", context=ReaderErrorContext("mcmicro", "quantification")
-    )
+    segmentation_dir = _optional_output_directory(root, "segmentation")
+    quantification_dir = _optional_output_directory(root, "quantification")
     quantified = _quantification_sources(quantification_dir, source_ids)
 
     labels: list[Segmentation] = []
@@ -268,17 +270,12 @@ def _segmentations(  # noqa: C901, RUF100 - one ordered pass resolves both segme
     # Images keep discovery order; methods and masks are lexical within each image.
     order = {image_id: index for index, image_id in enumerate(image_ids.values())}
     labels.sort(key=lambda label: (order[label.image_id], label.method, label.compartment))
-    by_name = {
-        (source, f"{label.method}_{label.compartment}"): label
-        for source, image_id in image_ids.items()
-        for label in labels
-        if label.image_id == image_id
-    }
+    by_name = {(label.image_id, f"{label.method}_{label.compartment}"): label for label in labels}
 
     quantifications: list[Quantification] = []
     for source, tables in quantified.items():
         for rest, entry in tables:
-            target = by_name.get((source, rest))
+            target = by_name.get((image_ids[source], rest))
             if target is None:
                 raise _error(
                     entry,
@@ -294,7 +291,7 @@ def _segmentations(  # noqa: C901, RUF100 - one ordered pass resolves both segme
     return tuple(labels), tuple(quantifications)
 
 
-def _require_unique_keys(layout: McmicroLayout) -> None:
+def _require_unique_keys(layout: McmicroLayout, root: DatasetRoot) -> None:
     """Reject any final element-name collision before raster construction."""
     if isinstance(layout, WsiLayout):
         keys = [f"{layout.image_id}_image"]
@@ -306,9 +303,7 @@ def _require_unique_keys(layout: McmicroLayout) -> None:
         keys.append(TABLE_KEY)
     duplicates = sorted(key for key, count in Counter(keys).items() if count > 1)
     if duplicates:
-        raise _error(
-            layout.root, artifact="element names", found=f"colliding keys {duplicates!r}", expected="unique keys"
-        )
+        raise _error(root, artifact="element names", found=f"colliding keys {duplicates!r}", expected="unique keys")
 
 
 def discover_layout(path: str | Path) -> McmicroLayout:
@@ -321,12 +316,12 @@ def discover_layout(path: str | Path) -> McmicroLayout:
     layout: McmicroLayout
     if mode == "wsi":
         segmentations, quantifications = _segmentations(root, {registered_id: registered_id})
-        layout = WsiLayout(root, markers, registered_id, registered, segmentations, quantifications)
+        layout = WsiLayout(markers, registered_id, registered, segmentations, quantifications)
     else:
         cores = _cores(root)
         sources = {str(core.number): core.image_id for core in cores}
         segmentations, quantifications = _segmentations(root, sources)
-        layout = TmaLayout(root, markers, registered, cores, segmentations, quantifications)
+        layout = TmaLayout(markers, registered, cores, segmentations, quantifications)
 
-    _require_unique_keys(layout)
+    _require_unique_keys(layout, root)
     return layout

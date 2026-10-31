@@ -95,6 +95,22 @@ class TestQuantificationColumns:
         assert columns.morphology == ("X_centroid", "Y_centroid", "Area")
         assert columns.text == ("note", "A_intensity_max")
 
+    @pytest.mark.parametrize("feature", ["CellID", "X_centroid", "Y_centroid"])
+    def test_required_roles_cannot_also_be_expression(self, tmp_path: Path, feature: str) -> None:
+        path = _path(tmp_path)
+        with pytest.raises(ReaderFormatError) as caught:
+            quantification_columns(["CellID", "X_centroid", "Y_centroid"], (feature,), path)
+        assert caught.value.context.reader == "mcmicro"
+        assert caught.value.path == path
+        assert feature in str(caught.value)
+
+    @pytest.mark.parametrize("name", ["CellID", "X_centroid", "Y_centroid"])
+    def test_suffixed_required_names_are_unambiguous(self, tmp_path: Path, name: str) -> None:
+        features = canonical_markers([name, name])
+        columns = quantification_columns(["CellID", *features, "X_centroid", "Y_centroid"], features, _path(tmp_path))
+        assert columns.features == (f"{name}_1", f"{name}_2")
+        assert columns.morphology == ("X_centroid", "Y_centroid")
+
     @pytest.mark.parametrize(
         ("header", "match"),
         [
@@ -179,6 +195,11 @@ class TestCellIds:
         assert identifiers.dtype == CELL_ID_DTYPE
         assert identifiers.tolist() == [3, 9007199254740993]
 
+    def test_duplicate_ids_are_preserved_for_final_table_validation(self, tmp_path: Path) -> None:
+        identifiers = cell_ids(pa.array(["3", "3"]), np.dtype(np.uint32), _path(tmp_path))
+        assert identifiers.tolist() == [3, 3]
+        assert identifiers.dtype == CELL_ID_DTYPE
+
     @pytest.mark.parametrize(
         ("tokens", "dtype", "match"),
         [
@@ -188,7 +209,6 @@ class TestCellIds:
             (["1", "99999999999999999999"], np.uint64, "non-integer"),
             (["0"], np.uint32, "outside"),
             (["-1"], np.int32, "outside"),
-            (["1", "1"], np.uint32, "outside"),
             (["256"], np.uint8, "outside"),
         ],
     )

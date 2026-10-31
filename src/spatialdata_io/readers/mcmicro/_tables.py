@@ -122,14 +122,13 @@ def _observations(
     sources = list(zip(measurements, paths, strict=True))
 
     # Every source file is validated with its own path before its values merge.
-    spatial = np.column_stack(
-        [
-            np.concatenate(
-                [float_values(measurement.annotations.column(name), path, name) for measurement, path in sources]
-            )
-            for name in CENTROIDS
-        ]
-    )
+    spatial = np.empty((len(index), 2), dtype=np.float64)
+    offset = 0
+    for measurement, path in sources:
+        end = offset + len(measurement.cell_ids)
+        for axis, name in enumerate(CENTROIDS):
+            spatial[offset:end, axis] = float_values(measurement.annotations.column(name), path, name)
+        offset = end
 
     obs = pd.DataFrame(index=index)
     obs[REGION_KEY] = pd.Categorical.from_codes(np.repeat(np.arange(len(regions)), sizes), categories=pd.Index(regions))

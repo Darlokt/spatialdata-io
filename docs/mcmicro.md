@@ -4,7 +4,7 @@
 
 ## Run layouts
 
-MCMICRO writes `qc/params.yml` as a complete dump of the parameters used. Its YAML boolean `workflow.tma` selects the layout; any other value, a duplicated key or malformed YAML fails. A whole-slide run contains:
+MCMICRO writes `qc/params.yml` as a complete dump of the parameters used. Its YAML boolean `workflow.tma` selects the layout; any other value, a missing or duplicated consumed `workflow`/`tma` key, or malformed YAML fails. The entire YAML document is composed into an inert node graph, but only `workflow.tma` is interpreted; unrelated metadata, including duplicate keys, is not recursively validated. A whole-slide run contains:
 
 ```text
 run/
@@ -30,7 +30,7 @@ run/
 
 Registration must contain exactly one TIFF-family image; its image ID drops the extension and an `.ome` suffix. Cores are positive integers and are ordered numerically. A mask stem is the label file name up to its first dot, as MCQuant names it, so `cell_mask_ring.ome.tif` has the stem `cell_mask_ring`. Every quantification table must name exactly one discovered label: `<image>--<method>_<mask>.csv` is compared with whole method and mask names, so underscores are never split. Labels without a quantification table are returned without table rows.
 
-A historical `segmentation/<image>/` directory, without the method prefix, is accepted when exactly one quantification table identifies the method of each of its masks. Segmentation and quantification are optional. All element names must be unique; a layout whose names would collide fails before any image is opened.
+A historical `segmentation/<image>/` directory, without the method prefix, is accepted when exactly one quantification table identifies the method of each of its masks. Segmentation and quantification are optional. Dataset-derived artifact paths, including present optional output directories and selected files, must resolve inside the dataset root. In-root symlinks are accepted; escaping or dangling symlinks and wrong-kind artifacts fail. All element names must be unique; a layout whose names would collide fails before any image is opened.
 
 ## Elements and coordinates
 
@@ -51,7 +51,7 @@ Each image uses complete base OME X/Y physical sizes in µm, nm or mm to scale i
 
 `markers.csv` needs a `marker_name` column. Every other column is optional module metadata and is kept as exact text in `var`, together with the original `marker_name`. `var_names` are the canonical marker IDs.
 
-Quantification tables need `CellID`, one column per canonical marker and `X_centroid`/`Y_centroid`. All tables of a run must have the same columns. Marker columns become eager, finite, canonical CSR float64 expression; exact decimal values are decoded with correct rounding, and nonfinite values or nonzero values that underflow to zero fail. `CellID` holds exact positive int64 label values, unique within each label and representable in that label's dtype; label pixels are never read to check them. MCQuant morphology columns (`Area`, `MajorAxisLength`, `MinorAxisLength`, `Eccentricity`, `Solidity`, `Extent`, `Orientation`, `column_centroid`, `row_centroid`) are float64 with empty fields as missing values. All other columns, including suffixed intensity properties, are kept as exact text.
+Quantification tables need `CellID`, one column per canonical marker and `X_centroid`/`Y_centroid`. Canonical marker IDs cannot also name the required `CellID`, `X_centroid` or `Y_centroid` fields; roles are checked after repeated-marker suffixing. An image-only panel may use those names. The reader-owned `region` column is also reserved. All tables of a run must have the same columns. Marker columns become eager, finite, canonical CSR float64 expression; exact decimal values are decoded with correct rounding, and nonfinite values or nonzero values that underflow to zero fail. `CellID` holds exact positive int64 label values, unique within each label and representable in that label's dtype; label pixels are never read to check them. MCQuant morphology columns (`Area`, `MajorAxisLength`, `MinorAxisLength`, `Eccentricity`, `Solidity`, `Extent`, `Orientation`, `column_centroid`, `row_centroid`) are float64 with empty fields as missing values. All other columns, including suffixed intensity properties, are kept as exact text.
 
 Rows follow label order and then source row order. Observation names are row positions `"0"`, `"1"`, ...; `region` names the label image and `CellID` is the instance key. `obsm["spatial_pixels"]` preserves the unchanged float64 centroid XY values. MCQuant obtains these directly from regionprops zero-based pixel-index centres. Their native frames are named `<source-image-frame>_regionprops_indices`, distinct from the raster's pixel-corner frame.
 
@@ -65,7 +65,11 @@ Area retains pixel², MajorAxisLength/MinorAxisLength and column_centroid/row_ce
 
 `scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale.
 
-Construction reads TIFF metadata only and executes no pixel tasks. Computing a region reads only the TIFF tiles, or strips grouped into bands of at most 16 MiB, that intersect its chunks. Quantification tables are parsed in bounded batches of at most 10,000 rows and 8 MiB of dense marker values, and only CSR blocks are retained. The source files must remain available for later raster computation.
+Construction reads TIFF metadata only and executes no pixel tasks. Raster decoding uses native tiles or source bands with a 16 MiB decoded-data target; one native strip can exceed that target. Output rechunking can fetch adjacent source bands. A crop's output size therefore does not bound bytes decoded, read or allocated. The source files must remain available for later raster computation.
+
+Arrow parses quantification CSV with a roughly 1 MiB block target, preserving duplicate-header rejection and full record-width validation. Its permissive quote handling is retained: for example, a quote inside an unquoted field is literal text, and text following a closing quote can be appended to that field. This is not strict validation of all CSV quoting syntax, and the parser block target does not establish a raw-record memory bound.
+
+Numerical expression blocks contain at most 10,000 rows, with an 8 MiB dense-marker target and at least one row. One unusually wide row can exceed the target. Parser and string buffers, retained eager annotations and IDs, retained CSR blocks, and final sparse assembly consume memory separately. Expression remains sparse after each numerical block; final linkage rejects duplicate `(region, CellID)` pairs, including duplicates across parser or numerical batches. The same ID may occur in different regions.
 
 ## Python and command line
 

@@ -147,6 +147,37 @@ class TestMcmicro:
         assert not result.labels
         assert not result.tables
 
+    def test_cell_id_cannot_be_used_as_expression(self, tmp_path: Path) -> None:
+        _write_historical_layout(tmp_path)
+        (tmp_path / "markers.csv").write_text("marker_name\nCellID\nDAPI\n", encoding="utf-8")
+        source = tmp_path / "quantification" / "sample--seg_cells.csv"
+        source.write_text("CellID,DAPI,X_centroid,Y_centroid\n1,3,1.5,0.5\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError) as caught:
+            mcmicro(tmp_path)
+        assert caught.value.context.reader == "mcmicro"
+        assert caught.value.path == source
+        assert "CellID" in str(caught.value)
+
+    def test_image_only_panel_can_name_cell_id(self, tmp_path: Path) -> None:
+        _write_historical_layout(tmp_path)
+        (tmp_path / "markers.csv").write_text("marker_name\nCellID\nDAPI\n", encoding="utf-8")
+        (tmp_path / "quantification" / "sample--seg_cells.csv").unlink()
+        (tmp_path / "segmentation" / "sample" / "cells.ome.tif").unlink()
+        result = mcmicro(tmp_path)
+        assert result.images["sample_image"].coords["c"].to_numpy().tolist() == ["CellID", "DAPI"]
+        assert not result.tables
+
+    def test_duplicate_ids_fail_with_final_table_context(self, tmp_path: Path) -> None:
+        _write_historical_layout(tmp_path)
+        source = tmp_path / "quantification" / "sample--seg_cells.csv"
+        source.write_text("CellID,CD3,DAPI,X_centroid,Y_centroid\n1,3,4,1.5,0.5\n1,5,6,2,3\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match=r"duplicate \(region, instance\) pairs") as caught:
+            mcmicro(tmp_path)
+        assert caught.value.context.reader == "mcmicro"
+        assert caught.value.context.artifact == "cell table"
+        assert "sample_seg_cells" in caught.value.found
+        assert "1" in caught.value.found
+
     def test_invalid_raster_option_fails_before_io(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="scale_factors"):
             mcmicro(tmp_path / "missing", scale_factors=(1,))
