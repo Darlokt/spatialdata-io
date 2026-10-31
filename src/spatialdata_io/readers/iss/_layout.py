@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
-    DatasetRoot,
     normalize_dataset_root,
     require_caller_file,
 )
@@ -23,7 +22,6 @@ _TIFF_SUFFIXES = frozenset({".tif", ".tiff", ".btf"})
 class _IssLayout:
     """Own validated canonical paths without retaining open resources."""
 
-    root: DatasetRoot
     raw_image: ArtifactFile
     labels: ArtifactFile
     table: ArtifactFile
@@ -46,4 +44,4 @@ def _discover_layout(
         message = f"ISS table {table} must be an h5ad file."
         raise ValueError(message)
 
-    return _IssLayout(root, raw_image, labels, table)
+    return _IssLayout(raw_image, labels, table)

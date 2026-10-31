@@ -24,7 +24,6 @@ class TestDiscoverLayout:
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
 
-        assert layout.root == tmp_path.resolve()
         assert layout.raw_image == (tmp_path / "raw.tiff").resolve()
         assert layout.labels == (tmp_path / "labels.tiff").resolve()
         assert layout.table == (tmp_path / "cells.h5ad").resolve()

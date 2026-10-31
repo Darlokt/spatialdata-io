@@ -100,8 +100,11 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         ``tables['table']`` is owned, eager, finite canonical CSR sparse-array
         expression with source dtype and row/feature order. Duplicate feature
         names become unique. The optional ``counts`` layer is normalized in the
-        same way. Other layers, additional H5AD annotation fields and their
-        dtypes/missingness, and existing spatial metadata are retained. Imported
+        same way. Integer duplicate sums in either expression slot must fit the
+        preserved source dtype; unsafe sums raise with the H5AD path and slot
+        in the error context. Safe duplicates, including signed cancellation,
+        retain the source dtype. Other layers, additional H5AD annotation fields
+        and their dtypes/missingness, and existing spatial metadata are retained. Imported
         H5AD ``obsm['spatial']`` moves exactly to ``spatial_source`` with its
         original dtype and shape; an occupied destination raises. No axes or
         units are inferred and no canonical ``spatial`` is returned. Label

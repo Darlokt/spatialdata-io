@@ -29,7 +29,7 @@ _READER_CASES = (
     pytest.param(_ReaderCase("spatialdata_io.readers.cosmx", "cosmx", "cosmx"), marks=pytest.mark.cosmx),
     pytest.param(_ReaderCase("spatialdata_io.readers.curio", "curio", "curio"), marks=pytest.mark.curio),
     _ReaderCase("spatialdata_io.readers.dbit", "dbit", "dbit"),
-    _ReaderCase("spatialdata_io.readers.iss", "iss", "iss"),
+    pytest.param(_ReaderCase("spatialdata_io.readers.iss", "iss", "iss"), marks=pytest.mark.iss),
     pytest.param(_ReaderCase("spatialdata_io.readers.macsima", "macsima", "macsima"), marks=pytest.mark.macsima),
     _ReaderCase("spatialdata_io.readers.mcmicro", "mcmicro", "mcmicro"),
     pytest.param(_ReaderCase("spatialdata_io.readers.merscope", "merscope", "merscope"), marks=pytest.mark.merscope),
@@ -79,6 +79,38 @@ class TestCliAlignment:
         for name, default in _RASTER_DEFAULTS.items():
             assert parameters[name].default == default
             assert command[name].default == default
+
+
+@pytest.mark.iss
+class TestIssCommandContract:
+    """Keep the ISS CLI selector inclusive of its complete public workflow."""
+
+    def test_reader_cli_conjunction_collects_command_alignment_and_workflow_tests(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "--no-cov",
+                "-q",
+                "-m",
+                "iss and cli",
+                "tests/unit/cli/commands/test_iss.py",
+                "tests/unit/cli/test_cli_alignment.py",
+                "tests/integration/readers/iss",
+            ],
+            cwd=Path(__file__).parents[3],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert "TestIssCommand::test_defaults_resolve_artifacts_in_reader" in completed.stdout
+        assert "TestCliAlignment::test_vendor_command_and_reader_parameter_names_agree[iss]" in completed.stdout
+        assert "TestCliAlignment::test_raster_options_use_the_central_defaults[iss]" in completed.stdout
+        assert "TestIssCommandWorkflow::test_writes_linked_spatialdata_zarr" in completed.stdout
+        assert "TestIss::" not in completed.stdout
 
 
 @pytest.mark.generic

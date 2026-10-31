@@ -25,11 +25,185 @@ from tests.integration.readers.iss.conftest import write_iss_dataset
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
+
     from tests.integration.readers.iss.conftest import IssDataset
 
 
 class TestIss:
-    """Read genuine artifacts without compatibility shims or mocked parsers."""
+    """Compose TIFF and H5AD artifacts into exact, linked scientific outputs."""
+
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize(
+        "case",
+        [
+            ("int8", [100, 100], None),
+            ("uint8", [200, 200], None),
+            ("uint64", [2**63, 2**63], None),
+            ("int8", [120, 120, -120], 120),
+            ("int64", [2**63 - 2, 1], 2**63 - 1),
+            ("uint64", [2**64 - 2, 1], 2**64 - 1),
+        ],
+    )
+    def test_h5ad_integer_duplicate_sums_preserve_source_and_lazy_pixels(
+        self, iss_dataset: IssDataset, slot: str, storage: str, case: tuple[str, list[int], int | None]
+    ) -> None:
+        dtype, values, expected = case
+        path = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        pointers = [0, len(values), len(values)] + ([len(values)] if storage == "csc" else [])
+        expression = constructor(
+            (np.asarray(values, dtype=dtype), np.zeros(len(values), dtype=np.int32), pointers), shape=source.shape
+        )
+        if slot == "X":
+            source.X = expression
+        else:
+            source.layers[slot] = expression
+        source.write_h5ad(path)
+        original = path.read_bytes()
+        ingested = ad.read_h5ad(path)
+        stored = ingested.X if slot == "X" else ingested.layers[slot]
+        assert isinstance(stored, sparse.csr_matrix | sparse.csc_matrix | sparse.csr_array | sparse.csc_array)
+        assert not stored.has_canonical_format
+        np.testing.assert_array_equal(stored.data, values)
+        tasks: list[object] = []
+
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            if expected is None:
+                with pytest.raises(ValueError, match="integer duplicate sum outside") as caught:
+                    iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+                notes = " ".join(caught.value.__notes__)
+                assert "iss" in notes
+                assert slot in notes
+                assert str(path) in notes
+            else:
+                result = iss(
+                    iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+                )
+                table = result.tables["table"]
+                actual = table.X if slot == "X" else table.layers[slot]
+                assert isinstance(actual, sparse.csr_array)
+                assert not isinstance(actual, sparse.spmatrix)
+                assert actual.has_canonical_format
+                assert actual.dtype == np.dtype(dtype)
+                assert int(actual[0, 0]) == expected
+                assert actual.nnz == 1
+                assert table.obs_names.tolist() == ["7", "2"]
+                assert table.var_names.tolist() == ["GeneB", "GeneA", "GeneB-1"]
+                assert table.obs["instance_id"].tolist() == [7, 2]
+                assert get_table_keys(table) == ("region_labels_image", "region", "instance_id")
+
+        assert not tasks
+        assert path.read_bytes() == original
+
+    @pytest.mark.parametrize(
+        ("dtype", "expected"),
+        [
+            ("int8", "int16"),
+            ("uint8", "uint16"),
+            ("int16", "int16"),
+            ("uint16", "uint16"),
+            ("int32", "int32"),
+            ("uint32", "uint32"),
+            ("int64", "int64"),
+            ("uint64", "uint64"),
+            ("Int64", "int64"),
+            ("UInt64", "uint64"),
+        ],
+    )
+    def test_explicit_integer_id_output_storage(self, iss_dataset: IssDataset, dtype: str, expected: str) -> None:
+        path = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.obs["segmentation_id"] = pd.Series([7, 2], index=source.obs_names, dtype=dtype)
+        source.write_h5ad(path)
+        original = path.read_bytes()
+
+        result = iss(
+            iss_dataset.root,
+            raw_image_file="raw.tiff",
+            labels_file="labels.tiff",
+            table_file="cells.h5ad",
+            instance_key="segmentation_id",
+        )
+
+        actual = result.tables["table"]
+        assert str(actual.obs["segmentation_id"].dtype) == expected
+        assert actual.obs["segmentation_id"].tolist() == [7, 2]
+        assert actual.obs.columns.tolist() == ["segmentation_id", "cell_type", "region"]
+        assert actual.obs_names.tolist() == ["7", "2"]
+        assert get_table_keys(actual) == ("region_labels_image", "region", "segmentation_id")
+        assert path.read_bytes() == original
+
+    @pytest.mark.parametrize("dtype", ["int64[pyarrow]", "uint64[pyarrow]"])
+    def test_arrow_ids_from_owned_read_result_have_compatible_final_storage(
+        self, iss_dataset: IssDataset, mocker: MockerFixture, dtype: str
+    ) -> None:
+        path = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        original = path.read_bytes()
+        identifiers = [2**53 + 1, 2**53 + 3] if dtype.startswith("int") else [2**63 + 1, 2**64 - 1]
+        source.obs["segmentation_id"] = pd.Series(identifiers, index=source.obs_names, dtype=dtype)
+        labels = np.zeros_like(iss_dataset.labels, dtype=np.uint64)
+        labels[:, 1:4], labels[:, 24:28] = identifiers
+        tifffile.imwrite(iss_dataset.root / "labels.tiff", labels, photometric="minisblack")
+        mocker.patch("spatialdata_io.readers.iss._tables.ad.read_h5ad", return_value=source)
+
+        result = iss(
+            iss_dataset.root,
+            raw_image_file="raw.tiff",
+            labels_file="labels.tiff",
+            table_file="cells.h5ad",
+            instance_key="segmentation_id",
+        )
+
+        table = result.tables["table"]
+        assert str(table.obs["segmentation_id"].dtype) == dtype.removesuffix("[pyarrow]")
+        assert table.obs["segmentation_id"].tolist() == identifiers
+        assert table.obs_names.tolist() == ["7", "2"]
+        assert get_table_keys(table) == ("region_labels_image", "region", "segmentation_id")
+        assert path.read_bytes() == original
+
+    @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
+    @pytest.mark.parametrize("dtype", ["uint64", "UInt64"])
+    def test_explicit_wide_id_storage_survives_persistence(
+        self, iss_dataset: IssDataset, storage: str, dtype: str
+    ) -> None:
+        root = iss_dataset.root
+        path = root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        identifiers = [2**63 + 1, 2**64 - 1]
+        source.obs["segmentation_id"] = pd.Series(identifiers, index=source.obs_names, dtype=dtype)
+        source.write_h5ad(path)
+        original = path.read_bytes()
+        labels = np.zeros_like(iss_dataset.labels, dtype=np.uint64)
+        labels[:, 1:4], labels[:, 24:28] = identifiers
+        tifffile.imwrite(root / "labels.tiff", labels, photometric="minisblack")
+        result = iss(
+            root,
+            raw_image_file="raw.tiff",
+            labels_file="labels.tiff",
+            table_file="cells.h5ad",
+            instance_key="segmentation_id",
+        )
+        table = result.tables["table"]
+        destination = root / f"ids.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            restored = ad.read_h5ad(destination)
+        elif storage == "anndata_zarr":
+            table.write_zarr(destination)
+            restored = ad.read_zarr(destination)
+        else:
+            result.write(destination)
+            restored = read_zarr(destination).tables["table"]
+        for actual in (table, restored):
+            assert str(actual.obs["segmentation_id"].dtype) == "uint64"
+            assert actual.obs["segmentation_id"].tolist() == identifiers
+            assert actual.obs_names.tolist() == ["7", "2"]
+            assert get_table_keys(actual) == ("region_labels_image", "region", "segmentation_id")
+        assert path.read_bytes() == original
 
     @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
     def test_inherited_slots_and_raw_survive_persistence(self, tmp_path: Path, storage: str) -> None:
@@ -94,7 +268,8 @@ class TestIss:
         assert "region" not in unchanged.obs
 
     @pytest.mark.parametrize("ome", [False, True])
-    def test_explicit_sample_channels_compose_with_linked_tables(self, tmp_path: Path, *, ome: bool) -> None:
+    @pytest.mark.parametrize("axes", ["YXC", "yXc"])
+    def test_explicit_sample_channels_compose_with_linked_tables(self, tmp_path: Path, axes: str, *, ome: bool) -> None:
         dataset = write_iss_dataset(tmp_path)
         source = np.arange(32 * 40 * 3, dtype=np.uint8).reshape(32, 40, 3)
         tifffile.imwrite(tmp_path / "raw.tiff", source, ome=ome, photometric="rgb", metadata={"axes": "YXS"})
@@ -103,7 +278,7 @@ class TestIss:
             raw_image_file="raw.tiff",
             labels_file="labels.tiff",
             table_file="cells.h5ad",
-            data_axes="YXC",
+            data_axes=axes,
             dataset_id="samples",
         )
         image = result.images["samples_raw_image"]

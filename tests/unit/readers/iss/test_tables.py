@@ -102,7 +102,22 @@ class TestSetInstanceIds:
                 obs, instance_key=None, label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "counts.h5ad")
             )
 
-    @pytest.mark.parametrize("dtype", ["int8", "uint8", "Int64", "UInt64", "uint64[pyarrow]"])
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            "int8",
+            "uint8",
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+            "Int64",
+            "UInt64",
+            "uint64[pyarrow]",
+        ],
+    )
     def test_integer_dtypes_and_nullable_storage(self, tmp_path: Path, dtype: str) -> None:
         """Integer dtypes and nullable storage."""
         obs = pd.DataFrame({"cell_id": pd.Series([7, 2], dtype=dtype)})
@@ -111,8 +126,13 @@ class TestSetInstanceIds:
             obs, instance_key="cell_id", label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "counts.h5ad")
         )
         np.testing.assert_array_equal(obs["cell_id"], [7, 2])
-        expected = dtype.lower().removesuffix("[pyarrow]") if "64" in dtype else ("uint16" if "u" in dtype else "int16")
-        assert str(obs["cell_id"].dtype) == f"{expected}[pyarrow]"
+        if dtype in {"int8", "uint8"}:
+            expected = "uint16[pyarrow]" if dtype == "uint8" else "int16[pyarrow]"
+        elif dtype in {"Int64", "UInt64", "uint64[pyarrow]"}:
+            expected = f"{dtype.lower().removesuffix('[pyarrow]')}[pyarrow]"
+        else:
+            expected = dtype
+        assert str(obs["cell_id"].dtype) == expected
 
     @pytest.mark.parametrize("instance_key", [None, "cell_id"])
     def test_empty_ids_remain_typed(self, tmp_path: Path, instance_key: str | None) -> None:
@@ -123,4 +143,34 @@ class TestSetInstanceIds:
             obs, instance_key=instance_key, label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "counts.h5ad")
         )
 
-        assert str(obs[instance_key or "instance_id"].dtype) == "int64[pyarrow]"
+        assert str(obs[instance_key or "instance_id"].dtype) == ("int64[pyarrow]" if instance_key is None else "int64")
+
+    @pytest.mark.parametrize("dtype", ["int16", "uint16", "int32", "uint32", "int64", "uint64"])
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_native_ids_preserve_column_storage_and_order(self, tmp_path: Path, dtype: str, *, empty: bool) -> None:
+        index = pd.Index([] if empty else ["cell-b", "cell-a"], name="cells")
+        obs = pd.DataFrame(
+            {
+                "before": "annotation",
+                "cell_id": pd.Series([] if empty else [7, 2], index=index, dtype=dtype),
+                "after": 3,
+            },
+            index=index,
+        )
+        original = obs.copy()
+        native = obs["cell_id"].to_numpy()
+        _set_instance_ids(
+            obs, instance_key="cell_id", label_dtype=np.dtype(np.uint64), path=ArtifactFile(tmp_path / "counts.h5ad")
+        )
+        pd.testing.assert_frame_equal(obs, original)
+        if not empty:
+            assert np.shares_memory(obs["cell_id"].to_numpy(), native)
+
+    @pytest.mark.parametrize("dtype", ["uint64", "UInt64", "uint64[pyarrow]"])
+    def test_wide_explicit_ids_remain_exact(self, tmp_path: Path, dtype: str) -> None:
+        obs = pd.DataFrame({"cell_id": pd.Series([2**63 + 1, 2**64 - 1], dtype=dtype)})
+        _set_instance_ids(
+            obs, instance_key="cell_id", label_dtype=np.dtype(np.uint64), path=ArtifactFile(tmp_path / "counts.h5ad")
+        )
+        assert obs["cell_id"].tolist() == [2**63 + 1, 2**64 - 1]
+        assert str(obs["cell_id"].dtype) == ("uint64" if dtype == "uint64" else "uint64[pyarrow]")

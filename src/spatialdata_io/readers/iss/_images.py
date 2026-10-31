@@ -125,8 +125,8 @@ def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOp
     if image.shape[-2:] != labels.shape:
         raise ReaderFormatError(
             context=ReaderErrorContext("iss", "raster alignment"),
-            path=layout.root,
-            found=f"raw YX shape {image.shape[-2:]} and labels shape {labels.shape}",
+            path=layout.labels,
+            found=f"raw image {layout.raw_image} YX shape {image.shape[-2:]} and labels shape {labels.shape}",
             expected="the same full-resolution pixel extent for raw and labels",
         )
     if labels.dtype.kind not in {"i", "u"}:
@@ -144,7 +144,7 @@ def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOp
         )
         raise ValueError(message)
     if factors and min(labels.shape) < prod(factors):
-        message = f"Requested scale factors {factors} exceed the spatial extent of the ISS rasters in {layout.root}."
+        message = f"Requested scale factors {factors} exceed the spatial extent of ISS labels {layout.labels}."
         raise ValueError(message)
 
     # OME names describe scientific channels, regardless of a three/four-channel count.
@@ -156,7 +156,7 @@ def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOp
         samples_expanded = (
             data_axes is not None
             and "s" in source_axes
-            and data_axes.lower()[source_axes.index("s")] == "c"
+            and data_axes[source_axes.index("s")] == "c"
             and len(channels) == 1
             and channels[0].samples_per_pixel == image.shape[0]
         )

@@ -24,6 +24,12 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
   policy, opt-in secondary analysis and run metadata in `attrs["xenium"]`. See
   the Xenium format guide.
 
+### Fixed
+
+- ISS rejects integer duplicate sums in imported H5AD `X` and `counts` when
+  they exceed the preserved source dtype, with the H5AD path and expression
+  slot in the error context. Safe duplicate sums retain their source dtype.
+
 ### Changed
 
 - **Breaking:** Curio cluster labels, metric values and defining-feature

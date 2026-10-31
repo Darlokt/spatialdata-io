@@ -70,6 +70,9 @@ def _set_instance_ids(
         column = obs[key]
         _validate_instance_ids(column, label_dtype=label_dtype, path=path)
 
+        if isinstance(column.dtype, np.dtype) and column.dtype.itemsize * 8 >= MIN_INSTANCE_BITS:
+            return
+
         # Linkage requires at least 16-bit integers; wider IDs keep signedness.
         arrow_type = (
             column.dtype.pyarrow_dtype

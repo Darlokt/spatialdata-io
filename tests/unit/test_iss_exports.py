@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import spatialdata_io
 from spatialdata_io import experimental
 from spatialdata_io.readers.iss import iss
 
 
+@pytest.mark.iss
 class TestIssExports:
     """Expose one supported ISS entry point through the lazy root API."""
 

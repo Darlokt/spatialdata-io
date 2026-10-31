@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+@pytest.mark.iss
 class TestIssCommand:
     """Verify paths, optional sequences, cardinality and output writing."""
 

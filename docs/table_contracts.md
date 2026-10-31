@@ -269,8 +269,12 @@ Categorical `region` names `<dataset_id>_labels_image`. The default integer
 `instance_id` is parsed exactly from observation names, using int64 or uint64;
 an explicit `instance_key` selects an existing integer column, promoting widths
 below 16 bits. These IDs are checked against the label dtype range, without
-reading label pixels. `X` and an optional documented `counts` layer become CSR;
-other layers and `raw` retain their source storage. Inherited
+reading label pixels. `X` and an optional documented `counts` layer become
+canonical CSR sparse arrays. Before normalization, integer duplicate sums in
+either slot must fit the preserved source dtype; unsafe sums fail with the H5AD
+path and expression slot in the error context. Safe duplicates, including signed
+cancellation, retain the source dtype. Other layers and `raw` retain their source
+storage and inherited numerical semantics. Inherited
 `spatialdata_attrs` is rejected. The [API](generated/spatialdata_io.iss.rst)
 describes the explicit artifact names and options.
 
@@ -547,11 +551,12 @@ Float32 cannot exactly represent every integer above 2²⁴. Scanpy's conversion
 may round large counts before the reader sees them; a later cast cannot recover
 them. HD nucleus output has the same final float32 limitation after guarded
 int64 accumulation. SciPy's dtype-preserving duplicate summation of noncanonical integer
-imported H5AD expression can overflow. Curio, DBiT and Stereo-seq analysis reject
+imported H5AD expression can overflow. Curio, DBiT, ISS and Stereo-seq analysis reject
 duplicate sums that cannot fit the preserved source dtype; raw Stereo-seq and
-HD retain their documented accumulation guards. Other imported-H5AD readers
-retain the general duplicate-overflow limitation. No unrestricted exact-count
-guarantee is made for those imported or float32 paths.
+HD retain their documented accumulation guards. Steinbock's imported expression
+retains the duplicate-overflow limitation. Other inherited layers and `raw`
+keep their source numerical semantics. No unrestricted exact-count guarantee is
+made for those imported or float32 paths.
 
 Shared HDF5 validation checks nonnegative/integral entries retained by Scanpy
 before local duplicate reduction; filtering may remove unselected records.

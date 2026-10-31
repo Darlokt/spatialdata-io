@@ -124,7 +124,7 @@ storage. Expression value dtypes are unaffected.
 
 `validate_integer_duplicate_sums()` adds a read-only preserved-dtype safety
 check for compressed CSR/CSC integer arrays and matrices before canonicalization.
-Curio's primary expression, DBiT's `X`/`counts`, and Stereo-seq's imported
+Curio's primary expression, DBiT's and ISS's `X`/`counts`, and Stereo-seq's imported
 expression slots require the same invariant: completed duplicate sums must fit
 the source integer dtype.
 The validator first checks compressed storage. Canonical integers return without
