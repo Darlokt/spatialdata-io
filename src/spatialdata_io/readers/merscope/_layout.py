@@ -95,7 +95,6 @@ class Mosaics:
 class MerscopeLayout:
     """Keep normalized products from instrument or caller-selected VPT analysis."""
 
-    root: DatasetRoot
     names: Names
     tables: TableFiles | None
     images: Mosaics | None
@@ -267,4 +266,4 @@ def discover_layout(
         image_directory = require_metadata_directory(root, "images", context=ReaderErrorContext("merscope", "images"))
         images = _mosaics(root, image_directory, selection.z_layers)
 
-    return MerscopeLayout(root, names, tables, images, boundaries, transcripts)
+    return MerscopeLayout(names, tables, images, boundaries, transcripts)

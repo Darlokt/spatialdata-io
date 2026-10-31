@@ -115,7 +115,6 @@ class TestDiscoverLayout:
         inferred = discover_layout(tmp_path, _selection())
         assert isinstance(inferred, MerscopeLayout)
         assert inferred.boundaries == tmp_path / "cell_boundaries.parquet"
-        assert inferred.root == tmp_path.resolve()
         assert inferred.names.dataset_id == f"{tmp_path.parent.name}_{tmp_path.name}"
         assert inferred.images is not None
         assert [layer.z for layer in inferred.images.layers] == [0, 2]
@@ -123,6 +122,8 @@ class TestDiscoverLayout:
             ["Cyto", "DAPI"]
         ] * 2
         assert inferred.tables is not None
+        assert inferred.tables.counts == tmp_path.resolve() / "cell_by_gene.csv"
+        assert inferred.tables.metadata == tmp_path.resolve() / "cell_metadata.csv"
         assert inferred.transcripts is not None
         assert inferred.transcripts.assignment == "current"
         selected = discover_layout(

@@ -20,6 +20,26 @@ if TYPE_CHECKING:
 class TestReadTransform:
     """Invert the source affine once without discarding its geometric components."""
 
+    def test_valid_matrix_above_former_byte_limit(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "transform.csv")
+        path.write_text("1" + " " * (70 * 1024) + "0 0\n0 1 0\n0 0 1\n", encoding="utf-8")
+        assert path.stat().st_size > 64 * 1024
+        np.testing.assert_array_equal(read_transform(path).matrix, np.eye(3))
+
+    def test_blank_lines_and_utf8_whitespace_do_not_count_as_rows(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "transform.csv")
+        path.write_text("\n\t\n1\u20030\t0\n \n0 1 0\n\u2003\n0 0 1\n\n", encoding="utf-8")
+        np.testing.assert_array_equal(read_transform(path).matrix, np.eye(3))
+
+    def test_fourth_nonempty_row_fails_after_blank_lines(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "transform.csv")
+        path.write_text("1 0 0\n0 1 0\n0 0 1\n\n \t\n0 0 1\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match="malformed transform") as caught:
+            read_transform(path)
+        assert caught.value.path == path
+        assert isinstance(caught.value.__cause__, ValueError)
+        assert "three rows of three coefficients" in str(caught.value.__cause__)
+
     def test_nonidentity_affine_direction(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "transform.csv")
         expected = np.asarray([[2, 0.25, 10], [0, 3, -7], [0, 0, 1]])

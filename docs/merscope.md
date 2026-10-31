@@ -111,8 +111,10 @@ remain two-dimensional projections, independent of selected image layers.
 
 The calibrated `global` frame is source micrometres. Native vector coordinates
 and table `obsm["spatial"]` remain unchanged; vectors carry identity. Mosaic
-images use the full **inverse** of the micron-to-mosaic affine. Its bounded
-64 KiB UTF-8 file contains a finite invertible homogeneous 3×3 matrix. For example:
+images use the full **inverse** of the micron-to-mosaic affine. Its UTF-8 file
+contains a finite invertible homogeneous 3×3 matrix: exactly three nonempty
+whitespace-separated rows of three coefficients. Blank lines are ignored;
+a fourth nonempty row fails. There is no fixed byte limit. For example:
 
 ```text
 2  0.25  10
@@ -153,7 +155,7 @@ CSV input must be valid. The Arrow decoder checks full record widths but does no
 
 Malformed unread coordinates, features and assignments raise with source context when the affected partition is computed. TIFF tasks open their source on execution, decode native tiles or bands of whole strips where supported, and close resources. Keep source files available until lazy computation or writing finishes; no open source handles are retained in the returned graphs.
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A sequence such as `(2, 2)` creates a lazy image pyramid. Computing a region decodes only the TIFF tiles, or strips grouped into bands of at most 16 MiB, that intersect its chunks. The full-resolution source series and level remain fixed; each stain file must supply one grayscale plane with only singleton extra axes.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A sequence such as `(2, 2)` creates a lazy image pyramid. TIFF decoding follows native tiles or bands of whole strips, grouped toward a 16 MiB decoded-byte target; a larger native strip stays indivisible. Output rechunking and generated pyramid dependencies can require additional source tiles or bands beyond the requested crop. The target is not a total-memory bound. The full-resolution source series and level remain fixed; each stain file must supply one grayscale plane with only singleton extra axes.
 
 Missing or wrong-kind paths raise the corresponding filesystem exception. Ambiguous layouts, malformed schemas, inconsistent populations and invalid scientific values raise `ReaderFormatError`, a `ValueError` subclass. Invalid option types raise `TypeError`; invalid values raise `ValueError`. Validation failures do not return partial results. Provenance records the reader and package version without absolute input paths.
 
@@ -174,11 +176,11 @@ sdata.write("sample.zarr")
 The CLI mirrors the reader, with repeatable layer, pyramid and chunk options:
 
 ```bash
-spatialdata_io merscope --input slide/region --output sample.zarr \
+python -m spatialdata_io merscope --input slide/region --output sample.zarr \
   --vpt-directory vpt --z-layers 2 --z-layers 0 \
   --scale-factors 2 --scale-factors 2
 
-spatialdata_io merscope --input slide/region --output counts.zarr \
+python -m spatialdata_io merscope --input slide/region --output counts.zarr \
   --no-include-images --no-include-transcripts --no-include-cell-boundaries
 ```
 

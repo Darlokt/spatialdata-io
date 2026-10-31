@@ -432,6 +432,72 @@ class TestMerscope:
         points = pickle.loads(pickle.dumps(result.points["slide_region_transcripts"]))  # noqa: S301, RUF100 - Test-owned lazy graph.
         assert points.compute()["cell_id"].tolist() == ["1001", "2002", "3003", "-1"]
 
+    def test_multiband_images_preserve_channels_and_bounded_serialized_crops(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        images = fixture.root / "images"
+        for path in images.glob("*.tif"):
+            path.unlink()
+        width = 4096
+        rows_per_strip = 128
+        bytes_per_strip = rows_per_strip * width * np.dtype(np.uint16).itemsize
+        band_rows = rows_per_strip * (tiff_dask.STRIP_BAND_BYTES // bytes_per_strip)
+        height = band_rows + rows_per_strip
+        source = np.arange(height * width, dtype=np.uint16).reshape(height, width)
+        for stain, offset in (("DAPI", 0), ("Cyto", 10_000)):
+            tifffile.imwrite(
+                images / f"mosaic_{stain}_z0.tif",
+                source + offset,
+                photometric="minisblack",
+                metadata={"axes": "YX"},
+                rowsperstrip=rows_per_strip,
+            )
+        assert source.nbytes > tiff_dask.STRIP_BAND_BYTES
+        source_read = mocker.spy(tiff_dask, "_read_tiff_selection")
+        tasks = mocker.Mock()
+        with Callback(posttask=tasks):
+            result = merscope(
+                fixture.root,
+                include_table=False,
+                include_transcripts=False,
+                include_cell_boundaries=False,
+                scale_factors=(),
+                chunks=(1, band_rows, width),
+            )
+        tasks.assert_not_called()
+        source_read.assert_not_called()
+        image = result.images["slide_region_z0"]
+        assert image.coords["c"].to_numpy().tolist() == ["Cyto", "DAPI"]
+        assert isinstance(image.data, da.Array)
+        restored = pickle.loads(pickle.dumps(image.data))  # noqa: S301, RUF100 - Test-owned path-backed graph.
+        assert restored.dtype == source.dtype
+        assert restored.chunks == ((1, 1), (band_rows, rows_per_strip), (width,))
+
+        assert_array_equal(restored[1, :2, 9:12].compute(), source[:2, 9:12])
+        source_read.assert_called_once()
+        assert source_read.call_args.args[0].path == images / "mosaic_DAPI_z0.tif"
+        assert source_read.call_args.args[1] == (slice(0, band_rows), slice(0, width))
+
+        source_read.reset_mock()
+        assert_array_equal(
+            restored[0, band_rows : band_rows + 2, 9:12].compute(), source[band_rows : band_rows + 2, 9:12] + 10_000
+        )
+        source_read.assert_called_once()
+        assert source_read.call_args.args[0].path == images / "mosaic_Cyto_z0.tif"
+        assert source_read.call_args.args[1] == (slice(band_rows, height), slice(0, width))
+
+        source_read.reset_mock()
+        assert_array_equal(
+            restored[1, band_rows - 1 : band_rows + 2, 9:12].compute(), source[band_rows - 1 : band_rows + 2, 9:12]
+        )
+        assert source_read.call_count == 2
+        assert {tuple((part.start, part.stop) for part in call.args[1]) for call in source_read.call_args_list} == {
+            ((0, band_rows), (0, width)),
+            ((band_rows, height), (0, width)),
+        }
+        assert all(call.args[0].path == images / "mosaic_DAPI_z0.tif" for call in source_read.call_args_list)
+
     def test_transcript_coordinates_use_correctly_rounded_source_lexemes(self, tmp_path: Path) -> None:
         fixture = write_merscope_dataset(tmp_path)
         (fixture.root / "detected_transcripts.csv").write_text(

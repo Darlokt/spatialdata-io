@@ -35,6 +35,8 @@ from spatialdata_io.readers.merscope._schemas import (
 
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers.merscope._geometry import CellBoundaries
+    from spatialdata_io.readers.merscope._layout import Names
 
 _CSV_BLOCK_BYTES = 1024 * 1024
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
@@ -64,7 +66,9 @@ def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
     """Decode a bounded lexical count block without float promotion or dense accumulation."""
     columns = [integer_values(column, path) for column in batch.columns[1:]]
     dtype = np.uint64 if any(column.dtype.kind == "u" for column in columns) else np.int64
-    dense = np.column_stack([column.astype(dtype, copy=False) for column in columns])
+    dense = np.empty((batch.num_rows, len(columns)), dtype=dtype)
+    for index, column in enumerate(columns):
+        dense[:, index] = column
     return as_csr_array(dense)
 
 
@@ -159,40 +163,37 @@ def read_table(counts: ArtifactFile, metadata: ArtifactFile) -> tuple[ad.AnnData
     return table, features
 
 
-def finalize_table(  # noqa: PLR0913, RUF100 - Final reader-owned annotations and linkage have distinct meanings.
+def finalize_table(
     table: ad.AnnData,
     *,
     frame: str,
-    region_name: str,
-    slide_name: str,
-    dataset_id: str,
-    target: str | None,
-    expected_instances: pd.Index | None,
-    source_instances: pd.Index | None,
+    names: Names,
+    boundaries: CellBoundaries | None,
 ) -> ad.AnnData:
     """Complete owned annotations and link once to an explicitly included cell footprint."""
     context = ReaderErrorContext("merscope", "cell table")
     # The reader owns eager AnnData annotations; backed Dataset2D is not produced.
     observations = cast("pd.DataFrame", table.obs)
-    expected = {"region": region_name, "slide": slide_name, "dataset_id": dataset_id}
-    if target is not None:
+
+    expected = {"region": names.region, "slide": names.slide, "dataset_id": names.dataset_id}
+    target = f"{names.dataset_id}_polygons"
+    if boundaries is not None:
         expected["cells_region"] = target
     validate_output_annotations(observations, expected, context=context)
-    if (
-        source_instances is not None
-        and expected_instances is not None
-        and len(source_instances) != len(expected_instances)
-    ):
-        if len(table.obs_names) != len(source_instances) or not table.obs_names.isin(source_instances).all():
+
+    # Dropping invalid geometry must not conceal a mismatch between the sources.
+    if boundaries is not None and len(boundaries.source_ids) != len(boundaries.shapes):
+        if len(table.obs_names) != len(boundaries.source_ids) or not table.obs_names.isin(boundaries.source_ids).all():
             raise ReaderFormatError(
                 context=context,
                 found="different original count and boundary populations",
                 expected="identical count and original boundary IDs before geometry filtering",
             )
-        keep = table.obs_names.isin(expected_instances)
+        keep = table.obs_names.isin(boundaries.shapes.index)
         if not keep.all():
             table = table[keep].copy()
             observations = cast("pd.DataFrame", table.obs)
+
     positions: PositionsMetadata = {
         "schema_version": 1,
         "coordinates": {
@@ -206,19 +207,21 @@ def finalize_table(  # noqa: PLR0913, RUF100 - Final reader-owned annotations an
         },
     }
     table.uns[POSITIONS_KEY] = positions
-    for name, value in (("region", region_name), ("slide", slide_name), ("dataset_id", dataset_id)):
+
+    for name, value in expected.items():
         observations[name] = pd.Series(value, index=observations.index, dtype="category")
-    if target is not None:
-        observations["cells_region"] = pd.Series(target, index=observations.index, dtype="category")
     observations["EntityID"] = pd.Series(observations.index, index=observations.index, dtype=STRING_DTYPE)
+
     table.obs = prepare_anndata_dataframe(observations, context=context)
     table.var = prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
-    if target is not None:
+
+    if boundaries is not None:
         return parse_linked_table(
             table,
             TableLinkage((target,), "cells_region", "EntityID"),
-            expected_instance_ids={target: expected_instances} if expected_instances is not None else None,
+            expected_instance_ids={target: boundaries.shapes.index},
             context=context,
         )
+
     normalize_owned_anndata(table)
     return table

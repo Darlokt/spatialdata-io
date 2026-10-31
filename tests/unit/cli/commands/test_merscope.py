@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+pytestmark = pytest.mark.merscope
+
+
 class TestMerscopeCommand:
     """Keep inclusion, layer, chunk and source selection aligned with the reader."""
 

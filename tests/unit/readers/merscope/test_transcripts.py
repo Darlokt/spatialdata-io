@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pickle
 import warnings
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 import pytest
@@ -88,6 +88,21 @@ class TestReadTranscripts:
         points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         assert set(points.columns) == {"gene", "x", "y"}
         assert points.compute().empty
+
+    @pytest.mark.parametrize("assignment", ["current", "original"])
+    def test_populated_source_without_cell_column_has_no_instance_linkage(
+        self, tmp_path: Path, assignment: Literal["current", "original"]
+    ) -> None:
+        source = _write_source(tmp_path / "transcripts.csv", assignment=assignment)
+        source.path.write_text('gene,global_x,global_y\nGeneB,1.5,2.5\n"Gene,A",3.5,4.5\n', encoding="utf-8")
+        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=("9007199254740993",))
+        assert set(points.columns) == {"gene", "x", "y"}
+        # SpatialData attaches metadata dynamically; Dask stubs type attrs as a method.
+        attributes = cast("dict[str, dict[str, str]]", points.attrs)
+        assert attributes["spatialdata_attrs"] == {"feature_key": "gene"}
+        result = points.compute()
+        assert result["gene"].tolist() == ["GeneB", "Gene,A"]
+        assert_array_equal(result[["x", "y"]], [[1.5, 2.5], [3.5, 4.5]])
 
     @pytest.mark.parametrize(
         ("gene", "cell", "message"), [("Unknown", "-1", "unknown gene"), ("GeneB", "9002", "unknown assigned")]

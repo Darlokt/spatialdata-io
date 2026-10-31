@@ -299,8 +299,8 @@ class TestValidateTranscriptColumns:
 class TestNormalizeTranscriptPartition:
     """Validate only executed events and preserve assignment provenance."""
 
-    @pytest.mark.parametrize("assignment", ["current", "original", "none"])
-    def test_output(self, tmp_path: Path, assignment: Literal["current", "original", "none"]) -> None:
+    @pytest.mark.parametrize("assignment", ["current", "original"])
+    def test_output(self, tmp_path: Path, assignment: Literal["current", "original"]) -> None:
         frame = pd.DataFrame(
             {
                 "gene": ["B", "A"],
@@ -346,5 +346,5 @@ class TestNormalizeTranscriptPartition:
     def test_empty(self, tmp_path: Path) -> None:
         frame = pd.DataFrame({name: pd.Series(dtype=STRING_DTYPE) for name in ("gene", "global_x", "global_y")})
         assert normalize_transcript_partition(
-            frame, features=("A",), path=ArtifactFile(tmp_path / "tx.csv"), assignment="none"
+            frame, features=("A",), path=ArtifactFile(tmp_path / "tx.csv"), assignment="current"
         ).empty

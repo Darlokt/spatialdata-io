@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     from click.testing import CliRunner
 
 
+pytestmark = pytest.mark.cli
+
+
 class TestMerscopeCommand:
     """Verify CLI parsing, VPT selection and output storage together."""
 

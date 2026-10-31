@@ -213,12 +213,8 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
         tables["table"] = finalize_table(
             table_data[0],
             frame=vector_frame,
-            region_name=layout.names.region,
-            slide_name=layout.names.slide,
-            dataset_id=dataset_id,
-            target=f"{dataset_id}_polygons" if boundaries is not None else None,
-            expected_instances=None if boundaries is None else boundaries.shapes.index,
-            source_instances=None if boundaries is None else boundaries.source_ids,
+            names=layout.names,
+            boundaries=boundaries,
         )
 
     result = SpatialData(images=images, points=points, shapes=shapes, tables=tables)

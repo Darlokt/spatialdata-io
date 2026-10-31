@@ -5,14 +5,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import anndata as ad
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import sparse
+from shapely.geometry import Polygon
 from spatialdata.models import get_table_keys
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.merscope._geometry import CellBoundaries
+from spatialdata_io.readers.merscope._layout import Names
 from spatialdata_io.readers.merscope._schemas import FLOAT_DTYPE, STRING_DTYPE
 from spatialdata_io.readers.merscope._tables import finalize_table, read_feature_names, read_table
 
@@ -157,23 +161,29 @@ class TestReadTable:
         assert table.obsm["spatial"][0, 0] == 0.10000000000000002
 
 
+def _boundaries(ids: tuple[str, ...]) -> CellBoundaries:
+    """Create complete normalized boundaries with a separately ordered table population."""
+    shapes = gpd.GeoDataFrame(
+        {"geometry_representation": ["union_footprint"] * len(ids)},
+        geometry=[Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])] * len(ids),
+        index=pd.Index(ids, dtype=STRING_DTYPE, name="EntityID"),
+    )
+    return CellBoundaries(shapes, shapes.index)
+
+
 class TestFinalizeTable:
     """Apply compatible annotation storage and exact independent target membership once."""
 
-    @pytest.mark.parametrize("target", [None, "slide_region_polygons"])
-    def test_linkage_and_blank_roundtrip(self, tmp_path: Path, target: str | None) -> None:
+    @pytest.mark.parametrize("linked", [False, True])
+    def test_linkage_and_blank_roundtrip(self, tmp_path: Path, *, linked: bool) -> None:
         table, _ = read_table(*_sources(tmp_path))
         native = table.obsm["spatial"]
         expression = table.X
         result = finalize_table(
             table,
             frame="global",
-            region_name="region",
-            slide_name="slide",
-            dataset_id="slide_region",
-            target=target,
-            expected_instances=pd.Index(["a", "b"]) if target else None,
-            source_instances=None,
+            names=Names(region="region", slide="slide"),
+            boundaries=_boundaries(("a", "b")) if linked else None,
         )
         assert result is table
         assert result.obsm["spatial"] is native
@@ -181,8 +191,8 @@ class TestFinalizeTable:
         assert result.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["frame"] == "global"
         assert result.obs["EntityID"].tolist() == ["b", "a"]
         assert result.obs["region"].tolist() == ["region", "region"]
-        if target:
-            assert get_table_keys(result) == (target, "cells_region", "EntityID")
+        if linked:
+            assert get_table_keys(result) == ("slide_region_polygons", "cells_region", "EntityID")
         else:
             assert "spatialdata_attrs" not in result.uns
             assert "cells_region" not in result.obs
@@ -200,12 +210,8 @@ class TestFinalizeTable:
             finalize_table(
                 table,
                 frame="global",
-                region_name="region",
-                slide_name="slide",
-                dataset_id="slide_region",
-                target="cells",
-                expected_instances=pd.Index(["a", "different"]),
-                source_instances=None,
+                names=Names(region="region", slide="slide"),
+                boundaries=_boundaries(("a", "different")),
             )
 
     def test_conflicting_source_annotations_fail(self, tmp_path: Path) -> None:
@@ -215,17 +221,18 @@ class TestFinalizeTable:
             finalize_table(
                 table,
                 frame="global",
-                region_name="region",
-                slide_name="slide",
-                dataset_id="slide_region",
-                target="cells",
-                expected_instances=pd.Index(["a", "b"]),
-                source_instances=None,
+                names=Names(region="region", slide="slide"),
+                boundaries=_boundaries(("a", "b")),
             )
 
     def test_matching_annotations_are_preserved_as_declared_categories(self, tmp_path: Path) -> None:
         table, _ = read_table(*_sources(tmp_path))
-        expected = {"region": "region", "slide": "slide", "dataset_id": "slide_region", "cells_region": "cells"}
+        expected = {
+            "region": "region",
+            "slide": "slide",
+            "dataset_id": "slide_region",
+            "cells_region": "slide_region_polygons",
+        }
         for column, value in expected.items():
             table.obs[column] = pd.Series(value, index=table.obs_names, dtype=STRING_DTYPE)
         native = table.obsm["spatial"]
@@ -233,12 +240,8 @@ class TestFinalizeTable:
         result = finalize_table(
             table,
             frame="global",
-            region_name="region",
-            slide_name="slide",
-            dataset_id="slide_region",
-            target="cells",
-            expected_instances=pd.Index(["a", "b"]),
-            source_instances=None,
+            names=Names(region="region", slide="slide"),
+            boundaries=_boundaries(("a", "b")),
         )
         assert result.obsm["spatial"] is native
         assert result.X is expression
@@ -253,10 +256,6 @@ class TestFinalizeTable:
             finalize_table(
                 table,
                 frame="global",
-                region_name="region",
-                slide_name="slide",
-                dataset_id="slide_region",
-                target=None,
-                expected_instances=None,
-                source_instances=None,
+                names=Names(region="region", slide="slide"),
+                boundaries=None,
             )

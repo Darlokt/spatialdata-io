@@ -243,7 +243,7 @@ def normalize_transcript_partition(
     *,
     features: tuple[str, ...],
     path: ArtifactFile,
-    assignment: Literal["current", "original", "none"],
+    assignment: Literal["current", "original"],
     allowed_cell_ids: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     """Validate one owned partition, preserving assignment provenance without a full scan."""
