@@ -114,11 +114,14 @@ class TestDiscoverLayout:
     def test_sorted_inference_explicit_order_and_normalized_root(self, tmp_path: Path) -> None:
         _write_pairs(tmp_path)
         inferred = discover_layout(tmp_path / ".", _selection())
-        assert inferred.root == tmp_path.resolve()
-        assert [roi.name for roi in inferred.rois] == ["Roi1", "Roi2"]
-        assert all(roi.pixels is None and roi.transcripts is None for roi in inferred.rois)
+        assert isinstance(inferred, tuple)
+        assert [roi.name for roi in inferred] == ["Roi1", "Roi2"]
+        assert all(roi.pixels is None and roi.transcripts is None for roi in inferred)
+        for roi in inferred:
+            assert roi.counts == (tmp_path / f"{roi.name}_CellxGene.csv").resolve()
+            assert roi.cells == (tmp_path / f"{roi.name}_CellCoordinates.csv").resolve()
         explicit = discover_layout(str(tmp_path), _selection(rois=("Roi2", "Roi1")))
-        assert [roi.name for roi in explicit.rois] == ["Roi2", "Roi1"]
+        assert [roi.name for roi in explicit] == ["Roi2", "Roi1"]
 
     @pytest.mark.parametrize("kind", ["missing", "file"])
     def test_root_missing_or_wrong_kind(self, tmp_path: Path, kind: str) -> None:
@@ -177,14 +180,14 @@ class TestDiscoverLayout:
                 discover_layout(tmp_path, selection)
             (tmp_path / f"Roi1_{suffix}").touch()
         layout = discover_layout(tmp_path, selection)
-        roi = layout.rois[0]
+        roi = layout[0]
         assert (roi.pixels is None) == (product in {"circles", "transcripts"})
         assert (roi.transcripts is not None) == (product == "transcripts")
 
     def test_explicit_subset_ignores_an_unselected_incomplete_roi(self, tmp_path: Path) -> None:
         _write_pairs(tmp_path, ("Roi1",))
         (tmp_path / "Roi2_CellxGene.csv").touch()
-        assert [roi.name for roi in discover_layout(tmp_path, _selection(rois=("Roi1",))).rois] == ["Roi1"]
+        assert [roi.name for roi in discover_layout(tmp_path, _selection(rois=("Roi1",)))] == ["Roi1"]
 
     def test_metadata_derived_symlink_cannot_escape_root(self, tmp_path: Path) -> None:
         root = tmp_path / "dataset"

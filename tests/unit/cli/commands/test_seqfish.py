@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+pytestmark = pytest.mark.seqfish
+
+
 class TestSeqfishCommand:
     """Mirror reader defaults and normalize CLI values exactly once."""
 

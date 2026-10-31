@@ -70,7 +70,9 @@ def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
         columns.append(values)
     largest = max(int(column.max()) for column in columns)
     dtype = np.uint64 if largest >= 2**63 else np.int64
-    values = np.column_stack([column.astype(dtype, copy=False) for column in columns])
+    values = np.empty((batch.num_rows, len(columns)), dtype=dtype)
+    for index, column in enumerate(columns):
+        values[:, index] = column
     return as_csr_array(values)
 
 
@@ -78,8 +80,8 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, npt.NDArray[np.i
     """Keep only bounded dense buffers and accumulate canonical sparse blocks."""
     columns = _read_header(path)
     features = validate_count_columns(columns, path)
-    # Bound both the source decoder's lexical buffers and the dense numeric
-    # kernel. Only CSR blocks and the required cell identifiers accumulate.
+    # Budget parsed numeric columns plus their dense destination separately
+    # from Arrow text buffers, sparse conversion and retained output blocks.
     batch_rows = max(1, min(_MAX_BATCH_ROWS, _BATCH_MEMORY_BYTES // (16 * len(features))))
     identifiers: list[str] = []
     blocks: list[sparse.csr_array] = []
@@ -152,12 +154,14 @@ def read_table(counts: ArtifactFile, cells: ArtifactFile) -> ad.AnnData:
     """Return an owned unlinked CSR table in count-row and feature-header order."""
     expression, identifiers, features = _read_counts(counts)
     metadata = _read_cells(cells)
-    if not metadata.index.equals(pd.Index(identifiers)):
-        if set(identifiers) != set(metadata.index):
+    count_index = pd.Index(identifiers)
+    if not metadata.index.equals(count_index):
+        positions = metadata.index.get_indexer(count_index)
+        if len(metadata) != len(identifiers) or (positions < 0).any():
             raise schema_error(
                 cells, found="different count and metadata IDs", expected="identical unique cell populations"
             )
-        metadata = metadata.loc[identifiers]
+        metadata = metadata.iloc[positions]
     observations = pd.DataFrame(index=pd.Index([str(i) for i in range(len(identifiers))]))
     observations["area"] = pd.Series(metadata["area"].array, index=observations.index)
     observations["instance_id"] = pd.Series(

@@ -49,14 +49,6 @@ class RoiLayout:
     transcripts: ArtifactFile | None
 
 
-@dataclass(frozen=True, slots=True)
-class SeqfishLayout:
-    """Own the canonical root and final ordered ROI inventory."""
-
-    root: DatasetRoot
-    rois: tuple[RoiLayout, ...]
-
-
 def make_selection(  # noqa: PLR0913, RUF100 - Keep supported product choices explicit.
     *,
     include_images: bool,
@@ -123,7 +115,7 @@ def _roi_layout(root: DatasetRoot, name: str, selection: Selection) -> RoiLayout
     return RoiLayout(name, counts, cells, pixels, artifact("TranscriptList.csv") if selection.transcripts else None)
 
 
-def discover_layout(path: str | Path, selection: Selection) -> SeqfishLayout:
+def discover_layout(path: str | Path, selection: Selection) -> tuple[RoiLayout, ...]:
     """Inspect one directory and resolve the requested complete ROI groups."""
     context = ReaderErrorContext("seqfish", "ROI layout")
     root = normalize_dataset_root(path, context=context)
@@ -146,4 +138,4 @@ def discover_layout(path: str | Path, selection: Selection) -> SeqfishLayout:
         raise ReaderFormatError(
             context=context, path=root, found=f"unknown ROIs {sorted(missing)!r}", expected=f"ROIs in {sorted(names)!r}"
         )
-    return SeqfishLayout(root, tuple(_roi_layout(root, name, selection) for name in requested))
+    return tuple(_roi_layout(root, name, selection) for name in requested)

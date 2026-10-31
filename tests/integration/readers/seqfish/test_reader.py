@@ -10,16 +10,19 @@ from typing import TYPE_CHECKING
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 import tifffile
 from anndata.tests.helpers import assert_equal
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
 from scipy import sparse
+from shapely.geometry import Polygon
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
 from spatialdata.transformations import Scale, get_transformation
 
+import spatialdata_io.readers.seqfish._rasters as raster_module
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers.seqfish import seqfish
@@ -35,6 +38,91 @@ if TYPE_CHECKING:
 
 class TestSeqfish:
     """Exercise the public transaction using actual on-disk vendor artifacts."""
+
+    @pytest.mark.parametrize("geometry", ["polygons", "both"])
+    def test_polygons_only_inspects_calibration_without_pixel_graphs(
+        self, tmp_path: Path, mocker: MockerFixture, geometry: Literal["polygons", "both"]
+    ) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",), reorder_boundaries=True)
+        tifffile.imwrite(
+            root / "Roi1_DAPI.tiff",
+            np.zeros((256, 320), dtype=np.uint16),
+            ome=True,
+            tile=(16, 16),
+            photometric="minisblack",
+            metadata={"axes": "YX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 0.25},
+        )
+        with_raster = seqfish(root, include_labels=False, include_transcripts=False, shape_geometry=geometry)
+        inspection = mocker.spy(raster_module, "inspect_tiff")
+        graph = mocker.spy(raster_module, "read_tiff")
+        tasks = mocker.Mock()
+        with Callback(posttask=tasks):
+            result = seqfish(
+                root, include_images=False, include_labels=False, include_transcripts=False, shape_geometry=geometry
+            )
+        inspection.assert_called_once()
+        graph.assert_not_called()
+        tasks.assert_not_called()
+        assert not result.images
+        assert_equal(result.tables["table_Roi1"], with_raster.tables["table_Roi1"], exact=True)
+        assert result.shapes.keys() == with_raster.shapes.keys()
+        for name, shapes in result.shapes.items():
+            pd.testing.assert_frame_equal(shapes, with_raster.shapes[name])
+            assert shapes.geometry.to_wkb().tolist() == with_raster.shapes[name].geometry.to_wkb().tolist()
+            assert get_transformation(shapes, get_all=True) == get_transformation(
+                with_raster.shapes[name], get_all=True
+            )
+        boundaries = result.shapes["Roi1_Boundaries"]
+        assert boundaries.index.tolist() == [9, 2]
+        assert boundaries["objectType"].tolist() == ["cell", "cell"]
+        polygon = boundaries.geometry.iloc[0]
+        assert isinstance(polygon, Polygon)
+        assert_array_equal(polygon.exterior.coords, [[2, 1], [5, 1], [5, 3], [2, 3], [2, 1]])
+        assert get_transformation(boundaries, to_coordinate_system="global") == Scale([0.25, 0.5], axes=("y", "x"))
+
+    def test_calibration_only_accepts_nonspatial_axis_excluded_from_products(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",))
+        tifffile.imwrite(
+            root / "Roi1_DAPI.tiff",
+            np.zeros((2, 8, 12), dtype=np.uint16),
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "ZYX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 0.25},
+        )
+        result = seqfish(root, include_images=False, include_labels=False, include_transcripts=False)
+        assert result.shapes["Roi1_Boundaries"].index.tolist() == [9, 2]
+        with pytest.raises(ReaderFormatError, match="singleton additional axes"):
+            seqfish(root, include_labels=False, include_transcripts=False)
+
+    def test_polygons_still_require_valid_calibration(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",))
+        tifffile.imwrite(
+            root / "Roi1_DAPI.tiff",
+            np.zeros((8, 12), dtype=np.uint16),
+            ome=True,
+            metadata={"axes": "YX", "PhysicalSizeX": 0.5},
+        )
+        with pytest.raises(ReaderFormatError, match="physical"):
+            seqfish(root, include_images=False, include_labels=False, include_transcripts=False)
+
+    def test_mixed_uint64_transcript_assignments_persist(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        root = write_seqfish_dataset(tmp_path / "source", rois=("Roi1",))
+        assignments = [0, 2, 2**53 + 1, 2**63 + 1, 2**64 - 1] * 5
+        (root / "Roi1_TranscriptList.csv").write_text(
+            "name,x,y,cell\n" + "".join(f"GeneA,{row},2,{cell}\n" for row, cell in enumerate(assignments)),
+            encoding="utf-8",
+        )
+        mocker.patch("spatialdata_io.readers.seqfish._transcripts._BLOCK_BYTES", 96)
+        result = seqfish(root)
+        source_points = result.points["Roi1_TranscriptList"]
+        assert source_points.npartitions > 3
+        assert source_points.dtypes["cell"] == pd.ArrowDtype(pa.uint64())
+        destination = tmp_path / "mixed_assignments.zarr"
+        result.write(destination)
+        restored = read_zarr(destination).points["Roi1_TranscriptList"].compute()
+        assert restored["cell"].dtype == pd.ArrowDtype(pa.uint64())
+        assert restored["cell"].tolist() == assignments
+        assert restored["x"].tolist() == list(range(len(assignments)))
 
     @pytest.mark.parametrize("rois", [("Roi1",), ("Roi1", "Roi2")])
     def test_physical_declarations_follow_selected_roi_frame(self, tmp_path: Path, rois: tuple[str, ...]) -> None:

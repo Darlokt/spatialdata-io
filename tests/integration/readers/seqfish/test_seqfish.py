@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from numpy.testing import assert_array_equal
 from scipy import sparse
 from spatialdata import read_zarr
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from click.testing import CliRunner
+
+
+pytestmark = pytest.mark.cli
 
 
 class TestSeqfishCommand:

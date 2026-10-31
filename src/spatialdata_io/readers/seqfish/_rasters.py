@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import isclose, prod
 from typing import TYPE_CHECKING, cast
 
+import numpy as np
 from spatialdata.models import Image2DModel, Labels2DModel
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
@@ -13,7 +14,6 @@ from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_a
 from spatialdata_io.readers.seqfish._transforms import pixel_scale
 
 if TYPE_CHECKING:
-    import numpy as np
     from dask.array import Array
     from ome_types.model import OME
     from spatialdata.transformations import Scale
@@ -30,22 +30,28 @@ _MAX_EXACT_LABEL_BYTES = 4
 def _inspect(path: ArtifactFile, artifact: str) -> TiffMetadata:
     """Add source context while preserving precise TIFF failure types."""
     try:
-        return inspect_tiff(path)
+        metadata = inspect_tiff(path)
     except (OSError, ValueError) as error:
         add_reader_context(error, context=ReaderErrorContext("seqfish", artifact), path=path)
         raise
+    if len(metadata.series) != 1:
+        raise ReaderFormatError(
+            context=ReaderErrorContext("seqfish", artifact),
+            path=metadata.path,
+            found=f"{len(metadata.series)} series",
+            expected="exactly one full-resolution TIFF series",
+        )
+    return metadata
+
+
+def read_calibration(path: ArtifactFile) -> Scale:
+    """Inspect DAPI physical XY calibration without constructing a pixel graph."""
+    return pixel_scale(_inspect(path, "DAPI"))
 
 
 def _array(metadata: TiffMetadata, target_axes: tuple[str, ...]) -> Array:
     """Normalize full-resolution named axes without reading pixels."""
     context = ReaderErrorContext("seqfish", "raster axes")
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context,
-            path=metadata.path,
-            found=f"{len(metadata.series)} series",
-            expected="exactly one full-resolution TIFF series",
-        )
     raster = read_tiff(metadata, series=0, level=0)
     try:
         return normalize_raster_axes(
@@ -126,8 +132,8 @@ def read_image(dapi: DapiRaster, *, roi: str, options: RasterOptions) -> DataArr
 
 
 def read_labels(
-    path: ArtifactFile, *, reference: DapiRaster, roi: str, options: RasterOptions
-) -> tuple[DataArray | DataTree, np.dtype[np.generic]]:
+    path: ArtifactFile, *, reference: DapiRaster, roi: str, options: RasterOptions, max_instance_id: int
+) -> DataArray | DataTree:
     """Return integer YX labels sharing the calibrated full-resolution DAPI grid."""
     metadata = _inspect(path, "segmentation")
     labels = _array(metadata, _LABEL_AXES)
@@ -164,17 +170,21 @@ def read_labels(
             found=str(labels.dtype),
             expected="integer label pixels with zero reserved for background",
         )
+    if max_instance_id > np.iinfo(labels.dtype.str).max:
+        raise ReaderFormatError(
+            context=ReaderErrorContext("seqfish", "label identity"),
+            path=path,
+            found="cell IDs exceeding the label dtype",
+            expected=f"IDs representable by {labels.dtype}",
+        )
     if options.scale_factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
         message = "Generated label pyramids require <=32-bit labels; use scale_factors=() for exact 64-bit IDs."
         raise ValueError(message)
     _check_pyramid(labels, options)
-    return (
-        Labels2DModel.parse(
-            labels,
-            dims=_LABEL_AXES,
-            scale_factors=options.model_scale_factors,
-            chunks=options.label_chunks(),
-            transformations={roi: reference.scale},
-        ),
-        labels.dtype,
+    return Labels2DModel.parse(
+        labels,
+        dims=_LABEL_AXES,
+        scale_factors=options.model_scale_factors,
+        chunks=options.label_chunks(),
+        transformations={roi: reference.scale},
     )

@@ -18,7 +18,7 @@ import spatialdata_io.readers.seqfish._rasters as raster_module
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.seqfish._rasters import read_dapi, read_image, read_labels
+from spatialdata_io.readers.seqfish._rasters import read_calibration, read_dapi, read_image, read_labels
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,6 +52,70 @@ DEFAULT_OPTIONS = make_raster_options()
 # The default 1024-pixel tiles merge the 16-pixel fixture tiles into one chunk;
 # tests of bounded reads and per-task resources request the stored tiles.
 NATIVE_CHUNKS = make_raster_options(chunks=(1, 16, 16))
+
+
+class TestReadCalibration:
+    """Inspect the physical frame without imposing excluded raster model contracts."""
+
+    def test_single_inspection_without_pixel_graph_or_tasks(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "DAPI.tiff"
+        _write_dapi(path)
+        inspection = mocker.spy(raster_module, "inspect_tiff")
+        graph = mocker.spy(raster_module, "read_tiff")
+        tasks = mocker.Mock()
+        with Callback(posttask=tasks):
+            scale = read_calibration(ArtifactFile(path))
+        inspection.assert_called_once()
+        graph.assert_not_called()
+        tasks.assert_not_called()
+        np.testing.assert_array_equal(scale.to_scale_vector(("x", "y")), [0.2, 0.5])
+
+    @pytest.mark.parametrize("invalid", ["channels", "axes"])
+    def test_accepts_calibration_when_excluded_raster_model_would_fail(
+        self, tmp_path: Path, mocker: MockerFixture, invalid: str
+    ) -> None:
+        path = tmp_path / "DAPI.tiff"
+        if invalid == "axes":
+            tifffile.imwrite(
+                path,
+                np.zeros((2, 16, 16), dtype=np.uint16),
+                ome=True,
+                photometric="minisblack",
+                metadata={"axes": "ZYX", "PhysicalSizeX": 0.2, "PhysicalSizeY": 0.5},
+            )
+        else:
+            _write_dapi(path)
+            metadata = inspect_tiff(ArtifactFile(path))
+            ome = metadata.ome
+            assert ome is not None
+            ome.images[0].pixels.channels = []
+            mocker.patch.object(raster_module, "inspect_tiff", return_value=metadata)
+        np.testing.assert_array_equal(read_calibration(ArtifactFile(path)).to_scale_vector(("x", "y")), [0.2, 0.5])
+        with pytest.raises(ReaderFormatError):
+            read_dapi(ArtifactFile(path))
+
+    def test_malformed_tiff_retains_context(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "DAPI.tiff")
+        path.write_bytes(b"not TIFF")
+        with pytest.raises(ValueError, match="TIFF") as caught:
+            read_calibration(path)
+        assert any("seqfish" in note and str(path) in note for note in caught.value.__notes__)
+
+    def test_multiple_series_fail_before_pixel_graph(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "DAPI.tiff"
+        with tifffile.TiffWriter(path) as output:
+            output.write(np.zeros((16, 16), dtype=np.uint16))
+            output.write(np.zeros((8, 8), dtype=np.uint16))
+        graph = mocker.spy(raster_module, "read_tiff")
+        with pytest.raises(ReaderFormatError, match="2 series"):
+            read_calibration(ArtifactFile(path))
+        graph.assert_not_called()
+
+    def test_missing_physical_size_rejected(self, tmp_path: Path) -> None:
+        path = tmp_path / "DAPI.tiff"
+        tifffile.imwrite(path, np.zeros((16, 16), dtype=np.uint16), ome=True, metadata={"axes": "YX"})
+        with pytest.raises(ReaderFormatError, match="physical"):
+            read_calibration(ArtifactFile(path))
 
 
 class TestReadDapi:
@@ -163,6 +227,36 @@ class TestReadImage:
 class TestReadLabels:
     """Preserve integer labels and DAPI frame correspondence without eager validation."""
 
+    @pytest.mark.parametrize("maximum", [2**16 - 1, 2**16])
+    def test_instance_id_representability_without_pixel_tasks(
+        self, tmp_path: Path, mocker: MockerFixture, maximum: int
+    ) -> None:
+        dapi, path = tmp_path / "DAPI.tiff", tmp_path / "Segmentation.tiff"
+        _write_dapi(dapi)
+        tifffile.imwrite(path, np.zeros((48, 64), dtype=np.uint16), photometric="minisblack")
+        reference = read_dapi(ArtifactFile(dapi))
+        pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
+        if maximum == 2**16:
+            with pytest.raises(ReaderFormatError, match="label dtype"):
+                read_labels(
+                    ArtifactFile(path),
+                    reference=reference,
+                    max_instance_id=maximum,
+                    roi="Roi1",
+                    options=DEFAULT_OPTIONS,
+                )
+        else:
+            result = read_labels(
+                ArtifactFile(path),
+                reference=reference,
+                max_instance_id=maximum,
+                roi="Roi1",
+                options=DEFAULT_OPTIONS,
+            )
+            assert isinstance(result, DataArray)
+            assert result.dtype == np.dtype(np.uint16)
+        pixels.assert_not_called()
+
     @pytest.mark.parametrize("calibrated", [False, True])
     def test_ome_labels_inherit_or_confirm_dapi_calibration(self, tmp_path: Path, *, calibrated: bool) -> None:
         dapi, path = tmp_path / "DAPI.tiff", tmp_path / "Segmentation.tiff"
@@ -176,9 +270,10 @@ class TestReadLabels:
             metadata={"axes": "YX", **calibration},
         )
         reference = read_dapi(ArtifactFile(dapi))
-        result, _ = read_labels(
+        result = read_labels(
             ArtifactFile(path),
             reference=reference,
+            max_instance_id=1,
             roi="Roi1",
             options=DEFAULT_OPTIONS,
         )
@@ -197,14 +292,15 @@ class TestReadLabels:
         tifffile.imwrite(path, source, tile=(16, 16), photometric="minisblack", compression="deflate")
         reference = read_dapi(ArtifactFile(dapi))
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
-        result, dtype = read_labels(
+        result = read_labels(
             ArtifactFile(path),
             reference=reference,
+            max_instance_id=2**54 + 1,
             roi="Roi1",
             options=make_raster_options(chunks=chunks),
         )
         assert isinstance(result, DataArray)
-        assert dtype == np.dtype(np.uint64)
+        assert result.dtype == np.dtype(np.uint64)
         assert result.dims == ("y", "x")
         assert max(result.data.chunks[0]) == (12 if isinstance(chunks, tuple) else 16)
         pixels.assert_not_called()
@@ -229,6 +325,7 @@ class TestReadLabels:
             read_labels(
                 ArtifactFile(path),
                 reference=reference,
+                max_instance_id=1,
                 roi="Roi1",
                 options=make_raster_options((2,) if invalid == "uint64" else ()),
             )
@@ -239,9 +336,10 @@ class TestReadLabels:
         source = np.full((48, 64), np.iinfo(np.uint32).max, dtype=np.uint32)
         tifffile.imwrite(path, source, tile=(16, 16), photometric="minisblack")
         reference = read_dapi(ArtifactFile(dapi))
-        result, _ = read_labels(
+        result = read_labels(
             ArtifactFile(path),
             reference=reference,
+            max_instance_id=np.iinfo(np.uint32).max,
             roi="Roi1",
             options=make_raster_options([2, 2]),
         )

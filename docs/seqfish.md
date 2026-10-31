@@ -40,9 +40,9 @@ The table retains `area`, integer `instance_id`, and `(center_x, center_y)` in `
 
 DAPI OME metadata calibrates pixel X and Y independently into the ROI physical coordinate frame. The transform assigns PhysicalSizeX to X and PhysicalSizeY to Y, including anisotropic pixels. The same pixel-to-physical transform applies to segmentation and GeoJSON polygons. Cell centroids and transcript X/Y already use the physical ROI frame and have identity transforms. Area supplies square physical units for circle radii. OME micrometers, nanometers and millimeters are converted to micrometers in the ROI frame; absent OME unit attributes use the OME micrometer default. Unsupported units, missing calibration and inconsistent metadata fail.
 
-Transcript `z` is retained as integer `z_raw`. The export does not establish a physical calibration for this slice index, so transcript points have two spatial coordinates, X and Y. Optional `cell` values preserve source assignments, including unassigned zero values. The complete CellxGene feature header supplies the transcript feature vocabulary; unknown transcript names fail when their partition is computed. Transcript name categories follow the CellxGene feature header order, including zero-count features.
+When polygons are requested with both images and labels excluded, DAPI is inspected only for calibration; no DAPI pixel graph is constructed. This mode still requires a valid TIFF with exactly one series and one unambiguous OME image with finite positive physical X/Y sizes in supported units. Raster CYX normalization and channel naming apply only when images or labels are requested, so unrelated nonspatial-axis or channel metadata does not restrict calibration-only loading.
 
-
+Transcript `z` is retained as integer `z_raw`. The export does not establish a physical calibration for this slice index, so transcript points have two spatial coordinates, X and Y. Optional `cell` values preserve source assignments, including unassigned zero values, in `uint64[pyarrow]` storage in every partition. This stable dtype preserves exact assignments through `2**64 - 1` even when partitions contain different identifier ranges. The complete CellxGene feature header supplies the transcript feature vocabulary; unknown transcript names fail when their partition is computed. Transcript name categories follow the CellxGene feature header order, including zero-count features.
 
 Table `uns["spatialdata_io_positions"]` describes unchanged float64 vendor cell-centroid XY micrometres: `global` for one ROI and each ROI name for multiple independent ROIs. These positions do not derive from polygon centroids.
 
@@ -52,9 +52,9 @@ Table `uns["spatialdata_io_positions"]` describes unchanged float64 vendor cell-
 
 `invalid_geometries="keep"` preserves invalid polygon topology by default. `"raise"` reports invalid cell IDs. `"drop"` removes the affected polygon, its requested centroid circle and its expression-table row, preserving surviving IDs, row order, sparse values and annotations. Complete boundary/table identity agreement is validated before dropping. Labels and lazy transcript assignments remain unchanged. A requested boundary element becoming empty fails the whole read. Circles-only and shapes-disabled modes never read boundaries or drop cells.
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Computing a region decodes only the TIFF tiles, or strips grouped into bands of at most 16 MiB, that intersect its chunks. A sequence such as `(2, 2)` builds image and label pyramids with the appropriate interpolation for each product. Generated label pyramids require segmentation dtypes of at most 32 bits, avoiding upstream integer rounding. Full-resolution source series and level remain fixed, so alternate scenes and uncalibrated source pyramid levels cannot be selected accidentally.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Computing a region decodes the native TIFF tiles or strip bands needed by the output chunks it intersects. Strips are grouped toward a 16 MiB decoded-band target; an indivisible native strip can exceed that target. An output chunk can depend on neighboring native tiles or bands, so 16 MiB is not a universal limit on decoded bytes per request. A sequence such as `(2, 2)` builds image and label pyramids with the appropriate interpolation for each product. Generated label pyramids require segmentation dtypes of at most 32 bits, avoiding upstream integer rounding. Full-resolution source series and level remain fixed, so alternate scenes and uncalibrated source pyramid levels cannot be selected accidentally.
 
-Expression parsing uses bounded batches and preserves sparse counts without allocating a full dense expression table. Metadata, tables and shapes are eager. Pixels and transcript rows remain lazy through construction of the returned SpatialData. TIFF tasks reopen their path-backed source when computed and close their resources; retain the input files until computation or writing completes. Small spatial selections read only the intersecting TIFF tiles or row bands of at most 16 MiB.
+Expression parsing uses bounded batches and preserves sparse counts without allocating a full dense expression table. Metadata, tables and shapes are eager. Pixels and transcript rows remain lazy through construction of the returned SpatialData. TIFF tasks reopen their path-backed source when computed and close their resources; retain the input files until computation or writing completes.
 
 Provide valid CSV inputs. Arrow checks complete record widths but does not enforce strict quoting, so some malformed quote forms may be accepted. Numeric precision and exact integer-identifier validation remain unchanged and apply to the values produced by the parser.
 
@@ -79,11 +79,11 @@ sdata.write("sample.zarr")
 The CLI uses paired inclusion flags and repeatable ROI, chunk and pyramid options:
 
 ```bash
-spatialdata_io seqfish --input dataset --output sample.zarr \
+python -m spatialdata_io seqfish --input dataset --output sample.zarr \
   --shape-geometry both --rois Roi2 --rois Roi1 \
   --chunks 1 --chunks 512 --chunks 512
 
-spatialdata_io seqfish --input dataset --output counts.zarr \
+python -m spatialdata_io seqfish --input dataset --output counts.zarr \
   --no-include-images --no-include-labels \
   --no-include-transcripts --no-include-shapes
 ```

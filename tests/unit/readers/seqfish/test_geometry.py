@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import anndata as ad
 import numpy as np
@@ -53,11 +53,14 @@ class TestReadBoundaries:
         assert shapely.equals_exact(result.geometry.iloc[0], invalid, 0)
         assert not result.geometry.is_valid.iloc[0]
 
-    def test_already_aligned_ids_remain_in_source_order(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
+    def test_already_aligned_ids_remain_in_source_order(
+        self, tmp_path: Path, policy: Literal["keep", "drop", "raise"]
+    ) -> None:
         polygon = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
         path = _write_boundaries(tmp_path / "boundaries.geojson", [polygon], ("1",))
         result = read_boundaries(
-            path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+            path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy=policy
         )
         assert result.index.tolist() == [1]
         assert result.geometry.iloc[0].equals(polygon)

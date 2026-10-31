@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast
 
-import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.seqfish._geometry import make_circles, read_boundaries
 from spatialdata_io.readers.seqfish._layout import discover_layout, make_selection
-from spatialdata_io.readers.seqfish._rasters import read_dapi, read_image, read_labels
+from spatialdata_io.readers.seqfish._rasters import read_calibration, read_dapi, read_image, read_labels
 from spatialdata_io.readers.seqfish._tables import finalize_table, read_table
 from spatialdata_io.readers.seqfish._transcripts import read_transcripts
 
@@ -49,6 +48,8 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     ``<ROI>_Boundaries.geojson`` or ``<ROI>_TranscriptList.csv``.
     DAPI OME metadata calibrates every pixel-based product, even when the image
     itself is excluded. Only a single full-resolution series is supported.
+    With images and labels excluded, polygons need only DAPI calibration
+    metadata; raster axis normalization and channel naming do not apply.
     No instrument/software release is inferred from these filenames.
 
     Parameters
@@ -119,8 +120,9 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     coordinates are already physical; cell area is square micrometers. Source
     transcript z has no established physical calibration and is retained as
     ``z_raw`` slice annotation; points are spatially two-dimensional. Optional
-    ``cell`` assignments retain zero for unassigned events. Point indexes are
-    partition-local storage indexes, not globally unique event IDs.
+    ``cell`` assignments use ``uint64[pyarrow]`` in every partition, retaining
+    exact nonnegative IDs through ``2**64 - 1`` and zero for unassigned events.
+    Point indexes are partition-local storage indexes, not globally unique event IDs.
 
     CSV inputs must be valid. Arrow checks record widths but does not enforce
     strict quoting; some malformed quote forms may be accepted. Numerical
@@ -142,39 +144,42 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         rois=rois,
     )
     options = make_raster_options(scale_factors=scale_factors, chunks=chunks)
-    layout = discover_layout(path, selection)
+    roi_layouts = discover_layout(path, selection)
     images: dict[str, DataArray | DataTree] = {}
     labels: dict[str, DataArray | DataTree] = {}
     points: dict[str, DataFrame] = {}
     shapes: dict[str, GeoDataFrame] = {}
     tables: dict[str, AnnData] = {}
 
-    for roi in layout.rois:
-        frame = "global" if len(layout.rois) == 1 else roi.name
+    for roi in roi_layouts:
+        frame = "global" if len(roi_layouts) == 1 else roi.name
         table = read_table(roi.counts, roi.cells)
         # read_table owns an eager AnnData; Dataset2D is only a backed alternative.
         obs = cast("pd.DataFrame", table.obs)
 
         if roi.pixels is not None:
-            dapi = read_dapi(roi.pixels.dapi)
-            if selection.images:
-                images[f"{roi.name}_DAPI"] = read_image(dapi, roi=frame, options=options)
-            if roi.pixels.labels is not None:
-                element, dtype = read_labels(roi.pixels.labels, reference=dapi, roi=frame, options=options)
-                if int(obs["instance_id"].max()) > np.iinfo(dtype.str).max:
-                    raise ReaderFormatError(
-                        context=ReaderErrorContext("seqfish", "label identity"),
-                        path=roi.pixels.labels,
-                        found="cell IDs exceeding the label dtype",
-                        expected=f"IDs representable by {dtype}",
+            if selection.images or selection.labels:
+                dapi = read_dapi(roi.pixels.dapi)
+                scale = dapi.scale
+                if selection.images:
+                    images[f"{roi.name}_DAPI"] = read_image(dapi, roi=frame, options=options)
+                if roi.pixels.labels is not None:
+                    labels[f"{roi.name}_Segmentation"] = read_labels(
+                        roi.pixels.labels,
+                        reference=dapi,
+                        roi=frame,
+                        options=options,
+                        max_instance_id=int(obs["instance_id"].max()),
                     )
-                labels[f"{roi.name}_Segmentation"] = element
+            else:
+                scale = read_calibration(roi.pixels.dapi)
+
             if roi.pixels.boundaries is not None:
                 boundaries = read_boundaries(
                     roi.pixels.boundaries,
                     instance_ids=pd.Index(obs["instance_id"]),
                     roi=frame,
-                    scale=dapi.scale,
+                    scale=scale,
                     policy=policy,
                 )
                 shapes[f"{roi.name}_Boundaries"] = boundaries

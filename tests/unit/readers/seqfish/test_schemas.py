@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -67,7 +68,7 @@ class TestNormalizeIds:
         path = ArtifactFile(tmp_path / "cells.csv")
         assert normalize_ids(pd.Series([str(2**64 - 1)]), path).dtype == np.dtype(np.uint64)
         assert normalize_ids(pd.Series([], dtype=STRING_DTYPE), path).dtype == np.dtype(np.int64)
-        assert normalize_ids(pd.Series([float(2**63)]), path).tolist() == [2**63]
+        assert normalize_ids(pd.Series([str(2**63)]), path).tolist() == [2**63]
         assert normalize_ids(pd.Series(["0"]), path, allow_zero=True).tolist() == [0]
 
     def test_arrow_zero_identifier(self, tmp_path: Path) -> None:
@@ -85,9 +86,9 @@ class TestNormalizeIds:
         assert result.tolist() == [0, 2**63 + 1]
 
     @pytest.mark.parametrize(
-        "value", [None, True, "", "NaN", "inf", "0", "-1", "1.00000000000000001", "1e10000", str(2**64), "1" * 129]
+        "value", [None, "True", "", "NaN", "inf", "0", "-1", "1.00000000000000001", "1e10000", str(2**64), "1" * 129]
     )
-    def test_invalid_identifiers(self, tmp_path: Path, *, value: str | bool | None) -> None:
+    def test_invalid_identifiers(self, tmp_path: Path, *, value: str | None) -> None:
         with pytest.raises(ReaderFormatError, match="identifier"):
             normalize_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"))
 
@@ -126,6 +127,21 @@ class TestValidateTranscriptColumns:
 
 class TestNormalizeTranscriptPartition:
     """Normalize only the executed partition and preserve unassigned events."""
+
+    @pytest.mark.parametrize("assignments", [[], ["0"], ["2"], [str(2**53 + 1)], [str(2**63 + 1)], [str(2**64 - 1)]])
+    def test_assignment_storage_is_partition_independent(self, tmp_path: Path, assignments: list[str]) -> None:
+        frame = pd.DataFrame(
+            {
+                "name": ["A"] * len(assignments),
+                "x": ["1"] * len(assignments),
+                "y": ["2"] * len(assignments),
+                "cell": assignments,
+            },
+            dtype=STRING_DTYPE,
+        )
+        result = normalize_transcript_partition(frame, features=("A",), path=ArtifactFile(tmp_path / "tx.csv"))
+        assert result["cell"].dtype == pd.ArrowDtype(pa.uint64())
+        assert result["cell"].tolist() == [int(value) for value in assignments]
 
     def test_partition_values_and_empty(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "tx.csv")

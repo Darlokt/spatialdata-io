@@ -62,17 +62,12 @@ def validate_cell_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[s
 def normalize_ids(
     series: pd.Series, path: ArtifactFile, *, allow_zero: bool = False
 ) -> npt.NDArray[np.int64 | np.uint64]:
-    """Normalize exact integral values into one signed or unsigned 64-bit array."""
+    """Normalize lexical integral values into one signed or unsigned 64-bit array."""
     values: list[int] = []
     lower = 0 if allow_zero else 1
     # CSV source columns are lexical Arrow strings. Cast their common unsigned
     # decimal form directly; never let numeric inference choose a float buffer.
-    if (
-        (series.dtype == STRING_DTYPE or isinstance(series.dtype, pd.StringDtype))
-        and len(series)
-        and not series.isna().any()
-        and series.str.fullmatch(r"[0-9]+").all()
-    ):
+    if len(series) and not series.isna().any() and series.str.fullmatch(r"[0-9]+").all():
         try:
             integers = series.astype(pd.ArrowDtype(pa.uint64()))
         except pa.ArrowInvalid:
@@ -84,10 +79,8 @@ def normalize_ids(
             return integers.to_numpy(dtype=dtype)
     for value in series:
         token = str(value)
-        if isinstance(value, (bool, np.bool_)):
-            raise schema_error(path, found=f"identifier {token!r}", expected="finite integral 64-bit identifiers")
         try:
-            exact = Decimal(float(value)) if isinstance(value, (float, np.floating)) else Decimal(token)
+            exact = Decimal(token)
         except (InvalidOperation, ValueError) as error:
             raise schema_error(
                 path, found=f"identifier {token!r}", expected="finite integral 64-bit identifiers"
@@ -152,14 +145,6 @@ class BoundaryFeature(TypedDict):
     properties: dict[str, object] | None
 
 
-def _validate_boundary_properties(properties: object, path: ArtifactFile) -> None:
-    """Protect the geometry column; other properties are independent annotations."""
-    if properties is not None and not isinstance(properties, dict):
-        raise schema_error(path, found="malformed feature properties", expected="an object or null properties")
-    if properties is not None and "geometry" in properties:
-        raise schema_error(path, found="reserved properties.geometry", expected="geometry only in Feature.geometry")
-
-
 def boundary_features(
     document: dict[str, object], path: ArtifactFile
 ) -> tuple[list[BoundaryFeature], npt.NDArray[np.int64 | np.uint64]]:
@@ -180,8 +165,12 @@ def boundary_features(
             )
         raw_ids.append(identifier)
         # GeoJSON requires this field; null properties carry no annotations.
-        feature["properties"] = feature.get("properties")
-        _validate_boundary_properties(feature["properties"], path)
+        properties = feature.get("properties")
+        if properties is not None and not isinstance(properties, dict):
+            raise schema_error(path, found="malformed feature properties", expected="an object or null properties")
+        if properties is not None and "geometry" in properties:
+            raise schema_error(path, found="reserved properties.geometry", expected="geometry only in Feature.geometry")
+        feature["properties"] = properties
     identifiers = normalize_ids(pd.Series([str(value) for value in raw_ids], dtype=STRING_DTYPE), path)
     if len(np.unique(identifiers)) != len(identifiers):
         raise schema_error(path, found="duplicate boundary IDs", expected="unique explicit boundary identifiers")
@@ -204,9 +193,7 @@ def normalize_transcript_partition(
         frame[axis] = normalize_floats(frame[axis], path, axis).to_numpy(dtype=np.float64)
     if "cell" in frame:
         identifiers = normalize_ids(frame["cell"], path, allow_zero=True)
-        frame["cell"] = pd.Series(
-            identifiers, index=frame.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(identifiers.dtype))
-        )
+        frame["cell"] = pd.Series(identifiers, index=frame.index, dtype=pd.ArrowDtype(pa.uint64()))
     if "z" in frame:
         # Vendor z is a nonnegative image-plane index, not physical distance.
         planes = normalize_ids(frame.pop("z"), path, allow_zero=True)

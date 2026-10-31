@@ -6,13 +6,14 @@ from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
+import pyarrow as pa
 import pytest
 from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._schemas import FLOAT_DTYPE
-from spatialdata_io.readers.seqfish._tables import finalize_table, read_table
+from spatialdata_io.readers.seqfish._tables import _count_block, finalize_table, read_table
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,6 +35,51 @@ def _sources(
 
 class TestReadTable:
     """Preserve count row/feature order while aligning metadata by exact identity."""
+
+    @pytest.mark.parametrize("batch_rows", [1, 2, 10])
+    def test_exact_mixed_count_columns_and_cross_batch_promotion(
+        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int
+    ) -> None:
+        mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_BATCH_ROWS", batch_rows)
+        counts = f",digits,decimal,exponent\n2,0,2.0,3e0\n1,{2**64 - 1},0.0,9007199254740993e0\n"
+        result = read_table(*_sources(tmp_path, counts))
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.has_canonical_format
+        assert result.X.dtype == np.dtype(np.uint64)
+        np.testing.assert_array_equal(result.X.data, np.array([2, 3, 2**64 - 1, 2**53 + 1], dtype=np.uint64))
+        np.testing.assert_array_equal(result.X.indices, [1, 2, 0, 2])
+        np.testing.assert_array_equal(result.X.indptr, [0, 2, 4])
+        assert result.var_names.tolist() == ["digits", "decimal", "exponent"]
+        assert result.obs["instance_id"].tolist() == [2, 1]
+
+    @pytest.mark.parametrize("ids", [(2**53, 2**53 + 1), (2**63 - 1, 2**63), (2**64 - 2, 2**64 - 1)])
+    def test_reordered_exact_boundary_populations(self, tmp_path: Path, ids: tuple[int, int]) -> None:
+        first, second = ids
+        counts = f",A\n{first},11\n{second},13\n"
+        cells = f"label,area,center_x,center_y\n{second},20,30,40\n{first},2,3,4\n"
+        result = read_table(*_sources(tmp_path, counts, cells))
+        assert result.obs["instance_id"].tolist() == [first, second]
+        assert result.obs["area"].tolist() == [2, 20]
+        np.testing.assert_array_equal(result.obsm["spatial"], [[3, 4], [30, 40]])
+
+    @pytest.mark.parametrize(
+        ("count_ids", "cell_ids"),
+        [
+            ((2**53, 2), (2**53 + 1, 2)),
+            ((2**63 - 1, 2), (2**63, 2)),
+            ((2**64 - 1, 2), (2**64 - 2, 2)),
+            ((2**63, 2), (2**63 - 1, 2)),
+            ((1, 2), (1,)),
+            ((1,), (1, 2)),
+        ],
+    )
+    def test_missing_extra_and_adjacent_boundary_ids_are_distinct(
+        self, tmp_path: Path, count_ids: tuple[int, ...], cell_ids: tuple[int, ...]
+    ) -> None:
+        counts = ",A\n" + "".join(f"{identifier},1\n" for identifier in count_ids)
+        cells = "label,area,center_x,center_y\n" + "".join(f"{identifier},1,2,3\n" for identifier in cell_ids)
+        with pytest.raises(ReaderFormatError, match="identical unique cell populations"):
+            read_table(*_sources(tmp_path, counts, cells))
 
     def test_sparse_order_and_alignment(self, tmp_path: Path, mocker: MockerFixture) -> None:
         mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_BATCH_ROWS", 1)
@@ -118,6 +164,37 @@ class TestReadTable:
         assert result.obs["instance_id"].tolist() == [1]
         assert result.var_names.tolist() == ["Gene,A"]
         np.testing.assert_array_equal(result.obsm["spatial"], [[1.5, 2]])
+
+
+class TestCountBlock:
+    """Exercise exact column normalization at its bounded numerical owner."""
+
+    @pytest.mark.parametrize("spelling", [str(2**64 - 1), f"{2**64 - 1}.0", f"{2**64 - 1}e0"])
+    def test_full_uint64_fallback_and_ordinary_columns(self, tmp_path: Path, spelling: str) -> None:
+        batch = pa.record_batch([["1"], ["9007199254740993.0"], [spelling], ["0"]], names=["", "A", "B", "C"])
+        result = _count_block(batch, ArtifactFile(tmp_path / "counts.csv"))
+        assert result.dtype == np.dtype(np.uint64)
+        np.testing.assert_array_equal(result.data, np.array([2**53 + 1, 2**64 - 1], dtype=np.uint64))
+        np.testing.assert_array_equal(result.indices, [0, 1])
+        np.testing.assert_array_equal(result.indptr, [0, 2])
+
+    @pytest.mark.parametrize("tokens", [("0", "0.0", "0e0"), ("1", "2.0", "3e0")])
+    def test_signed_zero_and_fallback_columns(self, tmp_path: Path, tokens: tuple[str, str, str]) -> None:
+        batch = pa.record_batch(
+            [["1", "2"], [tokens[0], "0"], [tokens[1], "0"], [tokens[2], "0"]], names=["", "A", "B", "C"]
+        )
+        result = _count_block(batch, ArtifactFile(tmp_path / "counts.csv"))
+        assert isinstance(result, sparse.csr_array)
+        assert result.has_canonical_format
+        assert result.shape == (2, 3)
+        assert result.dtype == np.dtype(np.int64)
+        if tokens[0] == "0":
+            assert result.nnz == 0
+            np.testing.assert_array_equal(result.indptr, [0, 0, 0])
+        else:
+            np.testing.assert_array_equal(result.data, [1, 2, 3])
+            np.testing.assert_array_equal(result.indices, [0, 1, 2])
+            np.testing.assert_array_equal(result.indptr, [0, 3, 3])
 
 
 class TestFinalizeTable:

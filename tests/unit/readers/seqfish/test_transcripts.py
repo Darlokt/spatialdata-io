@@ -7,6 +7,8 @@ import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
+import pyarrow as pa
 import pytest
 from dask.callbacks import Callback
 
@@ -36,6 +38,42 @@ def _write_transcripts(path: Path, *, rows: int = 40, last_name: str = '"Gene,A"
 
 class TestReadTranscripts:
     """Execute only selected source partitions and preserve scientific annotations."""
+
+    def test_mixed_uint64_assignments_compute_across_small_partitions(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        assignments = [0, 2, 2**53 + 1, 2**63 + 1, 2**64 - 1] * 12
+        path = ArtifactFile(tmp_path / "transcripts.csv")
+        path.write_text(
+            "name,x,y,cell\n" + "".join(f"GeneB,{row},2,{cell}\n" for row, cell in enumerate(assignments)),
+            encoding="utf-8",
+        )
+        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 96)
+        tasks = mocker.Mock()
+        with Callback(posttask=tasks):
+            points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        tasks.assert_not_called()
+        assert points.npartitions > 5
+        assert points.dtypes["cell"] == pd.ArrowDtype(pa.uint64())
+        partitions = [partition.compute() for partition in points.to_delayed()]
+        assert all(partition["cell"].dtype == pd.ArrowDtype(pa.uint64()) for partition in partitions)
+        result = points.compute()
+        assert result["cell"].dtype == pd.ArrowDtype(pa.uint64())
+        assert result["cell"].tolist() == assignments
+        assert result["x"].tolist() == list(range(len(assignments)))
+
+    @pytest.mark.parametrize("invalid_cell", ["-1", str(2**64), "1.1", "NaN"])
+    def test_invalid_later_assignment_is_checked_when_executed(
+        self, tmp_path: Path, mocker: MockerFixture, invalid_cell: str
+    ) -> None:
+        path = _write_transcripts(tmp_path / "transcripts.csv")
+        with path.open("a", encoding="utf-8") as output:
+            output.write(f"annotation,2.5,GeneB,{invalid_cell},1,1.5\n")
+        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 128)
+        points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        assert not points.partitions[0].compute().empty
+        with pytest.raises(ReaderFormatError, match="identifier"):
+            points.partitions[-1].compute()
 
     def test_projected_known_categories_construct_without_tasks_and_serialize(
         self, tmp_path: Path, mocker: MockerFixture

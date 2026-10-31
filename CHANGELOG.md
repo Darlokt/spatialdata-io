@@ -26,6 +26,9 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Fixed
 
+- seqFISH transcript `cell` assignments use stable `uint64[pyarrow]` storage,
+  preserving exact nonnegative IDs through `2**64 - 1` when different CSV
+  partitions contain different identifier ranges. Zero remains unassigned.
 - Steinbock rejects integer duplicate sums in imported H5AD `X` and `counts`
   when they exceed the preserved source dtype, with the H5AD path and expression
   slot in the error context. Safe duplicate sums retain their source dtype.
@@ -35,6 +38,10 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
 
 ### Changed
 
+- seqFISH polygon loading with images and labels excluded inspects DAPI only
+  for calibration, without constructing a pixel graph or applying raster axis
+  and channel-model restrictions. A valid single-series TIFF and unambiguous
+  OME image with finite positive physical X/Y calibration remain required.
 - DBiT explicitly owns and overwrites `obs` columns `array_A`, `array_B`,
   `sample`, `region`, and `pixel_id`, whether imported values are equal,
   conflicting, or null. It discards any inherited `uns["spatialdata_attrs"]`

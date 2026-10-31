@@ -33,7 +33,7 @@ _READER_CASES = (
     pytest.param(_ReaderCase("spatialdata_io.readers.macsima", "macsima", "macsima"), marks=pytest.mark.macsima),
     _ReaderCase("spatialdata_io.readers.mcmicro", "mcmicro", "mcmicro"),
     pytest.param(_ReaderCase("spatialdata_io.readers.merscope", "merscope", "merscope"), marks=pytest.mark.merscope),
-    _ReaderCase("spatialdata_io.readers.seqfish", "seqfish", "seqfish"),
+    pytest.param(_ReaderCase("spatialdata_io.readers.seqfish", "seqfish", "seqfish"), marks=pytest.mark.seqfish),
     pytest.param(
         _ReaderCase("spatialdata_io.readers.steinbock", "steinbock", "steinbock"), marks=pytest.mark.steinbock
     ),
@@ -181,6 +181,39 @@ class TestSteinbockCommandContract:
         assert "TestSteinbock::" not in completed.stdout
         assert "test_reader.py::" not in completed.stdout
         assert "test_positions.py::" not in completed.stdout
+
+
+@pytest.mark.seqfish
+class TestSeqfishCommandContract:
+    """Keep seqFISH CLI selection inclusive of command, alignment and persistence."""
+
+    def test_reader_cli_conjunction_collects_command_alignment_and_workflow_tests(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "--no-cov",
+                "-q",
+                "-m",
+                "seqfish and cli",
+                "tests/unit/cli/commands/test_seqfish.py",
+                "tests/unit/cli/test_cli_alignment.py",
+                "tests/integration/readers/seqfish",
+            ],
+            cwd=Path(__file__).parents[3],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "TestSeqfishCommand::test_defaults_forward_and_write" in completed.stdout
+        assert "TestCliAlignment::test_vendor_command_and_reader_parameter_names_agree[seqfish]" in completed.stdout
+        assert "TestCliAlignment::test_raster_options_use_the_central_defaults[seqfish]" in completed.stdout
+        assert "test_seqfish.py::TestSeqfishCommand::test_complete_conversion" in completed.stdout
+        assert "test_seqfish.py::TestSeqfishCommand::test_table_only_conversion" in completed.stdout
+        assert "test_reader.py::" not in completed.stdout
+        assert "test_characterization.py::" not in completed.stdout
 
 
 @pytest.mark.generic
