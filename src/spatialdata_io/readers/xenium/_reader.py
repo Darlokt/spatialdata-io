@@ -61,8 +61,10 @@ class _Shapes:
 
 
 def _feature_types(value: Sequence[str] | Literal["all"] | None) -> FeatureSelection:
-    if value is None or value == "all":
-        return value
+    if value is None:
+        return None
+    if isinstance(value, str) and value == "all":
+        return "all"
     if isinstance(value, str) or not isinstance(value, Sequence):
         message = "feature_types must be None, 'all' or a sequence of feature-type names."
         raise TypeError(message)

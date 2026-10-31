@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -156,7 +156,7 @@ def _description(table: AnnData, value: object, *, key: str) -> FixedFrame | Row
     if "frame" in description:
         result = {
             "axes": ["x", "y"],
-            "units": cast("Literal['micrometer', 'pixel', 'grid', 'unknown']", units),
+            "units": units,
             "position": position,
             "frame": _string(description["frame"], label=f"{label}.frame"),
         }
@@ -179,7 +179,7 @@ def _description(table: AnnData, value: object, *, key: str) -> FixedFrame | Row
             raise ValueError(msg)
         result = {
             "axes": ["x", "y"],
-            "units": cast("Literal['micrometer', 'pixel', 'grid', 'unknown']", units),
+            "units": units,
             "position": position,
             "frame_key": frame_key,
         }
