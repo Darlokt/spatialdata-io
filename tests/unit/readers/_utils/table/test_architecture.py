@@ -16,7 +16,10 @@ _FORBIDDEN_ARRAY_IMPORTS = {
 _FORBIDDEN_NORMALIZE_IMPORTS = _FORBIDDEN_ARRAY_IMPORTS - {"anndata", "spatialdata_io"}
 _FORBIDDEN_LINKAGE_IMPORTS = {"dask", "geopandas", "shapely", "xarray"}
 _FORBIDDEN_CALLS = {"compute", "load", "todense", "toarray", "to_memory"}
-_NORMALIZE_INTERNAL_IMPORTS = {"spatialdata_io.readers._utils.table._arrays"}
+_NORMALIZE_INTERNAL_IMPORTS = {
+    "spatialdata_io.readers._utils.table._arrays",
+    "spatialdata_io.readers._utils.table._duplicates",
+}
 
 
 class TestTableArchitecture:

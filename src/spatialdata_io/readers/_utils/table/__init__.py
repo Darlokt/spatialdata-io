@@ -11,19 +11,23 @@ from spatialdata_io.readers._utils.table._arrays import (
     as_csr_array,
     csr_array_from_triplets,
     validate_compressed_sparse,
-    validate_integer_duplicate_sums,
 )
 from spatialdata_io.readers._utils.table._compat import prepare_anndata_dataframe
+from spatialdata_io.readers._utils.table._count_values import count_accumulation_dtype, finalize_count_arrays
+from spatialdata_io.readers._utils.table._duplicates import SparseDuplicateSummary, normalize_sparse_duplicates
 from spatialdata_io.readers._utils.table._linkage import TableLinkage, parse_linked_table
 from spatialdata_io.readers._utils.table._normalize import normalize_owned_anndata
 
 __all__ = [
+    "SparseDuplicateSummary",
     "TableLinkage",
     "as_csr_array",
+    "count_accumulation_dtype",
     "csr_array_from_triplets",
+    "finalize_count_arrays",
     "normalize_owned_anndata",
+    "normalize_sparse_duplicates",
     "parse_linked_table",
     "prepare_anndata_dataframe",
     "validate_compressed_sparse",
-    "validate_integer_duplicate_sums",
 ]

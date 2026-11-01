@@ -561,10 +561,10 @@ class TestSteinbock:
     @pytest.mark.parametrize("slot", ["X", "counts"])
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     @pytest.mark.parametrize("case", [("int8", 100), ("uint8", 150)])
-    def test_integer_duplicate_overflow_rejected_before_reduction(
+    def test_integer_duplicate_overflow_promotes_before_reduction(
         self, tmp_path: Path, mocker: MockerFixture, slot: str, storage: str, case: tuple[str, int]
     ) -> None:
-        """Reject actual H5AD duplicate sums independently in each expression slot."""
+        """Preserve actual H5AD duplicate sums by promoting each affected expression slot."""
         dtype, value = case
         _write_layout(tmp_path)
         path = tmp_path / "cells.h5ad"
@@ -592,10 +592,15 @@ class TestSteinbock:
         for container in (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix):
             mocker.patch.object(container, "toarray", side_effect=AssertionError("expression densified"))
 
-        with pytest.raises(ValueError, match="integer duplicate sum") as caught:
-            steinbock(tmp_path)
-
-        assert any("steinbock" in note and slot in note and str(path) in note for note in caught.value.__notes__)
+        with pytest.warns(UserWarning, match="combined.*promoted") as reported:
+            table = steinbock(tmp_path).tables["table"]
+        actual = table.X if slot == "X" else table.layers[slot]
+        assert isinstance(actual, sparse.csr_array)
+        assert actual.dtype == np.dtype("int32" if dtype == "int8" else "uint32")
+        np.testing.assert_array_equal(actual.data, [2 * value, 7])
+        assert len(reported) == 1
+        assert slot in str(reported[0].message)
+        assert path.name in str(reported[0].message)
         assert path.read_bytes() == before
 
     @pytest.mark.parametrize("slot", ["X", "counts"])

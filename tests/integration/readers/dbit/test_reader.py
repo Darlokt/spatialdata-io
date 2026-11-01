@@ -133,7 +133,7 @@ class TestDbit:
     @pytest.mark.parametrize("slot", ["X", "counts"])
     @pytest.mark.parametrize("dtype", ["int8", "uint8"])
     @pytest.mark.parametrize("unsafe", [False, True])
-    def test_real_h5ad_duplicate_expression_is_exact_or_rejected(
+    def test_real_h5ad_duplicates_preserve_values_and_promote_if_needed(
         self,
         tmp_path: Path,
         storage: type[sparse.csr_array | sparse.csc_array],
@@ -165,22 +165,20 @@ class TestDbit:
         np.testing.assert_array_equal(before.indptr, [0, 2, 3])
         original_bytes = path.read_bytes()
 
-        if unsafe:
-            with pytest.raises(ValueError, match="source dtype") as raised:
-                dbit(tmp_path)
-            assert any("dbit" in note and str(path) in note for note in raised.value.__notes__)
-        else:
+        with pytest.warns(UserWarning, match="combined") as reported:
             table = dbit(tmp_path).tables["table"]
-            actual = table.X if slot == "X" else table.layers[slot]
-            assert isinstance(actual, sparse.csr_array)
-            assert not isinstance(actual, sparse.spmatrix)
-            assert actual.has_canonical_format
-            assert actual.dtype == np.dtype(dtype)
-            np.testing.assert_array_equal(actual.data, [7, 50])
-            np.testing.assert_array_equal(actual.indices, [1, 0])
-            np.testing.assert_array_equal(actual.indptr, [0, 1, 2])
-            assert table.obs_names.tolist() == _ORDERED_NAMES
-            assert table.var_names.tolist() == ["gene-b", "gene-a"]
+        assert len(reported) == 1
+        assert path.name in str(reported[0].message)
+        actual = table.X if slot == "X" else table.layers[slot]
+        assert isinstance(actual, sparse.csr_array)
+        assert actual.has_canonical_format
+        output_dtype = ("int32" if dtype == "int8" else "uint32") if unsafe else dtype
+        assert actual.dtype == np.dtype(output_dtype)
+        np.testing.assert_array_equal(actual.data, [7, sum(values[:2])])
+        np.testing.assert_array_equal(actual.indices, [1, 0])
+        np.testing.assert_array_equal(actual.indptr, [0, 1, 2])
+        assert table.obs_names.tolist() == _ORDERED_NAMES
+        assert table.var_names.tolist() == ["gene-b", "gene-a"]
         assert path.read_bytes() == original_bytes
 
     @pytest.mark.parametrize("sparse_source", [True, False])

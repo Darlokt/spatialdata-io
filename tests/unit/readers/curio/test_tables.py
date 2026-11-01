@@ -43,7 +43,7 @@ class TestReadTable:
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     @pytest.mark.parametrize(("dtype", "values"), [("int8", [100, 100]), ("uint8", [150, 150])])
     def test_integer_duplicate_overflow(self, tmp_path: Path, storage: str, dtype: str, values: list[int]) -> None:
-        """Reject ordinary count sums that cannot retain their imported storage dtype."""
+        """Promote imported integer sums losslessly and report the normalization."""
         write_curio(tmp_path)
         path = tmp_path / "sample_anndata.h5ad"
         table = ad.read_h5ad(path)
@@ -53,10 +53,13 @@ class TestReadTable:
         )
         table.write_h5ad(path)
 
-        with pytest.raises(ValueError, match="source dtype") as raised:
-            curio(tmp_path)
-
-        assert any(str(path) in note and "X" in note for note in raised.value.__notes__)
+        with pytest.warns(UserWarning, match="combined.*X.*promoted") as reported:
+            result = curio(tmp_path).tables["table"].X
+        assert len(reported) == 1
+        assert isinstance(result, sparse.csr_array)
+        assert int(result[0, 0]) == sum(values)
+        assert result.dtype == np.dtype("int32" if dtype == "int8" else "uint32")
+        assert path.name in str(reported[0].message)
         unchanged = ad.read_h5ad(path).X
         assert isinstance(unchanged, (sparse.csr_matrix, sparse.csc_matrix))
         np.testing.assert_array_equal(unchanged.data, values)
@@ -82,7 +85,9 @@ class TestReadTable:
         )
         table.write_h5ad(path)
 
-        result = curio(tmp_path).tables["table"].X
+        with pytest.warns(UserWarning, match="combined") as reported:
+            result = curio(tmp_path).tables["table"].X
+        assert len(reported) == 1
 
         assert isinstance(result, sparse.csr_array)
         assert result.dtype == np.dtype(dtype)

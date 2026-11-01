@@ -189,6 +189,13 @@ class TestPrepareTable:
 class TestLinkTable:
     """Parse linkage once against an independent materialized shape index."""
 
+    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "counts.h5")
+        table = AnnData(sparse.csr_array([[2**53 + 1]], dtype=np.int64))
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            link_table(table, dataset_id="sample", shape_index=pd.Index(["0"]), counts_path=path)
+        assert caught.value.path == path
+
     def test_links_exact_barcode_membership(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "positions.csv"
         path.write_text("a,1,0,0,1,2\n", encoding="utf-8")
@@ -208,7 +215,12 @@ class TestLinkTable:
             make_var_names_unique=True,
         )
 
-        result = link_table(prepared.adata, dataset_id="sample", shape_index=pd.Index(["a"], name="spot_id"))
+        result = link_table(
+            prepared.adata,
+            dataset_id="sample",
+            shape_index=pd.Index(["a"], name="spot_id"),
+            counts_path=layout.counts.path,
+        )
 
         assert result is adata
         assert get_table_keys(result) == ("sample", "region", "spot_id")
@@ -229,4 +241,6 @@ class TestLinkTable:
         )
 
         with pytest.raises(ReaderFormatError, match="target-instance membership"):
-            link_table(prepared.adata, dataset_id="sample", shape_index=pd.Index(["other"]))
+            link_table(
+                prepared.adata, dataset_id="sample", shape_index=pd.Index(["other"]), counts_path=layout.counts.path
+            )

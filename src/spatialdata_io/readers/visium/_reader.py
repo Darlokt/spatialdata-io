@@ -77,7 +77,10 @@ def visium(  # noqa: PLR0913, RUF100
     Fractional full-resolution pixel coordinates remain supported.
     Position rows are aligned to count barcodes without filtering ``in_tissue``. Count
     and feature order are preserved, and expression is returned as a finite
-    canonical CSR sparse array. All count feature types are retained in source
+    canonical CSR sparse array, float32 when every decoded count is exactly
+    representable, otherwise float64. Values unrepresentable in either dtype
+    raise. The accepted Scanpy decoding boundary remains unchanged.
+    All count feature types are retained in source
     order, including Antibody Capture features when present.
 
     Full-resolution TIFF/BigTIFF/BTF, PNG, and JPEG inputs are optional.
@@ -214,7 +217,9 @@ def visium(  # noqa: PLR0913, RUF100
         radius=vendor_scales.spot_diameter / 2.0,
         transforms=transforms,
     )
-    table = link_table(prepared.adata, dataset_id=resolved_id, shape_index=circles.index)
+    table = link_table(
+        prepared.adata, dataset_id=resolved_id, shape_index=circles.index, counts_path=layout.counts.path
+    )
 
     result = SpatialData(images=images, shapes={resolved_id: circles}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="visium", format_version=count_metadata.software_version)

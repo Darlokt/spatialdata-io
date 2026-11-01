@@ -14,8 +14,7 @@ from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
 
 from spatialdata_io import stereoseq
-from spatialdata_io.readers._utils.errors import ReaderFormatError
-from tests.integration.readers.stereoseq._fixtures import write_analysis
+from tests.integration.readers.stereoseq._fixtures import write_analysis, write_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,10 +101,40 @@ class TestStereoseqAnalysisResolution:
 class TestStereoseqAnalysisExpression:
     """Imported duplicates retain exact values and the declared numerical dtype."""
 
+    def test_one_warning_across_multiple_imported_tables_and_slots(self, tmp_path: Path) -> None:
+        paths = [write_analysis(tmp_path / f"sample.cellbin_{resolution}.h5ad") for resolution in ("0.5", "0.6")]
+        for path in paths:
+            source = ad.read_h5ad(path)
+            expression = sparse.csr_array(
+                (np.array([100, 100, 22], dtype=np.int8), np.array([0, 0, 1]), np.array([0, 2, 3])), shape=(2, 2)
+            )
+            source.X = expression
+            source.layers["counts"] = expression.copy()
+            source.write_h5ad(path)
+        with pytest.warns(UserWarning, match="combined") as reported:
+            result = stereoseq(tmp_path, analysis_files=tuple(paths))
+        assert len(reported) == 1
+        message = str(reported[0].message)
+        assert all(path.name in message for path in paths)
+        assert "layers['counts']" in message
+        assert len(result.tables) == 2
+        for table in result.tables.values():
+            assert isinstance(table.X, sparse.csr_array)
+            assert table.X.dtype == table.layers["counts"].dtype == np.dtype(np.int32)
+            assert int(table.X[0, 0]) == 200
+
+    def test_expected_square_record_sums_do_not_warn(self, tmp_path: Path, recwarn: pytest.WarningsRecorder) -> None:
+        fixture = write_dataset(tmp_path, products=("square",))
+        result = stereoseq(fixture.root, bin_sizes=(1,))
+        table = result.tables["bin1_table"]
+        assert isinstance(table.X, sparse.csr_array)
+        assert int(table.X[0, 0]) == 6
+        assert not any("combined" in str(item.message) for item in recwarn)
+
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     @pytest.mark.parametrize("slot", ["X", "counts", "log1p", "exon"])
     @pytest.mark.parametrize(("dtype", "values"), [("uint8", [200, 100]), ("int8", [-100, -100])])
-    def test_unrepresentable_duplicate_sum_fails_with_artifact_and_slot(
+    def test_narrow_duplicate_sum_promotes_and_warns_with_artifact_and_slot(
         self, tmp_path: Path, storage: str, slot: str, dtype: str, values: list[int]
     ) -> None:
         path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
@@ -120,13 +149,18 @@ class TestStereoseqAnalysisExpression:
             source.layers[slot] = matrix
         source.write_h5ad(path)
 
-        with pytest.raises(ReaderFormatError, match=r"duplicate.*sum") as caught:
-            stereoseq(tmp_path, analysis_files=(path,))
-
-        message = str(caught.value)
-        assert str(path) in message
-        assert ("X" if slot == "X" else f"layers/{slot}") in message
+        with pytest.warns(UserWarning, match="combined.*promoted") as reported:
+            result = stereoseq(tmp_path, analysis_files=(path,))
+        assert len(reported) == 1
+        message = str(reported[0].message)
+        assert path.name in message
+        assert slot in message
         assert dtype in message
+        table = next(iter(result.tables.values()))
+        actual = table.X if slot == "X" else table.layers[slot]
+        assert isinstance(actual, sparse.csr_array)
+        assert actual.dtype == np.dtype("uint32" if dtype == "uint8" else "int32")
+        assert int(actual[0, 0]) == sum(values)
 
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     @pytest.mark.parametrize("slot", ["X", "counts", "log1p", "exon"])

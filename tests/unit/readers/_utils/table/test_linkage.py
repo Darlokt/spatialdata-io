@@ -18,6 +18,8 @@ from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
+
 
 _CONTEXT = ReaderErrorContext(reader="test_reader", artifact="cell table", detected_version="1")
 
@@ -104,9 +106,14 @@ class TestParseLinkedTable:
             fromlist=["normalize_owned_anndata"],
         ).normalize_owned_anndata
 
-        def normalize(table: ad.AnnData, *, expression_layers: tuple[str, ...] = ()) -> ad.AnnData:
+        def normalize(
+            table: ad.AnnData,
+            *,
+            expression_layers: tuple[str, ...] = (),
+            duplicate_sums: list[SparseDuplicateSummary] | None = None,
+        ) -> ad.AnnData:
             events.append("normalize")
-            return real_normalize(table, expression_layers=expression_layers)
+            return real_normalize(table, expression_layers=expression_layers, duplicate_sums=duplicate_sums)
 
         def parse(
             table: ad.AnnData,
@@ -139,7 +146,7 @@ class TestParseLinkedTable:
 
         assert result is adata
         assert events == ["normalize", "parse"]
-        normalization.assert_called_once_with(adata, expression_layers=())
+        normalization.assert_called_once_with(adata, expression_layers=(), duplicate_sums=None)
         parser.assert_called_once_with(adata, region="cells", region_key="region", instance_key="instance")
 
     def test_passes_ordered_region_list(self, mocker: MockerFixture) -> None:

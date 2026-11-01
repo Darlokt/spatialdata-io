@@ -452,7 +452,7 @@ class TestValidateAnalysisTable:
 
 
 class TestValidateAnalysisSparse:
-    """Compressed analysis checks preserve source storage and exact integer sums."""
+    """Analysis schemas validate storage; the shared numerical boundary owns safe sums."""
 
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     @pytest.mark.parametrize("legacy", [False, True])
@@ -494,13 +494,7 @@ class TestValidateAnalysisSparse:
         path = ArtifactFile(Path("analysis.h5ad"))
         limits = np.iinfo(dtype)
         assert (limits.min <= sum(values) <= limits.max) == fits
-        if fits:
-            _schemas._validate_analysis_sparse(matrix, path, "X")
-        else:
-            with pytest.raises(ReaderFormatError, match=r"duplicate.*sum") as caught:
-                _schemas._validate_analysis_sparse(matrix, path, "X")
-            assert "analysis.h5ad" in str(caught.value)
-            assert dtype in str(caught.value)
+        _schemas._validate_analysis_sparse(matrix, path, "X")
         for actual, expected in zip((matrix.data, matrix.indices, matrix.indptr), original, strict=True):
             assert_array_equal(actual, expected, strict=True)
 

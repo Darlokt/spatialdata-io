@@ -27,7 +27,7 @@ def _assert_expression(table: AnnData) -> None:
     assert_array_equal(table.X.data, [3, 5])
     assert_array_equal(table.X.indices, [0, 1])
     assert_array_equal(table.X.indptr, [0, 1, 2])
-    assert table.X.dtype == np.dtype("int64")
+    assert table.X.dtype == np.dtype("float32")
     assert table.var_names.tolist() == ["GeneB", "GeneA"]
     assert table.obs_names.tolist() == ["0", "1"]
     assert_array_equal(table.obs["instance_id"], [9, 2])

@@ -10,13 +10,19 @@ import pandas as pd
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
+from spatialdata_io.readers._utils.table import (
+    TableLinkage,
+    finalize_count_arrays,
+    parse_linked_table,
+    prepare_anndata_dataframe,
+)
 from spatialdata_io.readers.visium_hd._positions import read_positions
 from spatialdata_io.readers.visium_hd._transforms import bin_centers
 
 if TYPE_CHECKING:
     from anndata import AnnData
     from numpy.typing import NDArray
+    from scipy.sparse import csr_array
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.visium_hd._layout import BinLayout
@@ -58,8 +64,13 @@ def read_bin_table(
     return table
 
 
-def link_table(table: AnnData, target: str, identifiers: pd.Index, *, position: str) -> AnnData:
+def link_table(
+    table: AnnData, target: str, identifiers: pd.Index, *, position: str, counts_path: ArtifactFile
+) -> AnnData:
     """Link the final owned table once against its materialized target index."""
+    table.X = finalize_count_arrays(
+        (cast("csr_array", table.X),), context=ReaderErrorContext("visium_hd", target), path=counts_path
+    )[0]
     if "spatial" in table.obsm:
         positions: PositionsMetadata = {
             "schema_version": 1,

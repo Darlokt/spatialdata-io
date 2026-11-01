@@ -99,6 +99,8 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
         and metadata align by exact cell identity. Controls named
         ``Blank-<positive integer>`` reside in CSR ``obsm['blank']`` with names
         in ``uns['blank_names']``; other features remain expression.
+        Expression and blank controls share float32 when every count is exact,
+        otherwise float64. Unrepresentable floating counts raise.
 
     Raises
     ------

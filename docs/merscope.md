@@ -185,3 +185,11 @@ python -m spatialdata_io merscope --input slide/region --output counts.zarr \
 ```
 
 The former `vpt_outputs` mapping, `backend`, `imread_kwargs` and `image_models_kwargs` have been removed. Use `vpt_directory` and explicit raster options. Inclusion options are now `include_images`, `include_transcripts`, `include_cell_boundaries` and `include_table`. The default selects all image layers instead of z3; `z_layers=None` no longer disables images. Use `include_images=False` for that choice. Automatic four-level pyramids have been removed; request downsampling explicitly. Images default to `(1, 1024, 1024)` chunks instead of `(1, 4096, 4096)`, and `scale_factors=None` and `chunks=None` are no longer accepted: pass `()` for a single scale and explicit sizes for other chunks. Image loading follows the same shared TIFF path in every environment.
+
+Gene counts and blank controls use one common floating dtype: float32 when all
+completed values are exact, otherwise float64. Exact integer parsing retains
+accepted decimal/exponent spellings before conversion. A value not exactly
+representable in either floating dtype raises a precision error, including in
+blank controls. Completed bounded blocks are converted before sparse assembly;
+empty blank/gene arrays retain the family's selected dtype. Cell identifiers and
+integer annotations keep their independent source contracts.

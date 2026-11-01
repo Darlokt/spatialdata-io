@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Literal, cast
 
 from spatialdata import SpatialData
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pandas as pd
+
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
 
 
 def steinbock(
@@ -90,11 +93,11 @@ def steinbock(
         unchanged and no stage registration between samples is inferred.
 
         ``tables['table']`` contains owned, eager, finite canonical CSR
-        sparse-array expression in source row/feature order and dtype. The
+        sparse-array expression preserving values and source row/feature order. The
         optional ``counts`` layer is normalized likewise. Other layers, pairwise
-        arrays, and annotations are retained. Integer duplicate sums in ``X``
-        and ``counts`` must fit the source dtype; unsafe sums raise before
-        reduction rather than wrapping or widening. ``obs['image']`` must contain
+        arrays, and annotations are retained. Duplicate integer entries in ``X``
+        and ``counts`` promote losslessly when required; sufficient source
+        dtypes are retained. No supported exact representation raises. ``obs['image']`` must contain
         source names including ``.tiff`` and observation names must follow
         ``Object <id> in <image>``. IDs are strictly positive exact integers
         within each mask's dtype. Zero is background. Final linkage uses
@@ -138,6 +141,13 @@ def steinbock(
         within each lazy task. No points or shapes are returned. Provenance
         records the reader and package version.
 
+    Warns
+    -----
+    UserWarning
+        One summary per successful call if imported sparse duplicate entries
+        were combined, identifying affected expression slots and dtype changes.
+        Expected format aggregation does not trigger this warning.
+
     Raises
     ------
     FileNotFoundError, NotADirectoryError, IsADirectoryError
@@ -146,6 +156,7 @@ def steinbock(
         If options, layouts, OME axes/channels, table schemas, identifiers,
         centroids, metadata cleanup, or expression violate these contracts.
     """
+    duplicate_sums: list[SparseDuplicateSummary] = []
     raster = make_raster_options(scale_factors, chunks)
 
     layout = _discover_layout(path, labels_kind=labels_kind)
@@ -172,12 +183,17 @@ def steinbock(
     prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
 
     # All identifier and coordinate mutations precede the one final linkage.
-    table = parse_linked_table(
-        table,
-        TableLinkage(tuple(table.obs["region"].unique()), "region", "cell_id"),
-        context=context,
-        expression_layers=("counts",) if "counts" in table.layers else (),
-    )
+    try:
+        table = parse_linked_table(
+            table,
+            TableLinkage(tuple(table.obs["region"].unique()), "region", "cell_id"),
+            context=context,
+            duplicate_sums=duplicate_sums,
+            expression_layers=("counts",) if "counts" in table.layers else (),
+        )
+    except (TypeError, ValueError) as error:
+        add_reader_context(error, context=ReaderErrorContext("steinbock", "linked expression"), path=layout.table)
+        raise
 
     result = SpatialData(
         images={f"{name}_image": sample.image for name, sample in samples.items()},
@@ -185,4 +201,10 @@ def steinbock(
         tables={"table": table},
     )
     set_reader_provenance(result.attrs, reader="steinbock")
+    if duplicate_sums:
+        warnings.warn(
+            f"steinbock {layout.table.name}: " + "; ".join(map(str, duplicate_sums)),
+            UserWarning,
+            stacklevel=2,
+        )
     return result

@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
     from anndata import AnnData
 
+    from spatialdata_io.readers._utils.table._duplicates import SparseDuplicateSummary
+
 type _IdentifierFamily = Literal["integer", "string"]
 type _IntegerDType = np.dtype[np.signedinteger[Any] | np.unsignedinteger[Any]]
 
@@ -374,7 +376,7 @@ def _validated_pairs(
     return _ValidatedIdentifiers(observed_pairs, identifiers)
 
 
-def parse_linked_table(
+def parse_linked_table(  # noqa: PLR0913 - explicit representation and linkage options have separate owners
     adata: AnnData,
     linkage: TableLinkage,
     /,
@@ -382,6 +384,7 @@ def parse_linked_table(
     context: ReaderErrorContext,
     expression_layers: tuple[str, ...] = (),
     expected_instance_ids: Mapping[str, pd.Index] | None = None,
+    duplicate_sums: list[SparseDuplicateSummary] | None = None,
 ) -> AnnData:
     """Normalize and link a reader-owned table to SpatialData elements.
 
@@ -405,6 +408,10 @@ def parse_linked_table(
         Optional borrowed target indexes keyed by a subset of declared regions.
         Each supplied index must exactly match table instances in that region;
         index order is irrelevant.
+    duplicate_sums
+        Optional reader-owned summary destination enabling lossless imported
+        integer duplicate promotion, as in :func:`normalize_owned_anndata`.
+        Linkage never emits warnings; the reader reports successful assembly.
 
     Returns
     -------
@@ -451,7 +458,7 @@ def parse_linked_table(
             context=context,
         )
 
-    normalize_owned_anndata(adata, expression_layers=expression_layers)
+    normalize_owned_anndata(adata, expression_layers=expression_layers, duplicate_sums=duplicate_sums)
     region: str | list[str] = linkage.regions[0] if len(linkage.regions) == 1 else list(linkage.regions)
     try:
         return TableModel.parse(

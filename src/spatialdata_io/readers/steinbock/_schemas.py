@@ -23,7 +23,7 @@ from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.table import validate_integer_duplicate_sums
+from spatialdata_io.readers._utils.table import validate_compressed_sparse
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -87,15 +87,12 @@ def _validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
             expected="unoccupied cell_id and region destinations",
         )
 
-    # Check only declared integer expression before SciPy can reduce duplicates
-    # in the source dtype. Final normalization owns floating/dense validation.
+    # Validate storage before numerical normalization; imported duplicate sums
+    # are promoted losslessly by the shared table boundary.
     for slot, expression in (("X", table.X), ("counts", table.layers.get("counts"))):
-        if (
-            isinstance(expression, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix))
-            and expression.dtype.kind in "iu"
-        ):
+        if isinstance(expression, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
             try:
-                validate_integer_duplicate_sums(expression)
+                validate_compressed_sparse(expression)
             except (TypeError, ValueError) as error:
                 add_reader_context(error, context=ReaderErrorContext("steinbock", f"cell table {slot}"), path=path)
                 raise

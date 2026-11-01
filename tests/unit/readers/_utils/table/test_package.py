@@ -11,12 +11,15 @@ class TestTablePackage:
     def test_exports_only_representation_boundaries(self) -> None:
         """Expose only intentional table representation and linkage operations."""
         assert table.__all__ == [
+            "SparseDuplicateSummary",
             "TableLinkage",
             "as_csr_array",
+            "count_accumulation_dtype",
             "csr_array_from_triplets",
+            "finalize_count_arrays",
             "normalize_owned_anndata",
+            "normalize_sparse_duplicates",
             "parse_linked_table",
             "prepare_anndata_dataframe",
             "validate_compressed_sparse",
-            "validate_integer_duplicate_sums",
         ]

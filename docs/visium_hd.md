@@ -120,11 +120,18 @@ unless `make_var_names_unique=False`.
 
 10x supplies cell matrices but no nucleus matrix. The nucleus table sums **raw
 2 µm counts** over bins with `in_nucleus=True`, including bins outside the tissue
-mask, in the selected cell population's order. Bin and cell count dtypes follow
-Scanpy: vendor int32 sources become float32, while alternate numeric source
-dtypes are retained. Counts must be finite, nonnegative and integer-valued. Nucleus
-aggregation uses int64, rejecting unsafe integer conversion or possible sum
-overflow; final counts use float32, whose precision applies to large values.
+mask, in the selected cell population's order. Returned counts use float32
+when every completed value is exact, otherwise float64. Values that neither
+type preserves raise. Counts must be finite, nonnegative and integer-valued.
+Nucleus reconstruction accumulates decoded bins without converting them to
+integers. Before addition, a Python-integer bound (maximum decoded count times
+maximum contributing bins) selects float32 arithmetic when at most 2**24,
+otherwise float64 when at most 2**53. The operands select that arithmetic
+dtype before multiplication, proving every nonnegative integer partial sum
+exact. Failure raises a precision error; this conservative bound can reject
+exceptional inputs whose actual sums would still be safe.
+Completed nucleus values return to float32 only when exact. Source integers
+already rounded by Scanpy cannot be recovered.
 Every returned expression matrix is a canonical SciPy CSR sparse **array**.
 Nothing is densified. Linkage is performed once after all filtering, using
 the actual returned shape indexes or derived grid-label IDs. Source count

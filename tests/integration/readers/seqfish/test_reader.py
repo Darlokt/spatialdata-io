@@ -176,6 +176,26 @@ class TestSeqfish:
             assert 9 in np.unique(result.labels["Roi1_Segmentation"].data.compute())
         assert_array_equal(result.points["Roi1_TranscriptList"].compute()["cell"], [2, 9, 0])
 
+    @pytest.mark.parametrize("retain_wide", [False, True])
+    def test_polygon_drop_selects_retained_count_dtype(self, tmp_path: Path, *, retain_wide: bool) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",), invalid_cell_ids=(9,))
+        first, second = (3, 2**24 + 1) if retain_wide else (2**24 + 1, 5)
+        (root / "Roi1_CellxGene.csv").write_text(f",GeneB,GeneA\n9,{first},0\n2,0,{second}\n", encoding="utf-8")
+        result = seqfish(
+            root,
+            include_images=False,
+            include_transcripts=False,
+            include_labels=False,
+            shape_geometry="polygons",
+            invalid_geometries="drop",
+        )
+        table = result.tables["table_Roi1"]
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.dtype == np.dtype(np.float64 if retain_wide else np.float32)
+        assert_array_equal(table.X.data, [second])
+        assert table.obs_names.tolist() == ["1"]
+        assert table.obs["instance_id"].tolist() == [2]
+
     def test_polygon_drop_does_not_hide_source_identity_disagreement(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path, rois=("Roi1",), invalid_cell_ids=(9,))
         source = root / "Roi1_Boundaries.geojson"

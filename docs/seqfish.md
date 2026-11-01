@@ -89,3 +89,10 @@ python -m spatialdata_io seqfish --input dataset --output counts.zarr \
 ```
 
 The former `load_*`, `load_points`, `cells_as_circles`, `imread_kwargs` and `raster_models_scale_factors` options have been removed. Use the explicit inclusion flags, geometry choice, `chunks` and `scale_factors`. Automatic pyramids based on image size have been removed; request a pyramid explicitly when needed. The default chunks are `(1, 1024, 1024)` for images and `(1024, 1024)` for labels instead of storage-aligned chunks, and `scale_factors=()` replaces `None` for a single scale.
+
+Completed counts use float32 when every value is exactly representable, otherwise
+float64. Exact integer CSV decoding, including accepted integral decimal and
+exponent spellings, precedes this conversion. Values that neither floating dtype
+can preserve raise a contextual precision error. Completed bounded blocks are
+converted before sparse assembly; expression is never densified. Cell IDs and
+transcript assignments retain their independent exact integer ranges.

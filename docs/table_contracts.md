@@ -59,6 +59,35 @@ numeric columns currently lack AnnData serialization support. It does not
 alter expression values or reinterpret identifiers. Support for those columns
 is tracked in [AnnData issue #948](https://github.com/scverse/anndata/issues/948).
 
+## Completed raw counts
+
+seqFISH, MERSCOPE, CosMx, raw Stereo-seq and the 10x-backed readers return
+completed counts as float32 when every value is exactly representable, otherwise
+float64. Related arrays such as MERSCOPE genes/blanks or Stereo-seq X/exon share
+one selected dtype. Geometry drops re-evaluate that choice from the surviving
+count family. Neither float can preserve every uint64 value; unsupported
+exact values raise rather than round. Source parsing remains exact where owned
+by the reader, without a mandatory full-matrix int32 stage. Native Stereo-seq
+square contributions use floating addition after proving every nonnegative
+partial sum stays within the dtype's exact integer range (2²⁴ for float32,
+2⁵³ for float64), with exact integer fallback for exceptional wider inputs.
+HD decoded bins use checked float32 addition within the 2²⁴ bound, otherwise
+float64 within 2⁵³. Selection/alignment alone adds no integer conversion.
+IDs, coordinates and sparse structure have independent contracts.
+
+## Imported sparse expression
+
+Curio, ISS, Steinbock, DBiT and Stereo-seq analysis normalize their documented
+imported expression slots without imposing raw-count semantics. Duplicate
+matrix coordinates are additive contributions and are summed, never dropped.
+Sufficient source integer dtypes are retained; otherwise they promote to a
+supported exact integer or, only if every completed value is exact, float64.
+An unsupported exact result raises before lossy conversion. Floating and boolean
+expression retain their existing numerical semantics. One UserWarning per
+successful reader call identifies affected artifacts/tables/slots, entries
+combined and dtype changes. Mere sorting and expected format aggregation do
+not warn. Mathematical values and source files are preserved.
+
 ## Expression and linkage
 
 Expression is returned as eager, finite, canonical SciPy CSR sparse arrays.
@@ -173,8 +202,9 @@ their precision and underflow checks are independent of the grid grammar.
 Image scale factors must have finite inverses, and the display diameter must
 produce a positive representable circle radius.
 
-`X` contains source counts, with the dtype returned by Scanpy (int32 HDF5
-usually becomes float32; MTX is float32). `obs` adds int64 `in_tissue`,
+`X` contains decoded counts as float32 when every value is exact, otherwise
+float64; values unrepresentable in either dtype raise. Standard int32 HDF5
+and MTX inputs already return float32 through the accepted Scanpy decoder. `obs` adds int64 `in_tissue`,
 `array_row`, `array_col`, textual `spot_id` and categorical `region` in that
 order. `spot_id` repeats the barcode and links to the generated spot circles
 indexed by barcode, using `region` as the region key. Float64
@@ -214,8 +244,9 @@ approximate 0.647 µm/pixel calibration without reversing stored orientation.
 The circles use the same scale; their radius 10 is a display radius in source
 pixels, rather than a measured bead footprint. Reprocessed, merged and Trekker
 coordinate profiles require separate evidence. Only `X` is converted to
-canonical CSR. Integer duplicate sums outside the preserved source dtype fail
-with H5AD path and `X` context before reduction. Every inherited layer, including
+canonical CSR. Duplicate entries are combined, promoting integer storage
+losslessly only when necessary, with one warning after successful assembly.
+An unsupported exact result fails with H5AD/slot context. Every inherited layer, including
 a layer named `counts`, retains its source representation.
 Other embeddings, aligned mappings, nested metadata and `raw` are preserved.
 Inherited `spatialdata_attrs` is rejected. See the
@@ -270,10 +301,10 @@ Categorical `region` names `<dataset_id>_labels_image`. The default integer
 an explicit `instance_key` selects an existing integer column, promoting widths
 below 16 bits. These IDs are checked against the label dtype range, without
 reading label pixels. `X` and an optional documented `counts` layer become
-canonical CSR sparse arrays. Before normalization, integer duplicate sums in
-either slot must fit the preserved source dtype; unsafe sums fail with the H5AD
-path and expression slot in the error context. Safe duplicates, including signed
-cancellation, retain the source dtype. Other layers and `raw` retain their source
+canonical CSR sparse arrays. Duplicate entries are combined, retaining
+sufficient source dtype and promoting integers losslessly when required.
+One warning summarizes affected slots and dtype changes after successful
+assembly; an unsupported exact result fails with H5AD/slot context. Other layers and `raw` retain their source
 storage and inherited numerical semantics. Inherited
 `spatialdata_attrs` is rejected. The [API](generated/spatialdata_io.iss.rst)
 describes the explicit artifact names and options.
@@ -281,7 +312,8 @@ describes the explicit artifact names and options.
 ### Steinbock
 
 Deepcell and Ilastik segmentation selections share one table contract. Imported
-H5AD row/feature order and expression dtype remain. Source `image`,
+H5AD row/feature order and expression values remain; integer duplicate
+normalization promotes storage only when needed. Source `image`,
 `centroid-0`, `centroid-1` and other annotations remain in `obs`; an equal
 redundant `Image` column is removed. Generated integer `cell_id` (int64 or
 uint64) and categorical `region` link to `<image_stem>_labels`. IDs derive
@@ -300,10 +332,10 @@ Complete per-sample calibration creates float64 micrometre `spatial` using
 `(source_xy + 0.5) * spacing_xy_um`, in the unchanged raster frame. Independent
 samples use categorical row frames. Mixed or absent calibration omits canonical
 `spatial` for the aggregate. Other mappings and metadata remain. `X` and optional
-`counts` become canonical CSR sparse arrays. Integer duplicate sums that cannot
-fit the preserved source dtype are rejected before canonicalization, with the
-H5AD path and expression slot in the error context. Safe duplicate sums,
-including signed cancellation, retain the source dtype. Other layers and `raw`
+`counts` become canonical CSR sparse arrays. Duplicate integer entries
+promote losslessly when required, retaining sufficient source dtype and signed
+cancellation. One warning summarizes affected slots and dtype changes; an
+unsupported exact result fails with H5AD/slot context. Other layers and `raw`
 retain their values and representation. Renaming
 active feature columns does not rename `raw.var` columns. Inherited
 `spatialdata_attrs` is rejected. See the
@@ -332,14 +364,15 @@ remains unchanged. Coordinate destination collisions still fail: imported
 
 `X` and optional `counts` become canonical CSR sparse arrays; other layers,
 embeddings, feature mappings, ordinary `uns` and `raw`
-survive. Integer duplicate accumulation that would overflow its source dtype
-fails. The optional image determines the square-grid display scale but does
+survive. Duplicate integer totals promote losslessly when needed; one
+warning summarizes combined entries and dtype changes. Unsupported exact
+results fail before lossy reduction. The optional image determines the square-grid display scale but does
 not rewrite table positions or establish physical calibration. See [DBiT](dbit.md).
 
 ### seqFISH
 
 Every selected ROI returns `table_<roi>` in count-row and feature-header order.
-`X` contains int64/uint64 counts; `var` has feature names and no columns.
+`X` contains exact float32/float64 counts; `var` has feature names and no columns.
 Observation names are original positional strings, retaining gaps after polygon
 drops. Required `obs` fields are float64 physical `area` (µm²) and integer
 `instance_id` (int64/uint64). Categorical `region` is added only when labels
@@ -355,7 +388,8 @@ describes the independent ROI frames, shape selection and whole-row drops.
 ### MERSCOPE
 
 Instrument, VPT Cellpose and VPT Watershed layouts share the table contract;
-selection without counts returns no table. `X` contains int64/uint64 counts in
+selection without counts returns no table. X and blank controls share the
+selected exact float32/float64 count dtype, in
 exact textual cell-ID and source feature order. `obs_names` are those cell
 IDs. Canonical `Blank-N` controls move to sparse `obsm["blank"]`, retaining
 their order in `uns["blank_names"]`; other controls stay in `X`. `var` has
@@ -401,7 +435,7 @@ convention, independent core frames and parser bounds.
 ### CosMx
 
 The supported flat-file layouts always return `table`, including when labels
-are excluded. `X` contains int64 counts, including controls, in expression
+are excluded. `X` contains exact float32/float64 counts, including controls, in expression
 feature order. Background `cell_ID=0` rows are removed; metadata align by
 `(fov, cell_ID)`. Vendor `cell` values name observations when available,
 otherwise positional string names are generated. `var` has no columns.
@@ -442,7 +476,7 @@ product-specific contracts; GEF schema profiles determine source feature
 fields independently of the producer release. See [Stereo-seq](stereoseq.md)
 for supported profiles and product names.
 
-Square-bin tables `<binN>_table` contain uint64 raw counts, source feature
+Square-bin tables `<binN>_table` contain exact float32/float64 raw counts, source feature
 order and first-occurrence coordinate order. Duplicate coordinate/feature
 records sum deterministically. `obs` contains categorical `region` and
 int64 `instance_id`; positional string observation names identify the bins.
@@ -451,10 +485,10 @@ int64 `instance_id`; positional string observation names identify the bins.
 finite float64 `spatial` uses source pitch divided by 1000 in `global`
 micrometres, describing source bin reference positions rather than footprint
 centres;
-optional uint64 `exon` is a CSR layer. `uns["stereoseq"]` describes origin
+optional `exon` is a CSR layer sharing the selected count dtype. `uns["stereoseq"]` describes origin
 and resolution. Tables link to the returned bin points by exact IDs.
 
-Cell and adjusted-cell tables contain uint64 raw counts in source cell/feature
+Cell and adjusted-cell tables contain exact float32/float64 raw counts in source cell/feature
 order with decimal source-ID observation names. Source `obs` fields are
 `id`, `offset`, `geneCount`, `expCount`, `dnbCount`, `area`, categorical
 `cellTypeID`/`clusterID` and optional `cellExon`, followed by final linkage.
@@ -462,12 +496,12 @@ order with decimal source-ID observation names. Source `obs` fields are
 `var` retains source gene identity/names, `offset`, `cellCount` or `cellcount`,
 `expCount`, `maxMIDcount` and optional `geneExon`. Source integer widths remain
 for summary annotations; summaries are not recomputed QC. Native-grid XY
-centres, optional uint64 CSR `exon`, origin/resolution metadata and available
+centres, optional CSR `exon` sharing the selected count dtype, origin/resolution metadata and available
 cell-type names are retained. Linkage uses `(region, instance_id)` with exact
 returned point/polygon IDs; invalid-cell drops filter the complete cell row.
 
 Analysis tables are separate products with their own point targets. Imported
-expression values, dtype, names/order, annotations, embeddings, ordinary
+expression values, sufficient source dtype, names/order, annotations, embeddings, ordinary
 metadata and `raw` remain. `obsm["spatial_grid"]` retains native-grid XY
 with its original source dtype. Float64 `spatial` gives the same vendor reference positions in
 micrometres. Native identity matching and common-pitch resolution precede
@@ -478,9 +512,10 @@ layers and aligned mappings retain their storage. Final `region` and
 `instance_id` link to analysis points. Nonfinite expression fails during
 bounded final normalization with the H5AD path attached to the error.
 Compressed sparse pointers and indices are validated before duplicate
-reduction. Integer duplicates in `X` and the declared expression layers must
-have exact sums representable in their source dtype; unsafe sums fail with
-the H5AD path and expression slot. Safe duplicates retain the numerical dtype.
+reduction. Integer duplicates in X and declared expression layers promote
+losslessly when required. One warning summarizes affected imported tables/slots,
+combined entries and dtype changes. An unsupported exact result fails with
+H5AD/slot context. Expected raw square aggregation does not warn.
 
 ### Xenium
 
@@ -494,9 +529,9 @@ controls, and a sequence selects explicit feature types.
 
 Gene/control entries are transcript counts. Protein entries are rescaled
 per-cell mean stain intensities and may legitimately be fractional after one
-division. Official int32 HDF5 counts become float32 through Scanpy. Alternate
-source dtypes follow Scanpy; protein division currently requires floating
-storage. Required textual `var` fields are `gene_ids`, `feature_types`;
+division. Official int32 HDF5 counts become float32 through Scanpy.
+Selected completed counts use exact float32/float64 storage before protein
+division; the accepted source decoder remains unchanged. Required textual `var` fields are `gene_ids`, `feature_types`;
 modern source feature metadata are retained. Protein annotation adds nullable
 text `long_name`/`clone` and nullable int64 `codeword_index`.
 When a protein panel enriches selected protein features, pre-existing source
@@ -530,8 +565,10 @@ tables: `square_XXXum_table`, `cell_table`, and requested `nucleus_table`.
 No unselected table is fabricated. Bin/cell barcodes and features retain matrix
 order. Feature metadata follow 10x (`gene_ids`, `feature_types`, available
 `genome` and additional annotations); symbols become unique unless disabled.
-Bin and cell dtypes follow Scanpy. Nucleus expression independently sums raw
-2 µm bins in guarded int64, then converts to float32 with its precision limits.
+Bin/cell output is float32 when exact, otherwise float64. Nucleus expression
+independently sums decoded raw 2 µm bins in float32 when maximum count times
+maximum contributing bins is at most 2**24, otherwise float64 up to 2**53; final output uses float32
+only when exact, otherwise float64. A failed conservative bound raises.
 It is not copied from the selected cell matrix.
 
 Bin `obs` contains uint8 `in_tissue`, uint32 `array_row`/`array_col`, float64
@@ -563,13 +600,16 @@ contract.
 
 Float32 cannot exactly represent every integer above 2²⁴. Scanpy's conversion
 may round large counts before the reader sees them; a later cast cannot recover
-them. HD nucleus output has the same final float32 limitation after guarded
-int64 accumulation. SciPy's dtype-preserving duplicate summation of noncanonical integer
-imported H5AD expression can overflow. Curio, DBiT, ISS, Steinbock and Stereo-seq analysis reject
-duplicate sums that cannot fit the preserved source dtype; raw Stereo-seq and
-HD retain their documented accumulation guards. Other inherited layers and `raw`
-keep their source numerical semantics. No unrestricted exact-count guarantee is
-made for those imported or float32 paths.
+them. Reader-owned completed raw counts use float32 when every actual value
+is exact, otherwise float64; unsupported exact values raise. This does not
+recover source information already rounded by Scanpy. HD nuclei accumulate in
+checked float32/f64 and adapt their output dtype after summation. Imported integer
+expression in Curio, DBiT, ISS, Steinbock and Stereo-seq analysis combines
+repeated matrix coordinates safely, retaining sufficient source dtype or
+promoting losslessly when required. One warning per successful reader call
+summarizes unexpected imported duplicate normalization. Other inherited layers
+and raw retain their source numerical semantics; processed expression is not
+automatically reinterpreted as nonnegative molecule counts.
 
 Shared HDF5 validation checks nonnegative/integral entries retained by Scanpy
 before local duplicate reduction; filtering may remove unselected records.

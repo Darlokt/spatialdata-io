@@ -122,24 +122,9 @@ order, remain valid. Unsigned 64-bit indices/pointers are rejected before
 canonicality inspection: SciPy's compressed kernels cannot safely dispatch that
 storage. Expression value dtypes are unaffected.
 
-`validate_integer_duplicate_sums()` adds a read-only preserved-dtype safety
-check for compressed CSR/CSC integer arrays and matrices before canonicalization.
-Curio's primary expression, DBiT's and ISS's `X`/`counts`, and Stereo-seq's imported
-expression slots require the same invariant: completed duplicate sums must fit
-the source integer dtype.
-The validator first checks compressed storage. Canonical integers return without
-scanning count magnitudes; noninteger inputs retain their existing policy.
-For noncanonical integers, a conservative min/max bound handles ordinary small
-counts. If that bound is inconclusive, Python integers accumulate exact completed
-coordinate sums one row or column at a time, allowing signed cancellation and
-the full int64/uint64 range. Unused capacity is ignored. An out-of-range sum
-raises `ValueError`; the reader supplies artifact and slot context.
-
-This eager validator does not choose an accumulation dtype, widen values, convert
-through floating point, densify, or mutate borrowed buffers. Its exact fallback
-uses workspace proportional to the distinct active indices in one compressed
-span. It does not change `as_csr_array()` or triplet construction automatically;
-readers select the expression slots and call it before normalization.
+Imported expression can instead opt into safe duplicate normalization and
+lossless integer promotion at the owned-AnnData boundary. This replaces the
+former reject-only source-dtype guard; see [imported sparse duplicates](#imported-sparse-duplicates).
 
 ## Owned AnnData normalization
 
@@ -429,3 +414,61 @@ Avoid generic reader callbacks, universal table loaders, untyped `ArrayLike`
 inputs, `np.asarray()` before sparse-type detection, silent Dask computation,
 COO outputs passed to `AnnData`, sparse-matrix outputs, and validation that
 densifies expression data.
+
+## Count accumulation and completed families
+
+`count_accumulation_dtype(maximum_sum)` selects arithmetic from a nonnegative
+Python-integer bound on every partial sum: float32 up to and including 2²⁴,
+otherwise float64 up to and including 2⁵³. Larger bounds return `None`, meaning
+exact floating accumulation is unproven. Readers validate source contributions,
+derive bounds without fixed-width overflow, and select their own aggregation and
+fallback behavior. Stereo-seq derives its bound from native gene spans and can
+fall back to exact integer reduction; Visium HD derives its bound from nucleus
+membership and raises a contextual precision error when the bound is inconclusive.
+The helper rejects booleans, non-Python integers and negative bounds; it performs
+no array scans, I/O, aggregation or mutation.
+
+`finalize_count_arrays((X, exon), context=...)` accepts nonempty families of
+owned canonical CSR arrays after all count arithmetic. It validates finite,
+nonnegative integral values in bounded stored-buffer batches and chooses one
+common float32 dtype when every actual value is exact, otherwise float64.
+Counts that neither dtype preserves raise `ReaderFormatError`. This is storage
+conversion, not scaling. Readers pass `path=` to identify the source artifact
+in numerical errors. It preserves explicit zeros, order, shapes and sparse
+index widths. Suitable floating arrays are returned unchanged; converted arrays
+own new values and may share owned structural buffers. No input is mutated.
+The helper does not parse source text, sum duplicates or recover upstream loss.
+
+## Imported sparse duplicates
+
+Supplying a reader-owned `duplicate_sums=[]` collector to
+`normalize_owned_anndata()` or `parse_linked_table()` opts into lossless
+normalization of imported CSR/CSC expression. Repeated matrix coordinates are
+summed, not discarded. Integer storage stays unchanged when completed sums fit;
+otherwise it promotes to sufficient integer storage, using at least 32 bits for
+promoted 8/16-bit sources. Float64 fallback is allowed only when all completed
+values are exact, including unaffected coordinates. Exact Python-integer totals
+prevent source rounding before fallback. No supported lossless result raises a
+contextual normalization error. Floating and boolean expression retain their
+existing numerical semantics. This does not impose raw-count semantics.
+
+Storage is validated before reading cached canonicality. A fresh compressed
+wrapper checks actual indices without mutating source metadata or buffers.
+Conservative integer bounds avoid Python accumulation for ordinary counts;
+exceptional inputs use dictionaries bounded by one compressed row/column.
+There is no densification or object-valued expression result. Unsorted unique
+indices are merely sorted and do not produce a duplicate report. Combined
+entries, including explicit-zero sums, append typed `SparseDuplicateSummary`
+values identifying the slot, number combined and source/result dtypes.
+
+`normalize_sparse_duplicates()` exposes the same numerical reduction without
+AnnData slot selection or warning collection. Readers can reuse it for expected
+format aggregation when their ordinary arithmetic bound cannot prove safety;
+it does not itself emit warnings or infer nonnegative count semantics.
+
+The reader owns reporting: emit one `UserWarning` from accumulated summaries
+only after successful result assembly, with affected artifacts/tables/slots.
+Expected format aggregation is not an imported-data warning. Default callers
+that omit the collector retain the dtype-preserving behavior documented above,
+including the unchanged Scanpy 10x boundary. Unnamed layers and raw remain
+outside the reader's explicitly declared normalization slots.

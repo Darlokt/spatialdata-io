@@ -75,7 +75,8 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     -------
     spatialdata.SpatialData
         ``tables['table']`` follows metadata row order. ``X`` is an eager
-        canonical CSR int64 count array whose features are every count-matrix
+        canonical CSR count array, float32 when exact and otherwise float64,
+        whose features are every count-matrix
         column except ``fov`` and ``cell_ID``, in source order, including
         negative and system controls. The per-FOV background rows with
         ``cell_ID`` 0 are removed; the remaining count and metadata populations

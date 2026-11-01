@@ -79,10 +79,10 @@ class TestReadTable:
 
     def test_exact_unsigned_counts_across_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
         mocker.patch("spatialdata_io.readers.merscope._tables._MAX_BATCH_ROWS", 1)
-        large = 2**63 + 1
+        large = 2**63
         table, _ = read_table(*_sources(tmp_path, f"cell,A\na,1\nb,{large}\n"))
         assert isinstance(table.X, sparse.csr_array)
-        assert table.X.dtype == np.dtype(np.uint64)
+        assert table.X.dtype == np.dtype(np.float32)
         assert table.X.data.tolist() == [1, large]
 
     @pytest.mark.parametrize("rows_per_batch", [1, 10_000])
@@ -93,16 +93,22 @@ class TestReadTable:
         table, _ = read_table(
             *_sources(
                 tmp_path,
-                f"cell,A,Blank-1,B\na,{2**63 - 1},2.0,3e0\nb,{2**63},{2**64 - 1},0\n",
+                f"cell,A,Blank-1,B\na,{2**24 + 1},2.0,3e0\nb,{2**63},{2**64 - 2048},0\n",
             )
         )
         assert isinstance(table.X, sparse.csr_array)
-        assert table.X.dtype == np.dtype(np.uint64)
-        np.testing.assert_array_equal(table.X.data, np.array([2**63 - 1, 3, 2**63], dtype=np.uint64))
+        assert table.X.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(table.X.data, np.array([2**24 + 1, 3, 2**63], dtype=np.float64))
         blanks = table.obsm["blank"]
         assert isinstance(blanks, sparse.csr_array)
-        assert blanks.dtype == np.dtype(np.uint64)
-        np.testing.assert_array_equal(blanks.data, np.array([2, 2**64 - 1], dtype=np.uint64))
+        assert blanks.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(blanks.data, np.array([2, 2**64 - 2048], dtype=np.float64))
+
+    @pytest.mark.parametrize("feature", ["A", "Blank-1"])
+    def test_rejects_inexact_count_or_control(self, tmp_path: Path, feature: str) -> None:
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            read_table(*_sources(tmp_path, f"cell,{feature}\na,1\nb,{2**64 - 1}\n"))
+        assert caught.value.path == tmp_path / "counts.csv"
 
     @pytest.mark.parametrize(
         "counts",
@@ -173,6 +179,31 @@ def _boundaries(ids: tuple[str, ...]) -> CellBoundaries:
 
 class TestFinalizeTable:
     """Apply compatible annotation storage and exact independent target membership once."""
+
+    @pytest.mark.parametrize("wide_feature", ["A", "Blank-1"])
+    @pytest.mark.parametrize("retain_wide", [False, True])
+    def test_geometry_drop_selects_dtype_from_retained_count_family(
+        self, tmp_path: Path, wide_feature: str, *, retain_wide: bool
+    ) -> None:
+        ordinary, wide = 3, 2**24 + 1
+        a, b = (wide, ordinary) if retain_wide else (ordinary, wide)
+        text = (
+            f"cell,A,Blank-1\na,{a if wide_feature == 'A' else 1},{a if wide_feature == 'Blank-1' else 2}\n"
+            f"b,{b if wide_feature == 'A' else 1},{b if wide_feature == 'Blank-1' else 2}\n"
+        )
+        table, _ = read_table(*_sources(tmp_path, text))
+        boundaries = CellBoundaries(_boundaries(("a",)).shapes, pd.Index(["a", "b"]))
+        result = finalize_table(
+            table, frame="global", names=Names(region="region", slide="slide"), boundaries=boundaries
+        )
+        assert result.obs_names.tolist() == ["a"]
+        assert isinstance(result.X, sparse.csr_array)
+        blanks = result.obsm["blank"]
+        assert isinstance(blanks, sparse.csr_array)
+        assert result.X.dtype == blanks.dtype == np.dtype(np.float64 if retain_wide else np.float32)
+        np.testing.assert_array_equal(result.X.data, [a if wide_feature == "A" else 1])
+        np.testing.assert_array_equal(blanks.data, [a if wide_feature == "Blank-1" else 2])
+        assert table.n_obs == 2
 
     @pytest.mark.parametrize("linked", [False, True])
     def test_linkage_and_blank_roundtrip(self, tmp_path: Path, *, linked: bool) -> None:

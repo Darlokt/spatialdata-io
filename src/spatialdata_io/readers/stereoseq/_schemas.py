@@ -12,7 +12,7 @@ import pyarrow as pa
 from scipy.sparse import csc_array, csc_matrix, csr_array, csr_matrix
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table import validate_integer_duplicate_sums
+from spatialdata_io.readers._utils.table import validate_compressed_sparse
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -278,15 +278,15 @@ def _analysis_integer(value: object, path: ArtifactFile, name: str) -> int:
 def _validate_analysis_sparse(
     matrix: csr_array | csc_array | csr_matrix | csc_matrix, path: ArtifactFile, slot: str
 ) -> None:
-    """Reject malformed storage and duplicate sums that cannot retain the source dtype."""
+    """Validate imported compressed sparse storage before numerical normalization."""
     try:
-        validate_integer_duplicate_sums(matrix)
+        validate_compressed_sparse(matrix)
     except (TypeError, ValueError) as error:
         raise format_error(
             path,
             slot,
             str(error),
-            "valid compressed sparse storage with integer sums representable in the source dtype",
+            "valid compressed sparse storage",
         ) from error
 
 

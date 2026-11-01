@@ -73,7 +73,7 @@ def _assert_table(table: AnnData, fixture: MerscopeFixture) -> None:
     assert isinstance(table.X, sparse.csr_array)
     assert not isinstance(table.X, sparse.spmatrix)
     assert table.X.shape == (3, 3)
-    assert table.X.dtype == np.dtype("int64")
+    assert table.X.dtype == np.dtype("float32")
     np.testing.assert_array_equal(table.X.data, [1 + increment, 4 + increment, 3 + increment, 1 + increment])
     np.testing.assert_array_equal(table.X.indices, [0, 1, 0, 1])
     np.testing.assert_array_equal(table.X.indptr, [0, 1, 2, 4])

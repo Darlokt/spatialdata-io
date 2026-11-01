@@ -33,6 +33,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
+    finalize_count_arrays,
     normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
@@ -245,14 +246,15 @@ def read_counts(source: CountSource, feature_types: FeatureSelection, panel: Pro
     if not selected.all():
         matrix = matrix[:, selected]
     var = source_var.loc[selected]
+    matrix = finalize_count_arrays((matrix,), context=_context("selected cell-feature counts"), path=path)[0]
 
     protein: dict[str, object] | None = None
     is_protein = types[selected] == PROTEIN_EXPRESSION
     if is_protein.any():
         factor = _protein_scaling(source)
         entries = is_protein[matrix.indices]
-        # One correctly rounded float32 division of exact operands; a float64
-        # detour would round twice.
+        # Preserve the existing float32 divisor contract. Ordinary float32
+        # tables divide once; exceptional exact counts retain float64 storage.
         matrix.data[entries] /= np.float32(factor)
         protein = {"scaling_factor": factor, "metric": PROTEIN_METRIC}
         if panel is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
     from xarray import DataArray
+
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
 
 _MAX_BORDER_SCALE = 4
 
@@ -145,12 +148,12 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     SpatialData
         ``tables['table']`` contains eager canonical CSR sparse-array ``X``
         and, if present, ``layers['counts']``, preserving finite source values,
-        dtype and feature order. Rows are ordered by A then B. Observation,
+        sufficient source dtype and feature order. Rows are ordered by A then B. Observation,
         feature and auxiliary metadata follow that order. Other layers retain
         their representation. Dense expression converts before row reordering
         so sorting does not make a second dense expression copy.
-        Duplicate sparse entries are summed. Integer sums outside the source
-        dtype range are rejected rather than wrapped.
+        Duplicate sparse entries are summed. Integer storage promotes losslessly
+        when required; no supported exact representation raises.
 
         ``array_A`` and ``array_B`` are one-based int64 grid coordinates.
         ``obsm['spatial_grid']`` retains these columns in A/B order, described as
@@ -184,6 +187,13 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         lazy task. Caller-owned state and source files are never mutated.
         Provenance records the reader and package version.
 
+    Warns
+    -----
+    UserWarning
+        One summary per successful call if imported sparse duplicate entries
+        were combined, identifying affected expression slots and dtype changes.
+        Expected format aggregation does not trigger this warning.
+
     Raises
     ------
     FileNotFoundError, NotADirectoryError, IsADirectoryError
@@ -200,6 +210,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     _validate_image_options(data_axes, tiff_series, tiff_level)
     raster = make_raster_options(scale_factors, chunks)
 
+    duplicate_sums: list[SparseDuplicateSummary] = []
     layout = _discover_layout(
         path, table_file=table_file, barcode_positions_file=barcode_positions_file, image_file=image_file
     )
@@ -219,7 +230,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         raise ValueError(message)
 
     barcodes = _read_barcodes(layout.barcode_positions)
-    table = _read_table(layout.table, barcodes)
+    table = _read_table(layout.table, barcodes, duplicate_sums=duplicate_sums)
 
     images: dict[str, DataArray | DataTree] = {}
     scale = 1.0
@@ -266,4 +277,10 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
 
     result = SpatialData(images=images, shapes={dataset_id: grid}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="dbit")
+    if duplicate_sums:
+        warnings.warn(
+            f"dbit {layout.table.name}: " + "; ".join(map(str, duplicate_sums)),
+            UserWarning,
+            stacklevel=2,
+        )
     return result

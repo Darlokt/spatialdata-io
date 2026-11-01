@@ -8,6 +8,7 @@ import numpy as np
 from scipy import sparse
 
 from spatialdata_io.readers._utils.table._arrays import as_csr_array
+from spatialdata_io.readers._utils.table._duplicates import SparseDuplicateSummary, normalize_sparse_duplicates
 
 if TYPE_CHECKING:
     from anndata import AnnData
@@ -25,8 +26,27 @@ def _require_owned_in_memory_anndata(adata: AnnData, /) -> None:
         raise TypeError(message)
 
 
-def _normalized_expression(data: object, *, location: str) -> sparse.csr_array:
+def _normalized_expression(
+    data: object, *, location: str, duplicate_sums: list[SparseDuplicateSummary] | None
+) -> sparse.csr_array:
+    if (
+        duplicate_sums is not None
+        and sparse.issparse(data)
+        and not isinstance(data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix))
+    ):
+        message = "Imported sparse expression must use CSR or CSC storage."
+        raise TypeError(message)
     try:
+        if duplicate_sums is not None and isinstance(
+            data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)
+        ):
+            result = normalize_sparse_duplicates(data)
+            combined = int(data.indptr[-1]) - result.nnz
+            if combined:
+                duplicate_sums.append(
+                    SparseDuplicateSummary(location.removeprefix("adata."), combined, data.dtype, result.dtype)
+                )
+            return result
         return as_csr_array(cast("_ExpressionData", data))
     except (TypeError, ValueError) as error:
         error.add_note(f"while normalizing {location}")
@@ -58,6 +78,7 @@ def normalize_owned_anndata(
     /,
     *,
     expression_layers: tuple[str, ...] = (),
+    duplicate_sums: list[SparseDuplicateSummary] | None = None,
 ) -> AnnData:
     """Normalize expression storage in a reader-owned in-memory AnnData.
 
@@ -80,6 +101,13 @@ def normalize_owned_anndata(
     expression_layers
         Names of layers whose documented meaning is expression or counts.
         Unnamed layers and ``raw.X`` are deliberately not normalized.
+    duplicate_sums
+        Optional reader-owned destination for imported duplicate summaries.
+        Supplying a list opts into lossless integer promotion before combining
+        imported CSR/CSC duplicates. Sufficient source dtypes and existing
+        floating/boolean semantics are retained. The reader emits one warning
+        from the accumulated summaries only after successful assembly. Omit
+        this option to retain ordinary dtype-preserving normalization.
 
     Returns
     -------
@@ -107,10 +135,11 @@ def normalize_owned_anndata(
 
     expression = adata.X
     if expression is not None:
-        adata.X = _normalized_expression(expression, location="adata.X")
+        adata.X = _normalized_expression(expression, location="adata.X", duplicate_sums=duplicate_sums)
     for name in expression_layers:
         adata.layers[name] = _normalized_expression(
             adata.layers[name],
             location=f"adata.layers[{name!r}]",
+            duplicate_sums=duplicate_sums,
         )
     return adata

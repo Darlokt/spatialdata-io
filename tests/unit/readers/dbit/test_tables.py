@@ -14,7 +14,7 @@ from scipy import sparse
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import require_file
 from spatialdata_io.readers.dbit._barcodes import _read_barcodes
-from spatialdata_io.readers.dbit._tables import _expression_array, _read_table
+from spatialdata_io.readers.dbit._tables import _read_table
 from tests.integration.readers.dbit.test_reader import _write_layout
 
 if TYPE_CHECKING:
@@ -32,81 +32,11 @@ def _read(path: Path) -> ad.AnnData:
     )
 
 
-class TestExpressionArray:
-    """Require exact, representable duplicate sums before sparse canonicalization."""
-
-    @pytest.mark.parametrize("storage", [sparse.csr_array, sparse.csr_matrix, sparse.csc_array, sparse.csc_matrix])
-    @pytest.mark.parametrize(("dtype", "values"), [("int8", [100, 100]), ("int8", [-100, -100]), ("uint8", [150, 150])])
-    def test_rejects_integer_overflow(
-        self,
-        storage: type[sparse.csr_array | sparse.csr_matrix | sparse.csc_array | sparse.csc_matrix],
-        dtype: str,
-        values: list[int],
-    ) -> None:
-        expression = storage((np.array(values, dtype=dtype), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))
-
-        with pytest.raises(ValueError, match="source dtype"):
-            _expression_array(expression)
-
-    @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
-    def test_exact_large_integer_limits(self, dtype: type[np.int64 | np.uint64]) -> None:
-        maximum = np.iinfo(dtype).max
-        expression = sparse.csr_array(
-            (np.array([maximum, 1], dtype=dtype), np.array([0, 0]), np.array([0, 2])), shape=(1, 1)
-        )
-
-        with pytest.raises(ValueError, match="source dtype"):
-            _expression_array(expression)
-
-        # One less in the source makes the duplicate sum exactly representable.
-        expression.data[0] -= 1
-        result = _expression_array(expression)
-
-        assert int(result.data[0]) == maximum
-        assert result.dtype == dtype
-
-    def test_distinct_unsorted_columns_do_not_aggregate(self) -> None:
-        expression = sparse.csr_array(
-            (np.array([100, 100], dtype=np.int8), np.array([1, 0]), np.array([0, 2])), shape=(1, 2)
-        )
-
-        result = _expression_array(expression)
-
-        np.testing.assert_array_equal(result.data, [100, 100])
-        np.testing.assert_array_equal(result.indices, [0, 1])
-        assert result.has_canonical_format
-
-    def test_float_duplicate_sum(self) -> None:
-        expression = sparse.csr_array((np.array([0.125, 0.25]), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))
-
-        np.testing.assert_array_equal(_expression_array(expression).data, [0.375])
-
-    def test_boolean_duplicate_storage_is_canonicalized(self) -> None:
-        """Boolean compressed input retains its dtype through the shared validator."""
-        expression = sparse.csr_array((np.array([True, False]), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))
-
-        result = _expression_array(expression)
-
-        assert result.dtype == np.dtype(np.bool_)
-        assert result.has_canonical_format
-        np.testing.assert_array_equal(result.data, [True])
-        np.testing.assert_array_equal(result.indices, [0])
-        np.testing.assert_array_equal(result.indptr, [0, 1])
-
-    @pytest.mark.parametrize("storage", [sparse.csr_array, sparse.csc_array])
-    def test_malformed_float_storage_is_rejected(self, storage: type[sparse.csr_array | sparse.csc_array]) -> None:
-        """Noninteger guard dispatch still leaves compressed storage validation intact."""
-        expression = storage((np.array([0.125, 0.25]), np.array([0, 2]), np.array([0, 2])), shape=(1, 1))
-
-        with pytest.raises(ValueError, match="active indices"):
-            _expression_array(expression)
-
-
 class TestReadTable:
     """Preserve auxiliary annotations while validating expression and identifiers."""
 
     @pytest.mark.parametrize("slot", ["X", "counts"])
-    def test_integer_overflow_retains_artifact_context(self, tmp_path: Path, slot: str) -> None:
+    def test_integer_duplicates_promote_before_row_alignment(self, tmp_path: Path, slot: str) -> None:
         _write_layout(tmp_path)
         path = tmp_path / "sample.h5ad"
         source = ad.read_h5ad(path)
@@ -119,10 +49,11 @@ class TestReadTable:
             source.layers[slot] = expression
         source.write_h5ad(path)
 
-        with pytest.raises(ValueError, match="source dtype") as raised:
-            _read(tmp_path)
-
-        assert any(str(path) in note and "expression table" in note for note in raised.value.__notes__)
+        result = _read(tmp_path)
+        actual = result.X if slot == "X" else result.layers[slot]
+        assert isinstance(actual, sparse.csr_array)
+        assert actual.dtype == np.dtype(np.uint32)
+        assert actual.data.tolist() == [300]
 
     @pytest.mark.parametrize("slot", ["X", "counts"])
     def test_malformed_integer_storage_retains_artifact_context(self, tmp_path: Path, slot: str) -> None:

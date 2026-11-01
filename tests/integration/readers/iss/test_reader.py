@@ -33,6 +33,69 @@ if TYPE_CHECKING:
 class TestIss:
     """Compose TIFF and H5AD artifacts into exact, linked scientific outputs."""
 
+    def test_one_normalization_warning_for_both_expression_slots(self, iss_dataset: IssDataset) -> None:
+        path = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        for slot, dtype, value in (("X", "int8", 100), ("counts", "uint8", 150)):
+            expression = sparse.csr_array(
+                (np.array([value, value, 7], dtype=dtype), np.array([0, 0, 2]), np.array([0, 2, 3])), shape=source.shape
+            )
+            if slot == "X":
+                source.X = expression
+            else:
+                source.layers[slot] = expression
+        source.write_h5ad(path)
+        with pytest.warns(UserWarning, match="combined") as reported:
+            result = iss(
+                iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+            )
+        messages = [str(item.message) for item in reported if "combined" in str(item.message)]
+        assert len(messages) == 1
+        assert "in X" in messages[0]
+        assert "layers['counts']" in messages[0]
+        assert "int8 to int32" in messages[0]
+        assert "uint8 to uint32" in messages[0]
+        table = result.tables["table"]
+        assert isinstance(table.X, sparse.csr_array)
+        assert int(table.X[0, 0]) == 200
+        counts = table.layers["counts"]
+        assert isinstance(counts, sparse.csr_array)
+        assert int(counts[0, 0]) == 300
+
+    def test_later_precision_failure_emits_no_normalization_warning(
+        self, iss_dataset: IssDataset, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        path = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.X = sparse.csr_array(
+            (np.array([100, 100], dtype=np.int8), np.array([0, 0]), np.array([0, 2, 2])), shape=source.shape
+        )
+        source.layers["counts"] = sparse.csr_array(
+            (np.array([2**64 - 1, 2**64 - 1], dtype=np.uint64), np.array([0, 0]), np.array([0, 2, 2])),
+            shape=source.shape,
+        )
+        source.write_h5ad(path)
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="no supported lossless") as raised:
+            iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+        assert any(str(path) in note for note in raised.value.__notes__)
+        assert not any("combined" in str(item.message) for item in recwarn)
+        assert path.read_bytes() == original
+
+    def test_sorting_unique_entries_does_not_warn(
+        self, iss_dataset: IssDataset, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        path = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.X = sparse.csr_array(
+            (np.array([100, 100, 7], dtype=np.int8), np.array([1, 0, 2]), np.array([0, 2, 3])), shape=source.shape
+        )
+        source.write_h5ad(path)
+        result = iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+        assert isinstance(result.tables["table"].X, sparse.csr_array)
+        assert result.tables["table"].X.dtype == np.dtype(np.int8)
+        assert not any("combined" in str(item.message) for item in recwarn)
+
     @pytest.mark.parametrize("slot", ["X", "counts"])
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     @pytest.mark.parametrize(
@@ -70,30 +133,32 @@ class TestIss:
         np.testing.assert_array_equal(stored.data, values)
         tasks: list[object] = []
 
-        with Callback(posttask=lambda *args: tasks.append(args)):
-            if expected is None:
-                with pytest.raises(ValueError, match="integer duplicate sum outside") as caught:
-                    iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
-                notes = " ".join(caught.value.__notes__)
-                assert "iss" in notes
-                assert slot in notes
-                assert str(path) in notes
-            else:
-                result = iss(
-                    iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
-                )
-                table = result.tables["table"]
-                actual = table.X if slot == "X" else table.layers[slot]
-                assert isinstance(actual, sparse.csr_array)
-                assert not isinstance(actual, sparse.spmatrix)
-                assert actual.has_canonical_format
-                assert actual.dtype == np.dtype(dtype)
-                assert int(actual[0, 0]) == expected
-                assert actual.nnz == 1
-                assert table.obs_names.tolist() == ["7", "2"]
-                assert table.var_names.tolist() == ["GeneB", "GeneA", "GeneB-1"]
-                assert table.obs["instance_id"].tolist() == [7, 2]
-                assert get_table_keys(table) == ("region_labels_image", "region", "instance_id")
+        output_dtype = dtype
+        if expected is None:
+            expected = sum(values)
+            output_dtype = {"int8": "int32", "uint8": "uint32", "uint64": "float64"}[dtype]
+        with (
+            Callback(posttask=lambda *args: tasks.append(args)),
+            pytest.warns(UserWarning, match="combined") as reported,
+        ):
+            result = iss(
+                iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+            )
+        normalization = [str(warning.message) for warning in reported if "combined" in str(warning.message)]
+        assert len(normalization) == 1
+        assert path.name in normalization[0]
+        assert slot in normalization[0]
+        table = result.tables["table"]
+        actual = table.X if slot == "X" else table.layers[slot]
+        assert isinstance(actual, sparse.csr_array)
+        assert actual.has_canonical_format
+        assert actual.dtype == np.dtype(output_dtype)
+        assert int(actual[0, 0]) == expected
+        assert actual.nnz == 1
+        assert table.obs_names.tolist() == ["7", "2"]
+        assert table.var_names.tolist() == ["GeneB", "GeneA", "GeneB-1"]
+        assert table.obs["instance_id"].tolist() == [7, 2]
+        assert get_table_keys(table) == ("region_labels_image", "region", "instance_id")
 
         assert not tasks
         assert path.read_bytes() == original

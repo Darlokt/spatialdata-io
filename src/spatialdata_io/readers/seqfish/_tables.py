@@ -14,9 +14,11 @@ import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     as_csr_array,
+    finalize_count_arrays,
     normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
@@ -33,7 +35,6 @@ from spatialdata_io.readers.seqfish._schemas import (
 if TYPE_CHECKING:
     import numpy.typing as npt
 
-    from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
@@ -101,7 +102,11 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, npt.NDArray[np.i
                 for offset in range(0, batch.num_rows, batch_rows):
                     block = batch.slice(offset, batch_rows)
                     identifiers.extend(block.column(0).to_pylist())
-                    blocks.append(_count_block(block, path))
+                    blocks.extend(
+                        finalize_count_arrays(
+                            (_count_block(block, path),), context=ReaderErrorContext("seqfish", "counts"), path=path
+                        )
+                    )
     except pa.ArrowInvalid as error:
         raise schema_error(
             path, found=f"malformed count CSV: {error}", expected="one field per header column"
@@ -112,9 +117,8 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, npt.NDArray[np.i
         ids = normalize_ids(pd.Series(identifiers, dtype=STRING_DTYPE), path)
         if len(np.unique(ids)) != len(ids):
             raise schema_error(path, found="duplicate count IDs", expected="unique cell identifiers")
-        # Mixed signed/unsigned batches must never promote exact counts to float.
-        if any(block.dtype.kind == "u" for block in blocks):
-            blocks = [block.astype(np.uint64, copy=False) for block in blocks]
+        # Each completed block is exact float32/f64. Stacking selects their
+        # common floating dtype once, independently of source/batch order.
         return sparse.vstack(blocks, format="csr"), ids, features
 
 

@@ -139,59 +139,6 @@ def validate_compressed_sparse(
             raise ValueError(message)
 
 
-def validate_integer_duplicate_sums(
-    data: sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix,
-    /,
-) -> None:
-    """Validate that compressed integer duplicate sums retain their source dtype.
-
-    Parameters
-    ----------
-    data
-        Borrowed two-dimensional SciPy CSR or CSC array or matrix.
-
-    Raises
-    ------
-    TypeError
-        If the container or compressed storage types are unsupported.
-    ValueError
-        If compressed storage is malformed or a completed integer coordinate
-        sum lies outside the source dtype's range.
-
-    Notes
-    -----
-    Storage is validated before inspecting canonicality. Noninteger inputs and
-    canonical integer inputs return without scanning expression magnitudes.
-    A conservative min/max bound handles ordinary small noncanonical counts;
-    otherwise exact Python integers accumulate each compressed span. Signed
-    cancellation is allowed: only completed coordinate sums determine safety.
-
-    This eager check never widens, converts through floating point, densifies,
-    canonicalizes, or mutates borrowed buffers. The fallback uses a dictionary
-    proportional to the distinct active indices in one row or column. Floating
-    and boolean expression policies remain the caller's responsibility.
-    """
-    validate_compressed_sparse(data)
-    if data.dtype.kind not in "iu" or data.has_canonical_format:
-        return
-
-    limits = np.iinfo(data.dtype)
-    records = int(data.indptr[-1])
-    values = data.data[:records]
-    # Bound every possible coordinate sum without visiting records in Python.
-    if int(values.min(initial=0)) * records >= limits.min and int(values.max(initial=0)) * records <= limits.max:
-        return
-
-    for start, stop in zip(data.indptr[:-1], data.indptr[1:], strict=True):
-        totals: dict[int, int] = {}
-        for index, value in zip(data.indices[start:stop], data.data[start:stop], strict=True):
-            key = int(index)
-            totals[key] = totals.get(key, 0) + int(value)
-        if any(total < limits.min or total > limits.max for total in totals.values()):
-            message = f"integer duplicate sum outside {data.dtype}; sums must be representable in the source dtype."
-            raise ValueError(message)
-
-
 def _validate_compressed_pointers(
     indptr: np.ndarray[tuple[int, ...], np.dtype[np.integer[Any]]],
     *,

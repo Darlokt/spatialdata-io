@@ -10,7 +10,7 @@ import pandas as pd
 from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.table import validate_integer_duplicate_sums
+from spatialdata_io.readers._utils.table import validate_compressed_sparse
 from spatialdata_io.readers.curio._schemas import (
     DEFINING_FEATURES_KEY,
     STRING_DTYPE,
@@ -78,7 +78,7 @@ def _read_table(layout: _CurioLayout) -> ad.AnnData:
     validate_counts(table, layout.counts)
     if isinstance(table.X, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
         try:
-            validate_integer_duplicate_sums(table.X)
+            validate_compressed_sparse(table.X)
         except (TypeError, ValueError) as error:
             add_reader_context(error, context=ReaderErrorContext("curio", "counts X"), path=layout.counts)
             raise

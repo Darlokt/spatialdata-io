@@ -20,6 +20,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     as_csr_array,
+    finalize_count_arrays,
     normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
@@ -130,10 +131,14 @@ def read_counts(path: ArtifactFile) -> Counts:
             keep = cell != 0
             if not keep.all():
                 values, fov, cell = values[keep], fov[keep], cell[keep]
-            blocks.append(as_csr_array(values))
+            blocks.extend(
+                finalize_count_arrays((as_csr_array(values),), context=ReaderErrorContext("cosmx", "counts"), path=path)
+            )
             fovs.append(fov)
             cell_ids.append(cell)
-    expression = sparse.vstack(blocks, format="csr") if blocks else sparse.csr_array((0, len(features)), dtype=np.int64)
+    expression = (
+        sparse.vstack(blocks, format="csr") if blocks else sparse.csr_array((0, len(features)), dtype=np.float32)
+    )
     all_fovs = np.concatenate(fovs) if fovs else np.empty(0, np.int64)
     all_cells = np.concatenate(cell_ids) if cell_ids else np.empty(0, np.int64)
     if pd.MultiIndex.from_arrays([all_fovs, all_cells]).has_duplicates:

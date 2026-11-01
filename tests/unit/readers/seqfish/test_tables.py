@@ -41,12 +41,12 @@ class TestReadTable:
         self, tmp_path: Path, mocker: MockerFixture, batch_rows: int
     ) -> None:
         mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_BATCH_ROWS", batch_rows)
-        counts = f",digits,decimal,exponent\n2,0,2.0,3e0\n1,{2**64 - 1},0.0,9007199254740993e0\n"
+        counts = f",digits,decimal,exponent\n2,0,2.0,3e0\n1,{2**63},0.0,16777217e0\n"
         result = read_table(*_sources(tmp_path, counts))
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.has_canonical_format
-        assert result.X.dtype == np.dtype(np.uint64)
-        np.testing.assert_array_equal(result.X.data, np.array([2, 3, 2**64 - 1, 2**53 + 1], dtype=np.uint64))
+        assert result.X.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(result.X.data, np.array([2, 3, 2**63, 2**24 + 1], dtype=np.float64))
         np.testing.assert_array_equal(result.X.indices, [1, 2, 0, 2])
         np.testing.assert_array_equal(result.X.indptr, [0, 2, 4])
         assert result.var_names.tolist() == ["digits", "decimal", "exponent"]
@@ -99,14 +99,20 @@ class TestReadTable:
 
     def test_unsigned_mixed_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
         mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_BATCH_ROWS", 1)
-        large = 2**63 + 1
+        large = 2**63
         counts = f",A\n65537,1\n{large},{large}\n"
         cells = f"label,area,center_x,center_y\n{large},1,2,3\n65537,4,5,6\n"
         result = read_table(*_sources(tmp_path, counts, cells))
         assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(np.uint64)
+        assert result.X.dtype == np.dtype(np.float32)
         assert result.X.data.tolist() == [1, large]
         assert result.obs["instance_id"].tolist() == [65537, large]
+
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**63 + 1, 2**64 - 1])
+    def test_completed_counts_reject_inexact_float64(self, tmp_path: Path, value: int) -> None:
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            read_table(*_sources(tmp_path, f",A\n1,{value}\n2,0\n"))
+        assert caught.value.path == tmp_path / "counts.csv"
 
     @pytest.mark.parametrize(
         "counts",

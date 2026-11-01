@@ -166,17 +166,21 @@ def _segmentations(
 
         name = f"{kind}_boundaries"
         shapes[name] = geometry
-        if table is None:
+        if table is None or selected.counts is None:
             continue
 
+        counts_path = selected.counts
         if kind == "nucleus" and (source := layout.nucleus_counts) is not None:
+            counts_path = source.raw_two_micron_counts
             table = read_nucleus_table(
                 source.raw_two_micron_counts, source.barcode_mappings, table, boundaries.shapes.index
             )
 
         if boundaries.centroids is not None:
             table.obsm["spatial"] = boundaries.centroids[boundaries.shapes.index.get_indexer(geometry.index)]
-        tables[f"{kind}_table"] = link_table(table, name, geometry.index, position=f"vendor {kind} centroid")
+        tables[f"{kind}_table"] = link_table(
+            table, name, geometry.index, position=f"vendor {kind} centroid", counts_path=counts_path
+        )
 
     return shapes, tables
 
@@ -308,8 +312,9 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         transforms. Images have (c, y, x) axes, source dtype/channel order and
         a fitted affine, whose maximum residual in µm is recorded in attrs.
         Raster pixels stay lazy; shapes and canonical CSR sparse-array tables
-        are eager. Bin/cell count dtypes follow Scanpy (vendor int32 becomes
-        float32); nucleus counts use float32. Inputs are never mutated; lazy sources must
+        are eager. Counts use float32 when exact, otherwise float64. Nucleus
+        reconstruction selects checked float32 or float64 accumulation of decoded bins,
+        without an integer conversion. Inputs are never mutated; lazy sources must
         remain accessible. See the format guide for layouts and memory costs.
 
     Raises
@@ -397,7 +402,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         else:
             labels[name] = make_bin_labels(frame, rows, cols, grid, size, options=raster)
 
-        tables[f"{name}_table"] = link_table(table, name, ids, position="nominal bin centre")
+        tables[f"{name}_table"] = link_table(table, name, ids, position="nominal bin centre", counts_path=source.counts)
 
     images: dict[str, DataArray | DataTree] = (
         {} if layout.images is None else read_images(layout.images, frame, scales, metadata, image_options)

@@ -56,7 +56,7 @@ class TestReadHeader:
 
 
 class TestReadCounts:
-    """Counts stream to exact int64 CSR without background rows."""
+    """Counts stream to exact float32/f64 CSR without background rows."""
 
     @pytest.mark.parametrize("compressed", [False, True])
     def test_background_removed_and_order_kept(
@@ -65,10 +65,26 @@ class TestReadCounts:
         mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_BATCH_ROWS", 1)
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS, compressed=compressed))
         assert isinstance(counts.expression, sparse.csr_array)
-        assert counts.expression.dtype == np.int64
+        assert counts.expression.dtype == np.float32
         np.testing.assert_array_equal(counts.expression.toarray(), [[0, 3, 0], [4, 0, 1], [0, 0, 2]])
         assert counts.fovs.tolist() == [2, 1, 1]
         assert counts.cell_ids.tolist() == [1, 2, 1]
+
+    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize(("value", "dtype"), [(7, "float32"), (2**24 + 1, "float64"), (2**24 + 2, "float32")])
+    def test_adaptive_exact_counts(
+        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, value: int, dtype: str
+    ) -> None:
+        mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_BATCH_ROWS", batch_rows)
+        text = f"fov,cell_ID,A,B\n1,1,1,0\n1,2,{value},2\n"
+        counts = read_counts(_write(tmp_path, "c.csv", text))
+        assert counts.expression.dtype == np.dtype(dtype)
+        np.testing.assert_array_equal(counts.expression.data, [1, value, 2])
+
+    def test_rejects_inexact_float64_counts(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            read_counts(_write(tmp_path, "c.csv", f"fov,cell_ID,A\n1,1,{2**53 + 1}\n"))
+        assert caught.value.path == tmp_path / "c.csv"
 
     def test_truncated_gzip_stream_fails(self, tmp_path: Path) -> None:
         path = _write(tmp_path, "c.csv", _COUNTS, compressed=True)
@@ -91,7 +107,7 @@ class TestReadCounts:
         assert isinstance(counts.expression, sparse.csr_array)
         assert not isinstance(counts.expression, sparse.spmatrix)
         assert counts.expression.has_canonical_format
-        assert counts.expression.dtype == np.int64
+        assert counts.expression.dtype == np.float32
         expected = np.array([[i, 0] for i, cell in enumerate(cells) if cell], dtype=np.int64).reshape(-1, 2)
         np.testing.assert_array_equal(counts.expression.toarray(), expected)
         assert counts.cell_ids.tolist() == [cell for cell in cells if cell]

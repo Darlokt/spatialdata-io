@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     import anndata as ad
     import numpy.typing as npt
 
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
+
 
 def finalize_positions(table: ad.AnnData, pitch_nm: int, position: str, *, calibration: str) -> None:
     """Finalize an owned, source-validated table without copying expression.
@@ -63,7 +65,13 @@ def finalize_positions(table: ad.AnnData, pitch_nm: int, position: str, *, calib
     table.uns[POSITIONS_KEY] = metadata
 
 
-def link_table(table: ad.AnnData, target: str, index: pd.Index) -> ad.AnnData:
+def link_table(
+    table: ad.AnnData,
+    target: str,
+    index: pd.Index,
+    *,
+    duplicate_sums: list[SparseDuplicateSummary] | None = None,
+) -> ad.AnnData:
     """Complete owned annotations once, then validate exact target membership."""
     context = ReaderErrorContext("stereoseq", target)
     obs = cast("pd.DataFrame", table.obs)
@@ -91,5 +99,6 @@ def link_table(table: ad.AnnData, target: str, index: pd.Index) -> ad.AnnData:
         TableLinkage((target,), "region", "instance_id"),
         context=context,
         expression_layers=tuple(name for name in EXPRESSION_LAYERS if name in table.layers),
+        duplicate_sums=duplicate_sums,
         expected_instance_ids={target: index},
     )

@@ -89,10 +89,24 @@ class TestReadCounts:
 class TestLinkTable:
     """Link only against the independent materialized target IDs."""
 
+    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+        path = _source(tmp_path)
+        _replace(path, "data", np.array([2**53 + 1, 2, 3, 4], dtype=np.int64))
+        table = tables.read_counts(path)
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            tables.link_table(table, "boundaries", pd.Index([2, 5]), position="vendor cell centroid", counts_path=path)
+        assert caught.value.path == path
+
     def test_linkage_and_serializable_categories(self, tmp_path: Path) -> None:
         result = tables.read_counts(_source(tmp_path))
         result.obs["instance_id"] = pd.Series([2, 5], index=result.obs_names, dtype="int64[pyarrow]")
-        result = tables.link_table(result, "boundaries", pd.Index([2, 5]), position="vendor cell centroid")
+        result = tables.link_table(
+            result,
+            "boundaries",
+            pd.Index([2, 5]),
+            position="vendor cell centroid",
+            counts_path=ArtifactFile(tmp_path / "matrix.h5"),
+        )
         assert result.uns["spatialdata_attrs"]["region"] == "boundaries"
         assert result.obs["region"].cat.categories.tolist() == ["boundaries"]
         result.write_h5ad(tmp_path / "roundtrip.h5ad")
@@ -101,7 +115,13 @@ class TestLinkTable:
         result = tables.read_counts(_source(tmp_path))
         result.obs["instance_id"] = [2, 5]
         with pytest.raises(ReaderFormatError):
-            tables.link_table(result, "boundaries", pd.Index([2, 3]), position="vendor cell centroid")
+            tables.link_table(
+                result,
+                "boundaries",
+                pd.Index([2, 3]),
+                position="vendor cell centroid",
+                counts_path=ArtifactFile(tmp_path / "matrix.h5"),
+            )
 
 
 class TestReadBinTable:

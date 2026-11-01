@@ -35,7 +35,7 @@ class TestStereoseqCommand:
         table = restored.tables["cells_table"]
         # AnnData owns the sparse container returned by the storage round trip.
         assert isinstance(table.X, csr_array | csr_matrix)
-        assert table.X.dtype == np.uint64
+        assert table.X.dtype == np.float32
         np.testing.assert_array_equal(table.X.data, [11, 22])
         np.testing.assert_array_equal(table.X.indices, [0, 1])
         np.testing.assert_array_equal(table.X.indptr, [0, 1, 2])

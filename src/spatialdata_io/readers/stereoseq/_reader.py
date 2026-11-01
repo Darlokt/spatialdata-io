@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import pandas as pd
 from spatialdata import SpatialData
@@ -14,6 +15,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
+from spatialdata_io.readers._utils.table import finalize_count_arrays
 from spatialdata_io.readers.stereoseq._analysis import read_analyses
 from spatialdata_io.readers.stereoseq._cells import read_cells
 from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygons
@@ -27,12 +29,20 @@ if TYPE_CHECKING:
     import anndata as ad
     import dask.dataframe as dd
     import geopandas as gpd
+    from scipy.sparse import csr_array
 
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
     from spatialdata_io.readers.stereoseq._cells import CellCounts
     from spatialdata_io.readers.stereoseq._layout import ImageRole
     from spatialdata_io.readers.stereoseq._square import SquareCounts
 
 _ROLES = frozenset({"registered", "mask", "tissue_cut", "distance_mask", "expression"})
+
+
+def _warn_imported_duplicates(messages: list[str]) -> None:
+    """Report all imported-table normalization only after result assembly."""
+    if messages:
+        warnings.warn("stereoseq: " + "; ".join(messages), UserWarning, stacklevel=3)
 
 
 def _set_grid_pitch(result: SpatialData, pitch_nm: int) -> None:
@@ -177,9 +187,9 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         paths are allowed. Flat counts require explicit paths.
     analysis_files
         Exact native SAW H5AD paths. Preserve analysis values, source order,
-        annotations, embeddings and raw. Sparse integer duplicates are summed
-        only when their exact total fits the source dtype; overflow raises a
-        contextual ``ReaderFormatError``. A matching selected GEF validates
+        annotations, embeddings and raw. Sparse duplicates are summed safely,
+        with lossless integer promotion when required. No supported exact
+        result raises a contextual error. A matching selected GEF validates
         filtered membership and coordinates by source keys. Analysis-only
         requires native spatial metadata and constructs its own point target.
     image_roles
@@ -203,8 +213,9 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         zero-occurrence features. Cells use stable source IDs in
         ``cells_centroids`` points or ``cells_polygons`` shapes and
         ``cells_table``; adjusted products use the ``adjusted_cells`` prefix.
-        Raw expression and optional ``exon`` layers are eager canonical uint64
-        CSR sparse arrays. Source summaries remain annotations, not replacements
+        Raw expression and optional ``exon`` layers are eager canonical CSR
+        sparse arrays with one float32 dtype when all counts are exact,
+        otherwise float64. Unrepresentable counts raise. Source summaries remain annotations, not replacements
         for exact expression. No NNZ-sized alternate traversal is copied to uns.
 
         Analysis products use ``<population>_analysis[_r<resolution>]`` plus
@@ -234,6 +245,13 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         Points wrap eager coordinates needed for counts; GEF ingestion itself
         is eager with bounded input slices and O(NNZ) working/output storage.
         Files close on success/failure. No caller-owned data are mutated.
+
+    Warns
+    -----
+    UserWarning
+        One summary per successful call if imported sparse duplicate entries
+        were combined, identifying affected expression slots and dtype changes.
+        Expected format aggregation does not trigger this warning.
 
     Raises
     ------
@@ -336,6 +354,14 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         if len(index) != table.n_obs:
             retained = pd.Index(cells.cell_ids).isin(index)
             table = table[retained].copy()
+            layers = ("exon",) if "exon" in table.layers else ()
+            completed = finalize_count_arrays(
+                (cast("csr_array", table.X), *(cast("csr_array", table.layers[name]) for name in layers)),
+                context=ReaderErrorContext("stereoseq", f"{name} counts"),
+                path=cell_source.file,
+            )
+            table.X = completed[0]
+            table.layers.update(zip(layers, completed[1:], strict=True))
         finalize_positions(
             table,
             cells.resolution,
@@ -344,6 +370,7 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         )
         tables[f"{name}_table"] = link_table(table, target, index)
 
+    duplicate_messages: list[str] = []
     for source, analysis in zip(layout.analyses, analyses, strict=True):
         name = f"{analysis.name}_table"
         target = f"{analysis.name}_points"
@@ -360,7 +387,9 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
                     else f"H5AD uns/resolution = {analysis.resolution} nm per grid unit"
                 ),
             )
-            tables[name] = link_table(analysis.table, target, analysis.instance_ids)
+            duplicate_sums: list[SparseDuplicateSummary] = []
+            tables[name] = link_table(analysis.table, target, analysis.instance_ids, duplicate_sums=duplicate_sums)
+            duplicate_messages.extend(f"{source.file.name}/{name}: {summary}" for summary in duplicate_sums)
         except (TypeError, ValueError) as error:
             add_reader_context(error, context=ReaderErrorContext("stereoseq", "analysis table"), path=source.file)
             raise
@@ -375,4 +404,5 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
     if pitch is not None:
         _set_grid_pitch(result, pitch)
     set_reader_provenance(result.attrs, reader="stereoseq")
+    _warn_imported_duplicates(duplicate_messages)
     return result

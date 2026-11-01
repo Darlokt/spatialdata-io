@@ -26,6 +26,15 @@ if TYPE_CHECKING:
 class TestReadCells:
     """Check semantic IDs independently of row position and alternate traversal."""
 
+    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+        path = write_cell_gef(tmp_path / "s.gef")
+        with h5py.File(path, "a") as handle:
+            del handle["cellBin/cellExp"]
+            handle["cellBin/cellExp"] = np.array([(0, 2**53 + 1), (1, 22)], dtype=[("geneID", "u4"), ("count", "u8")])
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+        assert caught.value.path == path
+
     def test_unsupported_modality_fails_before_cell_payload_discovery(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "protein.gef")
         with h5py.File(path, "w") as handle:
@@ -53,7 +62,7 @@ class TestReadCells:
         assert isinstance(table.X, sparray)
         assert not isinstance(table.X, spmatrix)
         assert isinstance(table.X, csr_array)
-        assert table.X.dtype == np.dtype(np.uint64)
+        assert table.X.dtype == np.dtype(np.float32)
         assert table.X.has_canonical_format
         assert table.obs_names.tolist() == ["200", "100"]
         assert table.var_names.tolist() == (["z", "a"] if profile == "name_only" else ["g_z", "g_a"])
@@ -69,7 +78,7 @@ class TestReadCells:
         assert result.origin == (0, 0)
         assert result.resolution == 500
 
-    def test_unsorted_features_keep_exon_alignment_and_uint64_counts(self, tmp_path: Path) -> None:
+    def test_unsorted_features_keep_exon_alignment_and_exact_float64_counts(self, tmp_path: Path) -> None:
         path = write_cell_gef(tmp_path / "s.gef")
         with h5py.File(path, "a") as handle:
             group = handle["cellBin"]
@@ -82,13 +91,15 @@ class TestReadCells:
             genes["cellCount"] = [1, 2]
             group["gene"][:] = genes
             del group["cellExp"]
-            group["cellExp"] = np.array([(1, 2**64 - 1), (0, 12), (1, 22)], dtype=[("geneID", "u4"), ("count", "u8")])
+            group["cellExp"] = np.array(
+                [(1, 2**64 - 2048), (0, 12), (1, 22)], dtype=[("geneID", "u4"), ("count", "u8")]
+            )
             del group["cellExpExon"]
             group["cellExpExon"] = np.array([7, 4, 6], dtype="u8")
 
         result = read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
         assert isinstance(result.table.X, csr_array)
-        assert_array_equal(result.table.X.data, [12, 2**64 - 1, 22])
+        assert_array_equal(result.table.X.data, np.array([12, 2**64 - 2048, 22], dtype=np.float64))
         assert_array_equal(result.table.layers["exon"].data, [4, 7, 6])
         assert isinstance(result.table.X, csr_array)
         assert result.table.X.has_canonical_format

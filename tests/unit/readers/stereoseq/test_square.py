@@ -52,7 +52,7 @@ class TestReadSquare:
         assert isinstance(table.X, sparray)
         assert not isinstance(table.X, spmatrix)
         assert isinstance(table.X, csr_array)
-        assert table.X.dtype == np.dtype(np.uint64)
+        assert table.X.dtype == np.dtype(np.float32)
         assert table.var_names.tolist() == (
             ["z", "a", "empty"] if profile == "name_only" else ["g_z", "g_a", "g_empty"]
         )
@@ -212,8 +212,37 @@ class TestReadSquare:
         assert "stereoseq" in caught.value.__notes__[0]
 
 
-class TestCheckAggregation:
-    """Use independent Python integers at the uint64 limit."""
+class TestReadSquareAggregation:
+    """Compare aggregation and output with independent Python integer totals."""
+
+    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+        path = write_square_gef(tmp_path / "s.gef", bins=(1,))
+        with h5py.File(path, "a") as handle:
+            group = handle["geneExp/bin1"]
+            attrs = dict(group["expression"].attrs)
+            del group["expression"]
+            group["expression"] = np.array(
+                [(5, 6, 2**53 + 1), (5, 6, 0), (1, 2, 3)], dtype=[("x", "i4"), ("y", "i4"), ("count", "u8")]
+            )
+            group["expression"].attrs.update(attrs)
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            read_square(SquareSource(ArtifactFile(path), (1,)))
+        assert caught.value.path == path
+
+    def test_float64_output_preserves_completed_sum_and_exon_dtype(self, tmp_path: Path) -> None:
+        path = write_square_gef(tmp_path / "s.gef", bins=(1,))
+        with h5py.File(path, "a") as handle:
+            group = handle["geneExp/bin1"]
+            attrs = dict(group["expression"].attrs)
+            del group["expression"]
+            group["expression"] = np.array(
+                [(5, 6, 2**24), (5, 6, 1), (1, 2, 3)], dtype=[("x", "i4"), ("y", "i4"), ("count", "u4")]
+            )
+            group["expression"].attrs.update(attrs)
+        (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
+        assert isinstance(result.table.X, csr_array)
+        assert result.table.X.dtype == result.table.layers["exon"].dtype == np.dtype(np.float64)
+        assert int(result.table.X.data[0]) == 2**24 + 1
 
     @pytest.mark.parametrize(("dtype", "maximum"), [("u1", 255), ("u2", 65535), ("u4", 4294967295)])
     def test_native_count_widths_promote_before_summation(self, tmp_path: Path, dtype: str, maximum: int) -> None:
@@ -234,15 +263,25 @@ class TestCheckAggregation:
         assert isinstance(result.table.X, csr_array)
         assert int(result.table.X.data[0]) == maximum + 1
 
-    def test_exon_overflow_is_checked_independently(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(("second", "fails"), [(1, False), (2**64 - 1, True)])
+    def test_exon_exactness_is_checked_independently(self, tmp_path: Path, second: int, *, fails: bool) -> None:
         path = write_square_gef(tmp_path / "s.gef", bins=(1,))
         with h5py.File(path, "a") as handle:
             del handle["geneExp/bin1/exon"]
-            handle["geneExp/bin1/exon"] = np.array([2**64 - 1, 1, 0], dtype="u8")
-        with pytest.raises(ReaderFormatError, match="uint64"):
-            read_square(SquareSource(ArtifactFile(path), (1,)))
+            handle["geneExp/bin1/exon"] = np.array([2**64 - 1, second, 0], dtype="u8")
+        if fails:
+            with pytest.raises(ReaderFormatError, match="lossless"):
+                read_square(SquareSource(ArtifactFile(path), (1,)))
+        else:
+            (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
+            assert isinstance(result.table.X, csr_array)
+            assert result.table.X.dtype == result.table.layers["exon"].dtype == np.dtype(np.float32)
+            assert int(result.table.layers["exon"].data[0]) == 2**64
 
-    @pytest.mark.parametrize(("values", "fails"), [([2**64 - 2, 1], False), ([2**64 - 1, 1], True)])
+    @pytest.mark.parametrize(
+        ("values", "fails"),
+        [([2**64 - 4096, 2048], False), ([2**64 - 1, 1], False), ([2**64 - 1, 2**64 - 1], True)],
+    )
     def test_exact_uint64_duplicates(self, tmp_path: Path, values: list[int], *, fails: bool) -> None:
         path = write_square_gef(tmp_path / "s.gef", bins=(1,))
         with h5py.File(path, "a") as handle:
@@ -258,9 +297,51 @@ class TestCheckAggregation:
             dataset.attrs.update(attrs)
 
         if fails:
-            with pytest.raises(ReaderFormatError, match="uint64"):
+            with pytest.raises(ReaderFormatError, match="lossless"):
                 read_square(SquareSource(ArtifactFile(path), (1,)))
         else:
             (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
             assert isinstance(result.table.X, csr_array)
             assert int(result.table.X.data[0]) == sum(values)
+
+
+class TestAggregateCounts:
+    """Select safe floating arithmetic before addition, with exact integer fallback."""
+
+    @pytest.mark.parametrize(
+        ("values", "source_dtype", "result_dtype"),
+        [
+            ([200, 100], "u1", "float32"),
+            ([2**23, 2**23], "u4", "float32"),
+            ([2**52, 2**52], "u8", "float64"),
+            ([2**24 - 1, 1], "u4", "float64"),
+            ([2**24, 1], "u4", "float64"),
+            ([2**24, 1, 1], "u4", "float64"),
+            ([2**53, 1, 1], "u8", "uint64"),
+            ([2**53 + 1, 1], "u8", "uint64"),
+            ([2**64 - 1, 1], "u8", "float64"),
+        ],
+    )
+    def test_exact_sums_and_source_ownership(
+        self, tmp_path: Path, values: list[int], source_dtype: str, result_dtype: str
+    ) -> None:
+        source = np.array(values, dtype=source_dtype)
+        rows = np.zeros(len(source), dtype=np.int64)
+        indptr = np.array([0, len(source)], dtype=np.int64)
+        result = _square._aggregate_counts(source, rows, indptr, 1, ArtifactFile(tmp_path / "s.gef"))
+        assert result.dtype == np.dtype(result_dtype)
+        assert result.has_canonical_format
+        assert result.shape == (1, 1)
+        assert int(result.data[0]) == sum(values)
+        assert_array_equal(source, np.array(values, dtype=source_dtype))
+        assert_array_equal(rows, np.zeros(len(source), dtype=np.int64))
+        assert_array_equal(indptr, [0, len(source)])
+
+    def test_unrelated_feature_records_do_not_force_float64(self, tmp_path: Path) -> None:
+        source = np.full(50, 1_000_000, dtype=np.uint32)
+        rows = np.zeros(50, dtype=np.int64)
+        indptr = np.arange(0, 51, 2, dtype=np.int64)
+        result = _square._aggregate_counts(source, rows, indptr, 1, ArtifactFile(tmp_path / "s.gef"))
+        assert result.dtype == np.dtype(np.float32)
+        assert result.shape == (1, 25)
+        assert_array_equal(result.data, np.full(25, 2_000_000, dtype=np.float32))

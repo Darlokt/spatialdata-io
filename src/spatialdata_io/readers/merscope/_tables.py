@@ -17,6 +17,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     as_csr_array,
+    finalize_count_arrays,
     normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
@@ -96,7 +97,13 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
                 for offset in range(0, batch.num_rows, rows_per_batch):
                     block = batch.slice(offset, rows_per_batch)
                     identifiers.extend(block.column(0).to_pylist())
-                    blocks.append(_count_block(block, path))
+                    blocks.extend(
+                        finalize_count_arrays(
+                            (_count_block(block, path),),
+                            context=ReaderErrorContext("merscope", "counts and blanks"),
+                            path=path,
+                        )
+                    )
     except pa.ArrowInvalid as error:
         raise schema_error(
             path, found=f"malformed count CSV: {error}", expected="one field per header column"
@@ -107,8 +114,6 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
         ids = normalize_cell_ids(pd.Series(identifiers, dtype=STRING_DTYPE), path)
         if not ids.is_unique:
             raise schema_error(path, found="duplicate count identities", expected="one count row per exact cell ID")
-        if any(block.dtype.kind == "u" for block in blocks):
-            blocks = [block.astype(np.uint64, copy=False) for block in blocks]
         return sparse.vstack(blocks, format="csr"), pd.Index(ids.to_numpy(), name=None), features
 
 
@@ -193,6 +198,9 @@ def finalize_table(
         if not keep.all():
             table = table[keep].copy()
             observations = cast("pd.DataFrame", table.obs)
+            table.X, table.obsm["blank"] = finalize_count_arrays(
+                (cast("sparse.csr_array", table.X), cast("sparse.csr_array", table.obsm["blank"])), context=context
+            )
 
     positions: PositionsMetadata = {
         "schema_version": 1,

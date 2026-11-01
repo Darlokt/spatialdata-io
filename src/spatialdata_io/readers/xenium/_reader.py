@@ -414,8 +414,9 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
           ``codeword_index``; pre-existing source columns with those names raise
           when enrichment is requested instead of being overwritten.
 
-        Alternate HDF5 numerical dtypes follow Scanpy; protein division requires
-        floating storage. Float32 retains its integer precision limits.
+        Decoded counts use float32 when exact, otherwise float64; values
+        unrepresentable in either dtype raise. The accepted Scanpy source
+        boundary remains unchanged. Protein division follows this conversion.
 
         Images and labels carry ``Scale(pixel_size)``, polygons a half-pixel
         ``Translation`` registering their vertices (traced through pixel centres
@@ -439,8 +440,9 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     Notes
     -----
     Protein Expression values are the mean stain intensity per cell after the
-    100-count offset was removed, divided once in float32 by the HDF5
-    ``protein_scaling_factor``. The count matrix contains assigned transcripts
+    100-count offset was removed, divided once by the float32 HDF5
+    ``protein_scaling_factor``. Ordinary count storage is float32; exceptional
+    exact counts retain float64 for this division. The count matrix contains assigned transcripts
     with ``qv >= 20``; filter points with ``points[points.qv >= 20]`` to match.
     """
     selection = _selection(

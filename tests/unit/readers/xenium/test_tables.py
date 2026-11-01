@@ -60,6 +60,18 @@ def _forbid_densification(mocker: MockerFixture) -> None:
 class TestReadCounts:
     """Counts keep source order, select feature types and scale protein exactly."""
 
+    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        source = _h5(bundle)
+        with h5py.File(source.file, "r+") as handle:
+            values = handle["matrix/data"][:].astype(np.int64)
+            values[0] = 2**53 + 1
+            del handle["matrix/data"]
+            handle["matrix/data"] = values
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            read_counts(source, "all", None)
+        assert caught.value.path == source.file
+
     @pytest.mark.parametrize("feature_types", [None, "all", ("Protein Expression", "Gene Expression")])
     @pytest.mark.parametrize("panel", [None, PANEL], ids=["without-panel", "with-panel"])
     def test_preserves_selected_feature_annotations(

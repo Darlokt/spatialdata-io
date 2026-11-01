@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING, cast
 import anndata as ad
 import numpy as np
 import pandas as pd
-from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.table import as_csr_array, validate_integer_duplicate_sums
+from spatialdata_io.readers._utils.table import normalize_owned_anndata
 from spatialdata_io.readers.dbit._schemas import (
     BARCODE_LENGTH,
     GRID_DTYPE,
@@ -21,26 +20,14 @@ from spatialdata_io.readers.dbit._schemas import (
 )
 
 if TYPE_CHECKING:
-    import numpy.typing as npt
-
     from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
     from spatialdata_io.readers.dbit._barcodes import _Barcodes
 
 
-def _expression_array(
-    values: npt.NDArray[np.generic] | sparse.sparray | sparse.spmatrix,
-) -> sparse.csr_array:
-    """Canonicalize expression without overflowing duplicate integer entries."""
-    if (
-        isinstance(values, (sparse.csr_array, sparse.csr_matrix, sparse.csc_array, sparse.csc_matrix))
-        and values.dtype.kind in "iu"
-    ):
-        validate_integer_duplicate_sums(values)
-
-    return as_csr_array(values)
-
-
-def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
+def _read_table(
+    path: ArtifactFile, barcodes: _Barcodes, *, duplicate_sums: list[SparseDuplicateSummary] | None = None
+) -> ad.AnnData:
     """Return an owned table sorted by A then B, with exact int64 grid coordinates."""
     context = ReaderErrorContext("dbit", "expression table")
     try:
@@ -69,11 +56,11 @@ def _read_table(path: ArtifactFile, barcodes: _Barcodes) -> ad.AnnData:
     # expression matrix merely to establish the final observation order.
     # read_h5ad is eager. as_csr_array checks its actual third-party container.
     try:
-        table.X = _expression_array(cast("npt.NDArray[np.generic] | sparse.sparray | sparse.spmatrix", table.X))
-        if "counts" in table.layers:
-            table.layers["counts"] = _expression_array(
-                cast("npt.NDArray[np.generic] | sparse.sparray | sparse.spmatrix", table.layers["counts"])
-            )
+        normalize_owned_anndata(
+            table,
+            expression_layers=("counts",) if "counts" in table.layers else (),
+            duplicate_sums=[] if duplicate_sums is None else duplicate_sums,
+        )
     except (TypeError, ValueError) as error:
         add_reader_context(error, context=context, path=path)
         raise

@@ -11,6 +11,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
+from spatialdata_io.readers._utils.table import finalize_count_arrays
 from spatialdata_io.readers.seqfish._geometry import make_circles, read_boundaries
 from spatialdata_io.readers.seqfish._layout import discover_layout, make_selection
 from spatialdata_io.readers.seqfish._rasters import read_calibration, read_dapi, read_image, read_labels
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from anndata import AnnData
     from dask.dataframe import DataFrame
     from geopandas import GeoDataFrame
+    from scipy.sparse import csr_array
     from xarray import DataArray, DataTree
 
 
@@ -93,7 +95,8 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         Per-ROI elements ``table_<ROI>``, ``<ROI>_DAPI``,
         ``<ROI>_Segmentation``, ``<ROI>_TranscriptList``,
         ``<ROI>_Boundaries`` and/or ``<ROI>_CellCoordinates`` when requested.
-        Tables contain eager finite canonical CSR count arrays in source feature
+        Tables contain eager finite canonical CSR count arrays, float32 when
+        exact and otherwise float64, in source feature
         and observation order; cells and boundaries align by exact top-level
         feature identifiers. GeoJSON properties are independent annotations.
         Polygon drops retain surviving positional row names, including gaps.
@@ -185,6 +188,9 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
                 shapes[f"{roi.name}_Boundaries"] = boundaries
                 if len(boundaries) != table.n_obs:
                     table = table[obs["instance_id"].isin(boundaries.index).to_numpy()].copy()
+                    table.X = finalize_count_arrays(
+                        (cast("csr_array", table.X),), context=ReaderErrorContext("seqfish", f"{roi.name} counts")
+                    )[0]
 
         if selection.shapes in {"circles", "both"}:
             shapes[f"{roi.name}_CellCoordinates"] = make_circles(table, roi=frame)

@@ -1,4 +1,4 @@
-"""Cell identities and integer sparse aggregation of raw bins into nuclei."""
+"""Cell identities and exact sparse aggregation of raw bins into nuclei."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import pyarrow.parquet as pq
 from scipy.sparse import csr_array
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.table import as_csr_array, count_accumulation_dtype, finalize_count_arrays
 from spatialdata_io.readers.visium_hd._schemas import validate_mapping_schema, validate_mappings
 from spatialdata_io.readers.visium_hd._tables import read_counts
 
@@ -57,6 +58,39 @@ def read_cell_table(path: ArtifactFile, *, make_var_names_unique: bool) -> ad.An
     return table
 
 
+def _aggregate_counts(
+    counts: csr_array,
+    rows: NDArray[np.int64],
+    columns: NDArray[np.int64],
+    observations: int,
+    path: ArtifactFile,
+) -> csr_array:
+    """Choose floating arithmetic that preserves every nonnegative partial sum."""
+    if not rows.size:
+        return csr_array((observations, counts.shape[1]), dtype=np.float32)
+
+    contributing = np.bincount(rows, minlength=observations)
+    bound = int(counts.data.max(initial=0)) * int(contributing.max(initial=0))
+    dtype = count_accumulation_dtype(bound)
+    if dtype is None:
+        raise ReaderFormatError(
+            context=ReaderErrorContext("visium_hd", "nucleus aggregation"),
+            path=path,
+            found="float64 exact-sum bound exceeds 2**53",
+            expected="maximum decoded count times maximum contributing bins at most 2**53",
+        )
+
+    # Let SciPy widen values during multiplication. Only narrow a source that
+    # would otherwise force wider arithmetic, sharing its immutable structure.
+    operand = counts
+    if np.result_type(counts.dtype, dtype) != dtype:
+        operand = csr_array((counts.data.astype(dtype), counts.indices, counts.indptr), shape=counts.shape, copy=False)
+    operator = csr_array((np.ones(rows.size, dtype=dtype), (rows, columns)), shape=(observations, counts.shape[0]))
+    aggregated = operator @ operand
+    # SciPy sparse products need not have sorted indices, even with canonical inputs.
+    return as_csr_array(aggregated)
+
+
 def read_nucleus_table(
     raw_file: ArtifactFile, mapping_file: ArtifactFile, population: ad.AnnData, known_cell_ids: pd.Index
 ) -> ad.AnnData:
@@ -74,16 +108,8 @@ def read_nucleus_table(
             expected="the same features in raw bins and cell counts",
         )
 
-    # read_counts guarantees canonical CSR; only the accumulation buffer changes dtype.
+    # read_counts guarantees finite nonnegative integral decoded CSR values.
     imported = cast("csr_array", raw.X)
-    # Compare Python integers so NumPy cannot round int64's upper bound when
-    # imported counts use floating storage.
-    maximum = int(imported.data.max(initial=0))
-    if maximum > np.iinfo(np.int64).max:
-        raise ReaderFormatError(
-            context=context, path=raw_file, found="counts exceed int64", expected="safe int64 nucleus accumulation"
-        )
-    counts = imported.astype(np.int64)
     source_rows: list[NDArray[np.int64]] = []
     target_rows: list[NDArray[np.int64]] = []
     seen = np.zeros(raw.n_obs, dtype=np.bool_)
@@ -130,18 +156,11 @@ def read_nucleus_table(
 
     rows = np.concatenate(target_rows) if target_rows else np.empty(0, dtype=np.int64)
     columns = np.concatenate(source_rows) if source_rows else np.empty(0, dtype=np.int64)
-    contributing = np.bincount(rows, minlength=population.n_obs)
-    if maximum * int(contributing.max(initial=0)) > np.iinfo(np.int64).max:
-        raise ReaderFormatError(
-            context=context, found="possible int64 sum overflow", expected="exact int64 accumulation"
-        )
-
-    # One operator row per selected cell sums its member bins without densifying counts.
-    operator = csr_array((np.ones(rows.size, dtype=np.int64), (rows, columns)), shape=(population.n_obs, raw.n_obs))
-    aggregated = operator @ counts
+    aggregated = _aggregate_counts(imported, rows, columns, population.n_obs, raw_file)
+    completed = finalize_count_arrays((aggregated,), context=context, path=raw_file)[0]
     # Both annotations are eager frames from the shared count boundary, never Dataset2D.
     return ad.AnnData(
-        aggregated.astype(np.float32),
+        completed,
         obs=cast("pd.DataFrame", population.obs).copy(),
         var=cast("pd.DataFrame", population.var).copy(),
     )

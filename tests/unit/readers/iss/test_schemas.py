@@ -67,7 +67,7 @@ class TestValidateExpression:
     def test_integer_duplicate_sums_before_normalization(
         self, tmp_path: Path, slot: str, storage: str, case: tuple[str, list[int], bool]
     ) -> None:
-        dtype, values, overflow = case
+        dtype, values, _ = case
         constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
         expression = constructor(
             (np.asarray(values, dtype=dtype), np.zeros(len(values), dtype=np.int32), [0, len(values), len(values)]),
@@ -81,15 +81,7 @@ class TestValidateExpression:
         original = (expression.data.copy(), expression.indices.copy(), expression.indptr.copy())
         path = ArtifactFile(tmp_path / "source.h5ad")
 
-        if overflow:
-            with pytest.raises(ValueError, match="integer duplicate sum outside") as caught:
-                _validate_expression(table, path=path)
-            notes = " ".join(caught.value.__notes__)
-            assert "iss" in notes
-            assert str(path) in notes
-            assert slot in notes
-        else:
-            _validate_expression(table, path=path)
+        _validate_expression(table, path=path)
 
         assert (table.X if slot == "X" else table.layers[slot]) is expression
         for actual, expected in zip((expression.data, expression.indices, expression.indptr), original, strict=True):
@@ -123,8 +115,7 @@ class TestValidateExpression:
             table.X = expression
         else:
             table.layers[slot] = expression
-        with pytest.raises(ValueError, match="integer duplicate sum outside"):
-            _validate_expression(table, path=ArtifactFile(tmp_path / "source.h5ad"))
+        _validate_expression(table, path=ArtifactFile(tmp_path / "source.h5ad"))
         np.testing.assert_array_equal(expression.data, [100, 100])
 
     @pytest.mark.parametrize("invalid", ["range", "dtype"])
@@ -151,10 +142,9 @@ class TestValidateExpression:
 class TestValidateTable:
     """Reject ambiguous names without constraining named-field order or extras."""
 
-    def test_expression_overflow_is_validated(self, tmp_path: Path) -> None:
+    def test_expression_duplicates_are_left_for_safe_normalization(self, tmp_path: Path) -> None:
         table = ad.AnnData(sparse.csr_array((np.asarray([100, 100], dtype=np.int8), [0, 0], [0, 2, 2]), shape=(2, 2)))
-        with pytest.raises(ValueError, match="integer duplicate sum outside"):
-            _validate_table(table, path=ArtifactFile(tmp_path / "source.h5ad"))
+        _validate_table(table, path=ArtifactFile(tmp_path / "source.h5ad"))
 
     @pytest.mark.parametrize("destination", ["spatial_source", "spatialdata_io_positions"])
     def test_reserved_coordinate_destinations(self, tmp_path: Path, destination: str) -> None:

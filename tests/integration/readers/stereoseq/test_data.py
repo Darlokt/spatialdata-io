@@ -43,7 +43,7 @@ def _assert_native_cells(table: AnnData, source: Path) -> None:
     matrix, exons = table.X, table.layers["exon"]
     assert isinstance(matrix, csr_array)
     assert isinstance(exons, csr_array)
-    assert matrix.dtype == exons.dtype == np.uint64
+    assert matrix.dtype == exons.dtype == np.float32
     assert matrix.has_canonical_format
     assert exons.has_canonical_format
     source_total = exon_total = 0
@@ -78,8 +78,8 @@ def _assert_native_cells(table: AnnData, source: Path) -> None:
             np.testing.assert_array_equal(exons.data[exon_start:exon_stop], source_exons[start:stop][order])
             source_total += sum(int(value) for value in records["count"])
             exon_total += sum(int(value) for value in source_exons[start:stop])
-    assert source_total == int(matrix.sum())
-    assert exon_total == int(exons.sum())
+    assert source_total == int(matrix.sum(dtype=np.float64))
+    assert exon_total == int(exons.sum(dtype=np.float64))
 
 
 def _assert_square_column(  # noqa: PLR0913, RUF100 - one assertion over paired source columns.
@@ -120,7 +120,7 @@ def _assert_native_square(table: AnnData, source: Path) -> None:
     """Check all source features with a bounded source batch per feature, without densification."""
     assert isinstance(table.X, csr_array)
     assert isinstance(table.layers["exon"], csr_array)
-    assert table.X.dtype == table.layers["exon"].dtype == np.uint64
+    assert table.X.dtype == table.layers["exon"].dtype == np.float32
     assert table.X.has_canonical_format
     counts, exons = csc_array(table.X), csc_array(table.layers["exon"])
     coordinates = np.asarray(table.obsm["spatial_grid"])
@@ -150,8 +150,8 @@ def _assert_native_square(table: AnnData, source: Path) -> None:
             checked_records += len(records)
     assert checked_records == 18829608
     assert duplicate_records == 30
-    assert total == int(counts.sum()) == 28085627
-    assert exon_total == int(exons.sum())
+    assert total == int(counts.sum(dtype=np.float64)) == 28085627
+    assert exon_total == int(exons.sum(dtype=np.float64))
     assert table.obs_names[0] == "0"
     assert table.obs_names[-1] == "12604917"
     for start in range(0, table.n_obs, 1000000):
@@ -186,7 +186,7 @@ def _assert_square_prefix(table: AnnData, source: Path) -> None:
     """Compare the reduced output directly with original per-feature source spans."""
     assert isinstance(table.X, csr_array)
     assert isinstance(table.layers["exon"], csr_array)
-    assert table.X.dtype == table.layers["exon"].dtype == np.uint64
+    assert table.X.dtype == table.layers["exon"].dtype == np.float32
     assert table.X.has_canonical_format
     assert table.layers["exon"].has_canonical_format
     counts, exons = csc_array(table.X), csc_array(table.layers["exon"])
@@ -218,8 +218,8 @@ def _assert_square_prefix(table: AnnData, source: Path) -> None:
     assert coordinates.dtype == np.int64
     np.testing.assert_array_equal(table.obs["instance_id"], np.arange(table.n_obs))
     assert table.obs_names.tolist() == [str(value) for value in range(table.n_obs)]
-    assert int(counts.sum()) == total
-    assert int(exons.sum()) == exon_total
+    assert int(counts.sum(dtype=np.float64)) == total
+    assert int(exons.sum(dtype=np.float64)) == exon_total
     assert table.uns["stereoseq"]["origin"] == [0, 0]
     assert table.uns["stereoseq"]["resolution"] == 500
 
@@ -251,7 +251,7 @@ def _assert_layout_equivalent(actual: SpatialData, expected: SpatialData) -> Non
         for matrix, source in ((table.X, reference.X), (table.layers["exon"], reference.layers["exon"])):
             assert isinstance(matrix, csr_array)
             assert isinstance(source, csr_array)
-            assert matrix.dtype == source.dtype == np.uint64
+            assert matrix.dtype == source.dtype == np.float32
             np.testing.assert_array_equal(matrix.data, source.data)
             np.testing.assert_array_equal(matrix.indices, source.indices)
             np.testing.assert_array_equal(matrix.indptr, source.indptr)
@@ -308,8 +308,8 @@ class TestStereoseqData:
         assert isinstance(table.layers["exon"], csr_array)
         assert table.shape == (7541, 27694)
         assert table.X.nnz == 3301510
-        assert int(table.X.sum()) == 5857957
-        assert int(table.layers["exon"].sum()) == 4667531
+        assert int(table.X.sum(dtype=np.float64)) == 5857957
+        assert int(table.layers["exon"].sum(dtype=np.float64)) == 4667531
         assert len(set(table.var["geneName"])) == table.n_vars - 18
         points = result.points["cells_centroids"].compute()
         np.testing.assert_array_equal(points[["x", "y"]], result.tables["cells_table"].obsm["spatial_grid"])
@@ -347,9 +347,9 @@ class TestStereoseqData:
         assert isinstance(table.X, csr_array)
         assert table.shape == (110646, 26220)
         assert table.X.nnz == 27926335
-        assert int(table.X.sum()) == 50226213
+        assert int(table.X.sum(dtype=np.float64)) == 50226213
         assert isinstance(table.layers["exon"], csr_array)
-        assert int(table.layers["exon"].sum()) == 48075283
+        assert int(table.layers["exon"].sum(dtype=np.float64)) == 48075283
 
         points = result.points["cells_centroids"].compute()
         np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial_grid"])
@@ -373,9 +373,9 @@ class TestStereoseqData:
         assert isinstance(table.X, csr_array)
         assert table.shape == (7546, 27694)
         assert table.X.nnz == 5581462
-        assert int(table.X.sum()) == 10459997
+        assert int(table.X.sum(dtype=np.float64)) == 10459997
         assert isinstance(table.layers["exon"], csr_array)
-        assert int(table.layers["exon"].sum()) == 8243004
+        assert int(table.layers["exon"].sum(dtype=np.float64)) == 8243004
 
         points = result.points["adjusted_cells_centroids"].compute()
         np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial_grid"])

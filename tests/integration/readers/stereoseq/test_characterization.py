@@ -47,22 +47,62 @@ class TestStereoseq:
         with pytest.raises(ReaderFormatError, match="image calibration companion"):
             stereoseq(fixture.root, image_roles=("registered",))
 
-    def test_polygon_drop_retains_uint64_count_and_exon_extremes(self, tmp_path: Path) -> None:
+    def test_polygon_drop_retains_exact_float64_count_and_exon_extremes(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, products=("cells",), invalid_cell_ids=(200,))
-        maximum = 2**64 - 1
+        maximum = 2**64 - 2048
         with h5py.File(fixture.cells, "r+") as handle:
             group = handle["cellBin"]
             del group["cellExp"]
             group["cellExp"] = np.array([(0, 11), (1, maximum)], dtype=[("geneID", "u4"), ("count", "u8")])
             del group["cellExpExon"]
-            group["cellExpExon"] = np.array([5, maximum - 1], dtype=np.uint64)
+            group["cellExpExon"] = np.array([5, maximum - 2048], dtype=np.uint64)
 
         result = stereoseq(fixture.root, cell_bins="unadjusted", cell_geometry="polygons", invalid_geometries="drop")
 
         table = result.tables["cells_table"]
         assert_array_equal(_counts(table).data, np.array([maximum], dtype=np.uint64))
-        assert_array_equal(_counts(table, layer="exon").data, np.array([maximum - 1], dtype=np.uint64))
+        assert_array_equal(_counts(table, layer="exon").data, np.array([maximum - 2048], dtype=np.uint64))
         assert table.obs_names.tolist() == ["100"]
+
+    @pytest.mark.parametrize("with_exon", [False, True])
+    @pytest.mark.parametrize("retain_wide", [False, True])
+    def test_polygon_drop_selects_retained_count_family_dtype(
+        self, tmp_path: Path, *, with_exon: bool, retain_wide: bool
+    ) -> None:
+        fixture = write_dataset(tmp_path, products=("cells",), invalid_cell_ids=(200,))
+        first, second = (11, 2**24 + 1) if retain_wide else (2**24 + 1, 22)
+        with h5py.File(fixture.cells, "r+") as handle:
+            group = handle["cellBin"]
+            del group["cellExp"]
+            group["cellExp"] = np.array([(0, first), (1, second)], dtype=[("geneID", "u4"), ("count", "u4")])
+            if not with_exon:
+                del group["cellExpExon"]
+        result = stereoseq(fixture.root, cell_bins="unadjusted", cell_geometry="polygons", invalid_geometries="drop")
+        table = result.tables["cells_table"]
+        assert _counts(table).dtype == np.dtype(np.float64 if retain_wide else np.float32)
+        assert_array_equal(_counts(table).data, [second])
+        assert table.obs_names.tolist() == ["100"]
+        assert table.obs["instance_id"].tolist() == [100]
+        if with_exon:
+            assert _counts(table, layer="exon").dtype == _counts(table).dtype
+            assert_array_equal(_counts(table, layer="exon").data, [6])
+
+    @pytest.mark.parametrize("retain_wide", [False, True])
+    def test_polygon_drop_selects_dtype_from_retained_exons(self, tmp_path: Path, *, retain_wide: bool) -> None:
+        fixture = write_dataset(tmp_path, products=("cells",), invalid_cell_ids=(200,))
+        first, second = (5, 2**24 + 1) if retain_wide else (2**24 + 1, 6)
+        with h5py.File(fixture.cells, "r+") as handle:
+            del handle["cellBin/cellExpExon"]
+            handle["cellBin/cellExpExon"] = np.array([first, second], dtype=np.uint32)
+        result = stereoseq(fixture.root, cell_bins="unadjusted", cell_geometry="polygons", invalid_geometries="drop")
+        table = result.tables["cells_table"]
+        assert (
+            _counts(table).dtype
+            == _counts(table, layer="exon").dtype
+            == np.dtype(np.float64 if retain_wide else np.float32)
+        )
+        assert_array_equal(_counts(table).data, [22])
+        assert_array_equal(_counts(table, layer="exon").data, [second])
 
     @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs", "flat"])
     @pytest.mark.parametrize("profile", ["name_only", "id_and_name"])
@@ -94,7 +134,7 @@ class TestStereoseq:
             assert shapes.index.tolist() == [identifier]
             assert_array_equal(_counts(table).data, [count])
             assert_array_equal(_counts(table, layer="exon").data, [exon])
-            assert _counts(table).dtype == np.uint64
+            assert _counts(table).dtype == np.float32
             assert table.obs["instance_id"].tolist() == [identifier]
 
     def test_geometry_drop_preserves_analysis_of_original_cell_population(self, tmp_path: Path) -> None:
@@ -191,7 +231,7 @@ class TestStereoseq:
         features = ["z", "a"] if profile == "name_only" else ["g_z", "g_a"]
         square = result.tables["bin50_table"]
         assert square.var_names.tolist() == features
-        assert _counts(square).dtype == np.uint64
+        assert _counts(square).dtype == np.float32
         assert_array_equal(_counts(square).toarray(), [[6, 0], [0, 3]])
         assert_array_equal(_counts(square, layer="exon").toarray(), [[3, 0], [0, 1]])
         assert_array_equal(result.points["bin50_genes"].compute()[["x", "y"]], [[5, 6], [1, 2]])
@@ -199,7 +239,7 @@ class TestStereoseq:
             table = result.tables[f"{name}_table"]
             assert table.var_names.tolist() == features
             assert table.obs_names.tolist() == ["200", "100"]
-            assert _counts(table).dtype == np.uint64
+            assert _counts(table).dtype == np.float32
             assert_array_equal(_counts(table).toarray(), [[11, 0], [0, 22]])
             assert_array_equal(_counts(table, layer="exon").toarray(), [[5, 0], [0, 6]])
             assert_array_equal(

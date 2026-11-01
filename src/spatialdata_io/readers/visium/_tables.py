@@ -13,7 +13,12 @@ import pyarrow.csv as pacsv
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
+from spatialdata_io.readers._utils.table import (
+    TableLinkage,
+    finalize_count_arrays,
+    parse_linked_table,
+    prepare_anndata_dataframe,
+)
 from spatialdata_io.readers.visium._layout import H5Counts
 from spatialdata_io.readers.visium._schemas import (
     INSTANCE_KEY,
@@ -28,7 +33,9 @@ from spatialdata_io.readers.visium._schemas import (
 
 if TYPE_CHECKING:
     from anndata import AnnData
+    from scipy.sparse import csr_array
 
+    from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
     from spatialdata_io.readers.visium._layout import CountsLayout, VisiumLayout
     from spatialdata_io.readers.visium._metadata import CountMetadata, ScaleFactors
 
@@ -173,8 +180,15 @@ def prepare_table(  # noqa: PLR0913 - Explicit reader-owned table construction i
     return PreparedTable(adata=adata, positions=aligned)
 
 
-def link_table(adata: AnnData, *, dataset_id: str, shape_index: pd.Index) -> AnnData:
+def link_table(
+    adata: AnnData, *, dataset_id: str, shape_index: pd.Index, counts_path: ArtifactFile | ArtifactDirectory
+) -> AnnData:
     """Validate exact circle membership and parse the table exactly once."""
+    # The accepted count decoder returns canonical CSR arrays; alignment above
+    # changes annotations, not count arithmetic.
+    adata.X = finalize_count_arrays(
+        (cast("csr_array", adata.X),), context=_context("completed counts"), path=counts_path
+    )[0]
     # The shared count readers return in-memory frames; AnnData's annotations
     # additionally cover Dataset2D, used only for backed tables.
     prepare_anndata_dataframe(cast("pd.DataFrame", adata.obs), context=_context("observation annotations"))

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, cast
 
 import pandas as pd
 from spatialdata import SpatialData
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.curio._geometry import _read_shapes
@@ -17,6 +18,8 @@ from spatialdata_io.readers.curio._tables import _read_table
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
 
 
 def curio(path: str | Path) -> SpatialData:
@@ -43,8 +46,9 @@ def curio(path: str | Path) -> SpatialData:
     -------
     SpatialData
         ``tables['table']`` contains owned, eager, finite canonical CSR sparse
-        array expression with source dtype, observation order, and feature order.
-        Integer duplicate sums must fit the source dtype; unsafe sums raise.
+        array expression preserving values, observation order and feature order.
+        Duplicate coordinates are summed; integer storage promotes losslessly
+        when necessary. No supported exact representation raises an error.
         Other layers retain their source representation. Cluster assignments are
         aligned by bead ID and stored as lexical categorical ``obs['cluster']``,
         with categories in first-occurrence order in the final H5AD row order.
@@ -90,6 +94,13 @@ def curio(path: str | Path) -> SpatialData:
         ``instance_id``. No images, labels, or transcript points are returned.
         All I/O is eager. Caller-owned state is not mutated.
 
+    Warns
+    -----
+    UserWarning
+        One summary per successful call if imported sparse duplicate entries
+        were combined, identifying affected expression slots and dtype changes.
+        Expected format aggregation does not trigger this warning.
+
     Raises
     ------
     FileNotFoundError
@@ -105,6 +116,7 @@ def curio(path: str | Path) -> SpatialData:
         precision. Format failures use the contextual ``ReaderFormatError``
         subclass.
     """
+    duplicate_sums: list[SparseDuplicateSummary] = []
     layout = _discover_layout(path)
     table = _read_table(layout)
     shapes = _read_shapes(table, layout.counts)
@@ -124,13 +136,24 @@ def curio(path: str | Path) -> SpatialData:
         context=ReaderErrorContext("curio", "cluster features"),
         allow_float_nulls=True,
     )
-    table = parse_linked_table(
-        table,
-        TableLinkage(("cells",), "region", "instance_id"),
-        context=ReaderErrorContext("curio", "linked counts"),
-        expected_instance_ids={"cells": shapes.index},
-    )
+    try:
+        table = parse_linked_table(
+            table,
+            TableLinkage(("cells",), "region", "instance_id"),
+            context=ReaderErrorContext("curio", "linked counts"),
+            duplicate_sums=duplicate_sums,
+            expected_instance_ids={"cells": shapes.index},
+        )
+    except (TypeError, ValueError) as error:
+        add_reader_context(error, context=ReaderErrorContext("curio", "linked expression"), path=layout.counts)
+        raise
 
     result = SpatialData(tables={"table": table}, shapes={"cells": shapes})
     set_reader_provenance(result.attrs, reader="curio")
+    if duplicate_sums:
+        warnings.warn(
+            f"curio {layout.counts.name}: " + "; ".join(map(str, duplicate_sums)),
+            UserWarning,
+            stacklevel=2,
+        )
     return result

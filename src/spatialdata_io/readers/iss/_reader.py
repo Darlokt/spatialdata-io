@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, cast
 
 import pandas as pd
@@ -19,6 +20,8 @@ from spatialdata_io.readers.iss._tables import _read_table
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
 
 
 def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boundary typed.
@@ -98,12 +101,12 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         pixel tasks. Computing a selection decodes only the TIFF tiles or strips
         of the output chunks it intersects. TIFF resources close after inspection and inside each lazy task.
         ``tables['table']`` is owned, eager, finite canonical CSR sparse-array
-        expression with source dtype and row/feature order. Duplicate feature
+        expression preserving values and row/feature order. Duplicate feature
         names become unique. The optional ``counts`` layer is normalized in the
-        same way. Integer duplicate sums in either expression slot must fit the
-        preserved source dtype; unsafe sums raise with the H5AD path and slot
-        in the error context. Safe duplicates, including signed cancellation,
-        retain the source dtype. Other layers, additional H5AD annotation fields
+        same way. Duplicate integer entries promote losslessly when their sums
+        exceed the source dtype. Sufficient source dtypes, including signed
+        cancellation, are retained. No supported exact representation raises
+        with the H5AD path and expression slot. Other layers, additional H5AD annotation fields
         and their dtypes/missingness, and existing spatial metadata are retained. Imported
         H5AD ``obsm['spatial']`` moves exactly to ``spatial_source`` with its
         original dtype and shape; an occupied destination raises. No axes or
@@ -114,6 +117,13 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         Final linkage uses categorical ``region`` and the selected integer
         instance column. No shapes or points are returned. Caller-owned state
         is not mutated. Provenance records the reader and package version.
+
+    Warns
+    -----
+    UserWarning
+        One summary per successful call if imported sparse duplicate entries
+        were combined, identifying affected expression slots and dtype changes.
+        Expected format aggregation does not trigger this warning.
 
     Raises
     ------
@@ -145,6 +155,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         message = "instance_key must be a nonempty observation name distinct from 'region'."
         raise ValueError(message)
 
+    duplicate_sums: list[SparseDuplicateSummary] = []
     raw_axes = _validate_data_axes(data_axes)
     raster = make_raster_options(scale_factors, chunks)
 
@@ -170,6 +181,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
             table,
             TableLinkage((region,), REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY),
             context=context,
+            duplicate_sums=duplicate_sums,
             expression_layers=("counts",) if "counts" in table.layers else (),
         )
     except (ValueError, TypeError) as error:
@@ -180,4 +192,10 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         images={f"{dataset_id}_raw_image": rasters.image}, labels={region: rasters.labels}, tables={"table": table}
     )
     set_reader_provenance(result.attrs, reader="iss")
+    if duplicate_sums:
+        warnings.warn(
+            f"iss {layout.table.name}: " + "; ".join(map(str, duplicate_sums)),
+            UserWarning,
+            stacklevel=2,
+        )
     return result
