@@ -596,7 +596,7 @@ class TestSteinbock:
             table = steinbock(tmp_path).tables["table"]
         actual = table.X if slot == "X" else table.layers[slot]
         assert isinstance(actual, sparse.csr_array)
-        assert actual.dtype == np.dtype("int32" if dtype == "int8" else "uint32")
+        assert actual.dtype == np.dtype(np.float32)
         np.testing.assert_array_equal(actual.data, [2 * value, 7])
         assert len(reported) == 1
         assert slot in str(reported[0].message)

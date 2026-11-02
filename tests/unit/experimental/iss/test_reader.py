@@ -14,9 +14,9 @@ from scipy import sparse
 from spatialdata.models import TableModel
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
-import spatialdata_io.readers.iss._reader as iss_reader
-from spatialdata_io.readers.iss import iss
-from tests.integration.readers.iss.conftest import write_iss_dataset
+from spatialdata_io.experimental.iss import _reader as iss_reader
+from spatialdata_io.experimental.iss import iss
+from tests.integration.experimental.iss.conftest import write_iss_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -188,7 +188,7 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
     analysis_files
         Exact native SAW H5AD paths. Preserve analysis values, source order,
         annotations, embeddings and raw. Sparse duplicates are summed safely,
-        with lossless integer promotion when required. No supported exact
+        with exact float32/f64 promotion when integer sums exceed source storage. No supported exact
         result raises a contextual error. A matching selected GEF validates
         filtered membership and coordinates by source keys. Analysis-only
         requires native spatial metadata and constructs its own point target.

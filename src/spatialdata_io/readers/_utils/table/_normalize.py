@@ -103,8 +103,10 @@ def normalize_owned_anndata(
         Unnamed layers and ``raw.X`` are deliberately not normalized.
     duplicate_sums
         Optional reader-owned destination for imported duplicate summaries.
-        Supplying a list opts into lossless integer promotion before combining
-        imported CSR/CSC duplicates. Sufficient source dtypes and existing
+        Supplying a list opts into lossless floating promotion when completed
+        imported CSR/CSC integer duplicate sums exceed their source dtype.
+        Promoted arrays use float32 when exact, otherwise float64; an inexact
+        floating result raises. Sufficient source dtypes and existing
         floating/boolean semantics are retained. The reader emits one warning
         from the accumulated summaries only after successful assembly. Omit
         this option to retain ordinary dtype-preserving normalization.

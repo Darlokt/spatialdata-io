@@ -410,7 +410,7 @@ def parse_linked_table(  # noqa: PLR0913 - explicit representation and linkage o
         index order is irrelevant.
     duplicate_sums
         Optional reader-owned summary destination enabling lossless imported
-        integer duplicate promotion, as in :func:`normalize_owned_anndata`.
+        integer duplicate sums to float32/f64, as in :func:`normalize_owned_anndata`.
         Linkage never emits warnings; the reader reports successful assembly.
 
     Returns

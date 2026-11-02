@@ -14,7 +14,6 @@ _LAZY_IMPORTS: dict[str, str] = {
     "cosmx": "spatialdata_io.readers.cosmx",
     "curio": "spatialdata_io.readers.curio",
     "dbit": "spatialdata_io.readers.dbit",
-    "iss": "spatialdata_io.readers.iss",
     "macsima": "spatialdata_io.readers.macsima",
     "mcmicro": "spatialdata_io.readers.mcmicro",
     "merscope": "spatialdata_io.readers.merscope",
@@ -43,7 +42,6 @@ __all__ = [
     "generic_to_zarr",
     "geojson",
     "image",
-    "iss",
     "macsima",
     "mcmicro",
     "merscope",
@@ -90,7 +88,6 @@ if TYPE_CHECKING:
 
     # readers file types
     from spatialdata_io.readers.generic import generic, geojson, image
-    from spatialdata_io.readers.iss import iss
     from spatialdata_io.readers.macsima import macsima
     from spatialdata_io.readers.mcmicro import mcmicro
     from spatialdata_io.readers.merscope import merscope

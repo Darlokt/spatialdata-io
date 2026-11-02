@@ -16,9 +16,8 @@ from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io._positions import POSITIONS_KEY
+from spatialdata_io.converters import legacy_anndata
 from spatialdata_io.converters.legacy_anndata import from_legacy_anndata, to_legacy_anndata
-from spatialdata_io.experimental import from_legacy_anndata as experimental_import
-from spatialdata_io.experimental import to_legacy_anndata as experimental_export
 
 
 def _table(*, units: Literal["micrometer", "pixel", "grid", "unknown"] = "micrometer") -> AnnData:
@@ -217,8 +216,9 @@ class TestFromLegacyAnndata:
 
 class TestPackage:
     def test_exports_and_keyword_only_signature(self) -> None:
-        assert experimental_import is from_legacy_anndata
-        assert experimental_export is to_legacy_anndata
+        assert set(legacy_anndata.__all__) == {"from_legacy_anndata", "to_legacy_anndata"}
+        assert legacy_anndata.from_legacy_anndata is from_legacy_anndata
+        assert legacy_anndata.to_legacy_anndata is to_legacy_anndata
         signature = inspect.signature(to_legacy_anndata)
         assert tuple(signature.parameters) == ("sdata", "table_name", "coordinate_system", "position_source")
         assert signature.parameters["position_source"].default == "table"

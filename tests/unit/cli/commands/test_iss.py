@@ -24,7 +24,7 @@ class TestIssCommand:
     def test_defaults_resolve_artifacts_in_reader(
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, reader_result: MagicMock
     ) -> None:
-        reader = mocker.patch("spatialdata_io.readers.iss.iss", return_value=reader_result)
+        reader = mocker.patch("spatialdata_io.experimental.iss.iss", return_value=reader_result)
         output = tmp_path / "out.zarr"
 
         result = runner.invoke(
@@ -66,7 +66,7 @@ class TestIssCommand:
         reader_result: MagicMock,
         chunk_args: list[str],
     ) -> None:
-        reader = mocker.patch("spatialdata_io.readers.iss.iss", return_value=reader_result)
+        reader = mocker.patch("spatialdata_io.experimental.iss.iss", return_value=reader_result)
         expected = 12 if len(chunk_args) == 1 else (1, 8, 16)
         args = [
             "-i",

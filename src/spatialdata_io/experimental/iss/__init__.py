@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from spatialdata_io.readers.iss._reader import iss
+from spatialdata_io.experimental.iss._reader import iss
 
 __all__ = ["iss"]

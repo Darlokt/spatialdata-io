@@ -55,8 +55,8 @@ if TYPE_CHECKING:
 @scale_factors_option
 @chunks_option
 def iss_command(input_path: Path, output_path: Path, **options: Unpack[_IssOptions]) -> None:
-    """Read ISS image, labels and counts, then write a SpatialData store."""
-    from spatialdata_io.readers.iss import iss  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
+    """Read experimental ISS image, labels and counts, then write a SpatialData store."""
+    from spatialdata_io.experimental.iss import iss  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
 
     result = iss(
         input_path,

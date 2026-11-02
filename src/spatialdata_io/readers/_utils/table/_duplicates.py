@@ -8,6 +8,9 @@ import numpy as np
 from scipy import sparse
 
 from spatialdata_io.readers._utils.table._arrays import as_csr_array, validate_compressed_sparse
+from spatialdata_io.readers._utils.table._count_values import count_accumulation_dtype
+
+_BOUND_BATCH_SIZE = 1_048_576
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,40 +51,45 @@ def _integer_span(source: sparse.csr_array | sparse.csc_array, start: int, stop:
     return totals
 
 
-def _integer_dtype(
-    source_dtype: np.dtype[np.integer], minimum: int, maximum: int, *, exact_float64: bool
-) -> np.dtype[np.integer | np.float64]:
-    limits = np.iinfo(source_dtype)
-    if limits.min <= minimum and maximum <= limits.max:
-        return source_dtype
-    candidates = (np.int32, np.int64, np.uint64) if source_dtype.kind == "i" else (np.uint32, np.uint64)
-    for candidate in candidates:
-        dtype = np.dtype(candidate)
-        limits = np.iinfo(dtype)
-        if dtype.itemsize >= source_dtype.itemsize and limits.min <= minimum and maximum <= limits.max:
-            return dtype
-    if exact_float64:
-        return np.dtype(np.float64)
-    message = "Integer duplicate sums have no supported lossless integer or float64 representation."
-    raise ValueError(message)
-
-
-def _exact_integer_reduction(source: sparse.csr_array | sparse.csc_array) -> sparse.csr_array:
-    """Analyze and build exact totals with only one compressed span in Python."""
+def _exact_integer_reduction(
+    source: sparse.csr_array | sparse.csc_array, arithmetic_dtype: np.dtype[np.float32 | np.float64] | None
+) -> sparse.csr_array:
+    """Retain sufficient integers, otherwise select exact floating promotion."""
     minimum = maximum = entries = 0
-    exact_float64 = True
+    exact_float32 = exact_float64 = True
+    check_float32 = arithmetic_dtype != np.dtype(np.float32)
     for start, stop in zip(source.indptr[:-1], source.indptr[1:], strict=True):
         totals = _integer_span(source, int(start), int(stop))
         entries += len(totals)
         for value in totals.values():
             minimum, maximum = min(minimum, value), max(maximum, value)
-            exact_float64 = exact_float64 and int(float(value)) == value
-    dtype = _integer_dtype(source.dtype, minimum, maximum, exact_float64=exact_float64)
-    if dtype == source.dtype:
+            if check_float32 and exact_float32:
+                converted = np.float32(value)
+                exact_float32 = bool(np.isfinite(converted)) and int(converted) == value
+            if arithmetic_dtype is None:
+                exact_float64 = exact_float64 and int(float(value)) == value
+    limits = np.iinfo(source.dtype)
+    if limits.min <= minimum and maximum <= limits.max:
         # Signed cancellation is permitted: fixed-width integer reduction has
         # the exact completed value whenever that value fits the source dtype.
         return as_csr_array(source)
 
+    if not exact_float64:
+        message = "Integer duplicate sums have no supported lossless float32 or float64 representation."
+        raise ValueError(message)
+    dtype = np.dtype(np.float32 if exact_float32 else np.float64)
+    if arithmetic_dtype is not None:
+        # astype casts before reducing duplicates. The magnitude bound proves
+        # every source value and signed partial sum exact in this arithmetic.
+        result = as_csr_array(source.astype(arithmetic_dtype))
+        return (
+            result
+            if result.dtype == dtype
+            else sparse.csr_array((result.data.astype(dtype), result.indices, result.indptr), shape=result.shape)
+        )
+
+    # Without a safe floating bound, build from completed Python-integer totals
+    # rather than rounding the individual contributions before summation.
     values = np.empty(entries, dtype=dtype)
     indices = np.empty(entries, dtype=source.indices.dtype)
     indptr = np.empty_like(source.indptr)
@@ -116,21 +124,25 @@ def normalize_sparse_duplicates(
     Returns
     -------
     scipy.sparse.csr_array
-        Canonical CSR retaining sufficient source dtype. Integer values promote
-        losslessly when necessary; float64 fallback requires every completed
-        value to be exact. Suitable canonical CSR arrays are reused. Other
+        Canonical CSR retaining sufficient source dtype. Integer overflow
+        promotes directly to float32 when every completed value is exact,
+        otherwise float64 if exact. Suitable canonical CSR arrays are reused. Other
         conversions allocate as required without changing source buffers.
 
     Raises
     ------
     TypeError, ValueError
         If storage or values are unsupported, malformed or nonfinite, or no
-        supported integer or float64 dtype preserves every completed total.
+        supported floating dtype preserves every completed total on promotion.
 
     Notes
     -----
     Conservative bounds handle ordinary integer inputs; exceptional inputs
     use exact Python integers with workspace bounded by one compressed span.
+    Safe floating bounds permit casting before SciPy reduction; otherwise the
+    output is built from completed exact totals. No source contribution is
+    rounded before addition and no wider integer array is constructed.
+    Unaffected entries must also fit the promoted dtype.
     No expression is densified. Floating/boolean numerical semantics remain
     unchanged. This function neither infers count semantics nor emits warnings;
     readers select expected aggregation versus imported-data reporting.
@@ -151,7 +163,14 @@ def normalize_sparse_duplicates(
     if compressed.dtype.kind in "iu":
         limits = np.iinfo(compressed.dtype)
         values = compressed.data
-        records = int(compressed.indptr[-1])
-        if int(values.min(initial=0)) * records < limits.min or int(values.max(initial=0)) * records > limits.max:
-            return _exact_integer_reduction(compressed)
+        maximum_records = 0
+        for start in range(0, len(compressed.indptr) - 1, _BOUND_BATCH_SIZE):
+            spans = np.diff(compressed.indptr[start : start + _BOUND_BATCH_SIZE + 1])
+            maximum_records = max(maximum_records, int(spans.max(initial=0)))
+        minimum, maximum = int(values.min(initial=0)), int(values.max(initial=0))
+        if minimum * maximum_records < limits.min or maximum * maximum_records > limits.max:
+            # Bounding sums of absolute contributions also bounds signed
+            # partial sums, without changing the imported expression contract.
+            arithmetic_dtype = count_accumulation_dtype(max(-minimum, maximum) * maximum_records)
+            return _exact_integer_reduction(compressed, arithmetic_dtype)
     return as_csr_array(compressed)

@@ -172,7 +172,7 @@ class TestDbit:
         actual = table.X if slot == "X" else table.layers[slot]
         assert isinstance(actual, sparse.csr_array)
         assert actual.has_canonical_format
-        output_dtype = ("int32" if dtype == "int8" else "uint32") if unsafe else dtype
+        output_dtype = "float32" if unsafe else dtype
         assert actual.dtype == np.dtype(output_dtype)
         np.testing.assert_array_equal(actual.data, [7, sum(values[:2])])
         np.testing.assert_array_equal(actual.indices, [1, 0])

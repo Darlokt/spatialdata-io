@@ -152,8 +152,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         feature and auxiliary metadata follow that order. Other layers retain
         their representation. Dense expression converts before row reordering
         so sorting does not make a second dense expression copy.
-        Duplicate sparse entries are summed. Integer storage promotes losslessly
-        when required; no supported exact representation raises.
+        Duplicate sparse entries are summed. Integer overflow promotes directly
+        to exact float32 or float64 storage; no supported exact representation raises.
 
         ``array_A`` and ``array_B`` are one-based int64 grid coordinates.
         ``obsm['spatial_grid']`` retains these columns in A/B order, described as

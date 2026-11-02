@@ -96,8 +96,9 @@ def steinbock(
         sparse-array expression preserving values and source row/feature order. The
         optional ``counts`` layer is normalized likewise. Other layers, pairwise
         arrays, and annotations are retained. Duplicate integer entries in ``X``
-        and ``counts`` promote losslessly when required; sufficient source
-        dtypes are retained. No supported exact representation raises. ``obs['image']`` must contain
+        and ``counts`` promote directly to exact float32 or float64 when
+        required; sufficient source dtypes are retained. No supported exact
+        representation raises. ``obs['image']`` must contain
         source names including ``.tiff`` and observation names must follow
         ``Object <id> in <image>``. IDs are strictly positive exact integers
         within each mask's dtype. Zero is background. Final linkage uses

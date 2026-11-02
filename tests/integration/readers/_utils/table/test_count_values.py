@@ -74,7 +74,7 @@ class TestCountPersistence:
             restored = ad.read_zarr(path)
         matrix = restored.X
         assert isinstance(matrix, (sparse.csr_array, sparse.csr_matrix))
-        assert matrix.dtype == np.dtype(np.int32)
+        assert matrix.dtype == np.dtype(np.float32)
         assert int(matrix.data[0]) == 200
         assert restored.uns["spatialdata_attrs"]["instance_key"] == "id"
         np.testing.assert_array_equal(source.data, [100, 100])

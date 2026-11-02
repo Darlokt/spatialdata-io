@@ -13,12 +13,12 @@ from spatialdata.transformations import Identity, get_transformation
 from xarray import DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
+from spatialdata_io.experimental.iss._images import _read_raster, _read_rasters, _validate_data_axes
+from spatialdata_io.experimental.iss._layout import _discover_layout
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.iss._images import _read_raster, _read_rasters, _validate_data_axes
-from spatialdata_io.readers.iss._layout import _discover_layout
-from tests.integration.readers.iss.conftest import write_iss_dataset
+from tests.integration.experimental.iss.conftest import write_iss_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path

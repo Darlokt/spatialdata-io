@@ -13,8 +13,10 @@ from pathlib import Path
 
 from sphinxcontrib import katex
 
+import spatialdata_io.converters.legacy_anndata
 import spatialdata_io.experimental
 
+_ = spatialdata_io.converters.legacy_anndata
 _ = spatialdata_io.experimental
 
 HERE = Path(__file__).parent

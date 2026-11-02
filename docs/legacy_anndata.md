@@ -3,8 +3,7 @@
 Reader tables already are AnnData objects. Use them directly for expression
 analysis; conversion is useful when importing older spatial AnnData datasets or
 explicitly choosing positions derived from linked elements. Both converters are
-available from `spatialdata_io.experimental` and
-`spatialdata_io.converters.legacy_anndata`.
+available from `spatialdata_io.converters.legacy_anndata`.
 
 ## Use a reader table directly
 
@@ -62,7 +61,7 @@ to_legacy_anndata(
 ```
 
 ```python
-from spatialdata_io.experimental import to_legacy_anndata
+from spatialdata_io.converters.legacy_anndata import to_legacy_anndata
 
 exported = to_legacy_anndata(sdata, table_name="table")
 ```
@@ -132,7 +131,7 @@ from_legacy_anndata(
 ```
 
 ```python
-from spatialdata_io.experimental import from_legacy_anndata
+from spatialdata_io.converters.legacy_anndata import from_legacy_anndata
 
 imported = from_legacy_anndata(adata)
 ```

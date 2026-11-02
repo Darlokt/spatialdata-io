@@ -8,14 +8,14 @@ from typing import TYPE_CHECKING, cast
 import pandas as pd
 from spatialdata import SpatialData
 
+from spatialdata_io.experimental.iss._images import _read_rasters, _validate_data_axes
+from spatialdata_io.experimental.iss._layout import _discover_layout
+from spatialdata_io.experimental.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY, _validate_output_column
+from spatialdata_io.experimental.iss._tables import _read_table
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
-from spatialdata_io.readers.iss._images import _read_rasters, _validate_data_axes
-from spatialdata_io.readers.iss._layout import _discover_layout
-from spatialdata_io.readers.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY, _validate_output_column
-from spatialdata_io.readers.iss._tables import _read_table
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -36,7 +36,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     data_axes: str | None = None,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> SpatialData:
-    """Read an unversioned ISS image, segmentation, and linked h5ad table.
+    """Read an experimental unversioned ISS image, segmentation, and linked h5ad table.
 
     The caller selects three artifacts. There is no inferred pipeline version
     or fixed vendor directory tree::
@@ -103,8 +103,8 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         ``tables['table']`` is owned, eager, finite canonical CSR sparse-array
         expression preserving values and row/feature order. Duplicate feature
         names become unique. The optional ``counts`` layer is normalized in the
-        same way. Duplicate integer entries promote losslessly when their sums
-        exceed the source dtype. Sufficient source dtypes, including signed
+        same way. Duplicate integer entries promote directly to exact float32
+        or float64 when their sums exceed the source dtype. Sufficient source dtypes, including signed
         cancellation, are retained. No supported exact representation raises
         with the H5AD path and expression slot. Other layers, additional H5AD annotation fields
         and their dtypes/missingness, and existing spatial metadata are retained. Imported

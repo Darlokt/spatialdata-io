@@ -120,7 +120,7 @@ class TestStereoseqAnalysisExpression:
         assert len(result.tables) == 2
         for table in result.tables.values():
             assert isinstance(table.X, sparse.csr_array)
-            assert table.X.dtype == table.layers["counts"].dtype == np.dtype(np.int32)
+            assert table.X.dtype == table.layers["counts"].dtype == np.dtype(np.float32)
             assert int(table.X[0, 0]) == 200
 
     def test_expected_square_record_sums_do_not_warn(self, tmp_path: Path, recwarn: pytest.WarningsRecorder) -> None:
@@ -159,7 +159,7 @@ class TestStereoseqAnalysisExpression:
         table = next(iter(result.tables.values()))
         actual = table.X if slot == "X" else table.layers[slot]
         assert isinstance(actual, sparse.csr_array)
-        assert actual.dtype == np.dtype("uint32" if dtype == "uint8" else "int32")
+        assert actual.dtype == np.dtype(np.float32)
         assert int(actual[0, 0]) == sum(values)
 
     @pytest.mark.parametrize("storage", ["csr", "csc"])

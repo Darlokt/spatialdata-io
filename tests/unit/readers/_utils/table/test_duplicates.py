@@ -29,16 +29,19 @@ class TestNormalizeSparseDuplicates:
     @pytest.mark.parametrize(
         ("dtype", "values", "expected_dtype"),
         [
-            ("int8", [100, 100], "int32"),
-            ("int8", [-100, -100], "int32"),
-            ("uint8", [150, 150], "uint32"),
-            ("int16", [30000, 30000], "int32"),
-            ("uint16", [65535, 1], "uint32"),
-            ("int32", [2**31 - 1, 1], "int64"),
-            ("uint32", [2**32 - 1, 1], "uint64"),
-            ("int64", [2**63 - 1, 1], "uint64"),
-            ("int64", [-(2**63), -(2**63)], "float64"),
-            ("uint64", [2**63 + 1, 2**63 - 1], "float64"),
+            ("int8", [100, 100], "float32"),
+            ("int8", [-100, -100], "float32"),
+            ("uint8", [150, 150], "float32"),
+            ("int16", [30000, 30000], "float32"),
+            ("uint16", [65535, 1], "float32"),
+            ("int32", [2**31 - 1, 1], "float32"),
+            ("int32", [2**31 - 1, 2], "float64"),
+            ("uint32", [2**32 - 1, 1], "float32"),
+            ("uint32", [2**32 - 1, 2], "float64"),
+            ("int64", [2**63 - 1, 1], "float32"),
+            ("int64", [2**63 - 1, 2049], "float64"),
+            ("int64", [-(2**63), -(2**63)], "float32"),
+            ("uint64", [2**63 + 1, 2**63 - 1], "float32"),
             ("int8", [100, 100, -100], "int8"),
             ("int16", [100, 100], "int16"),
             ("int8", [100, -100], "int8"),
@@ -71,6 +74,26 @@ class TestNormalizeSparseDuplicates:
         with pytest.raises(ValueError, match="no supported lossless"):
             normalize_sparse_duplicates(source)
 
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize(("unaffected", "dtype"), [(7, "float32"), (2**24 + 1, "float64")])
+    def test_promoted_dtype_includes_unaffected_values(self, storage: str, unaffected: int, dtype: str) -> None:
+        buffers = (
+            np.array([2**31 - 1, 1, unaffected], dtype=np.int32),
+            np.array([0, 0, 1]),
+            np.array([0, 3]),
+        )
+        source = (
+            sparse.csr_array(buffers, shape=(1, 2)) if storage == "csr" else sparse.csc_array(buffers, shape=(2, 1))
+        )
+        result = normalize_sparse_duplicates(source)
+        assert result.dtype == np.dtype(dtype)
+        np.testing.assert_array_equal(result.data, [2**31, unaffected])
+
+    def test_float_promotion_rejects_loss_even_if_a_wider_integer_would_fit(self) -> None:
+        source = _source([2**63 - 1, 2], "int64", "csr")
+        with pytest.raises(ValueError, match="lossless float32 or float64"):
+            normalize_sparse_duplicates(source)
+
     @pytest.mark.parametrize("dtype", ["int8", "int64", "uint64", "float32", "float64", "bool"])
     def test_canonical_buffers_are_borrowed(self, dtype: str) -> None:
         source = sparse.csr_array([[1, 0, 2]], dtype=dtype)
@@ -86,7 +109,7 @@ class TestNormalizeSparseDuplicates:
         source.has_sorted_indices = True
         result = normalize_sparse_duplicates(source)
         assert int(result.data[0]) == 200
-        assert result.dtype == np.dtype(np.int32)
+        assert result.dtype == np.dtype(np.float32)
 
     def test_sparse_structure_validated_before_conversion(self) -> None:
         source = _source([100, 100], "int8", "csr")
@@ -102,6 +125,26 @@ class TestNormalizeSparseDuplicates:
         assert result.dtype == source.dtype
         np.testing.assert_array_equal(result.data, [126, 127])
         assert result.nnz == source.nnz
+
+    def test_many_small_compressed_spans_retain_native_dtype(self) -> None:
+        source = sparse.csr_array(
+            (np.tile(np.array([20, 30], dtype=np.int8), 100), np.zeros(200, dtype=np.int32), np.arange(0, 201, 2)),
+            shape=(100, 1),
+        )
+        result = normalize_sparse_duplicates(source)
+        assert result.dtype == np.dtype(np.int8)
+        assert result.has_canonical_format
+        np.testing.assert_array_equal(result.data, np.full(100, 50, dtype=np.int8))
+
+    def test_late_compressed_spans_are_included_in_the_safety_bound(self, mocker: MockerFixture) -> None:
+        mocker.patch("spatialdata_io.readers._utils.table._duplicates._BOUND_BATCH_SIZE", 2)
+        source = sparse.csr_array(
+            (np.array([1, 1, 150, 150], dtype=np.uint8), np.zeros(4, dtype=np.int32), np.array([0, 1, 2, 4])),
+            shape=(3, 1),
+        )
+        result = normalize_sparse_duplicates(source)
+        assert result.dtype == np.dtype(np.float32)
+        np.testing.assert_array_equal(result.data, [1, 1, 300])
 
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     def test_float_and_boolean_semantics_remain(self, storage: str) -> None:
@@ -129,13 +172,25 @@ class TestNormalizeSparseDuplicates:
 
 class TestSparseDuplicateSummary:
     def test_summary_reports_promotion_and_safe_sums(self) -> None:
-        promoted = SparseDuplicateSummary("X", 1, np.dtype(np.int8), np.dtype(np.int32))
-        assert str(promoted) == "combined 1 duplicate sparse entry in X; promoted int8 to int32 to preserve exact sums"
+        promoted = SparseDuplicateSummary("X", 1, np.dtype(np.int8), np.dtype(np.float32))
+        assert (
+            str(promoted) == "combined 1 duplicate sparse entry in X; promoted int8 to float32 to preserve exact sums"
+        )
         safe = SparseDuplicateSummary("layers['counts']", 2, np.dtype(np.int16), np.dtype(np.int16))
         assert str(safe) == "combined 2 duplicate sparse entries in layers['counts']"
 
 
 class TestImportedNormalization:
+    def test_promoted_expression_supports_in_place_fractional_normalization(self) -> None:
+        source = _source([100, 100], "int8", "csr")
+        table = ad.AnnData(source)
+        normalize_owned_anndata(table, duplicate_sums=[])
+        assert isinstance(table.X, sparse.csr_array)
+        table.X.data /= np.float32(3)
+        assert table.X.dtype == np.dtype(np.float32)
+        np.testing.assert_array_equal(table.X.data, [np.float32(200) / np.float32(3)])
+        np.testing.assert_array_equal(source.data, [100, 100])
+
     def test_collects_multiple_slots_without_emitting_warning(self, recwarn: pytest.WarningsRecorder) -> None:
         table = ad.AnnData(_source([100, 100], "int8", "csr"))
         table.layers["counts"] = _source([150, 150], "uint8", "csr")
@@ -143,8 +198,8 @@ class TestImportedNormalization:
         assert normalize_owned_anndata(table, expression_layers=("counts",), duplicate_sums=reports) is table
         assert [report.slot for report in reports] == ["X", "layers['counts']"]
         assert isinstance(table.X, sparse.csr_array)
-        assert table.X.dtype == np.dtype(np.int32)
-        assert table.layers["counts"].dtype == np.dtype(np.uint32)
+        assert table.X.dtype == np.dtype(np.float32)
+        assert table.layers["counts"].dtype == np.dtype(np.float32)
         assert len(recwarn) == 0
         normalize_owned_anndata(table, expression_layers=("counts",), duplicate_sums=reports)
         assert len(reports) == 2

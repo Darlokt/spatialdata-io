@@ -52,7 +52,7 @@ class TestReadTable:
         result = _read(tmp_path)
         actual = result.X if slot == "X" else result.layers[slot]
         assert isinstance(actual, sparse.csr_array)
-        assert actual.dtype == np.dtype(np.uint32)
+        assert actual.dtype == np.dtype(np.float32)
         assert actual.data.tolist() == [300]
 
     @pytest.mark.parametrize("slot", ["X", "counts"])

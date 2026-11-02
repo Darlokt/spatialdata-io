@@ -1,13 +1,7 @@
-"""Experimental conversions between legacy AnnData and SpatialData."""
+"""Experimental readers with explicitly documented artifact contracts."""
 
 from __future__ import annotations
 
-from spatialdata_io.converters.legacy_anndata import (
-    from_legacy_anndata,
-    to_legacy_anndata,
-)
+from spatialdata_io.experimental.iss import iss
 
-__all__ = [
-    "from_legacy_anndata",
-    "to_legacy_anndata",
-]
+__all__ = ["iss"]

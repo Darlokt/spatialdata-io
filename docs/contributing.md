@@ -428,7 +428,7 @@ We recommend studying existing readers and reusing code from them. A few technic
 
 ##### Experimental readers
 
-If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. Experimental entry points belong under the [`experimental`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/experimental/__init__.py) module until their supported artifact contracts are documented and covered by executable workflows. The public [`iss()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/iss/_reader.py) reader, for example, supports explicitly selected TIFF images, integer segmentation labels, and a linked h5ad table.
+If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. Keep experimental readers under `spatialdata_io.experimental` and document their supported artifact contracts with executable workflows. The experimental [`iss()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/experimental/iss/_reader.py) reader, for example, supports explicitly selected TIFF images, integer segmentation labels, and a linked h5ad table.
 
 #### Reader-owned schemas and layout names
 
@@ -610,7 +610,7 @@ As a wrap-up, here is a checklist of the main points to consider when contributi
     - [ ] Provide a link to the public specification/changelog of the raw data format (if no public specification available yet, reach out to scverse privately (Zulip/email))
 
 - Reader implementation
-    - [ ] Implement reader functions in `src/spatialdata_io/readers/` (if no formal spec available, place under `experimental/`)
+    - [ ] Implement reader functions in `src/spatialdata_io/readers/`, or `src/spatialdata_io/experimental/` for experimental formats
     - [ ] Keep schemas and layout names in their reader-owned modules
 
 - Example data

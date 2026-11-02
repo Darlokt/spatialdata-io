@@ -18,16 +18,16 @@ from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io import __version__
+from spatialdata_io.experimental.iss import iss
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.iss import iss
-from tests.integration.readers.iss.conftest import write_iss_dataset
+from tests.integration.experimental.iss.conftest import write_iss_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pytest_mock import MockerFixture
 
-    from tests.integration.readers.iss.conftest import IssDataset
+    from tests.integration.experimental.iss.conftest import IssDataset
 
 
 class TestIss:
@@ -53,8 +53,8 @@ class TestIss:
         assert len(messages) == 1
         assert "in X" in messages[0]
         assert "layers['counts']" in messages[0]
-        assert "int8 to int32" in messages[0]
-        assert "uint8 to uint32" in messages[0]
+        assert "int8 to float32" in messages[0]
+        assert "uint8 to float32" in messages[0]
         table = result.tables["table"]
         assert isinstance(table.X, sparse.csr_array)
         assert int(table.X[0, 0]) == 200
@@ -136,7 +136,7 @@ class TestIss:
         output_dtype = dtype
         if expected is None:
             expected = sum(values)
-            output_dtype = {"int8": "int32", "uint8": "uint32", "uint64": "float64"}[dtype]
+            output_dtype = {"int8": "float32", "uint8": "float32", "uint64": "float32"}[dtype]
         with (
             Callback(posttask=lambda *args: tasks.append(args)),
             pytest.warns(UserWarning, match="combined") as reported,
@@ -213,7 +213,7 @@ class TestIss:
         labels = np.zeros_like(iss_dataset.labels, dtype=np.uint64)
         labels[:, 1:4], labels[:, 24:28] = identifiers
         tifffile.imwrite(iss_dataset.root / "labels.tiff", labels, photometric="minisblack")
-        mocker.patch("spatialdata_io.readers.iss._tables.ad.read_h5ad", return_value=source)
+        mocker.patch("spatialdata_io.experimental.iss._tables.ad.read_h5ad", return_value=source)
 
         result = iss(
             iss_dataset.root,

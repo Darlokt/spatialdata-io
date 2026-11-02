@@ -10,15 +10,15 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.iss._schemas import (
+from spatialdata_io.experimental.iss._schemas import (
     _validate_expression,
     _validate_index_ids,
     _validate_instance_ids,
     _validate_output_column,
     _validate_table,
 )
+from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.paths import ArtifactFile
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -9,8 +9,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers.iss._schemas import (
+from spatialdata_io.experimental.iss._schemas import (
     DEFAULT_INSTANCE_KEY,
     MIN_INSTANCE_BITS,
     _validate_index_ids,
@@ -18,6 +17,7 @@ from spatialdata_io.readers.iss._schemas import (
     _validate_output_column,
     _validate_table,
 )
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile

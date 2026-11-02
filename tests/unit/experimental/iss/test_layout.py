@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from spatialdata_io.experimental.iss._layout import _discover_layout
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.iss._layout import _discover_layout
-from tests.integration.readers.iss.conftest import write_iss_dataset
+from tests.integration.experimental.iss.conftest import write_iss_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path

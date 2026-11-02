@@ -80,8 +80,10 @@ IDs, coordinates and sparse structure have independent contracts.
 Curio, ISS, Steinbock, DBiT and Stereo-seq analysis normalize their documented
 imported expression slots without imposing raw-count semantics. Duplicate
 matrix coordinates are additive contributions and are summed, never dropped.
-Sufficient source integer dtypes are retained; otherwise they promote to a
-supported exact integer or, only if every completed value is exact, float64.
+Sufficient source integer dtypes are retained; otherwise they promote directly
+to float32 when every completed value is exact, or float64 if needed. No wider
+integer array is staged before floating output. If neither float preserves the
+completed values, including unaffected entries, promotion raises.
 An unsupported exact result raises before lossy conversion. Floating and boolean
 expression retain their existing numerical semantics. One UserWarning per
 successful reader call identifies affected artifacts/tables/slots, entries
@@ -244,8 +246,8 @@ approximate 0.647 µm/pixel calibration without reversing stored orientation.
 The circles use the same scale; their radius 10 is a display radius in source
 pixels, rather than a measured bead footprint. Reprocessed, merged and Trekker
 coordinate profiles require separate evidence. Only `X` is converted to
-canonical CSR. Duplicate entries are combined, promoting integer storage
-losslessly only when necessary, with one warning after successful assembly.
+canonical CSR. Duplicate entries are combined, promoting overflowing integer storage
+directly to exact float32/f64 only when necessary, with one warning after successful assembly.
 An unsupported exact result fails with H5AD/slot context. Every inherited layer, including
 a layer named `counts`, retains its source representation.
 Other embeddings, aligned mappings, nested metadata and `raw` are preserved.
@@ -286,7 +288,7 @@ header, parser and string buffers, retained annotations, final sparse output
 and eager FCS decoding have separate costs. See the
 [API](generated/spatialdata_io.codex.rst) for CSV/FCS selection.
 
-### ISS
+### ISS (experimental)
 
 The explicit image/labels/H5AD layout retains imported row names/order,
 feature order and expression dtype. Active feature names are made unique;
@@ -302,18 +304,18 @@ an explicit `instance_key` selects an existing integer column, promoting widths
 below 16 bits. These IDs are checked against the label dtype range, without
 reading label pixels. `X` and an optional documented `counts` layer become
 canonical CSR sparse arrays. Duplicate entries are combined, retaining
-sufficient source dtype and promoting integers losslessly when required.
+sufficient source dtype and promoting overflowing integers to exact float32/f64.
 One warning summarizes affected slots and dtype changes after successful
 assembly; an unsupported exact result fails with H5AD/slot context. Other layers and `raw` retain their source
 storage and inherited numerical semantics. Inherited
-`spatialdata_attrs` is rejected. The [API](generated/spatialdata_io.iss.rst)
+`spatialdata_attrs` is rejected. The [API](generated/spatialdata_io.experimental.iss.rst)
 describes the explicit artifact names and options.
 
 ### Steinbock
 
 Deepcell and Ilastik segmentation selections share one table contract. Imported
 H5AD row/feature order and expression values remain; integer duplicate
-normalization promotes storage only when needed. Source `image`,
+normalization promotes overflowing integers directly to exact float32/f64. Source `image`,
 `centroid-0`, `centroid-1` and other annotations remain in `obs`; an equal
 redundant `Image` column is removed. Generated integer `cell_id` (int64 or
 uint64) and categorical `region` link to `<image_stem>_labels`. IDs derive
@@ -333,8 +335,8 @@ Complete per-sample calibration creates float64 micrometre `spatial` using
 samples use categorical row frames. Mixed or absent calibration omits canonical
 `spatial` for the aggregate. Other mappings and metadata remain. `X` and optional
 `counts` become canonical CSR sparse arrays. Duplicate integer entries
-promote losslessly when required, retaining sufficient source dtype and signed
-cancellation. One warning summarizes affected slots and dtype changes; an
+promote directly to exact float32/f64 when required, retaining sufficient source
+dtype and signed cancellation. One warning summarizes affected slots and dtype changes; an
 unsupported exact result fails with H5AD/slot context. Other layers and `raw`
 retain their values and representation. Renaming
 active feature columns does not rename `raw.var` columns. Inherited
@@ -364,7 +366,7 @@ remains unchanged. Coordinate destination collisions still fail: imported
 
 `X` and optional `counts` become canonical CSR sparse arrays; other layers,
 embeddings, feature mappings, ordinary `uns` and `raw`
-survive. Duplicate integer totals promote losslessly when needed; one
+survive. Overflowing duplicate integer totals promote to exact float32/f64; one
 warning summarizes combined entries and dtype changes. Unsupported exact
 results fail before lossy reduction. The optional image determines the square-grid display scale but does
 not rewrite table positions or establish physical calibration. See [DBiT](dbit.md).
@@ -513,7 +515,7 @@ layers and aligned mappings retain their storage. Final `region` and
 bounded final normalization with the H5AD path attached to the error.
 Compressed sparse pointers and indices are validated before duplicate
 reduction. Integer duplicates in X and declared expression layers promote
-losslessly when required. One warning summarizes affected imported tables/slots,
+directly to exact float32/f64 when their sums exceed source storage. One warning summarizes affected imported tables/slots,
 combined entries and dtype changes. An unsupported exact result fails with
 H5AD/slot context. Expected raw square aggregation does not warn.
 
@@ -606,7 +608,7 @@ recover source information already rounded by Scanpy. HD nuclei accumulate in
 checked float32/f64 and adapt their output dtype after summation. Imported integer
 expression in Curio, DBiT, ISS, Steinbock and Stereo-seq analysis combines
 repeated matrix coordinates safely, retaining sufficient source dtype or
-promoting losslessly when required. One warning per successful reader call
+promoting overflowing integers to exact float32/f64. One warning per successful reader call
 summarizes unexpected imported duplicate normalization. Other inherited layers
 and raw retain their source numerical semantics; processed expression is not
 automatically reinterpreted as nonnegative molecule counts.

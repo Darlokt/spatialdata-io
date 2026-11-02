@@ -123,7 +123,7 @@ canonicality inspection: SciPy's compressed kernels cannot safely dispatch that
 storage. Expression value dtypes are unaffected.
 
 Imported expression can instead opt into safe duplicate normalization and
-lossless integer promotion at the owned-AnnData boundary. This replaces the
+lossless floating promotion for overflowing integers at the owned-AnnData boundary. This replaces the
 former reject-only source-dtype guard; see [imported sparse duplicates](#imported-sparse-duplicates).
 
 ## Owned AnnData normalization
@@ -445,16 +445,18 @@ Supplying a reader-owned `duplicate_sums=[]` collector to
 `normalize_owned_anndata()` or `parse_linked_table()` opts into lossless
 normalization of imported CSR/CSC expression. Repeated matrix coordinates are
 summed, not discarded. Integer storage stays unchanged when completed sums fit;
-otherwise it promotes to sufficient integer storage, using at least 32 bits for
-promoted 8/16-bit sources. Float64 fallback is allowed only when all completed
-values are exact, including unaffected coordinates. Exact Python-integer totals
-prevent source rounding before fallback. No supported lossless result raises a
+otherwise it promotes directly to float32 when every completed value is exact,
+or float64 if needed. No wider integer array is staged before floating output.
+Unaffected coordinates must also fit the selected floating dtype. Exact
+Python-integer totals prevent source rounding before promotion. No supported
+lossless floating result raises a
 contextual normalization error. Floating and boolean expression retain their
 existing numerical semantics. This does not impose raw-count semantics.
 
 Storage is validated before reading cached canonicality. A fresh compressed
 wrapper checks actual indices without mutating source metadata or buffers.
-Conservative integer bounds avoid Python accumulation for ordinary counts;
+Compressed-span bounds use bounded pointer batches and retain native integer
+storage whenever sufficient. Proven floating bounds enable SciPy reduction;
 exceptional inputs use dictionaries bounded by one compressed row/column.
 There is no densification or object-valued expression result. Unsorted unique
 indices are merely sorted and do not produce a duplicate report. Combined

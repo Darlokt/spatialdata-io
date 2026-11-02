@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from spatialdata_io.experimental.iss._tables import _read_table, _set_instance_ids
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.iss._tables import _read_table, _set_instance_ids
-from tests.integration.readers.iss.conftest import write_iss_dataset
+from tests.integration.experimental.iss.conftest import write_iss_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path

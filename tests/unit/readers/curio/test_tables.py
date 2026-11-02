@@ -58,7 +58,7 @@ class TestReadTable:
         assert len(reported) == 1
         assert isinstance(result, sparse.csr_array)
         assert int(result[0, 0]) == sum(values)
-        assert result.dtype == np.dtype("int32" if dtype == "int8" else "uint32")
+        assert result.dtype == np.dtype(np.float32)
         assert path.name in str(reported[0].message)
         unchanged = ad.read_h5ad(path).X
         assert isinstance(unchanged, (sparse.csr_matrix, sparse.csc_matrix))

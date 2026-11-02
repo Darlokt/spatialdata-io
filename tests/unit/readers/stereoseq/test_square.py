@@ -319,7 +319,7 @@ class TestAggregateCounts:
             ([2**24, 1, 1], "u4", "float64"),
             ([2**53, 1, 1], "u8", "uint64"),
             ([2**53 + 1, 1], "u8", "uint64"),
-            ([2**64 - 1, 1], "u8", "float64"),
+            ([2**64 - 1, 1], "u8", "float32"),
         ],
     )
     def test_exact_sums_and_source_ownership(

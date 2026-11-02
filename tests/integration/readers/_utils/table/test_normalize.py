@@ -12,7 +12,8 @@ import pytest
 import tifffile
 from scipy import sparse
 
-from spatialdata_io import iss, stereoseq
+from spatialdata_io import stereoseq
+from spatialdata_io.experimental import iss
 from spatialdata_io.readers._utils.table import normalize_owned_anndata
 from tests.integration.readers.stereoseq._fixtures import write_analysis
 

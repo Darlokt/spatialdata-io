@@ -47,8 +47,8 @@ def curio(path: str | Path) -> SpatialData:
     SpatialData
         ``tables['table']`` contains owned, eager, finite canonical CSR sparse
         array expression preserving values, observation order and feature order.
-        Duplicate coordinates are summed; integer storage promotes losslessly
-        when necessary. No supported exact representation raises an error.
+        Duplicate coordinates are summed; integer overflow promotes directly
+        to exact float32 or float64 storage. No supported exact representation raises an error.
         Other layers retain their source representation. Cluster assignments are
         aligned by bead ID and stored as lexical categorical ``obs['cluster']``,
         with categories in first-occurrence order in the final H5AD row order.

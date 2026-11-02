@@ -22,7 +22,6 @@ I/O for the `spatialdata` project.
     cosmx
     curio
     dbit
-    iss
     macsima
     mcmicro
     merscope
@@ -45,6 +44,19 @@ I/O for the `spatialdata` project.
     geojson
 ```
 
+### Experimental readers
+
+The ISS reader imports a caller-selected image, segmentation and H5AD table
+from an in situ sequencing workflow. Its entry point is
+`spatialdata_io.experimental.iss`.
+
+```{eval-rst}
+.. autosummary::
+    :toctree: generated
+
+    experimental.iss
+```
+
 ### Conversion functions
 
 For direct table access, explicit table/centroid position selection and importing
@@ -57,8 +69,8 @@ The exporter returns one coordinate frame per call and does not export images.
 .. autosummary::
     :toctree: generated
 
-    experimental.from_legacy_anndata
-    experimental.to_legacy_anndata
+    converters.legacy_anndata.from_legacy_anndata
+    converters.legacy_anndata.to_legacy_anndata
     generic_to_zarr
 ```
 

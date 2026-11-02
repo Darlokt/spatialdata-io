@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from click.testing import CliRunner
 
-    from tests.integration.readers.iss.conftest import IssDataset
+    from tests.integration.experimental.iss.conftest import IssDataset
 
 
 @pytest.mark.cli

@@ -17,10 +17,10 @@ if TYPE_CHECKING:
     from dask.array import Array
     from xarray import DataArray, DataTree
 
+    from spatialdata_io.experimental.iss._layout import _IssLayout
     from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.image.tiff import TiffMetadata
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.iss._layout import _IssLayout
 
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
