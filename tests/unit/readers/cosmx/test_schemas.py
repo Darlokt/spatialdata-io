@@ -210,3 +210,18 @@ class TestHalfUnits:
     def test_rejects_non_decimal(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="non-decimal"):
             half_units(pa.array(["1", "0x10"]), _path(tmp_path), "x")
+
+    def test_representable_extremes_and_exponent_cancellation(self, tmp_path: Path) -> None:
+        tokens = ["0e-323", "-0.000e-320", "0e308", "0." + "0" * 400 + "e400"]
+        np.testing.assert_array_equal(half_units(pa.array(tokens), _path(tmp_path), "x"), [5e-324, 5e-324, 5e307, 0.5])
+
+    @pytest.mark.parametrize(
+        "token",
+        ["5e-324", "0e-400", "0e309", "0e9223372036854775808", "0.0e-9223372036854775808"],
+    )
+    def test_unrepresentable_width_has_artifact_context(self, tmp_path: Path, token: str) -> None:
+        with np.errstate(all="raise"), pytest.raises(ReaderFormatError, match=r"rounding.*(width|exponent)") as caught:
+            half_units(pa.array([token]), _path(tmp_path), "x")
+        assert "cosmx" in str(caught.value)
+        assert "source.csv" in str(caught.value)
+        assert "'x'" in str(caught.value)

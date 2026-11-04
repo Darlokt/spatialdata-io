@@ -7,7 +7,11 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import sparse
 
-from spatialdata_io.readers._utils.table._arrays import as_csr_array, validate_compressed_sparse
+from spatialdata_io.readers._utils.table._arrays import (
+    _compressed_to_csr,
+    _validate_value_dtype,
+    validate_compressed_sparse,
+)
 from spatialdata_io.readers._utils.table._count_values import count_accumulation_dtype
 
 _BOUND_BATCH_SIZE = 1_048_576
@@ -72,7 +76,7 @@ def _exact_integer_reduction(
     if limits.min <= minimum and maximum <= limits.max:
         # Signed cancellation is permitted: fixed-width integer reduction has
         # the exact completed value whenever that value fits the source dtype.
-        return as_csr_array(source)
+        return _compressed_to_csr(source, owns_data=False)
 
     if not exact_float64:
         message = "Integer duplicate sums have no supported lossless float32 or float64 representation."
@@ -81,7 +85,7 @@ def _exact_integer_reduction(
     if arithmetic_dtype is not None:
         # astype casts before reducing duplicates. The magnitude bound proves
         # every source value and signed partial sum exact in this arithmetic.
-        result = as_csr_array(source.astype(arithmetic_dtype))
+        result = _compressed_to_csr(source.astype(arithmetic_dtype), owns_data=True)
         return (
             result
             if result.dtype == dtype
@@ -107,7 +111,7 @@ def _exact_integer_reduction(
         if source.format == "csr"
         else sparse.csc_array((values, indices, indptr), shape=source.shape)
     )
-    return as_csr_array(result)
+    return _compressed_to_csr(result, owns_data=True)
 
 
 def normalize_sparse_duplicates(
@@ -148,6 +152,7 @@ def normalize_sparse_duplicates(
     readers select expected aggregation versus imported-data reporting.
     """
     validate_compressed_sparse(source)
+    _validate_value_dtype(source.dtype, parameter="data")
     # A fresh wrapper recomputes canonicality from storage rather than trusting
     # cached flags that third-party buffers may have invalidated. It borrows
     # buffers; noncanonical reduction in as_csr_array establishes ownership.
@@ -157,9 +162,13 @@ def normalize_sparse_duplicates(
         else sparse.csc_array((source.data, source.indices, source.indptr), shape=source.shape, copy=False)
     )
     if compressed.has_canonical_format:
-        if isinstance(source, sparse.csr_array) and source.has_canonical_format:
-            return as_csr_array(source)
-        return as_csr_array(compressed)
+        if (
+            isinstance(source, sparse.csr_array)
+            and source.has_canonical_format
+            and source.data.size == compressed.data.size
+        ):
+            return _compressed_to_csr(source, owns_data=False)
+        return _compressed_to_csr(compressed, owns_data=False)
     if compressed.dtype.kind in "iu":
         limits = np.iinfo(compressed.dtype)
         values = compressed.data
@@ -173,4 +182,4 @@ def normalize_sparse_duplicates(
             # partial sums, without changing the imported expression contract.
             arithmetic_dtype = count_accumulation_dtype(max(-minimum, maximum) * maximum_records)
             return _exact_integer_reduction(compressed, arithmetic_dtype)
-    return as_csr_array(compressed)
+    return _compressed_to_csr(compressed, owns_data=False)

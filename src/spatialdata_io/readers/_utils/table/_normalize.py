@@ -29,20 +29,16 @@ def _require_owned_in_memory_anndata(adata: AnnData, /) -> None:
 def _normalized_expression(
     data: object, *, location: str, duplicate_sums: list[SparseDuplicateSummary] | None
 ) -> sparse.csr_array:
-    if (
-        duplicate_sums is not None
-        and sparse.issparse(data)
-        and not isinstance(data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix))
+    if sparse.issparse(data) and not isinstance(
+        data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)
     ):
-        message = "Imported sparse expression must use CSR or CSC storage."
-        raise TypeError(message)
+        error = TypeError("Owned sparse expression must use CSR or CSC storage.")
+        error.add_note(f"while normalizing {location}")
+        raise error
     try:
-        if duplicate_sums is not None and isinstance(
-            data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)
-        ):
+        if isinstance(data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
             result = normalize_sparse_duplicates(data)
-            combined = int(data.indptr[-1]) - result.nnz
-            if combined:
+            if duplicate_sums is not None and (combined := int(data.indptr[-1]) - result.nnz):
                 duplicate_sums.append(
                     SparseDuplicateSummary(location.removeprefix("adata."), combined, data.dtype, result.dtype)
                 )
@@ -102,14 +98,14 @@ def normalize_owned_anndata(
         Names of layers whose documented meaning is expression or counts.
         Unnamed layers and ``raw.X`` are deliberately not normalized.
     duplicate_sums
-        Optional reader-owned destination for imported duplicate summaries.
-        Supplying a list opts into lossless floating promotion when completed
-        imported CSR/CSC integer duplicate sums exceed their source dtype.
+        Optional reader-owned destination for duplicate summaries. Collecting
+        summaries does not change numerical behavior or accepted storage.
+        CSR/CSC integer duplicate sums exceeding their source dtype always
+        use lossless floating promotion.
         Promoted arrays use float32 when exact, otherwise float64; an inexact
         floating result raises. Sufficient source dtypes and existing
         floating/boolean semantics are retained. The reader emits one warning
-        from the accumulated summaries only after successful assembly. Omit
-        this option to retain ordinary dtype-preserving normalization.
+        from the accumulated summaries only after successful assembly.
 
     Returns
     -------
@@ -123,7 +119,8 @@ def normalize_owned_anndata(
         selected expression values are malformed.
     TypeError
         If ``adata`` is backed or selected expression values use unsupported,
-        lazy, or otherwise non-memory storage.
+        lazy, otherwise non-memory storage, or a sparse format other than
+        CSR/CSC. Dense numerical NumPy storage remains supported.
     KeyError
         If a requested expression layer does not exist.
 

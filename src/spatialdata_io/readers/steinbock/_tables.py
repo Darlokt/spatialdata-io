@@ -102,8 +102,9 @@ def _set_positions(table: ad.AnnData, samples: Mapping[str, _SampleRasters], pat
     if len(spacings) == len(samples):
         # Regionprops averages zero-based pixel indices; the unchanged raster
         # locates their centres half a pixel inward from its corner origin.
-        with np.errstate(over="ignore", invalid="ignore"):
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
             physical = np.add(native, 0.5, dtype=np.float64)
+            nonzero = physical != 0
             if len(spacings) == 1:
                 physical *= next(iter(spacings.values()))
             else:
@@ -115,6 +116,13 @@ def _set_positions(table: ad.AnnData, samples: Mapping[str, _SampleRasters], pat
                 path=path,
                 found="nonfinite physical positions",
                 expected="finite float64 physical XY",
+            )
+        if np.any(nonzero & (physical == 0)):
+            raise ReaderFormatError(
+                context=ReaderErrorContext("steinbock", "positions"),
+                path=path,
+                found="nonzero shifted pixel coordinates becoming zero physical positions",
+                expected="nonzero float64 physical XY for nonzero shifted pixel coordinates",
             )
         table.obsm["spatial"] = physical
         evidence = {sample.frame: sample.calibration for sample in samples.values()}

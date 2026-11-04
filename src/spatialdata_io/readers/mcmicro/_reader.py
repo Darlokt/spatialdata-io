@@ -108,8 +108,10 @@ def mcmicro(
         ``<source-image-frame>_regionprops_indices``. If every image represented
         by measured rows has complete calibration, ``obsm['spatial']`` contains
         float64 micrometre XY, calculated as ``(native_xy + 0.5) * spacing_xy_um``
-        in the unchanged source raster frame. Multiple segmentations share their
-        image frame; TMA cores remain independent. Multiple native/physical
+        in the unchanged source raster frame. Nonfinite physical values and
+        nonzero shifted pixel coordinates becoming zero during multiplication
+        fail. Multiple segmentations share their image frame; TMA cores remain
+        independent. Multiple native/physical
         frames use categorical ``spatial_pixel_frame``/``spatial_frame`` columns.
         Missing, partial or mixed calibration omits physical ``spatial`` for
         the entire aggregate. Unmeasured images and independent tissue masks

@@ -75,6 +75,23 @@ class TestMacsima:
         assert result.attrs["spatialdata_io_reader"] == "macsima"
         assert result.attrs["spatialdata_io_format_version"] == software
 
+    @pytest.mark.parametrize("version", [0, 1])
+    @pytest.mark.parametrize("failure", ["calibration", "exposure"])
+    def test_invalid_derived_metadata_fails_without_pixel_tasks(
+        self, tmp_path: Path, version: SchemaVersion, failure: str
+    ) -> None:
+        channel = ChannelSpec("CD3", 1, "APC", exposure_ms="-1e-400" if failure == "exposure" else "1")
+        write_stack(
+            tmp_path / "run",
+            (channel,),
+            version=version,
+            physical_size=("5e-324", "nm") if failure == "calibration" else ("0.17", "µm"),
+        )
+        executed: list[object] = []
+        with Callback(posttask=lambda *args: executed.append(args)), pytest.raises(ReaderFormatError):
+            macsima(tmp_path / "run")
+        assert not executed
+
     def test_multiple_folders_keep_provenance_and_separate_frames(self, tmp_path: Path) -> None:
         write_stack(tmp_path / "root" / "first run", V0_CHANNELS, version=0)
         write_stack(tmp_path / "root" / "second", V1_CHANNELS, version=1)

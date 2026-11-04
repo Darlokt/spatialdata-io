@@ -5,6 +5,7 @@ from __future__ import annotations
 from math import prod
 from typing import TYPE_CHECKING, cast
 
+import numpy as np
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Scale
 from spatialdata.transformations import Sequence as TransformSequence
@@ -14,7 +15,6 @@ from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_a
 from spatialdata_io.readers.cosmx._transforms import raster_to_local
 
 if TYPE_CHECKING:
-    import numpy as np
     from dask.array import Array
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
@@ -66,13 +66,25 @@ def _normalize(raster: LazyRaster, path: ArtifactFile, artifact: str, target: tu
         ) from error
 
 
-def _frames(fov: int, height: int, placement: Placement, pixel_size_um: float | None) -> dict[str, BaseTransformation]:
+def _frames(
+    fov: int, height: int, placement: Placement, pixel_size_um: float | None, path: ArtifactFile
+) -> dict[str, BaseTransformation]:
     """Map pixel centers to the FOV's local frame, then to global pixels."""
     local = raster_to_local(height)
     steps: list[BaseTransformation] = [local, placement.local_to_global()]
     if pixel_size_um is not None:
         steps.append(Scale([pixel_size_um, pixel_size_um], axes=("x", "y")))
-    return {str(fov): local, "global": TransformSequence(steps)}
+    global_ = TransformSequence(steps)
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        matrix = global_.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
+    if not np.isfinite(matrix).all():
+        raise ReaderFormatError(
+            context=ReaderErrorContext("cosmx", "FOV raster placement"),
+            path=path,
+            found=f"FOV {fov} nonfinite global raster affine",
+            expected="a finite affine after pixel-center placement and calibration",
+        )
+    return {str(fov): local, "global": global_}
 
 
 def _check_pyramid(array: Array, options: RasterOptions) -> None:
@@ -97,7 +109,7 @@ def read_image(
         rgb=False,
         scale_factors=options.model_scale_factors,
         chunks=options.image_chunks(),
-        transformations=_frames(fov, grid[0], placement, pixel_size_um),
+        transformations=_frames(fov, grid[0], placement, pixel_size_um, path),
     )
     return element, grid
 
@@ -132,6 +144,6 @@ def read_labels(  # noqa: PLR0913, RUF100 - Independent raster/grid/placement st
         dims=_LABEL_AXES,
         scale_factors=options.model_scale_factors,
         chunks=options.label_chunks(),
-        transformations=_frames(fov, int(labels.shape[0]), placement, pixel_size_um),
+        transformations=_frames(fov, int(labels.shape[0]), placement, pixel_size_um, path),
     )
     return element, labels.dtype

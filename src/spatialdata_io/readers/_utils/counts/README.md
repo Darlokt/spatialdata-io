@@ -21,12 +21,29 @@ Both functions return the identical, freshly read `AnnData` after
 sparse array. A canonical Scanpy CSR matrix can be wrapped without copying its
 `data`, `indices`, or `indptr` buffers. Conversion from another sparse format
 allocates only the required CSR storage and never densifies expression data.
-Negative and fractional entries retained by Scanpy fail before local duplicate
-summation. Finiteness and canonical CSR storage remain the shared table
-normalizer's responsibility. Float32 remains the normal Scanpy representation,
-including its integer precision limits: large source integers may already have
-rounded. These checks do not reread expression records or create a second
-expression matrix. Upstream filtering can discard unselected source entries.
+Negative, fractional and nonfinite entries retained by Scanpy fail before local
+duplicate summation. Integer duplicate counts combine losslessly using the
+shared table normalizer; sufficient source dtype is retained, otherwise exact
+float32/f64 promotion is used. Decoded floating and boolean duplicates use a
+Python-integer partial-sum bound to choose exact floating arithmetic before
+reduction. An unproved bound above 2**53 raises a contextual precision error;
+no arbitrary-precision floating fallback or unconditional widening is added.
+Sorting without duplicates does not require an addition bound. Canonical
+decoded values retain their dtype and suitable buffers are reused.
+
+For example, decoded float32 contributions 16,777,216 and 1 require float64
+addition to preserve 16,777,217. The generic expression normalizer's ordinary
+floating reduction alone does not establish this count-specific guarantee.
+Boolean count contributions add numerically; generic boolean expression keeps
+its distinct boolean reduction semantics. Sparse capacity beyond the terminal
+pointer is not an active count contribution.
+
+Scanpy converts int32 HDF5 values to float32 while other source dtypes can
+remain integer. Source integers may already have rounded before local checks;
+upstream filtering can discard unselected source entries. Local guarantees are
+relative to the retained decoded contributions, not original source text.
+No expression records are reread and no source decoder is replaced. Final
+count-family storage remains reader-owned, as does Xenium protein scaling.
 
 The return value is eager, owned, and in memory. The public Scanpy readers own
 expression and annotation parsing and return fully materialized tables. The

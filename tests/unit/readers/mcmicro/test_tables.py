@@ -221,6 +221,35 @@ class TestSetPositions:
         else:
             assert "spatial" not in table.obsm
 
+    @pytest.mark.parametrize(("native_x", "physical_x"), [(-0.5, 0.0), (0.5, 5e-324), (-1.5, -5e-324)])
+    def test_shifted_zero_and_representable_subnormal_are_valid(
+        self, tmp_path: Path, native_x: float, physical_x: float
+    ) -> None:
+        native = np.asarray([[native_x, 0.5]], dtype=np.float64)
+        table = ad.AnnData(sparse.csr_array([[1]]))
+        _set_positions(
+            table,
+            native,
+            [ImageGrid((10, 10), (5e-324, 3.0), "global", "source OME spacing")],
+            [1],
+            ArtifactFile(tmp_path / "source.csv"),
+        )
+        np.testing.assert_array_equal(table.obsm["spatial"], [[physical_x, 3]])
+        np.testing.assert_array_equal(native, [[native_x, 0.5]])
+        assert table.obsm["spatial_pixels"] is native
+        assert table.obsm["spatial"].dtype == np.dtype(np.float64)
+
+    def test_nonzero_shifted_coordinate_cannot_collapse_to_zero(self, tmp_path: Path) -> None:
+        table = ad.AnnData(sparse.csr_array([[1]]))
+        with pytest.raises(ReaderFormatError, match="nonzero"):
+            _set_positions(
+                table,
+                np.asarray([[0.0, 1.0]]),
+                [ImageGrid((10, 10), (5e-324, 3.0), "global", "source OME spacing")],
+                [1],
+                ArtifactFile(tmp_path / "source.csv"),
+            )
+
     def test_nonfinite_physical_output_fails(self, tmp_path: Path) -> None:
         table = ad.AnnData(sparse.csr_array([[1]]))
         with pytest.raises(ReaderFormatError, match="nonfinite physical positions"):

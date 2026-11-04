@@ -113,6 +113,8 @@ def steinbock(
         within their sample's pixel frame. If every sample has resolved XY
         calibration, ``obsm['spatial']`` is float64 micrometre XY, calculated
         as ``(native_xy + 0.5) * spacing_xy_um`` in each unchanged raster frame.
+        Nonfinite physical values and nonzero shifted pixel coordinates that
+        become zero during multiplication fail.
         One calibrated sample uses ``global``; independent samples use
         categorical ``obs['spatial_frame']``. Multiple native frames use
         categorical ``obs['spatial_pixel_frame']``. Missing or mixed calibration

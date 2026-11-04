@@ -11,12 +11,17 @@ from scanpy import read_10x_mtx as _scanpy_read_10x_mtx
 from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.table import normalize_owned_anndata
+from spatialdata_io.readers._utils.table import (
+    count_accumulation_dtype,
+    normalize_owned_anndata,
+    validate_compressed_sparse,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from anndata import AnnData
+    from numpy.typing import NDArray
 
     from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 
@@ -28,6 +33,73 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
     | {f"COM{suffix}" for suffix in "123456789¹²³"}
     | {f"LPT{suffix}" for suffix in "123456789¹²³"}
 )
+
+
+def _prepare_count_arithmetic(
+    matrix: sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix,
+    path: Path,
+    context: ReaderErrorContext,
+) -> sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix:
+    """Choose exact arithmetic before reducing decoded floating or boolean counts."""
+    # Recompute canonicality without changing a borrowed object's cached flags.
+    source = (
+        sparse.csr_array((matrix.data, matrix.indices, matrix.indptr), shape=matrix.shape, copy=False)
+        if isinstance(matrix, (sparse.csr_array, sparse.csr_matrix))
+        else sparse.csc_array((matrix.data, matrix.indices, matrix.indptr), shape=matrix.shape, copy=False)
+    )
+    if source.has_canonical_format:
+        return matrix
+
+    owns_buffers = False
+    if not source.has_sorted_indices:
+        source = source.copy()
+        source.sort_indices()
+        owns_buffers = True
+        if source.has_canonical_format:
+            return source
+
+    maximum_records = 0
+    for start in range(0, len(source.indptr) - 1, _VALIDATION_BATCH_SIZE):
+        spans = np.diff(source.indptr[start : start + _VALIDATION_BATCH_SIZE + 1])
+        maximum_records = max(maximum_records, int(spans.max(initial=0)))
+    bound = int(source.data.max(initial=0)) * maximum_records
+    dtype = count_accumulation_dtype(bound)
+    if dtype is None:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="a decoded duplicate-sum bound exceeding float64 consecutive-integer precision",
+            expected="an exact floating duplicate-sum bound at most 2**53",
+        )
+    if matrix.dtype.itemsize < dtype.itemsize:
+        # SciPy casts values before combining duplicates. Its dtype-changing
+        # conversion also owns the structural buffers needed by the reduction.
+        return source.astype(dtype)
+    if owns_buffers:
+        source.sum_duplicates()
+    return source
+
+
+def _validate_count_values(
+    values: NDArray[np.bool_ | np.integer | np.floating], path: Path, context: ReaderErrorContext
+) -> None:
+    """Validate retained count contributions before duplicate reduction."""
+    if values.size and values.min() < 0:
+        raise ReaderFormatError(
+            context=context, path=path, found="negative counts", expected="nonnegative count values"
+        )
+    if values.dtype.kind != "f":
+        return
+    for start in range(0, values.size, _VALIDATION_BATCH_SIZE):
+        batch = values[start : start + _VALIDATION_BATCH_SIZE]
+        if not np.isfinite(batch).all():
+            raise ReaderFormatError(
+                context=context, path=path, found="nonfinite counts", expected="finite count values"
+            )
+        if np.any(batch != np.floor(batch)):
+            raise ReaderFormatError(
+                context=context, path=path, found="fractional counts", expected="integer count values"
+            )
 
 
 def _normalize_counts(adata: AnnData, path: Path, context: ReaderErrorContext) -> AnnData:
@@ -45,19 +117,14 @@ def _normalize_counts(adata: AnnData, path: Path, context: ReaderErrorContext) -
     ):
         message = "The 10x source must return a real numerical CSR or CSC count matrix."
         raise TypeError(message)
-    values = matrix.data
-    if values.size and values.min() < 0:
-        raise ReaderFormatError(
-            context=context, path=path, found="negative counts", expected="nonnegative count values"
-        )
-    if values.dtype.kind == "f":
-        for start in range(0, values.size, _VALIDATION_BATCH_SIZE):
-            batch = values[start : start + _VALIDATION_BATCH_SIZE]
-            # NaN and infinities remain the shared normalizer's responsibility.
-            if np.any(batch > np.floor(batch)):
-                raise ReaderFormatError(
-                    context=context, path=path, found="fractional counts", expected="integer count values"
-                )
+    if matrix.dtype == np.dtype(np.float16):
+        message = "Float16 count storage is unsupported."
+        raise TypeError(message)
+    validate_compressed_sparse(matrix)
+    values = matrix.data[: int(matrix.indptr[-1])]
+    _validate_count_values(values, path, context)
+    if matrix.dtype.kind in "bf":
+        adata.X = _prepare_count_arithmetic(matrix, path, context)
     return normalize_owned_anndata(adata)
 
 
@@ -121,8 +188,11 @@ def read_10x_h5(
     alignment, and source lifetime. Canonical CSR matrix storage can be wrapped
     as a sparse array without copying its buffers.
     Count checks inspect entries retained by Scanpy before local duplicate
-    summation. Filtering can discard unselected source entries. Float32 storage
-    is retained; source integers above its exact range can already be rounded.
+    summation. Integer duplicates combine losslessly; decoded floating and
+    boolean counts use a proved float32/float64 partial-sum bound before adding
+    duplicates. An unproved floating bound raises a contextual precision error.
+    Canonical decoded values retain their dtype. Filtering and source decoding
+    can already discard or round information; local reduction cannot recover it.
     """
     try:
         adata = _scanpy_read_10x_h5(
@@ -208,8 +278,9 @@ def read_10x_mtx(  # noqa: PLR0913, RUF100
     because Scanpy concatenates them with fixed companion basenames.
     Only the MatrixMarket header is inspected outside Scanpy. Its parser can
     truncate malformed integer tokens and sum duplicates before returning;
-    validation of its result cannot recover those source records. Float32
-    storage is retained, including its integer precision limits.
+    validation of its result cannot recover those source records. Retained
+    duplicates use checked integer or bound-proven floating arithmetic.
+    Canonical decoded float32 values retain their upstream precision limits.
     """
     try:
         _validate_mtx_prefix(prefix)

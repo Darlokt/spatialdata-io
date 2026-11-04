@@ -280,9 +280,13 @@ def build_table(
         },
     }
     if pixel_size_um is not None:
-        physical = metadata.global_ * pixel_size_um
+        with np.errstate(over="ignore", under="ignore"):
+            physical = metadata.global_ * pixel_size_um
         if not np.isfinite(physical).all():
             msg = "pixel_size_um produces nonfinite physical cell coordinates."
+            raise ValueError(msg)
+        if ((metadata.global_ != 0) & (physical == 0)).any():
+            msg = "pixel_size_um makes nonzero physical cell coordinates underflow to zero."
             raise ValueError(msg)
         table.obsm["spatial"] = physical
         descriptions["coordinates"]["spatial"] = {

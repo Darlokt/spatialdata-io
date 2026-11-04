@@ -87,18 +87,29 @@ def raster_to_local(height: int) -> Affine:
     return Affine(np.asarray(matrix, dtype=np.float64), input_axes=_AXES, output_axes=_AXES)
 
 
-def _intervals(samples: AxisSamples, rows: npt.NDArray[np.bool_]) -> dict[Sign, tuple[float, float]]:
+def _intervals(
+    samples: AxisSamples, rows: npt.NDArray[np.bool_], path: ArtifactFile
+) -> dict[Sign, tuple[float, float]]:
     """Return the offset interval consistent with every selected cell, for each sign."""
     local, global_ = samples.local[rows], samples.global_[rows]
-    rounding_tolerance = (
-        samples.local_half[rows]
-        + samples.global_half[rows]
-        + _DECODING_ULPS * np.maximum(np.abs(local), np.abs(global_))
-    )
+    with np.errstate(over="ignore", invalid="ignore"):
+        rounding_tolerance = (
+            samples.local_half[rows]
+            + samples.global_half[rows]
+            + _DECODING_ULPS * np.maximum(np.abs(local), np.abs(global_))
+        )
+    if not np.isfinite(rounding_tolerance).all():
+        raise _error(path, found="nonfinite printed-coordinate tolerance", expected="finite offset intervals")
     feasible: dict[Sign, tuple[float, float]] = {}
     for sign in (1, -1):
-        offsets = global_ - sign * local
-        low, high = float((offsets - rounding_tolerance).max()), float((offsets + rounding_tolerance).min())
+        with np.errstate(over="ignore", invalid="ignore"):
+            offsets = global_ - sign * local
+            lower, upper = offsets - rounding_tolerance, offsets + rounding_tolerance
+        # An unrepresentable sign candidate cannot establish a finite placement.
+        # The other sign may still have a valid, finite intersection.
+        if not (np.isfinite(lower).all() and np.isfinite(upper).all()):
+            continue
+        low, high = float(lower.max()), float(upper.min())
         if low <= high:
             feasible[sign] = (low, high)
     return feasible
@@ -128,6 +139,26 @@ def _midpoint(low: float, high: float) -> float:
     return low + (high - low) / 2 if low >= 0 or high <= 0 else (low + high) / 2
 
 
+def _position_offset(
+    value: float, half: float, interval: tuple[float, float] | None, name: str, path: ArtifactFile
+) -> float:
+    """Intersect a finite printed origin interval with the optional cell evidence."""
+    low, high = value - half, value + half
+    if not np.isfinite([low, high]).all():
+        raise _error(path, found=f"{name} nonfinite pixel-position interval", expected="finite offset intervals")
+    if interval is None:
+        return value
+    low, high = max(interval[0], low), min(interval[1], high)
+    if low > high:
+        raise _error(
+            path,
+            found=f"{name} position {value} outside cell-derived {interval}",
+            expected="FOV positions consistent with every cell",
+        )
+    # A rounded origin is an interval, not necessarily a feasible offset itself.
+    return value if low <= value <= high else _midpoint(low, high)
+
+
 def solve_placements(
     fovs: npt.NDArray[np.int64],
     samples: tuple[AxisSamples, AxisSamples],
@@ -141,12 +172,12 @@ def solve_placements(
     for fov in np.unique(fovs).tolist():
         rows = fovs == fov
         for axis, axis_samples in enumerate(samples):
-            feasible = _intervals(axis_samples, rows)
+            feasible = _intervals(axis_samples, rows, path)
             if not feasible:
                 raise _error(
                     path,
                     found=f"FOV {fov} {_AXES[axis]} coordinates inconsistent with any translation",
-                    expected="global = ±local + offset within the printed precision of every cell",
+                    expected="finite global = ±local + offset within the printed precision of every cell",
                 )
             candidates[axis][fov] = feasible
 
@@ -159,17 +190,7 @@ def solve_placements(
             interval = candidates[axis].get(fov, {}).get(sign)
             if position is not None and sign == 1:
                 value, half = (position.x, position.x_half) if axis == 0 else (position.y, position.y_half)
-                if interval is not None:
-                    low, high = max(interval[0], value - half), min(interval[1], value + half)
-                    if low > high:
-                        raise _error(
-                            path,
-                            found=f"FOV {fov} {_AXES[axis]} position {value} outside cell-derived {interval}",
-                            expected="FOV positions consistent with every cell",
-                        )
-                    # A rounded origin is an interval, not necessarily a feasible offset itself.
-                    value = value if low <= value <= high else _midpoint(low, high)
-                offsets.append(value)
+                offsets.append(_position_offset(value, half, interval, f"FOV {fov} {_AXES[axis]}", path))
             elif interval is not None:
                 offsets.append(_midpoint(*interval))
             else:
@@ -178,5 +199,7 @@ def solve_placements(
                     found=f"FOV {fov} without cells or a pixel position",
                     expected="a placement for every FOV with rasters",
                 )
+        if not np.isfinite(offsets).all():
+            raise _error(path, found=f"FOV {fov} nonfinite placement", expected="finite affine offsets")
         placements[fov] = Placement(signs[0], signs[1], offsets[0], offsets[1])
     return placements

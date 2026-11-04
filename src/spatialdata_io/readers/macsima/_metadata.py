@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 from ome_types.model import UnitsLength
@@ -186,12 +187,19 @@ def _exposure_ms(text: str | None, unit: str | None, origin: _Origin) -> float |
     if unit is not None and unit != EXPOSURE_UNIT:
         raise origin.error(found=f"exposure unit {unit!r}", expected=f"exposure in {EXPOSURE_UNIT!r}")
 
+    expected = "a finite non-negative number representable as nonzero float64 when nonzero"
+    try:
+        source = Decimal(text)
+    except InvalidOperation as error:
+        raise origin.error(found=f"exposure {text!r}", expected=expected) from error
+    if not source.is_finite() or (source.is_signed() and not source.is_zero()):
+        raise origin.error(found=f"exposure {text!r}", expected=expected)
     try:
         exposure = float(text)
     except ValueError as error:
-        raise origin.error(found=f"exposure {text!r}", expected="a finite non-negative number") from error
-    if not math.isfinite(exposure) or exposure < 0:
-        raise origin.error(found=f"exposure {text!r}", expected="a finite non-negative number")
+        raise origin.error(found=f"exposure {text!r}", expected=expected) from error
+    if not math.isfinite(exposure) or (exposure == 0 and not source.is_zero()):
+        raise origin.error(found=f"exposure {text!r}", expected=expected)
     return exposure
 
 

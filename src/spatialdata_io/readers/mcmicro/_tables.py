@@ -231,14 +231,21 @@ def _set_positions(
     if all(x is not None and y is not None for x, y in (grid.declared_sizes_um for grid in grids)):
         # MCQuant exports regionprops pixel-index centres. Match the unchanged
         # raster's half-pixel centre convention before applying its XY spacing.
-        with np.errstate(over="ignore", invalid="ignore"):
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
             physical = np.add(native, 0.5, dtype=np.float64)
+            nonzero = physical != 0
             offset = 0
             for grid, size in zip(grids, sizes, strict=True):
                 physical[offset : offset + size] *= grid.declared_sizes_um
                 offset += size
         if not np.isfinite(physical).all():
             raise schema_error(path, found="nonfinite physical positions", expected="finite float64 physical XY")
+        if np.any(nonzero & (physical == 0)):
+            raise schema_error(
+                path,
+                found="nonzero shifted pixel coordinates becoming zero physical positions",
+                expected="nonzero float64 physical XY for nonzero shifted pixel coordinates",
+            )
         table.obsm["spatial"] = physical
         evidence = {grid.frame: grid.calibration for grid in grids}
         if frame_codes is None:

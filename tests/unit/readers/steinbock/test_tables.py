@@ -10,13 +10,16 @@ import pandas as pd
 import pytest
 from dask.callbacks import Callback
 from scipy import sparse
+from xarray import DataArray
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.steinbock._images import _SampleRasters
 from spatialdata_io.readers.steinbock._schemas import LabelGrid
 from spatialdata_io.readers.steinbock._tables import (
     _read_table,
     _set_instance_ids,
+    _set_positions,
 )
 
 if TYPE_CHECKING:
@@ -217,3 +220,28 @@ class TestSetInstanceIds:
 
         assert int(obs["cell_id"].iloc[0]) == identifier
         assert str(obs["cell_id"].dtype) == ("uint64[pyarrow]" if identifier >= 2**63 else "int64[pyarrow]")
+
+
+class TestSetPositions:
+    @pytest.mark.parametrize(("native_x", "physical_x"), [(-0.5, 0.0), (0.5, 5e-324), (-1.5, -5e-324)])
+    def test_shifted_zero_and_representable_subnormal_are_valid(
+        self, tmp_path: Path, native_x: float, physical_x: float
+    ) -> None:
+        table, samples = self._inputs(native_x)
+        _set_positions(table, samples, ArtifactFile(tmp_path / "cells.h5ad"))
+        np.testing.assert_array_equal(table.obsm["spatial"], [[physical_x, 3]])
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[native_x, 0.5]])
+        assert table.obsm["spatial"].dtype == np.dtype(np.float64)
+
+    def test_rejects_nonzero_shifted_coordinate_collapsing_to_zero(self, tmp_path: Path) -> None:
+        table, samples = self._inputs(0)
+        with pytest.raises(ReaderFormatError, match=r"nonzero.*zero"):
+            _set_positions(table, samples, ArtifactFile(tmp_path / "cells.h5ad"))
+
+    @staticmethod
+    def _inputs(native_x: float) -> tuple[ad.AnnData, dict[str, _SampleRasters]]:
+        table = ad.AnnData(obs=pd.DataFrame({"image": ["sample.tiff"]}, index=["cell"]))
+        table.obsm["spatial_pixels"] = np.asarray([[native_x, 0.5]], dtype=np.float64)
+        raster = DataArray(np.zeros((1, 1)))
+        sample = _SampleRasters(raster, raster, _sample(), "global", (5e-324, 3), "test")
+        return table, {"sample": sample}

@@ -49,6 +49,13 @@ class TestPixelSizeUm:
     def test_nanometers_are_divided_exactly(self) -> None:
         assert pixel_size_um(170.0, UnitsLength.NANOMETER, context=_CONTEXT, path=_PATH) == 0.17
 
+    def test_rejects_nanometer_conversion_that_collapses_to_zero(self) -> None:
+        with pytest.raises(ReaderFormatError, match=r"finite positive.*micrometers"):
+            pixel_size_um(5e-324, UnitsLength.NANOMETER, context=_CONTEXT, path=_PATH)
+
+    def test_preserves_representable_subnormal_micrometers(self) -> None:
+        assert pixel_size_um(5e-324, UnitsLength.MICROMETER, context=_CONTEXT, path=_PATH) == 5e-324
+
     @pytest.mark.parametrize("unit", [UnitsLength.MILLIMETER, UnitsLength.PIXEL, UnitsLength.REFERENCEFRAME])
     def test_rejects_other_units(self, unit: UnitsLength) -> None:
         with pytest.raises(ReaderFormatError, match="µm or nm"):

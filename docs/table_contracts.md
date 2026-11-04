@@ -90,6 +90,12 @@ successful reader call identifies affected artifacts/tables/slots, entries
 combined and dtype changes. Mere sorting and expected format aggregation do
 not warn. Mathematical values and source files are preserved.
 
+Owned CSR/CSC normalization uses the same integer reduction whether or not a
+duplicate-summary collector is supplied. The collector controls reporting
+only. Dense NumPy expression is also supported; the owned AnnData boundary
+rejects other sparse formats consistently. Generic sparse-format conversion
+remains a separate operation whose caller chooses sufficient arithmetic.
+
 ## Expression and linkage
 
 Expression is returned as eager, finite, canonical SciPy CSR sparse arrays.

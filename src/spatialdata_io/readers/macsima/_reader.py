@@ -151,6 +151,8 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
           ``autofluorescence``) strings; ``cycle`` int64; ``well``,
           ``fluorophore`` and ``clone`` strings and ``ROI`` nullable Int64,
           NA when absent; ``exposure`` float64 milliseconds, NaN when absent.
+          Exposures must be non-negative; nonzero source text becoming zero
+          in float64 fails.
           Cycle and ROI values are non-negative and at most ``2**63 - 1``.
           The table annotates no element.
         - ``<stack>_nuclei_image`` and ``<stack>_nuclei_table`` when the
@@ -158,10 +160,13 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
           images.
 
         One selected stack uses ``global`` in micrometers through the isotropic
-        OME pixel size (µm or nm). Multiple independent stacks use their own
+        OME pixel size (µm or nm), finite and strictly positive after conversion.
+        Multiple independent stacks use their own
         ``<stack>`` frames; each nuclei stack shares its parent frame. Channels
         are placed on one canvas by their integral
-        OME plane position in pixels (absent positions are the origin). The
+        OME plane position in pixels (absent positions are the origin). Offset
+        validation uses decoded OME float64 values, without recovering source
+        XML precision. The
         canvas starts at the smallest position and spans every channel;
         uncovered pixels are zero, with a warning. A position shared by all
         channels is not represented in the transformation. The reader name

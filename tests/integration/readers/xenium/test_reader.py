@@ -14,6 +14,7 @@ import shapely
 from anndata.tests.helpers import assert_equal
 from click.testing import CliRunner
 from dask.callbacks import Callback
+from scanpy import read_10x_h5
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
@@ -99,6 +100,47 @@ def _q20_counts(result: SpatialData, table: AnnData) -> NDArray[np.int64]:
 
 class TestXenium:
     """Every family returns exact, explicitly linked micrometre elements."""
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "first", "second", "expected"),
+        [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
+    )
+    def test_duplicate_h5_counts_finish_before_protein_scaling(
+        self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        path = bundle.root / "cell_feature_matrix.h5"
+        with h5py.File(path, "r+") as handle:
+            data = handle["matrix/data"][:].astype(source_dtype)
+            data[:2] = [first, second]
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+            handle["matrix/indices"][1] = 0
+        decoded = read_10x_h5(path, gex_only=False)
+        assert isinstance(decoded.X, sparse.csr_matrix | sparse.csr_array)
+        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
+        assert not decoded.X.has_canonical_format
+        np.testing.assert_array_equal(decoded.X.data[:2], [first, second])
+
+        result = xenium(bundle.root)
+
+        table = result.tables["table"]
+        expression = _x(table)
+        assert expression.dtype == np.dtype(np.float64)
+        assert expression.has_canonical_format
+        selected = [index for index, kind in enumerate(bundle.feature_types) if kind in DEFAULT_TYPES]
+        truth = bundle.counts[:, selected].astype(np.float64)
+        truth[0, 0] = expected
+        truth[0, 2] = 0
+        truth[:, 3:] /= fx.PROTEIN_FACTOR
+        np.testing.assert_array_equal(expression.toarray(), truth)
+        assert table.obs_names.tolist() == list(bundle.barcodes)
+        assert table.var_names.tolist() == [bundle.features[index] for index in selected]
+        assert get_table_keys(table) == ("cell_labels", "region", "label_id")
+        assert table.obs["label_id"].tolist() == list(bundle.cell_labels)
+        np.testing.assert_array_equal(
+            table.obsm["spatial"], [[1.275, 1.0625], [3.4, 1.0625], [1.7, 3.4], [4.8875, 3.4]]
+        )
 
     @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0), (1.25, 0.0)])
     def test_rejects_malformed_source_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:

@@ -17,6 +17,7 @@ from spatialdata import get_centroids, read_zarr
 
 import spatialdata_io.readers.mcmicro._tables as table_owner
 from spatialdata_io._positions import POSITIONS_KEY
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.mcmicro import mcmicro
 from tests.integration.readers.mcmicro._fixtures import write_mcmicro_dataset
 
@@ -160,6 +161,23 @@ class TestMcmicroPositions:
         else:
             assert "spatial" not in table.obsm
             assert "spatial" not in declaration
+
+    @pytest.mark.parametrize("mode", ["wsi", "tma"])
+    def test_shifted_nonzero_underflow_fails_without_pixel_tasks(
+        self, tmp_path: Path, mode: Literal["wsi", "tma"]
+    ) -> None:
+        fixture = write_mcmicro_dataset(tmp_path, mode=mode)
+        for sample in fixture.samples:
+            image = tmp_path / ("registration" if mode == "wsi" else "dearray") / f"{sample}.ome.tif"
+            _calibrate(image, (5e-324, 3.0))
+        for path in (tmp_path / "quantification").glob("*.csv"):
+            frame = pd.read_csv(path)
+            frame["X_centroid"] = 0.0
+            frame.to_csv(path, index=False)
+        executed: list[object] = []
+        with Callback(posttask=lambda *args: executed.append(args)), pytest.raises(ReaderFormatError, match="nonzero"):
+            mcmicro(tmp_path)
+        assert not executed
 
     def test_mixed_calibration_omits_physical_for_entire_aggregate(self, tmp_path: Path) -> None:
         write_mcmicro_dataset(tmp_path, mode="tma")

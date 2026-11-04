@@ -24,7 +24,7 @@ in `spatialdata_io._raster_defaults`, and used by every reader and command.
 A sequence of integer downsampling factors of at least two, one per generated
 level, applied equally to the images and labels of a dataset. For example
 `(2, 2, 2)` adds three levels, each half the size of the previous one. Images
-are downsampled by interpolation and labels by nearest neighbour, so generated
+are downsampled by averaging and labels by nearest neighbour, so generated
 label levels keep the original label values. Generated label pyramids require
 labels of at most 32 bits; 64-bit labels are only read as a single scale.
 `visium` applies the factors to the full-resolution tissue image only: its

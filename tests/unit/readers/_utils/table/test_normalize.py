@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import PropertyMock
 
 import anndata as ad
@@ -13,7 +13,8 @@ import pytest
 from dask import delayed
 from scipy import sparse
 
-from spatialdata_io.readers._utils.table import normalize_owned_anndata
+from spatialdata_io.readers._utils.table import SparseDuplicateSummary, normalize_owned_anndata
+from spatialdata_io.readers._utils.table._normalize import _normalized_expression
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -37,6 +38,69 @@ def _identity_dense(values: np.ndarray) -> np.ndarray:
 
 class TestNormalizeOwnedAnndata:
     """Validate eager normalization, ownership, and selected-layer behavior."""
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize("collector_state", ["none", "empty", "populated"])
+    @pytest.mark.parametrize(
+        "case",
+        [
+            ([150, 150], "uint8", 300, "float32"),
+            ([2**32 - 1, 2], "uint32", 2**32 + 1, "float64"),
+            ([100, 100, -100], "int8", 100, "int8"),
+            ([100, -100], "int8", 0, "int8"),
+            ([100, 100], "int16", 200, "int16"),
+        ],
+    )
+    def test_duplicate_arithmetic_is_independent_of_diagnostics(
+        self,
+        storage: str,
+        collector_state: Literal["none", "empty", "populated"],
+        case: tuple[list[int], str, int, str],
+    ) -> None:
+        values, dtype, expected, result_dtype = case
+        buffers = (np.array(values, dtype=dtype), np.zeros(len(values), dtype=np.int32), np.array([0, len(values)]))
+        source = (
+            sparse.csr_array(buffers, shape=(1, 1)) if storage == "csr" else sparse.csc_array(buffers, shape=(1, 1))
+        )
+        table = ad.AnnData(source)
+        reports: list[SparseDuplicateSummary] | None = None if collector_state == "none" else []
+        if reports is not None and collector_state == "populated":
+            reports.append(SparseDuplicateSummary("existing", 1, np.dtype(np.int16), np.dtype(np.int16)))
+        previous = 0 if reports is None else len(reports)
+
+        normalize_owned_anndata(table, duplicate_sums=reports)
+
+        result = _assert_canonical_csr(table.X)
+        assert result.dtype == np.dtype(result_dtype)
+        assert result.nnz == 1
+        assert int(result.data[0]) == expected
+        np.testing.assert_array_equal(source.data, values)
+        if reports is not None:
+            assert len(reports) == previous + 1
+            assert reports[-1].slot == "X"
+            assert reports[-1].combined_entries == len(values) - 1
+
+    @pytest.mark.parametrize("collect", [False, True])
+    def test_unrepresentable_duplicate_sum_fails_without_changing_source(self, *, collect: bool) -> None:
+        source = sparse.csr_array(
+            (np.array([2**63 - 1, 2], dtype=np.int64), np.array([0, 0]), np.array([0, 2])), shape=(1, 1)
+        )
+        table = ad.AnnData(source)
+        reports: list[SparseDuplicateSummary] | None = [] if collect else None
+
+        with pytest.raises(ValueError, match="lossless"):
+            normalize_owned_anndata(table, duplicate_sums=reports)
+
+        assert table.X is source
+        np.testing.assert_array_equal(source.data, [2**63 - 1, 2])
+        assert reports is None or reports == []
+
+    @pytest.mark.parametrize("collect", [False, True])
+    def test_rejects_noncompressed_sparse_storage_independently_of_diagnostics(self, *, collect: bool) -> None:
+        with pytest.raises(TypeError, match="CSR or CSC") as error:
+            _normalized_expression(sparse.coo_array([[1]]), location="adata.X", duplicate_sums=[] if collect else None)
+
+        assert error.value.__notes__ == ["while normalizing adata.X"]
 
     @pytest.mark.parametrize(
         "factory",

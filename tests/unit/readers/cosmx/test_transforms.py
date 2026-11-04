@@ -212,3 +212,40 @@ class TestSolvePlacements:
                 required=frozenset({3}),
                 positions={3: FovPosition(300.0, 30.0, 0.5, 0.5)},
             )
+
+    def test_unrepresentable_wrong_sign_does_not_hide_finite_placement(self, tmp_path: Path) -> None:
+        samples = _samples([1e308, 1.1e308], [1e308, 1.1e308])
+        with np.errstate(all="raise"):
+            placement = _solve(tmp_path, [1, 1], (samples, samples))[1]
+        assert placement == Placement(1, 1, 0, 0)
+        np.testing.assert_array_equal(
+            placement.local_to_global().to_affine_matrix(input_axes=_AXES, output_axes=_AXES), np.eye(3)
+        )
+
+    def test_unrepresentable_offset_is_not_a_feasible_sign(self, tmp_path: Path) -> None:
+        samples = _samples([-1e308, -9e307], [1e308, 1.1e308])
+        with np.errstate(all="raise"), pytest.raises(ReaderFormatError, match="inconsistent with any translation"):
+            _solve(tmp_path, [1, 1], (samples, samples))
+
+    def test_overflowing_interval_endpoints_fail(self, tmp_path: Path) -> None:
+        samples = _samples([0, 1], [1.7e308, 1.7e308], half=5e307)
+        with np.errstate(all="raise"), pytest.raises(ReaderFormatError, match="finite global"):
+            _solve(tmp_path, [1, 1], (samples, samples))
+
+    def test_nonfinite_tolerance_fails(self, tmp_path: Path) -> None:
+        samples = _samples([0, 1], [10, 11], half=1e308)
+        with np.errstate(all="raise"), pytest.raises(ReaderFormatError, match="nonfinite printed-coordinate tolerance"):
+            _solve(tmp_path, [1, 1], (samples, samples))
+
+    @pytest.mark.parametrize("with_cells", [False, True])
+    def test_nonfinite_position_interval_fails(self, tmp_path: Path, *, with_cells: bool) -> None:
+        samples = _samples([2, 6], [102, 106])
+        fov = 1 if with_cells else 3
+        with pytest.raises(ReaderFormatError, match="nonfinite pixel-position interval"):
+            _solve(
+                tmp_path,
+                [1, 1],
+                (samples, samples),
+                required=frozenset({fov}),
+                positions={fov: FovPosition(1.7e308, 100, 5e307, 0.5)},
+            )

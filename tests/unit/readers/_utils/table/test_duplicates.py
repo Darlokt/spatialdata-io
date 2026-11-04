@@ -11,7 +11,6 @@ from scipy import sparse
 
 from spatialdata_io.readers._utils.table import SparseDuplicateSummary, normalize_owned_anndata
 from spatialdata_io.readers._utils.table._duplicates import normalize_sparse_duplicates
-from spatialdata_io.readers._utils.table._normalize import _normalized_expression
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -209,7 +208,3 @@ class TestImportedNormalization:
         reports: list[SparseDuplicateSummary] = []
         normalize_owned_anndata(ad.AnnData(source), duplicate_sums=reports)
         assert reports == []
-
-    def test_rejects_noncompressed_imported_sparse_storage(self) -> None:
-        with pytest.raises(TypeError, match="CSR or CSC"):
-            _normalized_expression(sparse.coo_array([[1]]), location="X", duplicate_sums=[])

@@ -122,9 +122,10 @@ order, remain valid. Unsigned 64-bit indices/pointers are rejected before
 canonicality inspection: SciPy's compressed kernels cannot safely dispatch that
 storage. Expression value dtypes are unaffected.
 
-Imported expression can instead opt into safe duplicate normalization and
-lossless floating promotion for overflowing integers at the owned-AnnData boundary. This replaces the
-former reject-only source-dtype guard; see [imported sparse duplicates](#imported-sparse-duplicates).
+Owned-AnnData normalization always combines compressed integer duplicates
+losslessly, with floating promotion when the source dtype is insufficient.
+Generic `as_csr_array()` retains its dtype-preserving arithmetic contract;
+see [imported sparse duplicates](#imported-sparse-duplicates).
 
 ## Owned AnnData normalization
 
@@ -441,9 +442,12 @@ The helper does not parse source text, sum duplicates or recover upstream loss.
 
 ## Imported sparse duplicates
 
-Supplying a reader-owned `duplicate_sums=[]` collector to
-`normalize_owned_anndata()` or `parse_linked_table()` opts into lossless
-normalization of imported CSR/CSC expression. Repeated matrix coordinates are
+`normalize_owned_anndata()` and `parse_linked_table()` always use lossless
+integer duplicate normalization for CSR/CSC expression. An optional reader-owned
+`duplicate_sums=[]` collector records summaries without choosing arithmetic or
+accepted representations. Owned expression supports dense NumPy and CSR/CSC
+storage; other sparse formats use the separate generic conversion boundary.
+Repeated matrix coordinates are
 summed, not discarded. Integer storage stays unchanged when completed sums fit;
 otherwise it promotes directly to float32 when every completed value is exact,
 or float64 if needed. No wider integer array is staged before floating output.
@@ -470,7 +474,6 @@ it does not itself emit warnings or infer nonnegative count semantics.
 
 The reader owns reporting: emit one `UserWarning` from accumulated summaries
 only after successful result assembly, with affected artifacts/tables/slots.
-Expected format aggregation is not an imported-data warning. Default callers
-that omit the collector retain the dtype-preserving behavior documented above,
-including the unchanged Scanpy 10x boundary. Unnamed layers and raw remain
+Expected format aggregation is not an imported-data warning. Omitting the
+collector does not change normalization. Unnamed layers and raw remain
 outside the reader's explicitly declared normalization slots.

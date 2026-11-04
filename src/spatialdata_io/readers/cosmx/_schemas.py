@@ -195,5 +195,17 @@ def half_units(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: str
     # Unmatched optional groups are missing or empty depending on the string storage.
     parts = lexical.str.extract(f"^{_DECIMAL}$").fillna("")
     fraction = (parts["fraction"].str.len() + parts["leading"].str.len()).to_numpy(dtype=np.int64)
-    exponent = parts["exponent"].mask(parts["exponent"].eq(""), "0").astype(np.int64).to_numpy()
-    return 0.5 * np.power(10.0, exponent - fraction)
+    expected = "finite positive float64 printed rounding half-widths"
+    try:
+        exponent = parts["exponent"].mask(parts["exponent"].eq(""), "0").astype(np.int64).to_numpy()
+    except (ValueError, OverflowError) as error:
+        raise schema_error(path, found=f"unrepresentable {name!r} rounding exponent", expected=expected) from error
+    # Compare before subtracting: a very negative exponent must not wrap to a
+    # positive power. 10**-323 / 2 is the smallest nonzero float64 half-unit.
+    if (exponent < fraction - 323).any():
+        raise schema_error(path, found=f"{name!r} rounding half-widths that underflow to zero", expected=expected)
+    with np.errstate(over="ignore", under="ignore"):
+        widths = 0.5 * np.power(10.0, exponent - fraction)
+    if not np.isfinite(widths).all():
+        raise schema_error(path, found=f"nonfinite {name!r} rounding half-widths", expected=expected)
+    return widths

@@ -247,3 +247,23 @@ class TestBuildTable:
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS.replace("2,1,0,3,0\n", "2,7,0,3,0\n")))
         with pytest.raises(ReaderFormatError, match="identical positive count and metadata populations"):
             build_table(counts, read_metadata(metadata_path), path=metadata_path, linked=True)
+
+    @pytest.mark.parametrize("coordinate", [0.25, -0.25])
+    def test_nonzero_physical_underflow_fails(self, tmp_path: Path, coordinate: float) -> None:
+        metadata_path = _write(tmp_path, "m.csv", _METADATA)
+        metadata = read_metadata(metadata_path)
+        metadata.global_[0, 0] = coordinate
+        counts = read_counts(_write(tmp_path, "c.csv", _COUNTS))
+        with np.errstate(all="raise"), pytest.raises(ValueError, match=r"nonzero physical.*underflow to zero"):
+            build_table(counts, metadata, path=metadata_path, linked=False, pixel_size_um=5e-324)
+
+    def test_zero_and_signed_nonzero_subnormal_products_are_preserved(self, tmp_path: Path) -> None:
+        metadata_path = _write(tmp_path, "m.csv", _METADATA)
+        metadata = read_metadata(metadata_path)
+        metadata.global_[:] = [[0, -0.0], [1, -1], [2, -2]]
+        counts = read_counts(_write(tmp_path, "c.csv", _COUNTS))
+        table = build_table(counts, metadata, path=metadata_path, linked=False, pixel_size_um=5e-324)
+        physical = table.obsm["spatial"]
+        assert isinstance(physical, np.ndarray)
+        np.testing.assert_array_equal(physical, [[0, -0.0], [5e-324, -5e-324], [1e-323, -1e-323]])
+        np.testing.assert_array_equal(np.signbit(physical), np.signbit(metadata.global_))

@@ -134,6 +134,9 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     already feasible for the cells is preserved; otherwise the midpoint of
     the cell/position intersection is used. Wholly cell-empty exports cannot
     determine the dataset axis signs and are unsupported.
+    Printed rounding half-widths must be finite and positive in float64;
+    placement intervals, selected offsets and composed raster affines must be finite. Calibrated cell
+    coordinates must remain finite without nonzero values collapsing to zero.
     Rasters are supported for exports whose axes
     are not reversed between frames; the raster convention of exports with a
     reversed global axis has not been evidenced, so such rasters fail.

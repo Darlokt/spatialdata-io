@@ -80,6 +80,20 @@ def _canonicalize_csr(data: sparse.csr_array, *, owns_data: bool) -> sparse.csr_
     return result
 
 
+def _compressed_to_csr(
+    data: sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix, *, owns_data: bool
+) -> sparse.csr_array:
+    """Canonicalize validated supported compressed storage and check finite results."""
+    if isinstance(data, sparse.csr_array):
+        result = _canonicalize_csr(data, owns_data=owns_data)
+    else:
+        copy = isinstance(data, sparse.csr_matrix) and not owns_data and not data.has_canonical_format
+        result = sparse.csr_array(data, copy=copy)
+        result = _canonicalize_csr(result, owns_data=True)
+    _validate_finite_values(result.data, parameter="data")
+    return result
+
+
 def validate_compressed_sparse(
     data: sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix,
     /,
@@ -218,20 +232,15 @@ def as_csr_array(
         sparse_metadata = cast("_ShapedArray", sparse_data)
         if isinstance(sparse_data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
             validate_compressed_sparse(sparse_data)
-        else:
-            _validate_two_dimensions(sparse_metadata)
+            _validate_value_dtype(sparse_metadata.dtype, parameter="data")
+            return _compressed_to_csr(sparse_data, owns_data=False)
+        _validate_two_dimensions(sparse_metadata)
         _validate_value_dtype(sparse_metadata.dtype, parameter="data")
 
-        if isinstance(sparse_data, sparse.csr_array):
-            result = _canonicalize_csr(sparse_data, owns_data=False)
-        elif isinstance(sparse_data, sparse.csr_matrix):
-            result = sparse.csr_array(sparse_data, copy=not sparse_data.has_canonical_format)
-            result = _canonicalize_csr(result, owns_data=True)
-        else:
-            # scipy-stubs does not model the public sparse base classes as
-            # accepted by csr_array, although SciPy supports this conversion.
-            result = sparse.csr_array(sparse_data, copy=False)  # pyrefly: ignore[no-matching-overload]
-            result = _canonicalize_csr(result, owns_data=True)
+        # scipy-stubs does not model the public sparse base classes as
+        # accepted by csr_array, although SciPy supports this conversion.
+        result = sparse.csr_array(sparse_data, copy=False)  # pyrefly: ignore[no-matching-overload]
+        result = _canonicalize_csr(result, owns_data=True)
     elif type(data) is np.ndarray:
         _validate_two_dimensions(data)
         _validate_value_dtype(data.dtype, parameter="data")

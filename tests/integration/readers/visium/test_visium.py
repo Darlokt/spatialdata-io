@@ -16,6 +16,7 @@ import pytest
 import tifffile
 from anndata import read_h5ad
 from anndata.tests.helpers import assert_equal
+from scanpy import read_10x_h5
 from scipy import sparse
 from scipy.io import mmwrite
 from spatialdata import SpatialData
@@ -154,6 +155,43 @@ def _assert_table_contract(result: SpatialData) -> None:
 
 class TestVisiumSyntheticWorkflow:
     """Prove every supported count and position layout through the public API."""
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "first", "second", "expected"),
+        [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
+    )
+    def test_duplicate_h5_counts_preserve_exact_sum_and_public_linkage(
+        self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
+    ) -> None:
+        path = tmp_path / "filtered_feature_bc_matrix.h5"
+        _write_h5(path)
+        _write_spatial(tmp_path, version="v2")
+        with h5py.File(path, "r+") as handle:
+            data = handle["matrix/data"][:].astype(source_dtype)
+            data[:2] = [first, second]
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+            handle["matrix/indices"][1] = 0
+        # Establish retained decoded contributions; upstream rounding/summation
+        # would be outside the local count boundary's recovery guarantee.
+        decoded = read_10x_h5(path, gex_only=False)
+        assert isinstance(decoded.X, sparse.csr_matrix | sparse.csr_array)
+        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
+        assert not decoded.X.has_canonical_format
+        np.testing.assert_array_equal(decoded.X.data[:2], [first, second])
+
+        result = visium(tmp_path)
+
+        table = result.tables["table"]
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.dtype == np.dtype(np.float64)
+        assert table.X.has_canonical_format
+        np.testing.assert_array_equal(table.X.toarray(), [[expected, 0, 0], [0, 2, 0], [3, 4, 6]])
+        assert table.obs_names.tolist() == ["barcode-a", "barcode-b", "barcode-c"]
+        assert table.var_names.tolist() == ["gene-a", "gene-b", "protein-a"]
+        assert get_table_keys(table) == ("sample", "region", "spot_id")
+        assert table.obs["spot_id"].tolist() == result.shapes["sample"].index.tolist()
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[20, 10], [40, 30], [60, 50]])
 
     def test_rejects_mex_legacy_selector_before_silent_feature_relabeling(self, tmp_path: Path) -> None:
         mex = tmp_path / "filtered_feature_bc_matrix"

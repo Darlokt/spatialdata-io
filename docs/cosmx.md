@@ -38,7 +38,11 @@ Each FOV's local-to-global map is a translation per axis, possibly with a revers
 
 The raster convention has only been evidenced for exports whose global axes run in the same direction as the local axes. Rasters in an export with a reversed global axis therefore fail, while its table and transcripts are read.
 
+Printed rounding half-widths must remain finite and positive in float64, including for coordinates written as zero. Extreme decimal exponents that overflow or collapse that width to zero fail with the source artifact identified. Placement requires finite offset intervals and finite selected offsets; a nonfinite sign candidate cannot establish a placement. The final raster affine, including pixel-center placement and any caller calibration, must also remain finite. These checks do not enlarge the printed rounding intervals.
+
 `pixel_size_um` supplies a positive finite micrometre-per-global-pixel scale from the caller's associated acquisition/export evidence. It changes the registered `global` frame to micrometres and scales canonical table positions, images, labels and lazy point transformations consistently. The existing local FOV frames remain pixels. Scaling follows the complete signed placement and raster-centre mapping. It establishes a local metric, not stage registration. No expression or transcript coordinates are resampled, and morphology summaries retain their source values.
+
+Calibrated cell positions must remain finite, and a nonzero native global coordinate must not become zero through multiplication. Genuine zero coordinates and representable subnormal results retain their signs.
 
 No scale is inferred automatically from headers, stage-only positions, paired pixel/mm fields, image dimensions or instrument guesses. Releases documenting 0.18, 0.12 and 0.12028 µm/pixel remain distinct. The current AtoMx 3.10.5 pancreas cell coordinates violate the supported signed unit-translation contract; supplying a scale does not make that profile supported. Automatic paired-FOV and TIFF optical-metadata profiles require associated source evidence and their own coordinate contracts.
 

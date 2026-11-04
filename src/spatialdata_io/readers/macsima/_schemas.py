@@ -80,4 +80,12 @@ def pixel_size_um(size: float | None, unit: UnitsLength, *, context: ReaderError
         raise ReaderFormatError(
             context=context, path=path, found=f"physical pixel size {size!r}", expected="a finite positive size"
         )
-    return size / _MICROMETER_DIVISORS[unit]
+    converted = size / _MICROMETER_DIVISORS[unit]
+    if not math.isfinite(converted) or converted <= 0:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"physical pixel size {size!r} {unit.value}",
+            expected="a finite positive size in micrometers after conversion",
+        )
+    return converted

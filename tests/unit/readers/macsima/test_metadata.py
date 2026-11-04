@@ -59,6 +59,19 @@ class TestReadChannel:
         assert metadata.cycle == value
         assert metadata.roi == value
 
+    @pytest.mark.parametrize("version", [0, 1])
+    @pytest.mark.parametrize("exposure", ["-1e-400", "1e-400", "+1e-400", "1__0", "1e400"])
+    def test_rejects_exposure_sign_or_nonzero_lost_in_float(
+        self, tmp_path: Path, version: SchemaVersion, exposure: str
+    ) -> None:
+        with pytest.raises(ReaderFormatError, match=r"exposure.*finite non-negative"):
+            _read(tmp_path, ChannelSpec("CD3", 1, "APC", exposure_ms=exposure), version)
+
+    @pytest.mark.parametrize("exposure", ["0", "-0", "+0e-400", "5e-324", "1212.52"])
+    def test_preserves_zero_and_representable_exposure(self, tmp_path: Path, exposure: str) -> None:
+        metadata = _read(tmp_path, ChannelSpec("CD3", 1, "APC", exposure_ms=exposure), 1)
+        assert metadata.exposure_ms == float(exposure)
+
     def test_v0_export(self, tmp_path: Path) -> None:
         write_channel(tmp_path, V0_CHANNELS[0], version=0, index=0, stored_name="channel.tif")
         path = ArtifactFile((tmp_path / "channel.tif").resolve())

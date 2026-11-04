@@ -24,7 +24,14 @@ from spatialdata_io._cli.commands.cosmx import cosmx_command
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.cosmx import _reader, cosmx
-from tests.integration.readers.cosmx._fixtures import LANDMARKS, POSITIONS, global_xy, local_xy, write_cosmx_dataset
+from tests.integration.readers.cosmx._fixtures import (
+    LANDMARKS,
+    POSITIONS,
+    global_xy,
+    local_xy,
+    write_cosmx_dataset,
+    write_extreme_cosmx_dataset,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -211,6 +218,39 @@ class TestCosmx:
         assert not result.images
         assert not result.points
         assert "spatialdata_attrs" not in result.tables["table"].uns
+
+    def test_nonfinite_placement_fails_before_element_construction(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        root = write_extreme_cosmx_dataset(tmp_path, placement=True)
+        image = mocker.spy(_reader, "read_image")
+        labels = mocker.spy(_reader, "read_labels")
+        table = mocker.spy(_reader, "build_table")
+        points = mocker.spy(_reader, "read_transcripts")
+        tasks: list[object] = []
+        with (
+            np.errstate(all="raise"),
+            Callback(posttask=lambda *args: tasks.append(args)),
+            pytest.raises(ReaderFormatError, match="inconsistent with any translation"),
+        ):
+            cosmx(root)
+        image.assert_not_called()
+        labels.assert_not_called()
+        table.assert_not_called()
+        points.assert_not_called()
+        assert not tasks
+
+    @pytest.mark.parametrize("token", ["0e309", "0e-400", "0.0e-9223372036854775808"])
+    def test_invalid_printed_width_fails_before_raster_construction(
+        self, tmp_path: Path, mocker: MockerFixture, token: str
+    ) -> None:
+        fixture = write_cosmx_dataset(tmp_path)
+        path = fixture.root / "Run_1_metadata_file.csv"
+        path.write_text(path.read_text().replace("2.0,5.0", f"{token},5.0", 1))
+        counts = mocker.spy(_reader, "read_counts")
+        image = mocker.spy(_reader, "read_image")
+        with pytest.raises(ReaderFormatError, match="rounding half-widths"):
+            cosmx(fixture.root)
+        counts.assert_not_called()
+        image.assert_not_called()
 
     def test_include_transcripts_must_be_boolean(self, tmp_path: Path) -> None:
         with pytest.raises(TypeError, match="boolean"):
@@ -488,3 +528,42 @@ class TestCosmxCalibration:
         fixture = write_cosmx_dataset(tmp_path, rasters=False)
         with np.errstate(over="ignore"), pytest.raises(ValueError, match="nonfinite physical"):
             cosmx(fixture.root, pixel_size_um=1e308)
+
+    @pytest.mark.parametrize("include_transcripts", [False, True])
+    def test_nonzero_physical_underflow_fails_before_returning(
+        self, tmp_path: Path, *, include_transcripts: bool
+    ) -> None:
+        root = write_extreme_cosmx_dataset(tmp_path, placement=False)
+        tasks: list[object] = []
+        with (
+            np.errstate(all="raise"),
+            Callback(posttask=lambda *args: tasks.append(args)),
+            pytest.raises(ValueError, match=r"nonzero physical.*underflow to zero"),
+        ):
+            cosmx(root, pixel_size_um=5e-324, include_transcripts=include_transcripts)
+        assert not tasks
+
+    @pytest.mark.parametrize("raster_mode", ["images", "labels"])
+    def test_raster_affine_overflow_fails_even_with_finite_physical_cells(
+        self, tmp_path: Path, raster_mode: str
+    ) -> None:
+        fixture = write_cosmx_dataset(tmp_path, positions=False)
+        shutil.rmtree(fixture.root / ("CellLabels" if raster_mode == "images" else "CellComposite"))
+        path = fixture.root / "Run_1_metadata_file.csv"
+        metadata = pd.read_csv(path)
+        local = np.array([-1e308, -9e307] * 2)
+        global_ = np.array([0, 1e307] * 2)
+        # Both rows determine a positive finite offset near 1e308. Scaling
+        # the small global cell positions is safe, but scaling that offset is not.
+        assert np.isfinite(global_ * 2).all()
+        metadata["CenterX_local_px"] = [f"{value:.1f}" for value in local]
+        metadata["CenterX_global_px"] = [f"{value:.1f}" for value in global_]
+        metadata.to_csv(path, index=False)
+        tasks: list[object] = []
+        with (
+            np.errstate(all="raise"),
+            Callback(posttask=lambda *args: tasks.append(args)),
+            pytest.raises(ReaderFormatError, match="nonfinite global raster affine"),
+        ):
+            cosmx(fixture.root, pixel_size_um=2)
+        assert not tasks

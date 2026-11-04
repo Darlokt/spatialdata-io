@@ -14,8 +14,10 @@ import pyarrow.parquet as pq
 import pytest
 from anndata.tests.helpers import assert_equal
 from numpy.testing import assert_allclose, assert_array_equal
+from scanpy import read_10x_h5
 from scipy.sparse import csr_array, csr_matrix, spmatrix
 from spatialdata import read_zarr
+from spatialdata.models import get_table_keys
 from spatialdata.transformations import get_transformation
 from xarray import DataArray
 
@@ -60,6 +62,99 @@ def _invalidate(root: Path, kind: str, ids: tuple[int, ...]) -> None:
 
 class TestVisiumHD:
     """Supported layouts and linked products agree with independent source truth."""
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "first", "second", "expected"),
+        [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
+    )
+    def test_duplicate_h5_bin_counts_preserve_order_positions_and_linkage(
+        self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
+    ) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2,), segmented=False)
+        baseline = visium_hd(bundle.root, bin_sizes=(2,), include_images=False).tables["square_002um_table"]
+        positions = baseline.obsm["spatial"]
+        assert isinstance(positions, np.ndarray)
+        path = bundle.root / "binned_outputs/square_002um/filtered_feature_bc_matrix.h5"
+        with h5py.File(path, "r+") as handle:
+            data = handle["matrix/data"][:].astype(source_dtype)
+            data[:2] = [first, second]
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+            handle["matrix/indices"][1] = 0
+        decoded = read_10x_h5(path, gex_only=False)
+        assert isinstance(decoded.X, csr_matrix | csr_array)
+        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
+        assert not decoded.X.has_canonical_format
+        assert_array_equal(decoded.X.data[:2], [first, second])
+
+        result = visium_hd(bundle.root, bin_sizes=(2,), include_images=False)
+
+        table = result.tables["square_002um_table"]
+        assert isinstance(table.X, csr_array)
+        assert table.X.dtype == np.dtype(np.float64)
+        assert table.X.has_canonical_format
+        truth = bundle.raw[2][bundle.filtered_rows[2]].astype(np.float64)
+        truth[0] = [expected, 0, 0]
+        assert_array_equal(table.X.toarray(), truth)
+        assert table.obs_names.tolist() == [
+            "s_002um_00001_00003-1",
+            "s_002um_00000_00000-1",
+            "s_002um_00001_00000-1",
+            "s_002um_00000_00005-1",
+        ]
+        assert table.var_names.tolist() == ["Gene", "Gene-1", "Other"]
+        assert get_table_keys(table) == ("square_002um", "region", "instance_id")
+        assert table.obs["instance_id"].tolist() == result.shapes["square_002um"].index.tolist()
+        assert_array_equal(table.obsm["spatial"], positions)
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "first", "second", "expected"),
+        [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
+    )
+    def test_duplicate_h5_raw_counts_feed_exact_nucleus_reconstruction(
+        self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
+    ) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2,))
+        baseline = visium_hd(bundle.root, bin_sizes=(), include_images=False, include_nucleus_table=True).tables[
+            "nucleus_table"
+        ]
+        positions = baseline.obsm["spatial"]
+        assert isinstance(positions, np.ndarray)
+        path = bundle.root / "binned_outputs/square_002um/raw_feature_bc_matrix.h5"
+        with h5py.File(path, "r+") as handle:
+            data = handle["matrix/data"][:].astype(source_dtype)
+            indices = handle["matrix/indices"][:]
+            indptr = handle["matrix/indptr"][:]
+            # Raw bin 1 belongs to cell 1's nucleus; it has one Gene-1 entry.
+            start = int(indptr[1])
+            data[start] = first
+            data = np.insert(data, start + 1, second)
+            indices = np.insert(indices, start + 1, indices[start])
+            indptr[2:] += 1
+            for name, values in (("data", data), ("indices", indices), ("indptr", indptr)):
+                del handle[f"matrix/{name}"]
+                handle.create_dataset(f"matrix/{name}", data=values)
+        decoded = read_10x_h5(path, gex_only=False)
+        assert isinstance(decoded.X, csr_matrix | csr_array)
+        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
+        assert not decoded.X.has_canonical_format
+        assert_array_equal(decoded.X.data[start : start + 2], [first, second])
+
+        result = visium_hd(bundle.root, bin_sizes=(), include_images=False, include_nucleus_table=True)
+
+        table = result.tables["nucleus_table"]
+        assert isinstance(table.X, csr_array)
+        assert table.X.dtype == np.dtype(np.float64)
+        assert table.X.has_canonical_format
+        assert_array_equal(table.X.toarray(), [[0, 0, 4], [0, expected, 0]])
+        assert table.obs_names.tolist() == [CELL_IDS[1], CELL_IDS[0]]
+        assert table.var_names.tolist() == ["Gene", "Gene-1", "Other"]
+        assert get_table_keys(table) == ("nucleus_boundaries", "region", "instance_id")
+        assert table.obs["instance_id"].tolist() == result.shapes["nucleus_boundaries"].index.tolist()
+        assert_array_equal(table.obsm["spatial"], positions)
+        cell_expression = result.tables["cell_table"].X
+        assert isinstance(cell_expression, csr_array)
+        assert_array_equal(cell_expression.toarray(), bundle.cells[[1, 0]])
 
     @pytest.mark.parametrize(
         ("version", "segmented", "sizes", "prefix", "feature_slice_name", "null_pair"),
