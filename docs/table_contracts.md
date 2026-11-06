@@ -320,7 +320,7 @@ describes the explicit artifact names and options.
 
 ### Steinbock
 
-Deepcell and Ilastik segmentation selections share one table contract. Imported
+Every mask directory selected with `masks_dir` shares one table contract. Imported
 H5AD row/feature order and expression values remain; integer duplicate
 normalization promotes overflowing integers directly to exact float32/f64. Source `image`,
 `centroid-0`, `centroid-1` and other annotations remain in `obs`; an equal

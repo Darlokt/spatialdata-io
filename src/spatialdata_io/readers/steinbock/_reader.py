@@ -1,4 +1,4 @@
-"""Assemble one deterministically paired Steinbock multi-sample dataset."""
+"""Assemble one Steinbock dataset: paired sample rasters and the linked cell table."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
-from spatialdata_io.readers.steinbock._images import _read_rasters
-from spatialdata_io.readers.steinbock._layout import _discover_layout
+from spatialdata_io.readers.steinbock._images import read_rasters
+from spatialdata_io.readers.steinbock._layout import discover_layout, validate_masks_dir, validate_table_file
 from spatialdata_io.readers.steinbock._metadata import read_image_metadata
-from spatialdata_io.readers.steinbock._tables import _read_table, _set_positions
+from spatialdata_io.readers.steinbock._tables import read_table, set_positions
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -25,52 +25,68 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.table import SparseDuplicateSummary
 
+_LINKAGE_CONTEXT = ReaderErrorContext("steinbock", "linked cell table")
 
-def steinbock(
+
+def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boundary typed.
     path: str | Path,
     *,
-    labels_kind: Literal["deepcell", "ilastik"] = "deepcell",
+    masks_dir: str = "masks",
+    table_file: str | Path = "cells.h5ad",
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
-    """Read an unversioned Steinbock OME-image, mask, and AnnData export.
+    """Read a Steinbock project: OME images, one segmentation-mask directory and the AnnData table.
 
-    Supported layouts differ only in the selected segmentation directory::
+    Supported layout (Steinbock has no format version marker)::
 
-        cells.h5ad
-        ome/<sample>.ome.tiff
-        masks_deepcell/<sample>.tiff
+        project/
+        ├── cells.h5ad              # steinbock export anndata (table_file)
+        ├── images.csv              # optional; dimensions and IMC acquisition extents
+        ├── ome/<sample>.ome.tiff   # steinbock export ome
+        └── masks/<sample>.tiff     # steinbock segment (masks_dir)
 
-    Or, with ``labels_kind="ilastik"``::
+    Other Steinbock outputs (``img/``, ``intensities/``, ``regionprops/``,
+    ``neighbors/``, ``panel.csv``) are not read.
 
-        cells.h5ad
-        ome/<sample>.ome.tiff
-        masks_ilastik/<sample>.tiff
-
-    Every image needs exactly one mask and table region. Missing or extra
-    samples fail instead of being omitted. Images require OME metadata. Each
-    image/mask contains one series, read at full-resolution level zero.
-    Image and mask extents must match. Sample names must use alphanumeric
-    characters, underscores, dots, or hyphens. They cannot be reserved names
-    or differ only by case. No pipeline version is inferred.
+    - Images and masks pair by sample name (the file name without
+      ``.ome.tiff`` or ``.tiff``); every image needs exactly one mask and the
+      reverse, and at least one pair is required. Unmatched files fail.
+    - Sample names name elements and coordinate systems, so they may contain
+      only letters, digits, ``_``, ``-`` and ``.``, may not be ``.``, ``..``
+      or start with ``__``, and must be distinct ignoring case. A sample may
+      not be named like another sample's derived frame
+      (``<other>_pixels`` or ``<other>_regionprops_indices``).
+    - The table must describe exactly these samples and the selected masks: ``obs["image"]`` is
+      ``<sample>.tiff`` and every observation is named
+      ``Object <id> in <sample>.tiff``, where ``<id>`` is the object's
+      positive mask label (zero is background). ``centroid-0`` and
+      ``centroid-1`` are required.
+    - Each image and mask has one TIFF series, read at full resolution; the
+      image needs OME metadata and the mask the image's ``Y, X`` extent.
 
     Parameters
     ----------
     path
-        Dataset directory. Discovered artifacts and symlinks stay within it.
-    labels_kind
-        Select ``masks_deepcell`` or ``masks_ilastik``. The unselected directory
-        is not read. The table must describe the selected segmentation.
+        Project directory.
+    masks_dir
+        Directory of the segmentation masks, relative to ``path``, for example
+        ``"masks_deepcell"`` in a project that keeps several segmentations.
+        It may not be absolute or contain ``..`` and follows ``path_policy``
+        like every discovered artifact. Other mask directories are not read.
+    table_file
+        AnnData table exported by ``steinbock export anndata``. Relative
+        paths resolve against ``path``; absolute paths may point elsewhere.
     scale_factors
-        Integer factors of at least two, one per generated pyramid level of the
-        images and labels; empty for a single scale. Generated label pyramids
-        require <=32-bit integer masks because upstream downsampling rounds
-        64-bit IDs. Base int64/uint64 masks are exact at a single scale.
+        Integer factors of at least two, one per generated pyramid level of
+        every image and mask; empty for a single scale. Generated mask levels
+        require masks of at most 32 bits, because downsampling rounds 64-bit
+        IDs above ``2**53``; 64-bit masks are exact at a single scale.
     chunks
         One positive size for every axis or three ``c, y, x`` sizes of the
-        images; labels use the ``y`` and ``x`` sizes. By default one channel per
-        chunk and square 1024-pixel tiles.
+        images; masks use the ``y`` and ``x`` sizes. By default one channel
+        per chunk and square 1024-pixel tiles.
     path_policy
         How symlinks inside the dataset directory are treated. ``"strict"``
         requires every discovered artifact and relative file option to resolve
@@ -84,103 +100,107 @@ def steinbock(
     Returns
     -------
     SpatialData
-        For each lexically ordered sample, ``images['<sample>_image']`` is lazy
-        CYX and ``labels['<sample>_labels']`` is lazy YX. Source dtypes and pixel
-        values are retained. OME channel names are used when nonempty and unique.
-        Otherwise OME IDs identify channels. Scientific three/four-channel
-        images are never guessed to be RGB. Singleton spatial axes are retained.
-        Extra axes must be singleton. Optional root ``images.csv`` matches exact
-        ``<sample>.tiff`` identities using ``image``, ``width_px``, ``height_px``
-        and optional paired ``acquisition_width_um``/``acquisition_height_um``.
-        Positive acquisition extents divided by exact matching raster dimensions
-        calibrate XY in micrometres. The streamed CSV accepts reordered and
-        additional columns; duplicate names, malformed pairs, stale dimensions
-        and conflicting OME sizes fail. Missing rows or empty physical pairs
-        supply no IMC calibration. Complete source OME sizes in µm, nm or mm
-        also calibrate unchanged grids, with agreement required across sources.
-        Missing/incomplete calibration retains source pixels. One calibrated
-        sample uses ``global``; multiple samples retain independent sample
-        frames, including mixed physical and pixel groups. Native origins remain
-        unchanged and no stage registration between samples is inferred.
+        One image and one labels element per sample, in the lexical order of
+        the image file names, and one linked table:
 
-        ``tables['table']`` contains owned, eager, finite canonical CSR
-        sparse-array expression preserving values and source row/feature order. The
-        optional ``counts`` layer is normalized likewise. Other layers, pairwise
-        arrays, and annotations are retained. Duplicate integer entries in ``X``
-        and ``counts`` promote directly to exact float32 or float64 when
-        required; sufficient source dtypes are retained. No supported exact
-        representation raises. ``obs['image']`` must contain
-        source names including ``.tiff`` and observation names must follow
-        ``Object <id> in <image>``. IDs are strictly positive exact integers
-        within each mask's dtype. Zero is background. Final linkage uses
-        categorical ``region`` and integer ``cell_id``. IDs may repeat across
-        regions but not within a region. Lazy mask pixels are not scanned for
-        membership. Region declaration order follows first table occurrence.
+        ``images["<sample>_image"]``
+            Lazy ``c, y, x`` image with the source dtype and channel order.
+            Channels are named by the OME channel names when all are nonempty
+            and unique, else by the OME channel IDs; they are not matched to
+            the table's features. Other source axes must be singleton (and are
+            dropped); singleton ``y`` or ``x`` axes are kept. Steinbock images
+            are scientific channel stacks: an RGB TIFF (a non-singleton
+            samples axis ``S``) is rejected, and three or four channels are
+            never read as colours.
+        ``labels["<sample>_labels"]``
+            Lazy ``y, x`` mask with its source integer dtype.
+        ``tables["table"]``
+            The imported table with its row and feature order, linked to the
+            labels by categorical ``obs["region"]`` (``<sample>_labels``) and
+            ``obs["cell_id"]`` (the mask label; int64, or uint64 when a label
+            needs it). IDs may repeat across samples, not within one; mask
+            pixels are never read to check them.
 
-        ``obsm['spatial_pixels']`` retains exact native XY centroids from
-        ``centroid-1`` and ``centroid-0``, correcting the export's row/column
-        order. These are regionprops zero-based pixel-index centres in native
-        ``<sample>_regionprops_indices`` frames. Centroids must be finite and
-        within their sample's pixel frame. If every sample has resolved XY
-        calibration, ``obsm['spatial']`` is float64 micrometre XY, calculated
-        as ``(native_xy + 0.5) * spacing_xy_um`` in each unchanged raster frame.
-        Nonfinite physical values and nonzero shifted pixel coordinates that
-        become zero during multiplication fail.
-        One calibrated sample uses ``global``; independent samples use
-        categorical ``obs['spatial_frame']``. Multiple native frames use
-        categorical ``obs['spatial_pixel_frame']``. Missing or mixed calibration
-        omits physical ``spatial`` for the entire aggregate, preserving all rows.
-        The version-1 ``uns['spatialdata_io_positions']`` declaration records
-        position meaning, units, frames and bounded calibration evidence.
-        An imported ``spatial`` embedding retains its exact dtype and shape
-        under ``spatial_source`` without invented semantics. Existing position
-        declarations, preservation destinations or generated frame columns fail.
-        These arrays are snapshots: later element registration and ordinary
-        AnnData concatenation do not update or register them.
-        Nullable integer columns are supported when they contain no missing
-        values; source annotation dtypes are retained. Mixed XY numeric types
-        must combine without rounding integer coordinates. An
-        optional duplicate ``Image`` column is removed only if equal to ``image``.
-        Feature metadata spaces become underscores and the legacy
-        ``Final Concentration / Dilution`` key becomes ``Final_Concentration``.
-        Named columns accept arbitrary order and additional H5AD annotations
-        retain their source dtypes and missingness. Duplicate annotation names
-        and occupied generated ``region``/``cell_id`` columns fail, including
-        values equal to the generated output. Conflicting
-        destination names fail. Caller-owned state is not mutated.
+            - ``X`` and an optional ``counts`` layer: canonical CSR sparse
+              arrays with their source values and dtypes; duplicate sparse
+              entries are summed, promoting integers to an exact float dtype
+              only if a sum would overflow, and failing when no float dtype
+              holds the sums exactly.
+            - ``obsm["spatial_pixels"]``: the regionprops centroids as
+              ``x, y`` (``centroid-1``, ``centroid-0``) in their source dtype,
+              in zero-based pixel-index coordinates, declared as frame
+              ``<sample>_regionprops_indices``.
+            - ``obsm["spatial"]`` (only when every sample is calibrated):
+              float64 ``x, y`` micrometres ``(spatial_pixels + 0.5) *
+              spacing``, in the coordinate system of the sample's rasters.
+              With several samples, categorical ``obs["spatial_frame"]`` and
+              ``obs["spatial_pixel_frame"]`` name each row's frames.
+            - ``uns["spatialdata_io_positions"]`` declares both arrays; an
+              imported ``obsm["spatial"]`` moves unchanged to
+              ``obsm["spatial_source"]``.
+            - The redundant ``obs["Image"]`` column is dropped (it must equal
+              ``obs["image"]``). Feature column names replace spaces with
+              underscores, and ``Final Concentration / Dilution`` becomes
+              ``Final_Concentration``. Everything else, including other
+              layers, mappings and ``raw``, is kept unchanged.
 
-        Raster construction executes no pixel tasks. Computing a selection
-        decodes only the TIFF tiles or strips of the output chunks it
-        intersects. Files/stores close after metadata inspection and
-        within each lazy task. No points or shapes are returned. Provenance
-        records the reader and package version.
+        Coordinate systems: a sample's image and mask share one frame with
+        its native pixel origin. A calibrated sample is scaled to
+        micrometres, from the ``images.csv`` acquisition extents divided by
+        its pixel dimensions, or else from complete OME
+        ``PhysicalSizeX``/``PhysicalSizeY`` of the image; every other present
+        OME size must agree. Its micrometre frame is ``global`` when one
+        sample is read and ``<sample>`` otherwise. An uncalibrated sample uses
+        the identity into the pixel frame ``<sample>_pixels``, also when it is
+        the only sample, so ``global`` and ``<sample>`` always mean
+        micrometres. Samples are never registered to each other.
+
+        ``attrs`` record the reader and package version. Pixels are not read
+        until computed, and a partial computation decodes only the TIFF tiles
+        or strips it overlaps. All files are closed on return; the source
+        files are not modified.
 
     Warns
     -----
     UserWarning
-        One summary per successful call if imported sparse duplicate entries
-        were combined, identifying affected expression slots and dtype changes.
-        Expected format aggregation does not trigger this warning.
+        Once per call if duplicate sparse entries of ``X`` or ``counts`` were
+        summed, naming the affected slots and dtype changes.
 
     Raises
     ------
+    TypeError
+        If an option has the wrong type.
+    ValueError
+        If an option has an invalid value, or a requested pyramid level
+        would downsample 64-bit masks or shrink a sample below one pixel.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
-        If an artifact is missing or has the wrong filesystem kind.
-    TypeError, ValueError
-        If options, layouts, OME axes/channels, table schemas, identifiers,
-        centroids, metadata cleanup, or expression violate these contracts.
-    """
-    duplicate_sums: list[SparseDuplicateSummary] = []
-    raster = make_raster_options(scale_factors, chunks)
+        If an artifact is missing or has the wrong kind.
+    ValueError
+        A contextual ``ReaderFormatError`` naming the artifact and path if the
+        layout, a raster, ``images.csv`` or the table is malformed or they
+        disagree, for example unmatched samples, an RGB or non-OME image,
+        conflicting calibrations, malformed observation names, out-of-range
+        IDs or centroids, nonfinite expression, or occupied output columns.
 
-    layout = _discover_layout(path, labels_kind=labels_kind, path_policy=path_policy)
+    Notes
+    -----
+    ``labels_kind`` was removed. It only chose between the directories
+    ``masks_deepcell`` and ``masks_ilastik``, which are not Steinbock
+    defaults. Pass ``masks_dir="masks_deepcell"`` (or ``"masks_ilastik"``)
+    instead; a project with Steinbock's default ``masks/`` needs no option.
+    """
+    masks_dir = validate_masks_dir(masks_dir)
+    table_file = validate_table_file(table_file)
+    raster = make_raster_options(scale_factors, chunks)
+    layout = discover_layout(path, masks_dir=masks_dir, table_file=table_file, path_policy=path_policy)
+
     metadata = (
         read_image_metadata(layout.image_metadata, {f"{sample.name}.tiff" for sample in layout.samples})
         if layout.image_metadata is not None
         else {}
     )
     samples = {
-        sample.name: _read_rasters(
+        sample.name: read_rasters(
             sample,
             raster,
             metadata=metadata.get(f"{sample.name}.tiff"),
@@ -188,19 +208,18 @@ def steinbock(
         )
         for sample in layout.samples
     }
-    table = _read_table(layout.table, {name: sample.grid for name, sample in samples.items()})
-    _set_positions(table, samples, layout.table)
+    grids = {name: sample.grid for name, sample in samples.items()}
+    table = read_table(layout.table, grids)
+    set_positions(table, grids, layout.table)
 
-    # _read_table validates eager frames; AnnData also types backed Dataset2D.
-    context = ReaderErrorContext("steinbock", "linked cell table")
-    prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=context)
-    prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
-
-    # All identifier and coordinate mutations precede the one final linkage.
+    # read_table validated eager frames; AnnData also types backed Dataset2D.
+    prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=_LINKAGE_CONTEXT)
+    prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=_LINKAGE_CONTEXT)
+    duplicate_sums: list[SparseDuplicateSummary] = []
     table = parse_linked_table(
         table,
         TableLinkage(tuple(table.obs["region"].unique()), "region", "cell_id"),
-        context=context,
+        context=_LINKAGE_CONTEXT,
         path=layout.table,
         duplicate_sums=duplicate_sums,
         expression_layers=("counts",) if "counts" in table.layers else (),

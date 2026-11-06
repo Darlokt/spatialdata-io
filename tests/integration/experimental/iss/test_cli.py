@@ -70,8 +70,8 @@ class TestIssCommandWorkflow:
         assert image.coords["c"].to_numpy().tolist() == [0, 1]
         np.testing.assert_array_equal(image.data.compute(), iss_dataset.raw)
         np.testing.assert_array_equal(labels.data.compute(), iss_dataset.labels)
-        assert get_transformation(image, get_all=True) == {"global": Identity()}
-        assert get_transformation(labels, get_all=True) == {"global": Identity()}
+        assert get_transformation(image, get_all=True) == {"image_pixels": Identity()}
+        assert get_transformation(labels, get_all=True) == {"image_pixels": Identity()}
 
         table = restored.tables["table"]
         assert table.obs_names.tolist() == ["7", "2"]

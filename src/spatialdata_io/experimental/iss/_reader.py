@@ -1,22 +1,22 @@
-"""Assemble the ISS raw image, segmentation, table linkage, and provenance."""
+"""Public ISS reader: link a caller-selected raw image, labels and ``.h5ad`` table."""
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
-import pandas as pd
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.experimental.iss._images import _read_rasters, _validate_data_axes
-from spatialdata_io.experimental.iss._layout import _discover_layout
-from spatialdata_io.experimental.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY, _validate_output_column
-from spatialdata_io.experimental.iss._tables import _read_table
+from spatialdata_io.experimental.iss._images import read_rasters, validate_data_axes
+from spatialdata_io.experimental.iss._layout import discover_layout, validate_artifact_names
+from spatialdata_io.experimental.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY
+from spatialdata_io.experimental.iss._tables import read_table
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import make_raster_options
+from spatialdata_io.readers._utils.names import validate_element_name
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -33,64 +33,56 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     table_file: str | Path,
     instance_key: str | None = None,
     dataset_id: str = "region",
-    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     data_axes: str | None = None,
+    scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
-    """Read an experimental unversioned ISS image, segmentation, and linked h5ad table.
+    """Read an ISS raw image, its segmentation labels and a linked ``.h5ad`` table.
 
-    The caller selects three artifacts. There is no inferred pipeline version
-    or fixed vendor directory tree::
+    ISS pipelines have no fixed directory tree or format version, so the caller
+    names each of the three artifacts::
 
-        raw.tiff  # TIFF-family scientific image
-        labels.tiff  # TIFF-family integer segmentation
-        cells.h5ad  # expression and observation metadata
+        dataset/
+        ├── raw.tiff     # raw_image_file: TIFF, OME-TIFF, BigTIFF or BTF image
+        ├── labels.tiff  # labels_file: TIFF-family integer segmentation
+        └── cells.h5ad   # table_file: AnnData expression and cell metadata
 
-    Each TIFF must contain exactly one series. Its full-resolution level zero
-    is used. The caller must select images and labels registered on the same
-    base pixel grid; equal YX extents are required but do not prove alignment.
-    Complete raw-image OME XY spacing calibrates this pair in micrometres.
+    Each TIFF must hold exactly one series, read at full resolution. The image
+    and labels must be registered on the same pixel grid; equal YX extents are
+    checked, alignment itself is the caller's assertion. Table rows link to
+    label values through an integer instance column.
 
     Parameters
     ----------
     path
         Dataset directory.
     raw_image_file, labels_file, table_file
-        Required TIFF, OME-TIFF, BigTIFF/BTF and h5ad paths. Relative paths
-        resolve within the dataset root. Absolute paths may be outside it.
+        The three artifacts, with suffix ``.tif``, ``.tiff`` or ``.btf`` for the
+        rasters and ``.h5ad`` for the table. Relative paths resolve against
+        ``path``; absolute paths may point elsewhere.
     instance_key
-        Integer observation column containing strictly positive label IDs.
-        Otherwise decimal observation names become ``instance_id``. Zero is
-        reserved for label background. IDs must fit the labels' integer dtype.
-        Exact pixel membership is not checked by computing lazy labels.
+        Observation column holding the label value of each row: non-null
+        positive integers. By default the observation names are used, and
+        must then consist of ASCII digits only.
     dataset_id
-        Nonempty identifier used to name the two raster elements. Contains only
-        alphanumeric characters, underscores, dots or hyphens, and cannot start
-        with two underscores.
+        Prefix of the raster element names. It must be a valid SpatialData
+        element name: nonempty, only letters, digits, ``_``, ``-`` and ``.``,
+        not ``.`` or ``..``, and not starting with ``__``.
+    data_axes
+        Axes of the raw image as one string of distinct letters including X
+        and Y, case-insensitive, for example ``"CYX"`` for a stack without
+        axis metadata or ``"YXC"`` to read interleaved RGB samples (``YXS``)
+        as channels. Defaults to the axes the file declares. Labels always use
+        their declared axes.
     scale_factors
         Integer factors of at least two, one per generated pyramid level of the
-        images and labels; empty for a single scale. Generated label pyramids
-        require <=32-bit integer labels: upstream downsampling rounds 64-bit
-        IDs. Exact base int64/uint64 labels are supported at a single scale.
-    data_axes
-        Optional source raw-image axes, such as ``CYX`` for an unlabeled
-        stack. Otherwise TIFF axes are used. Scientific C channels never
-        become RGB based on their number. Non-singleton sample axes require
-        an explicit interpretation as C, for example ``YXC`` for RGB ``YXS``.
-        Samples the TIFF declares RGB (``PhotometricInterpretation`` RGB or
-        JPEG-compressed YCbCr) are named ``r, g, b``, plus ``a`` for a
-        fourth sample declared alpha by ``ExtraSamples``. Other expanded OME
-        samples use ``<identifier>:sample:<zero-based index>`` identities,
-        where the identifier is the OME channel name when names are nonempty
-        and unique, otherwise the OME channel ID; other plain TIFF samples
-        use positional identities. Singleton nonspatial axes may be removed,
-        while singleton X/Y dimensions are retained. Labels require YX and
-        only singleton extra axes.
+        image and labels; empty for a single scale. Pyramids require labels of
+        at most 32 bits, because downsampling rounds larger IDs.
     chunks
-        One positive size for every axis or three ``c, y, x`` sizes of the
-        images; labels use the ``y`` and ``x`` sizes. By default one channel per
-        chunk and square 1024-pixel tiles.
+        One positive size for every axis or three ``c, y, x`` sizes; labels use
+        the ``y, x`` sizes. By default one channel per chunk and square
+        1024-pixel tiles.
     path_policy
         How symlinks inside the dataset directory are treated. ``"strict"``
         requires every discovered artifact and relative file option to resolve
@@ -104,103 +96,95 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     Returns
     -------
     SpatialData
-        ``images['<dataset_id>_raw_image']`` is lazy CYX with source dtype,
-        channel order, and unique available OME channel names or IDs. Channels
-        without OME metadata use positions. ``labels['<dataset_id>_labels_image']`` is lazy YX with
-        source integer dtype and instance values. Both use ``global`` in micrometres
-        when the base raw image declares complete OME XY sizes in µm, nm or mm;
-        labels inherit missing calibration and conflicting declarations fail.
-        Otherwise both retain shared source pixels. Explicit reinterpretation
-        of spatial axes retains pixels. The source origin is unchanged; stage
-        placement is not inferred. Construction executes zero
-        pixel tasks. Computing a selection decodes only the TIFF tiles or strips
-        of the output chunks it intersects. TIFF resources close after inspection and inside each lazy task.
-        ``tables['table']`` is owned, eager, finite canonical CSR sparse-array
-        expression preserving values and row/feature order. Duplicate feature
-        names become unique. The optional ``counts`` layer is normalized in the
-        same way. Duplicate integer entries promote directly to exact float32
-        or float64 when their sums exceed the source dtype. Sufficient source dtypes, including signed
-        cancellation, are retained. No supported exact representation raises
-        with the H5AD path and expression slot. Other layers, additional H5AD annotation fields
-        and their dtypes/missingness, and existing spatial metadata are retained. Imported
-        H5AD ``obsm['spatial']`` moves exactly to ``spatial_source`` with its
-        original dtype and shape; an occupied destination raises. No axes or
-        units are inferred and no canonical ``spatial`` is returned. Label
-        linkage and OME image calibration do not establish table calibration. Annotation
-        columns may be reordered; duplicate column names are rejected. Existing
-        reserved output columns must be semantically equal to generated values.
-        Final linkage uses categorical ``region`` and the selected integer
-        instance column. No shapes or points are returned. Caller-owned state
-        is not mutated. Provenance records the reader and package version.
+        One image, one labels element and one linked table:
+
+        ``images["<dataset_id>_raw_image"]``
+            Lazy CYX image with the source dtype and channel order. Singleton
+            nonspatial axes are dropped; a missing C axis is added. Channel
+            names are ``r, g, b`` (``r, g, b, a`` with a declared alpha sample)
+            for samples the TIFF declares RGB (``PhotometricInterpretation``
+            RGB or JPEG-compressed YCbCr); otherwise OME channel names when all
+            are nonempty and unique, else OME channel IDs, with
+            ``<name or ID>:sample:<index>`` for an OME channel expanded from
+            samples; otherwise positions. A three- or four-channel image is
+            never guessed to be RGB.
+        ``labels["<dataset_id>_labels_image"]``
+            Lazy YX labels with the source integer dtype. Zero is background.
+        ``tables["table"]``
+            The ``.h5ad`` table in source row and feature order.
+
+            - ``X`` and the optional ``layers["counts"]``: canonical CSR sparse
+              arrays with the source values and dtype. Duplicate sparse entries
+              are summed; an integer sum that overflows the source dtype
+              promotes to float32 or float64 when exact, and raises otherwise.
+            - ``obs["region"]``: the labels element name, categorical.
+            - ``obs[instance_key]`` (kept, widened to 16 bits when narrower) or
+              ``obs["instance_id"]`` (int64, or uint64 when an ID needs it)
+              holds the label values. IDs must fit the labels dtype. Membership
+              in the labels is not checked, so labels are never computed.
+            - ``var_names``: duplicates are made unique (``GeneB``, ``GeneB-1``).
+            - An imported ``obsm["spatial"]`` moves unchanged to
+              ``obsm["spatial_source"]``; no axes or units are inferred.
+            - Other fields, layers, ``raw`` and ``uns`` entries are kept with
+              their dtypes and missingness. Source fields named ``region`` or
+              like the instance column must equal the generated values.
+
+        Coordinate systems: image and labels share one coordinate system.
+
+        - ``global`` in micrometres, with a ``Scale`` of the pixel size, when
+          the raw image declares complete OME ``PhysicalSizeX``/``Y`` in µm,
+          nm or mm. Label OME sizes must agree where present.
+        - ``image_pixels`` (identity) otherwise, or when ``data_axes`` moves X
+          or Y. ``global`` is then absent, because it always means
+          micrometres.
+
+        The source origin is kept; stage placement is not inferred. The table
+        has no coordinates.
+
+        ``attrs`` record the reader and package version. Pixels are not read
+        until computed, and a partial computation decodes only the TIFF tiles
+        or strips it overlaps. All files are closed on return; caller-owned
+        objects and source files are not modified.
 
     Warns
     -----
     UserWarning
-        One summary per successful call if imported sparse duplicate entries
-        were combined, identifying affected expression slots and dtype changes.
-        Expected format aggregation does not trigger this warning.
+        Once per call when duplicate sparse entries were summed, naming the
+        affected expression slots and any dtype change.
 
     Raises
     ------
-    FileNotFoundError, NotADirectoryError, IsADirectoryError
-        If an artifact is missing or has the wrong filesystem kind.
-    ValueError
-        If raster axes, integer IDs, table linkage, shared extents, options,
-        TIFF metadata, expression values or generated pyramids violate the
-        supported contract. Malformed layouts and schemas raise the
-        ``ReaderFormatError`` subclass.
     TypeError
-        If option or expression types are unsupported.
+        If an option has the wrong type, or the expression storage is
+        unsupported.
+    ValueError
+        If an option has an invalid value, for example a wrong file suffix.
+    FileNotFoundError, NotADirectoryError, IsADirectoryError
+        If a path is missing or has the wrong kind.
+    ValueError
+        A contextual ``ReaderFormatError`` naming the artifact and path if an
+        artifact is malformed: several TIFF series, unsupported axes, unequal
+        extents, non-integer labels, conflicting calibration, a missing or
+        duplicate table field, invalid or out-of-range IDs, or non-finite
+        expression.
     """
-    # Validate public configuration before opening any artifact.
-    if (
-        not isinstance(dataset_id, str)
-        or not dataset_id
-        or dataset_id.startswith("__")
-        or not all(character.isalnum() or character in "_-." for character in dataset_id)
-    ):
-        message = (
-            "dataset_id must contain only alphanumeric characters, underscores, dots or hyphens "
-            "and cannot start with '__'."
-        )
-        raise ValueError(message)
-    if instance_key is not None and (
-        not isinstance(instance_key, str) or not instance_key or instance_key == REGION_KEY
-    ):
-        message = "instance_key must be a nonempty observation name distinct from 'region'."
-        raise ValueError(message)
-
-    duplicate_sums: list[SparseDuplicateSummary] = []
-    raw_axes = _validate_data_axes(data_axes)
+    validate_artifact_names(raw_image_file, labels_file, table_file)
+    _validate_options(instance_key, dataset_id)
+    raw_axes = validate_data_axes(data_axes)
     raster = make_raster_options(scale_factors, chunks)
 
-    layout = _discover_layout(
-        path,
-        raw_image_file=raw_image_file,
-        labels_file=labels_file,
-        table_file=table_file,
-        path_policy=path_policy,
+    layout = discover_layout(
+        path, raw_image_file=raw_image_file, labels_file=labels_file, table_file=table_file, path_policy=path_policy
     )
-    rasters = _read_rasters(layout, data_axes=raw_axes, raster=raster)
-    table = _read_table(layout.table, instance_key=instance_key, label_dtype=rasters.label_dtype)
-
-    # _read_table validates eager frames; AnnData also types backed Dataset2D.
-    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
-
+    rasters = read_rasters(layout, data_axes=raw_axes, raster=raster)
     region = f"{dataset_id}_labels_image"
-    regions = pd.Series(pd.Categorical([region] * table.n_obs), index=table.obs_names)
-    _validate_output_column(obs, REGION_KEY, regions, path=layout.table)
-    obs[REGION_KEY] = regions
+    table = read_table(layout.table, region=region, instance_key=instance_key, label_dtype=rasters.label_dtype)
 
-    # Annotation storage is finalized after reader mutations and before linkage.
-    context = ReaderErrorContext("iss", "linked counts")
-    prepare_anndata_dataframe(obs, context=context)
-    prepare_anndata_dataframe(var, context=context)
-
+    duplicate_sums: list[SparseDuplicateSummary] = []
     table = parse_linked_table(
         table,
         TableLinkage((region,), REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY),
-        context=context,
+        context=ReaderErrorContext("iss", "linked table"),
         path=layout.table,
         duplicate_sums=duplicate_sums,
         expression_layers=("counts",) if "counts" in table.layers else (),
@@ -211,9 +195,23 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     )
     set_reader_provenance(result.attrs, reader="iss")
     if duplicate_sums:
-        warnings.warn(
-            f"iss {layout.table.name}: " + "; ".join(map(str, duplicate_sums)),
-            UserWarning,
-            stacklevel=2,
-        )
+        warnings.warn(f"iss {layout.table.name}: " + "; ".join(map(str, duplicate_sums)), UserWarning, stacklevel=2)
     return result
+
+
+def _validate_options(instance_key: str | None, dataset_id: str) -> None:
+    """Validate the table column and element-name options before any I/O.
+
+    ``dataset_id`` follows SpatialData's element-name rule. The derived names
+    end in ``_raw_image`` and ``_labels_image``, so they cannot collide with
+    ``table``.
+    """
+    if instance_key is not None:
+        if not isinstance(instance_key, str):
+            message = "instance_key must be a string or None."
+            raise TypeError(message)
+        if not instance_key or instance_key == REGION_KEY:
+            message = f"instance_key must be a nonempty observation column other than {REGION_KEY!r}."
+            raise ValueError(message)
+
+    validate_element_name(dataset_id, parameter="dataset_id")

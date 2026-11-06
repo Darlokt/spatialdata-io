@@ -30,7 +30,7 @@ H5AD observation names encode the B sequence in their first eight characters and
 
 ## Output and coordinates
 
-`dataset_id` defaults to the H5AD filename stem (`sample` in the layout above). It must be nonempty, use only letters, digits, underscores, dots or hyphens, and must not begin with two underscores. The names `.`, `..`, and `table` (case-insensitive) are reserved. The returned elements are:
+`dataset_id` defaults to the H5AD filename stem (`sample` in the layout above). It must be a valid SpatialData element name: nonempty, only letters, digits, underscores, dots or hyphens, not `.` or `..`, and not beginning with two underscores. Because SpatialData compares element names case-insensitively, `table` is reserved in any letter case. A `dataset_id` argument is checked before any file is read: a non-string raises `TypeError` and an invalid name `ValueError`. A filename stem that breaks these rules is repaired instead, with one `UserWarning` naming the original and the repaired name: every other character becomes `_`, a leading run of underscores becomes one, an empty name, `.` or `..` becomes `unnamed`, and a reserved name gains a trailing `_`. For example `my run.h5ad` gives `my_run` and `Table.h5ad` gives `Table_`. Pass `dataset_id` to choose the name yourself. The returned elements are:
 
 | Element | Contract |
 | --- | --- |
@@ -40,25 +40,32 @@ H5AD observation names encode the B sequence in their first eight characters and
 
 The reader owns the generated `obs` columns `array_A`, `array_B`, `sample`, `region`, and `pixel_id`. It deliberately overwrites these columns whether imported values are equal, conflicting, or null. Any inherited `uns["spatialdata_attrs"]` is discarded without interpretation, and fresh table linkage targets the final shape index. Other observation/feature metadata and aligned arrays are retained, including their source dtypes, missingness, and categorical order. Named annotation columns accept arbitrary order and additional fields; duplicate column names fail. Generated grid identifiers reach the output as NumPy int64, `sample` as pandas strings, and `region` as categorical strings. `X` and an existing `counts` layer become finite, canonical SciPy CSR sparse arrays; other layers retain their representation. Duplicate sparse entries are summed, promoting overflowing integer storage directly to exact float32/f64 only when necessary. A successful read emits one warning identifying combined entries and dtype changes. No supported exact result raises an error; source files remain unchanged. The reader owns its newly read table and does not modify the source H5AD.
 
-A is the x axis and B is the y axis. Without an image, grid cell `(A, B)` occupies `[A - 1, A] × [B - 1, B]` before the border inset. `include_border=True` shrinks each edge inward by `0.125 * border_scale` grid units. `border_scale` must be finite and satisfy `0 <= border_scale < 4`, including when `include_border=False`.
+A is the x axis and B is the y axis. The polygons are always stored in grid units, with or without an image: grid cell `(A, B)` occupies `[A - 1, A] × [B - 1, B]` before the border inset. `include_border=True` shrinks each edge inward by `0.125 * border_scale` grid units. `border_scale` must be finite and satisfy `0 <= border_scale < 4`, including when `include_border=False`.
 
-With an image, both grid axes and the border inset are multiplied by `max(image_height, image_width) / N`. This uniform scaling preserves the historical square-grid convention for rectangular images too: the grid spans the longer image dimension on both axes. The image must already be cropped, oriented, and registered appropriately; the reader does not infer a registration or physical units. Shapes and images use identity transformations into the `global` coordinate system.
+With an image, a uniform scale `s = max(image_height, image_width) / N` maps the grid onto the full-resolution image of the selected level. This preserves the historical square-grid convention for rectangular images too: the grid spans the longer image dimension on both axes. The image must already be cropped, oriented, and registered appropriately; the reader does not infer a registration or physical units.
 
-Without an image these are barcode-grid units; with an image they use the documented image-pixel convention. OME spacing or nominal channel width alone cannot establish the barcode pitch, origin, orientation and capture footprint, so neither triggers automatic conversion to micrometres.
+DBiT files carry no physical calibration, so no element is placed in `global`, which always means micrometres. The coordinate systems are:
+
+| Coordinate system | Unit | `shapes[dataset_id]` | `images[dataset_id + "_image"]` |
+| --- | --- | --- | --- |
+| `grid_pixels` | one barcode-grid step (one DBiT pixel) | `Identity()` | not present |
+| `image_pixels` (only with an image) | one full-resolution image pixel | `Scale([s, s], axes=("x", "y"))` | `Identity()` |
+
+OME spacing or nominal channel width alone cannot establish the barcode pitch, origin, orientation and capture footprint, so neither triggers automatic conversion to micrometres.
 
 `invalid_geometries="keep"`, `"drop"` and `"raise"` produce identical supported squares and linkage because this geometry is valid by construction. No topology scan is performed. The option is validated before I/O, and floating-point collapse of a positive square width fails in every mode.
 
-`table.obsm["spatial_grid"]` retains the one-based integer `(array_A, array_B)` coordinates, even when an image scales the polygons. These values are barcode positions, not polygon centers or image-pixel coordinates.
+`table.obsm["spatial_grid"]` retains the one-based integer `(array_A, array_B)` coordinates. These values are barcode positions, not polygon centers or image-pixel coordinates.
 
-`uns["spatialdata_io_positions"]` describes `spatial_grid` as grid ordinals in the `barcode_grid` frame. Existing `spatial_grid` or `spatialdata_io_positions` destinations raise. Imported `obsm["spatial"]` moves exactly to `spatial_source` before sorting, preserving dtype and shape; an occupied destination raises when this move is required. No physical `spatial` is produced. Channel widths and fitting display polygons to an image do not establish physical table calibration.
+`uns["spatialdata_io_positions"]` describes `spatial_grid` as one-based grid ordinals in the `grid_pixels` frame. Existing `spatial_grid` or `spatialdata_io_positions` destinations raise. Imported `obsm["spatial"]` moves exactly to `spatial_source` before sorting, preserving dtype and shape; an occupied destination raises when this move is required. No physical `spatial` is produced. Channel widths and fitting display polygons to an image do not establish physical table calibration.
 
 ## Image options and lazy execution
 
-TIFF metadata supplies source axes when they are unambiguous. Use `data_axes`, such as `"CYX"` or `"YXC"`, when an explicit interpretation is required. `tiff_series=0` and `tiff_level=0` select the first TIFF series and its first resolution level; other nonnegative indices select an existing series or pyramid level. PNG and JPEG use their encoded image layout and do not accept TIFF-specific selection or axis overrides.
+TIFF metadata supplies source axes when they are unambiguous. Use `data_axes`, one case-insensitive string such as `"CYX"` or `"YXS"`, when an explicit interpretation is required; other types raise `TypeError`. By default the reader reads the TIFF's only series; a file with several series raises `ReaderFormatError` unless `tiff_series` selects one. `tiff_level=0` selects the full-resolution level of that series; other nonnegative indices select an existing stored pyramid level. PNG and JPEG use their encoded image layout and do not accept `data_axes`, `tiff_series` (not even `0`) or a nonzero `tiff_level`. Wrongly typed indexes raise `TypeError`, negative ones `ValueError`.
 
 Image channels are named `r, g, b`, or `r, g, b, a` with a declared alpha sample, when the image's samples become its channels and the file itself declares them RGB: TIFF `PhotometricInterpretation` RGB (alpha through `ExtraSamples`) or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6 (alpha through colour type 6 or `tRNS`), and three-component JPEG. Viewers composite such images as colour. Otherwise reliable scientific channel names from OME metadata are retained in source order; OME declares an interleaved image as one channel with several samples per pixel, so its samples are named `<name or ID>:sample:0`, `:sample:1`, … (for example `Channel:0:0:sample:0`). Images without either declaration, such as grayscale PNG or non-OME `MinIsBlack` TIFF samples, keep positional channel coordinates. The channel count or dtype never makes an image RGB.
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A pyramid is generated only when `scale_factors` requests one; the grid scale always uses the full-resolution extent of the selected TIFF level. Image options other than their defaults require an image. Metadata inspection is eager, while pixel decoding stays lazy until the returned image is computed or written. TIFF tasks decode the tiles or strips that overlap the computed chunks. PNG and JPEG can require decoding the entire encoded frame even for a small selection; rechunking does not change that codec limitation.
+`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A pyramid is generated only when `scale_factors` requests one, and factors whose product exceeds the smaller image side raise `ValueError`; the grid scale always uses the full-resolution extent of the selected TIFF level. Image options other than their defaults require an image. Metadata inspection is eager, while pixel decoding stays lazy until the returned image is computed or written. TIFF tasks decode the tiles or strips that overlap the computed chunks. PNG and JPEG can require decoding the entire encoded frame even for a small selection; rechunking does not change that codec limitation.
 
 Missing or wrong-kind paths raise the corresponding filesystem exception. Malformed or ambiguous layouts, barcode schemas, and identifier relationships raise `ReaderFormatError`, a `ValueError` subclass, with reader and artifact context. Invalid option values raise `ValueError`, and unsupported option types raise `TypeError`. The reader does not return partial results after a validation failure.
 
@@ -74,8 +81,6 @@ sdata = dbit(
     image_file="registered.tif",
     include_border=True,
     border_scale=1.0,
-    tiff_series=0,
-    tiff_level=0,
     scale_factors=(2, 2),
     chunks=(1, 512, 512),
 )
@@ -95,6 +100,12 @@ python -m spatialdata_io dbit --input dataset --output sample.zarr \
 
 Images are now chunked `(1, 1024, 1024)` by default instead of keeping the storage-aligned chunks of the source, and `chunks=None` is no longer accepted. Pass `chunks` explicitly to choose another layout. The new `scale_factors` option builds pyramid levels.
 
+Shapes and images are no longer placed in `global`. The polygons are stored in grid units in `grid_pixels`; with an image they reach the image's `image_pixels` frame through `Scale([s, s])`, where earlier versions stored the scaled vertices directly. The overlay in `image_pixels` is unchanged up to one floating-point rounding step. The position declaration names the `grid_pixels` frame instead of `barcode_grid`.
+
+A filename stem that is not a valid element name is now repaired with a warning (for example `my run.h5ad` gives `my_run`) instead of raising.
+
+`tiff_series` now defaults to `None` (and `--tiff-series` has no default): a TIFF with several series raises instead of silently reading the first one. Pass `tiff_series=0` to keep the previous selection. PNG and JPEG images reject any `tiff_series`. A non-string `dataset_id` raises `TypeError` instead of `ValueError`.
+
 Images whose file declares RGB samples (RGB TIFF and OME-TIFF, RGB, RGBA and palette PNG, three-component JPEG) now have channel coordinates `r, g, b` or `r, g, b, a` instead of positional indexes or `<name or ID>:sample:<k>`.
 
 ## Complete synthetic example
@@ -110,6 +121,9 @@ import numpy as np
 import pandas as pd
 import imagecodecs
 from scipy import sparse
+
+from spatialdata import transform
+from spatialdata.transformations import Identity, Scale, get_transformation
 
 from spatialdata_io import dbit
 
@@ -134,7 +148,13 @@ with TemporaryDirectory() as directory:
     assert table.var_names.tolist() == ["gene-b", "gene-a"]
     assert table.obs["pixel_id"].tolist() == sdata.shapes["sample"].index.tolist()
     np.testing.assert_array_equal(table.X.toarray(), [[1, 2], [3, 4]])
-    np.testing.assert_allclose(sdata.shapes["sample"].total_bounds, [0.625, 0.625, 9.375, 9.375])
+    np.testing.assert_allclose(sdata.shapes["sample"].total_bounds, [0.125, 0.125, 1.875, 1.875])
+    assert get_transformation(sdata.shapes["sample"], get_all=True) == {
+        "grid_pixels": Identity(),
+        "image_pixels": Scale([5.0, 5.0], axes=("x", "y")),
+    }
+    overlay = transform(sdata.shapes["sample"], to_coordinate_system="image_pixels")
+    np.testing.assert_allclose(overlay.total_bounds, [0.625, 0.625, 9.375, 9.375])
     image = sdata.images["sample_image"]
     assert image.dims == ("c", "y", "x")
     assert image.coords["c"].values.tolist() == ["r", "g", "b"]

@@ -39,8 +39,10 @@ class TestSteinbockCommandWorkflow:
                 str(steinbock_dataset.root),
                 "-o",
                 str(output),
-                "--labels-kind",
-                "deepcell",
+                "--masks-dir",
+                "masks",
+                "--table-file",
+                str(steinbock_dataset.root / "cells.h5ad"),
                 "--chunks",
                 "16",
             ],
@@ -66,9 +68,9 @@ class TestSteinbockCommandWorkflow:
             assert labels.dtype == np.dtype(np.uint16)
             assert image.coords["c"].to_numpy().tolist() == ["DNA", "CD3"]
             np.testing.assert_array_equal(image.data.compute(), steinbock_dataset.images[sample])
-            np.testing.assert_array_equal(labels.data.compute(), steinbock_dataset.deepcell[sample])
-            assert get_transformation(image, get_all=True) == {sample: Identity()}
-            assert get_transformation(labels, get_all=True) == {sample: Identity()}
+            np.testing.assert_array_equal(labels.data.compute(), steinbock_dataset.masks[sample])
+            assert get_transformation(image, get_all=True) == {f"{sample}_pixels": Identity()}
+            assert get_transformation(labels, get_all=True) == {f"{sample}_pixels": Identity()}
 
         table = restored.tables["table"]
         assert isinstance(table.obs, pd.DataFrame)
@@ -88,7 +90,7 @@ class TestSteinbockCommandWorkflow:
         assert get_table_keys(table) == (["sample-b_labels", "sample-a_labels"], "region", "cell_id")
         for sample in ("sample-a", "sample-b"):
             ids = table.obs.loc[table.obs["region"] == f"{sample}_labels", "cell_id"]
-            assert set(ids) <= set(np.unique(steinbock_dataset.deepcell[sample]))
+            assert set(ids) <= set(np.unique(steinbock_dataset.masks[sample]))
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[3, 1.5], [8.5, 5], [8.5, 5], [3, 1.5]])
         assert "spatial" not in table.obsm
         # AnnData persistence can restore matrices instead of sparse arrays.

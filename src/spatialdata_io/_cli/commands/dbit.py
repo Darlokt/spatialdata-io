@@ -24,7 +24,7 @@ if TYPE_CHECKING:
         border_scale: float
         invalid_geometries: Literal["keep", "drop", "raise"]
         data_axes: str | None
-        tiff_series: int
+        tiff_series: int | None
         tiff_level: int
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     default=None,
     help="TIFF/BTF, PNG, or JPEG override. Relative paths resolve below the dataset root.",
 )
-@click.option("--dataset-id", type=str, default=None, help="Element identifier. Defaults to the H5AD filename stem.")
+@click.option("--dataset-id", type=str, default=None, help="Shapes element name; defaults to the H5AD filename stem.")
 @click.option(
     "--include-border/--no-include-border",
     default=True,
@@ -66,17 +66,23 @@ if TYPE_CHECKING:
     help="Finite border multiplier in [0, 4). Validated even when borders are disabled.",
 )
 @click.option(
+    "--invalid-geometries",
+    type=click.Choice(["keep", "drop", "raise"]),
+    default="keep",
+    show_default=True,
+    help="Polygon policy; supported generated squares are valid in every mode.",
+)
+@click.option(
     "--data-axes",
     type=str,
     default=None,
-    help="Explicit TIFF source axes when metadata is ambiguous, for example CYX or YXC.",
+    help="TIFF source axes as one string, for example CYX or YXS; defaults to the axes the file declares.",
 )
 @click.option(
     "--tiff-series",
     type=click.IntRange(min=0),
-    default=0,
-    show_default=True,
-    help="Zero-based TIFF series to read.",
+    default=None,
+    help="Zero-based TIFF series to read. Required when the TIFF has several series.",
 )
 @click.option(
     "--tiff-level",
@@ -87,13 +93,6 @@ if TYPE_CHECKING:
 )
 @scale_factors_option
 @chunks_option
-@click.option(
-    "--invalid-geometries",
-    type=click.Choice(["keep", "drop", "raise"]),
-    default="keep",
-    show_default=True,
-    help="Polygon policy; supported generated squares are valid in every mode.",
-)
 @path_policy_option
 def dbit_command(input_path: Path, output_path: Path, **options: Unpack[_DbitOptions]) -> None:
     """Read one DBiT dataset and write its linked SpatialData store."""

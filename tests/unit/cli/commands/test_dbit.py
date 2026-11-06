@@ -45,7 +45,7 @@ class TestDbitCommand:
             border_scale=1.0,
             invalid_geometries="keep",
             data_axes=None,
-            tiff_series=0,
+            tiff_series=None,
             tiff_level=0,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
@@ -224,6 +224,12 @@ class TestDbitCommand:
         assert result.exit_code == 2
         reader.assert_not_called()
 
+    def test_option_order_matches_the_reader_signature(self) -> None:
+        options = [parameter.name for parameter in dbit_command.params]
+        reader_parameters = list(inspect.signature(dbit).parameters)
+
+        assert options == ["input_path", "output_path", *reader_parameters[1:]]
+
     def test_parameter_names_types_and_defaults(self) -> None:
         options = {parameter.name: parameter for parameter in dbit_command.params}
         reader_parameters = inspect.signature(dbit).parameters
@@ -236,6 +242,7 @@ class TestDbitCommand:
             "dataset_id",
             "include_border",
             "border_scale",
+            "invalid_geometries",
             "data_axes",
             "tiff_series",
             "tiff_level",

@@ -1,4 +1,4 @@
-"""Read linked ISS image, segmentation, and expression artifacts."""
+"""Experimental ISS reader for a caller-selected raw image, labels and linked h5ad table."""
 
 from __future__ import annotations
 

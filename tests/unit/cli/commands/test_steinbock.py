@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
@@ -13,7 +14,6 @@ from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTOR
 from spatialdata_io.readers.steinbock import steinbock
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from unittest.mock import MagicMock
 
     from click.testing import CliRunner
@@ -35,7 +35,8 @@ class TestSteinbockCommand:
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
-            labels_kind="deepcell",
+            masks_dir="masks",
+            table_file=Path("cells.h5ad"),
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
             path_policy="strict",
@@ -59,8 +60,10 @@ class TestSteinbockCommand:
             str(tmp_path),
             "--output",
             str(output),
-            "--labels-kind",
-            "ilastik",
+            "--masks-dir",
+            "masks_ilastik",
+            "--table-file",
+            "/data/objects.h5ad",
             "--scale-factors",
             "2",
             "--scale-factors",
@@ -74,7 +77,8 @@ class TestSteinbockCommand:
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
-            labels_kind="ilastik",
+            masks_dir="masks_ilastik",
+            table_file=Path("/data/objects.h5ad"),
             scale_factors=(2, 3),
             chunks=expected_chunks,
             path_policy="strict",
@@ -84,7 +88,8 @@ class TestSteinbockCommand:
     @pytest.mark.parametrize(
         "extra",
         [
-            ["--labels-kind", "unknown"],
+            ["--labels-kind", "deepcell"],
+            ["--table-file", str(Path(__file__).parent)],
             ["--scale-factors", "1"],
             ["--image-scale-factors", "2"],
             ["--chunks", "0"],
@@ -112,17 +117,20 @@ class TestSteinbockCommand:
         assert list(options) == [
             "input_path",
             "output_path",
-            "labels_kind",
+            "masks_dir",
+            "table_file",
             "scale_factors",
             "chunks",
             "path_policy",
         ]
         reader_parameters = inspect.signature(steinbock).parameters
         assert set(reader_parameters) - {"path"} == set(options) - {"input_path", "output_path"}
-        assert options["labels_kind"].default == reader_parameters["labels_kind"].default == "deepcell"
-        choice = options["labels_kind"].type
-        assert isinstance(choice, click.Choice)
-        assert choice.choices == ("deepcell", "ilastik")
+        assert options["masks_dir"].default == reader_parameters["masks_dir"].default == "masks"
+        assert options["masks_dir"].type == click.STRING
+        assert options["table_file"].default == reader_parameters["table_file"].default == "cells.h5ad"
+        table_type = options["table_file"].type
+        assert isinstance(table_type, click.Path)
+        assert not table_type.dir_okay
         assert options["scale_factors"].default == reader_parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
         assert options["chunks"].default == reader_parameters["chunks"].default == DEFAULT_CHUNKS
         for name in ("scale_factors", "chunks"):

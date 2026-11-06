@@ -176,16 +176,21 @@ class TestRegionName:
             region_name(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"))
 
     @pytest.mark.parametrize(
-        ("value", "expected"), [(1, "1"), (2.0, "2"), (np.int64(3), "3"), ("reg001", "reg001"), ("é-1.a_b", "é-1.a_b")]
+        ("value", "expected"),
+        [(1, "1"), (2.0, "2"), (np.int64(3), "3"), ("reg001", "reg001"), ("é-1.a_b", "é-1.a_b"), ("tables", "tables")],
     )
     def test_valid_region(self, tmp_path: Path, value: object, expected: str) -> None:
         assert region_name(pd.Series([value, value]), ArtifactFile(tmp_path / "cells.csv")) == expected
 
-    @pytest.mark.parametrize("value", [".", "..", "__reg", "my region", "a:b", "reg/1", "table", "Images"])
+    @pytest.mark.parametrize(
+        "value", [".", "..", "__reg", "my region", "a:b", "reg/1", "table", "TABLE", "images", "Images", "iMaGeS"]
+    )
     def test_region_must_be_an_element_name(self, tmp_path: Path, value: str) -> None:
         """The region names the shapes element, so it must not fail SpatialData construction later."""
-        with pytest.raises(ReaderFormatError, match=r"artifact 'cell table'.*valid element name"):
+        with pytest.raises(ReaderFormatError, match=r"artifact 'cell table'.*valid element name") as caught:
             region_name(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"))
+
+        assert isinstance(caught.value.__cause__, ValueError)
 
 
 class TestCsvColumnNames:

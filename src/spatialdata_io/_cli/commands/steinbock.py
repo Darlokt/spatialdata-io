@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
@@ -9,13 +10,13 @@ import click
 from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from typing import Literal, TypedDict, Unpack
 
     class _SteinbockOptions(TypedDict):
         """Describe Click-converted source choices and image/label options."""
 
-        labels_kind: Literal["deepcell", "ilastik"]
+        masks_dir: str
+        table_file: Path
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
         path_policy: Literal["strict", "relaxed"]
@@ -24,11 +25,18 @@ if TYPE_CHECKING:
 @click.command(name="steinbock")
 @dataset_io_options
 @click.option(
-    "--labels-kind",
-    type=click.Choice(["deepcell", "ilastik"]),
-    default="deepcell",
+    "--masks-dir",
+    type=str,
+    default="masks",
     show_default=True,
-    help="Segmentation-mask family to use.",
+    help="Mask directory inside the dataset root, for example masks_deepcell.",
+)
+@click.option(
+    "--table-file",
+    type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
+    default="cells.h5ad",
+    show_default=True,
+    help="AnnData table. Relative paths resolve within the dataset root.",
 )
 @scale_factors_option
 @chunks_option
@@ -39,7 +47,8 @@ def steinbock_command(input_path: Path, output_path: Path, **options: Unpack[_St
 
     result = steinbock(
         input_path,
-        labels_kind=options["labels_kind"],
+        masks_dir=options["masks_dir"],
+        table_file=options["table_file"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
         path_policy=options["path_policy"],

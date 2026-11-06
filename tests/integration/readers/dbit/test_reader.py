@@ -14,10 +14,10 @@ import shapely
 import tifffile
 from anndata.tests.helpers import assert_equal
 from scipy import sparse
-from spatialdata import read_zarr
+from spatialdata import read_zarr, transform
 from spatialdata.models import get_table_keys
 from spatialdata.testing import assert_spatial_data_objects_are_identical
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Identity, Scale, get_transformation
 
 from spatialdata_io import __version__
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -207,7 +207,8 @@ class TestDbit:
         assert shapes.index.tolist() == [0, 1]
         assert shapes.geometry.geom_type.tolist() == ["Polygon", "Polygon"]
         np.testing.assert_allclose(shapes.total_bounds, [0.125, 0.125, 1.875, 1.875])
-        assert get_transformation(shapes, get_all=True) == {"global": Identity()}
+        assert get_transformation(shapes, get_all=True) == {"grid_pixels": Identity()}
+        assert result.coordinate_systems == ["grid_pixels"]
 
         table = result.tables["table"]
         assert isinstance(table.X, sparse.csr_array)
@@ -283,12 +284,38 @@ class TestDbit:
         np.testing.assert_array_equal(image.c, ["r", "g", "b"])
         np.testing.assert_array_equal(image.data.compute(), pixels.transpose(2, 0, 1))
 
-        assert get_transformation(image, get_all=True) == {"global": Identity()}
-        assert get_transformation(result.shapes["sample"], get_all=True) == {"global": Identity()}
+        assert get_transformation(image, get_all=True) == {"image_pixels": Identity()}
+        assert get_transformation(result.shapes["sample"], get_all=True) == {
+            "grid_pixels": Identity(),
+            "image_pixels": Scale([5.0, 5.0], axes=("x", "y")),
+        }
+        assert sorted(result.coordinate_systems) == ["grid_pixels", "image_pixels"]
+        # Table positions stay grid ordinals of the grid_pixels frame.
+        positions = result.tables["table"].uns["spatialdata_io_positions"]["coordinates"]["spatial_grid"]
+        assert positions["frame"] == "grid_pixels"
+        assert positions["units"] == "grid"
 
-        inset = 1.25 if border else 0
-        np.testing.assert_allclose(result.shapes["sample"].total_bounds, [inset, inset, 10 - inset, 10 - inset])
+        inset = 0.25 if border else 0
+        np.testing.assert_allclose(result.shapes["sample"].total_bounds, [inset, inset, 2 - inset, 2 - inset])
+        overlay = transform(result.shapes["sample"], to_coordinate_system="image_pixels")
+        np.testing.assert_allclose(overlay.total_bounds, [5 * inset, 5 * inset, 10 - 5 * inset, 10 - 5 * inset])
         np.testing.assert_array_equal(result.tables["table"].obsm["spatial_grid"], [[1, 1], [2, 2]])
+
+    def test_filename_stem_with_space_is_sanitized_and_persists(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        (tmp_path / "sample.h5ad").rename(tmp_path / "my run.h5ad")
+        _write_image(tmp_path / "tissue_lowres_image.png")
+
+        with pytest.warns(UserWarning, match=r"'my run' is not a usable SpatialData element name; using 'my_run'"):
+            result = dbit(tmp_path)
+        result.write(tmp_path / "out.zarr")
+        restored = read_zarr(tmp_path / "out.zarr")
+
+        for sdata in (result, restored):
+            assert list(sdata.shapes) == ["my_run"]
+            assert list(sdata.images) == ["my_run_image"]
+            assert get_table_keys(sdata.tables["table"]) == ("my_run", "region", "pixel_id")
+            assert sdata.tables["table"].obs["sample"].tolist() == ["my_run", "my_run"]
 
     def test_image_auto_discovery(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)

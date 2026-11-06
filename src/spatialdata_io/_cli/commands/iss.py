@@ -20,8 +20,8 @@ if TYPE_CHECKING:
         table_file: Path
         instance_key: str | None
         dataset_id: str
-        scale_factors: tuple[int, ...]
         data_axes: str | None
+        scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
         path_policy: Literal["strict", "relaxed"]
 
@@ -47,17 +47,23 @@ if TYPE_CHECKING:
     help="Linked h5ad counts and metadata. Relative paths resolve within the dataset root.",
 )
 @click.option(
-    "--instance-key", type=str, default=None, help="Observation column containing positive integer label IDs."
+    "--instance-key",
+    type=str,
+    default=None,
+    help="Observation column holding positive integer label IDs. Default: the observation names.",
 )
-@click.option("--dataset-id", type=str, default="region", show_default=True, help="Raster element-name prefix.")
+@click.option("--dataset-id", type=str, default="region", show_default=True, help="Prefix of the raster element names.")
 @click.option(
-    "--data-axes", type=str, default=None, help="Source raw-image axes, for example CYX for an unlabeled stack."
+    "--data-axes",
+    type=str,
+    default=None,
+    help="Raw-image axes, for example CYX for a stack without axis metadata or YXC for RGB samples.",
 )
 @scale_factors_option
 @chunks_option
 @path_policy_option
 def iss_command(input_path: Path, output_path: Path, **options: Unpack[_IssOptions]) -> None:
-    """Read experimental ISS image, labels and counts, then write a SpatialData store."""
+    """Read an experimental ISS raw image, labels and linked h5ad table, then write a SpatialData store."""
     from spatialdata_io.experimental.iss import iss  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
 
     result = iss(
@@ -67,8 +73,8 @@ def iss_command(input_path: Path, output_path: Path, **options: Unpack[_IssOptio
         table_file=options["table_file"],
         instance_key=options["instance_key"],
         dataset_id=options["dataset_id"],
-        scale_factors=options["scale_factors"],
         data_axes=options["data_axes"],
+        scale_factors=options["scale_factors"],
         chunks=options["chunks"],
         path_policy=options["path_policy"],
     )

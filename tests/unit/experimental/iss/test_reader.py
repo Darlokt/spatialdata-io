@@ -27,15 +27,28 @@ if TYPE_CHECKING:
 class TestIss:
     """Fail invalid public configuration before filesystem access."""
 
-    @pytest.mark.parametrize("dataset_id", ["", "a/b", "a\\b", "__private", "has space"])
+    @pytest.mark.parametrize(
+        "dataset_id", ["", ".", "..", "a/b", "a\\b", "a:b", "__private", "has space", "\u00e9t\u00e9 1"]
+    )
     def test_invalid_dataset_id(self, tmp_path: Path, dataset_id: str) -> None:
-        with pytest.raises(ValueError, match="dataset_id"):
+        with pytest.raises(ValueError, match="dataset_id must be a valid SpatialData element name"):
             iss(
                 tmp_path / "absent",
                 raw_image_file="raw.tiff",
                 labels_file="labels.tiff",
                 table_file="cells.h5ad",
                 dataset_id=dataset_id,
+            )
+
+    @pytest.mark.parametrize(("option", "value"), [("dataset_id", 3), ("instance_key", 3), ("data_axes", ["c"])])
+    def test_wrong_option_types(self, tmp_path: Path, option: str, value: object) -> None:
+        with pytest.raises(TypeError, match=option):
+            iss(
+                tmp_path / "absent",
+                raw_image_file="raw.tiff",
+                labels_file="labels.tiff",
+                table_file="cells.h5ad",
+                **{option: value},  # pyrefly: ignore[bad-argument-type] - Exercise an untyped caller boundary.
             )
 
     @pytest.mark.parametrize("instance_key", ["", "region"])
@@ -49,15 +62,22 @@ class TestIss:
                 instance_key=instance_key,
             )
 
-    def test_invalid_chunks_precede_path_io(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="chunks"):
-            iss(
-                tmp_path / "absent",
-                raw_image_file="raw.tiff",
-                labels_file="labels.tiff",
-                table_file="cells.h5ad",
-                chunks=0,
-            )
+    def test_options_are_validated_in_signature_order_before_io(self, tmp_path: Path) -> None:
+        invalid: list[tuple[str, int | str, int | str | None]] = [
+            ("raw_image_file", "raw.csv", "raw.tiff"),
+            ("instance_key", "", None),
+            ("dataset_id", "", "region"),
+            ("data_axes", "", None),
+            ("chunks", 0, 16),
+            ("path_policy", "lenient", "strict"),
+        ]
+        options: dict[str, int | str | None] = {"labels_file": "labels.tiff", "table_file": "cells.h5ad"}
+        options |= {name: bad for name, bad, _ in invalid}
+        # Each option is reported once every earlier option is valid, and before the missing root is noticed.
+        for name, _, good in invalid:
+            with pytest.raises(ValueError, match=name):
+                iss(tmp_path / "absent", **options)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+            options[name] = good
 
     def test_pyramids_construct_without_tasks_and_link_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_iss_dataset(tmp_path)

@@ -10,16 +10,15 @@ import pandas as pd
 import pytest
 from dask.callbacks import Callback
 from scipy import sparse
-from xarray import DataArray
 
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.steinbock._images import _SampleRasters
-from spatialdata_io.readers.steinbock._schemas import LabelGrid
+from spatialdata_io.readers.steinbock._images import Calibration, SampleGrid
 from spatialdata_io.readers.steinbock._tables import (
-    _read_table,
     _set_instance_ids,
-    _set_positions,
+    read_table,
+    set_positions,
 )
 
 if TYPE_CHECKING:
@@ -28,9 +27,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
-def _sample(*, shape: tuple[int, int] = (8, 12), dtype: str = "uint16") -> LabelGrid:
+def _sample(*, shape: tuple[int, int] = (8, 12), dtype: str = "uint16") -> SampleGrid:
     """Provide independently inspected grid metadata without constructing models."""
-    return LabelGrid(shape, np.dtype(dtype))
+    return SampleGrid(shape, np.dtype(dtype), "sample", None)
 
 
 def _write_table(path: Path) -> ArtifactFile:
@@ -66,7 +65,7 @@ class TestReadTable:
         tasks: list[str] = []
 
         with Callback(pretask=lambda key, *_: tasks.append(str(key))):
-            table = _read_table(path, samples)
+            table = read_table(path, samples)
 
         assert not tasks
         assert table.obs_names.tolist() == [
@@ -111,7 +110,7 @@ class TestReadTable:
         table.write_h5ad(path)
 
         with pytest.raises(ReaderFormatError) as caught:
-            _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+            read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
 
         assert caught.value.path == path
         assert caught.value.context.reader == "steinbock"
@@ -125,14 +124,14 @@ class TestReadTable:
         table.write_h5ad(path)
 
         with pytest.raises(ReaderFormatError, match="columns"):
-            _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+            read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
 
     def test_read_failure_has_artifact_context(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "cells.h5ad")
         path.write_bytes(b"not an HDF5 file")
 
         with pytest.raises(OSError, match="file signature") as caught:
-            _read_table(path, {"sample-a": _sample()})
+            read_table(path, {"sample-a": _sample()})
 
         assert any("steinbock" in note and str(path) in note for note in caught.value.__notes__)
 
@@ -141,7 +140,7 @@ class TestReadTable:
         mocker.patch("spatialdata_io.readers.steinbock._tables.ad.read_h5ad", return_value=result)
 
         with pytest.raises(TypeError, match="eager DataFrames"):
-            _read_table(ArtifactFile(tmp_path / "cells.h5ad"), {"sample-a": _sample()})
+            read_table(ArtifactFile(tmp_path / "cells.h5ad"), {"sample-a": _sample()})
 
     @pytest.mark.parametrize("field", ["cell_id", "region"])
     def test_occupied_generated_columns_fail_before_annotation_mutation(
@@ -156,7 +155,7 @@ class TestReadTable:
         mocker.patch("spatialdata_io.readers.steinbock._tables.ad.read_h5ad", return_value=source)
 
         with pytest.raises(ReaderFormatError, match=f"occupied.*{field}"):
-            _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+            read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
 
         pd.testing.assert_frame_equal(source.obs, before, check_exact=True)
         assert source.obsm["spatial"] is spatial
@@ -173,7 +172,7 @@ class TestReadTable:
             ),
         ).write_h5ad(path)
 
-        table = _read_table(path, {"sample": _sample()})
+        table = read_table(path, {"sample": _sample()})
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[8.5, 1.5], [0, 0], [11, 7]])
 
     @pytest.mark.parametrize("duplicate", [False, True])
@@ -189,7 +188,7 @@ class TestReadTable:
         with ad.settings.override(disallow_forward_slash_in_h5ad=False):
             source.write_h5ad(path)
 
-        table = _read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+        table = read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
 
         assert "Image" not in table.obs
         assert table.var.columns.tolist() == ["Channel_Name", "Final_Concentration"]
@@ -223,25 +222,82 @@ class TestSetInstanceIds:
 
 
 class TestSetPositions:
+    """Declare native centroids and derive physical positions only from complete calibration."""
+
     @pytest.mark.parametrize(("native_x", "physical_x"), [(-0.5, 0.0), (0.5, 5e-324), (-1.5, -5e-324)])
     def test_shifted_zero_and_representable_subnormal_are_valid(
         self, tmp_path: Path, native_x: float, physical_x: float
     ) -> None:
-        table, samples = self._inputs(native_x)
-        _set_positions(table, samples, ArtifactFile(tmp_path / "cells.h5ad"))
+        table = self._table([[native_x, 0.5]], ["sample.tiff"])
+        set_positions(table, {"sample": self._grid("global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad"))
         np.testing.assert_array_equal(table.obsm["spatial"], [[physical_x, 3]])
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[native_x, 0.5]])
         assert table.obsm["spatial"].dtype == np.dtype(np.float64)
 
     def test_rejects_nonzero_shifted_coordinate_collapsing_to_zero(self, tmp_path: Path) -> None:
-        table, samples = self._inputs(0)
+        table = self._table([[0, 0.5]], ["sample.tiff"])
         with pytest.raises(ReaderFormatError, match=r"nonzero.*zero"):
-            _set_positions(table, samples, ArtifactFile(tmp_path / "cells.h5ad"))
+            set_positions(table, {"sample": self._grid("global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad"))
+
+    def test_single_calibrated_sample_declares_fixed_frames(self, tmp_path: Path) -> None:
+        table = self._table([[1, 2]], ["sample.tiff"])
+        set_positions(table, {"sample": self._grid("global", (2, 4))}, ArtifactFile(tmp_path / "cells.h5ad"))
+        np.testing.assert_array_equal(table.obsm["spatial"], [[3, 10]])
+        assert table.uns[POSITIONS_KEY] == {
+            "schema_version": 1,
+            "coordinates": {
+                "spatial_pixels": {
+                    "axes": ["x", "y"],
+                    "units": "pixel",
+                    "frame": "sample_regionprops_indices",
+                    "position": "source_regionprops_centroid_zero_based_pixel_index_centres",
+                },
+                "spatial": {
+                    "axes": ["x", "y"],
+                    "units": "micrometer",
+                    "frame": "global",
+                    "position": "source_regionprops_centroid_in_raster_corner_frame",
+                    "calibration": {"global": "evidence"},
+                },
+            },
+        }
+        assert "spatial_frame" not in table.obs
+        assert "spatial_pixel_frame" not in table.obs
+
+    def test_several_samples_scale_rows_by_their_own_frame(self, tmp_path: Path) -> None:
+        table = self._table([[1, 2], [1, 2], [0, 0]], ["b.tiff", "a.tiff", "b.tiff"])
+        grids = {"a": self._grid("a", (2, 4)), "b": self._grid("b", (10, 100))}
+        set_positions(table, grids, ArtifactFile(tmp_path / "cells.h5ad"))
+        np.testing.assert_array_equal(table.obsm["spatial"], [[15, 250], [3, 10], [5, 50]])
+        assert table.obs["spatial_frame"].tolist() == ["b", "a", "b"]
+        assert table.obs["spatial_pixel_frame"].tolist() == [
+            "b_regionprops_indices",
+            "a_regionprops_indices",
+            "b_regionprops_indices",
+        ]
+        coordinates = table.uns[POSITIONS_KEY]["coordinates"]
+        assert coordinates["spatial"]["frame_key"] == "spatial_frame"
+        assert coordinates["spatial"]["calibration"] == {"a": "evidence", "b": "evidence"}
+        assert coordinates["spatial_pixels"]["frame_key"] == "spatial_pixel_frame"
+
+    @pytest.mark.parametrize("calibrated", [(), ("a",)])
+    def test_incomplete_calibration_keeps_native_positions_only(
+        self, tmp_path: Path, calibrated: tuple[str, ...]
+    ) -> None:
+        table = self._table([[1, 2], [1, 2]], ["a.tiff", "b.tiff"])
+        grids = {name: self._grid(name, (2, 4) if name in calibrated else None) for name in ("a", "b")}
+        set_positions(table, grids, ArtifactFile(tmp_path / "cells.h5ad"))
+        assert "spatial" not in table.obsm
+        assert "spatial_frame" not in table.obs
+        assert list(table.uns[POSITIONS_KEY]["coordinates"]) == ["spatial_pixels"]
 
     @staticmethod
-    def _inputs(native_x: float) -> tuple[ad.AnnData, dict[str, _SampleRasters]]:
-        table = ad.AnnData(obs=pd.DataFrame({"image": ["sample.tiff"]}, index=["cell"]))
-        table.obsm["spatial_pixels"] = np.asarray([[native_x, 0.5]], dtype=np.float64)
-        raster = DataArray(np.zeros((1, 1)))
-        sample = _SampleRasters(raster, raster, _sample(), "global", (5e-324, 3), "test")
-        return table, {"sample": sample}
+    def _table(native: list[list[float]], images: list[str]) -> ad.AnnData:
+        table = ad.AnnData(obs=pd.DataFrame({"image": images}, index=[str(row) for row in range(len(images))]))
+        table.obsm["spatial_pixels"] = np.asarray(native, dtype=np.float64)
+        return table
+
+    @staticmethod
+    def _grid(frame: str, spacing: tuple[float, float] | None) -> SampleGrid:
+        calibration = None if spacing is None else Calibration(spacing, "evidence")
+        return SampleGrid((8, 12), np.dtype("uint16"), frame, calibration)

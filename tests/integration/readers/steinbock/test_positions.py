@@ -46,17 +46,17 @@ def _write_dataset(
     root: Path,
     spacings: Mapping[str, tuple[float, float] | None],
     *,
-    family: Literal["deepcell", "ilastik"] = "deepcell",
+    masks_dir: Literal["masks", "masks_ilastik"] = "masks",
 ) -> AnalyticDataset:
     """Match the producer's actual regionprops and object-identity export."""
     (root / "ome").mkdir()
-    for kind in ("deepcell", "ilastik"):
-        (root / f"masks_{kind}").mkdir()
+    for directory in ("masks", "masks_ilastik"):
+        (root / directory).mkdir()
     base = np.zeros((10, 12), dtype=np.uint16)
     base[1, 2] = 2
     base[3:5, 4:7] = 7
     base[5, 8] = base[6, 8] = base[6, 9] = 11
-    selected = np.roll(base, (1, 1), axis=(0, 1)) if family == "ilastik" else base
+    selected = np.roll(base, (1, 1), axis=(0, 1)) if masks_dir == "masks_ilastik" else base
     measured = regionprops_table(selected, properties=("label", "centroid"))
     measured_xy = {
         int(identifier): (float(x), float(y))
@@ -75,9 +75,9 @@ def _write_dataset(
             metadata=metadata,
             photometric="minisblack",
         )
-        for kind in ("deepcell", "ilastik"):
-            mask = base if kind == "deepcell" else np.roll(base, (1, 1), axis=(0, 1))
-            tifffile.imwrite(root / f"masks_{kind}" / f"{name}.tiff", mask, photometric="minisblack")
+        for directory in ("masks", "masks_ilastik"):
+            mask = base if directory == "masks" else np.roll(base, (1, 1), axis=(0, 1))
+            tifffile.imwrite(root / directory / f"{name}.tiff", mask, photometric="minisblack")
     names = list(reversed(list(spacings)))
     identities = [(name, identifier) for identifier in (11, 2, 7) for name in names]
     native = np.asarray([measured_xy[identifier] for _, identifier in identities], dtype=np.float64)
@@ -109,15 +109,15 @@ def _write_dataset(
 
 
 class TestSteinbockPositions:
-    @pytest.mark.parametrize("family", ["deepcell", "ilastik"])
+    @pytest.mark.parametrize("masks_dir", ["masks", "masks_ilastik"])
     def test_producer_centroids_align_to_unchanged_raster_frame(
-        self, tmp_path: Path, family: Literal["deepcell", "ilastik"]
+        self, tmp_path: Path, masks_dir: Literal["masks", "masks_ilastik"]
     ) -> None:
-        fixture = _write_dataset(tmp_path, {"sample-a": (2.0, 3.0)}, family=family)
-        shift = 1 if family == "ilastik" else 0
+        fixture = _write_dataset(tmp_path, {"sample-a": (2.0, 3.0)}, masks_dir=masks_dir)
+        shift = 1 if masks_dir == "masks_ilastik" else 0
         expected_native = np.asarray([[25 / 3, 17 / 3], [2, 1], [5, 3.5]]) + shift
         np.testing.assert_array_equal(fixture.native_xy, expected_native)
-        result = steinbock(tmp_path, labels_kind=family)
+        result = steinbock(tmp_path, masks_dir=masks_dir)
         table = result.tables["table"]
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], expected_native)
         np.testing.assert_array_equal(table.obsm["spatial"], (expected_native + 0.5) * [2, 3])
@@ -195,7 +195,7 @@ class TestSteinbockPositions:
 
     def test_resolves_calibration_once_before_single_final_linkage(self, tmp_path: Path, mocker: MockerFixture) -> None:
         _write_dataset(tmp_path, {"sample-a": (2.0, 3.0), "sample-b": (5.0, 7.0)})
-        spacing = mocker.spy(image_owner, "_spacing")
+        spacing = mocker.spy(image_owner, "_calibration")
         linkage = mocker.spy(reader_owner, "parse_linked_table")
         table = steinbock(tmp_path).tables["table"]
         assert spacing.call_count == 2

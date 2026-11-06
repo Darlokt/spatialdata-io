@@ -20,11 +20,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class SteinbockDataset:
-    """Both segmentation families and two images with independent expectations."""
+    """Two images, the default ``masks/`` and a second ``masks_ilastik/`` segmentation."""
 
     root: Path
     images: dict[str, NDArray[np.float32]]
-    deepcell: dict[str, NDArray[np.uint16]]
+    masks: dict[str, NDArray[np.uint16]]
     ilastik: dict[str, NDArray[np.uint16]]
 
 
@@ -32,10 +32,10 @@ class SteinbockDataset:
 def steinbock_dataset(tmp_path: Path) -> SteinbockDataset:
     """Write the upstream compound observation-ID and metadata conventions."""
     (tmp_path / "ome").mkdir()
-    for kind in ("deepcell", "ilastik"):
-        (tmp_path / f"masks_{kind}").mkdir()
+    for directory in ("masks", "masks_ilastik"):
+        (tmp_path / directory).mkdir()
     images: dict[str, NDArray[np.float32]] = {}
-    deepcell: dict[str, NDArray[np.uint16]] = {}
+    masks: dict[str, NDArray[np.uint16]] = {}
     ilastik: dict[str, NDArray[np.uint16]] = {}
     for offset, name in enumerate(("sample-b", "sample-a")):
         image = np.arange(2 * 8 * 12, dtype=np.float32).reshape(2, 8, 12) + 1000 * offset
@@ -50,10 +50,10 @@ def steinbock_dataset(tmp_path: Path) -> SteinbockDataset:
             photometric="minisblack",
             metadata={"axes": "CYX", "Channel": {"Name": ["DNA", "CD3"]}},
         )
-        tifffile.imwrite(tmp_path / "masks_deepcell" / f"{name}.tiff", mask, photometric="minisblack")
+        tifffile.imwrite(tmp_path / "masks" / f"{name}.tiff", mask, photometric="minisblack")
         tifffile.imwrite(tmp_path / "masks_ilastik" / f"{name}.tiff", other_mask, photometric="minisblack")
         images[name] = image
-        deepcell[name] = mask
+        masks[name] = mask
         ilastik[name] = other_mask
 
     names = ["sample-b.tiff", "sample-a.tiff", "sample-b.tiff", "sample-a.tiff"]
@@ -78,4 +78,4 @@ def steinbock_dataset(tmp_path: Path) -> SteinbockDataset:
     # Historical exports used this key. Enable only while writing that legacy artifact.
     with ad.settings.override(disallow_forward_slash_in_h5ad=False):
         table.write_h5ad(tmp_path / "cells.h5ad")
-    return SteinbockDataset(tmp_path, images, deepcell, ilastik)
+    return SteinbockDataset(tmp_path, images, masks, ilastik)

@@ -13,21 +13,26 @@ import pytest
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.steinbock._images import SampleGrid
 from spatialdata_io.readers.steinbock._schemas import (
-    LabelGrid,
-    _centroid_columns,
     _format_error,
-    _instance_identifiers,
-    _metadata_columns,
-    _validate_centroids,
-    _validate_position_destinations,
-    _validate_table,
+    centroid_columns,
     image_metadata_columns,
+    instance_identifiers,
+    metadata_columns,
     normalize_image_metadata,
+    validate_centroids,
+    validate_position_destinations,
+    validate_table,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _grid(shape: tuple[int, int], dtype: np.dtype[np.integer]) -> SampleGrid:
+    """Describe an uncalibrated mask grid without reading rasters."""
+    return SampleGrid(shape, dtype, "sample", None)
 
 
 class TestValidateTable:
@@ -49,7 +54,7 @@ class TestValidateTable:
         )
         assert isinstance(table.obs, pd.DataFrame)
         before = table.obs.copy()
-        _validate_table(table, ArtifactFile(tmp_path / "cells.h5ad"))
+        validate_table(table, ArtifactFile(tmp_path / "cells.h5ad"))
         pd.testing.assert_frame_equal(table.obs, before)
 
     @pytest.mark.parametrize("axis", ["obs", "var"])
@@ -58,7 +63,7 @@ class TestValidateTable:
         table = ad.AnnData(np.ones((1, 1)))
         setattr(table, axis, pd.DataFrame([[1, 2]], columns=["same", "same"], index=["0"]))
         with pytest.raises(ReaderFormatError, match="duplicate annotation"):
-            _validate_table(table, ArtifactFile(tmp_path / "cells.h5ad"))
+            validate_table(table, ArtifactFile(tmp_path / "cells.h5ad"))
 
     @pytest.mark.parametrize("axis", ["obs", "var"])
     def test_null_identifiers(self, tmp_path: Path, axis: str) -> None:
@@ -68,7 +73,7 @@ class TestValidateTable:
         assert isinstance(frame, pd.DataFrame)
         frame.index = pd.Index(pd.array([None], dtype="string"))
         with pytest.raises(ReaderFormatError, match="identifiers"):
-            _validate_table(table, ArtifactFile(tmp_path / "cells.h5ad"))
+            validate_table(table, ArtifactFile(tmp_path / "cells.h5ad"))
 
 
 class TestFormatError:
@@ -105,8 +110,8 @@ class TestInstanceIdentifiers:
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[observation])
 
         with pytest.raises(ReaderFormatError):
-            _instance_identifiers(
-                obs, {"sample": LabelGrid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
+            instance_identifiers(
+                obs, {"sample": _grid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
             )
 
     def test_dtype_bounds_are_sample_local(self, tmp_path: Path) -> None:
@@ -116,9 +121,9 @@ class TestInstanceIdentifiers:
         )
 
         with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
-            _instance_identifiers(
+            instance_identifiers(
                 obs,
-                {"small": LabelGrid((8, 12), np.dtype("uint8")), "large": LabelGrid((8, 12), np.dtype("uint64"))},
+                {"small": _grid((8, 12), np.dtype("uint8")), "large": _grid((8, 12), np.dtype("uint64"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -130,8 +135,8 @@ class TestInstanceIdentifiers:
         )
 
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
-            _instance_identifiers(
-                obs, {"sample": LabelGrid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
+            instance_identifiers(
+                obs, {"sample": _grid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
             )
 
     def test_missing_discovered_sample(self, tmp_path: Path) -> None:
@@ -139,9 +144,9 @@ class TestInstanceIdentifiers:
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=["Object 1 in sample.tiff"])
 
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
-            _instance_identifiers(
+            instance_identifiers(
                 obs,
-                {"sample": LabelGrid((8, 12), np.dtype("uint16")), "other": LabelGrid((8, 12), np.dtype("uint16"))},
+                {"sample": _grid((8, 12), np.dtype("uint16")), "other": _grid((8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -155,10 +160,10 @@ class TestValidateCentroids:
         obs = pd.DataFrame({"image": ["sample.tiff"], "centroid-0": [value], "centroid-1": [2.0]})
 
         with pytest.raises(ReaderFormatError, match="invalid centroids"):
-            _validate_centroids(
+            validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"sample": LabelGrid((8, 12), np.dtype("uint16"))},
+                {"sample": _grid((8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -168,10 +173,10 @@ class TestValidateCentroids:
         obs = pd.DataFrame({"image": ["sample.tiff"], "centroid-0": [y], "centroid-1": [x]})
 
         with pytest.raises(ReaderFormatError, match="outside"):
-            _validate_centroids(
+            validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"sample": LabelGrid((8, 12), np.dtype("uint16"))},
+                {"sample": _grid((8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -180,10 +185,10 @@ class TestValidateCentroids:
         obs = pd.DataFrame({"image": ["small.tiff", "large.tiff"], "centroid-0": [5, 5], "centroid-1": [2, 2]})
 
         with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
-            _validate_centroids(
+            validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"small": LabelGrid((4, 4), np.dtype("uint16")), "large": LabelGrid((8, 12), np.dtype("uint16"))},
+                {"small": _grid((4, 4), np.dtype("uint16")), "large": _grid((8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -197,7 +202,7 @@ class TestMetadataColumns:
         obs = pd.DataFrame({"image": ["sample.tiff"], "Image": [value]})
 
         with pytest.raises(ReaderFormatError, match="conflicting"):
-            _metadata_columns(obs, pd.DataFrame(), ArtifactFile(tmp_path / "cells.h5ad"))
+            metadata_columns(obs, pd.DataFrame(), ArtifactFile(tmp_path / "cells.h5ad"))
 
     @pytest.mark.parametrize(
         "columns", [[""], [1], ["A B", "A_B"], ["Final Concentration / Dilution", "Final Concentration"]]
@@ -207,7 +212,7 @@ class TestMetadataColumns:
         var = pd.DataFrame([[1] * len(columns)], columns=columns)
 
         with pytest.raises(ReaderFormatError):
-            _metadata_columns(pd.DataFrame({"image": ["sample.tiff"]}), var, ArtifactFile(tmp_path / "cells.h5ad"))
+            metadata_columns(pd.DataFrame({"image": ["sample.tiff"]}), var, ArtifactFile(tmp_path / "cells.h5ad"))
 
 
 class TestCentroidColumns:
@@ -220,7 +225,7 @@ class TestCentroidColumns:
         """Extract each supported numeric representation without mutating obs."""
         obs = pd.DataFrame({"centroid-0": pd.Series([1, 3], dtype=dtype), "centroid-1": pd.Series([2, 4], dtype=dtype)})
         before = obs.copy()
-        x, y = _centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
+        x, y = centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
         np.testing.assert_array_equal(x, [2, 4])
         np.testing.assert_array_equal(y, [1, 3])
         assert x.dtype == y.dtype == np.dtype(dtype.lower().removesuffix("[pyarrow]"))
@@ -232,20 +237,20 @@ class TestCentroidColumns:
         values = [True] if dtype == "boolean" else [None] if dtype in {"Int64", "UInt64", "Float64"} else ["1"]
         obs = pd.DataFrame({"centroid-0": pd.Series(values, dtype=dtype), "centroid-1": [2]})
         with pytest.raises(ReaderFormatError, match="invalid centroids"):
-            _centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
+            centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
 
     @pytest.mark.parametrize("value", [2**53 + 1, 2**63 + 1, 2**64 - 1])
     def test_lossy_integer_float_mixture(self, tmp_path: Path, value: int) -> None:
         """Reject integer coordinates that a common float64 dtype would round."""
         obs = pd.DataFrame({"centroid-0": pd.Series([value], dtype="UInt64"), "centroid-1": [1.0]})
         with pytest.raises(ReaderFormatError, match="centroid integer precision loss"):
-            _centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
+            centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
 
     @pytest.mark.parametrize("value", [2**53 + 2, -(2**53 + 2), -(2**63)])
     def test_exact_wide_integer_float_mixture(self, tmp_path: Path, value: int) -> None:
         """Accept exactly representable wide integers without an arbitrary magnitude ban."""
         obs = pd.DataFrame({"centroid-0": pd.Series([value], dtype="Int64"), "centroid-1": [1.0]})
-        _, y = _centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
+        _, y = centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
         assert int(y[0]) == value
 
     def test_uint64_columns_remain_exact(self, tmp_path: Path) -> None:
@@ -253,7 +258,7 @@ class TestCentroidColumns:
         obs = pd.DataFrame(
             {"centroid-0": pd.Series([2**64 - 1], dtype="UInt64"), "centroid-1": pd.Series([2**63 + 1], dtype="UInt64")}
         )
-        x, y = _centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
+        x, y = centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
         assert x.dtype == y.dtype == np.dtype(np.uint64)
         assert int(x[0]) == 2**63 + 1
         assert int(y[0]) == 2**64 - 1
@@ -347,11 +352,11 @@ class TestValidatePositionDestinations:
             if collision == "spatial_source":
                 table.obsm["spatial"] = np.zeros((2, 3), dtype=np.int16)
         with pytest.raises(ReaderFormatError, match="existing position"):
-            _validate_position_destinations(table, multiple=True, path=ArtifactFile(tmp_path / "cells.h5ad"))
+            validate_position_destinations(table, multiple=True, path=ArtifactFile(tmp_path / "cells.h5ad"))
         assert "cell_id" not in table.obs
 
     def test_unrelated_source_embedding_is_retained(self, tmp_path: Path) -> None:
         table = ad.AnnData(np.ones((1, 1)))
         table.obsm["spatial_source"] = np.zeros((1, 3), dtype=np.int16)
-        _validate_position_destinations(table, multiple=False, path=ArtifactFile(tmp_path / "cells.h5ad"))
+        validate_position_destinations(table, multiple=False, path=ArtifactFile(tmp_path / "cells.h5ad"))
         assert "spatial_source" in table.obsm

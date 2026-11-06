@@ -33,6 +33,7 @@ import pandas as pd
 import pyarrow as pa
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.names import validate_element_name
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -49,7 +50,10 @@ _ZERO_PATTERN = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 # The region names the shapes element. Other element names are fixed, and
 # SpatialData compares names case-insensitively across element types.
 _RESERVED_REGIONS = frozenset({"table", "images"})
-_REGION_EXPECTED = "a positive integer region or a valid element name (letters, digits, '_-.')"
+_REGION_EXPECTED = (
+    "a positive integer region or a valid element name (letters, digits, '_-.') other than 'table' or 'images' "
+    "in any letter case"
+)
 
 
 def schema_error(path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
@@ -166,15 +170,10 @@ def region_name(regions: pd.Series, path: ArtifactFile) -> str:
             raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED)
         return str(int(region))
 
-    if (
-        isinstance(region, str)
-        and region not in {"", ".", ".."}
-        and not region.startswith("__")
-        and region.casefold() not in _RESERVED_REGIONS
-        and all(character.isalnum() or character in "_-." for character in region)
-    ):
-        return region
-    raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED)
+    try:
+        return validate_element_name(region, parameter="region", reserved=_RESERVED_REGIONS)
+    except (TypeError, ValueError) as error:
+        raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED) from error
 
 
 def validate_csv_fields(frame: pd.DataFrame, path: ArtifactFile) -> None:

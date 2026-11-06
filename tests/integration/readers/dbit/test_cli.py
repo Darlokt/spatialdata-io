@@ -11,7 +11,7 @@ import tifffile
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Identity, Scale, get_transformation
 
 from spatialdata_io import __version__
 from spatialdata_io._cli import cli
@@ -77,9 +77,12 @@ class TestDbitCommandWorkflow:
         np.testing.assert_array_equal(image.data.compute(), pixels)
         shapes = restored.shapes["cli_grid"]
         assert shapes.index.tolist() == [0, 1]
-        np.testing.assert_allclose(shapes.total_bounds, [2, 2, 30, 30])
-        assert get_transformation(image, get_all=True) == {"global": Identity()}
-        assert get_transformation(shapes, get_all=True) == {"global": Identity()}
+        np.testing.assert_allclose(shapes.total_bounds, [0.125, 0.125, 1.875, 1.875])
+        assert get_transformation(image, get_all=True) == {"image_pixels": Identity()}
+        assert get_transformation(shapes, get_all=True) == {
+            "grid_pixels": Identity(),
+            "image_pixels": Scale([16.0, 16.0], axes=("x", "y")),
+        }
         table = restored.tables["table"]
         assert isinstance(table.obs, pd.DataFrame)
         assert table.obs_names.tolist() == _ORDERED_NAMES
@@ -93,6 +96,8 @@ class TestDbitCommandWorkflow:
         np.testing.assert_array_equal(table.obs["pixel_id"], shapes.index)
         np.testing.assert_array_equal(table.obsm["spatial_grid"], [[1, 1], [2, 2]])
         assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial_grid"]["units"] == "grid"
+        assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial_grid"]["frame"] == "grid_pixels"
+        assert sorted(restored.coordinate_systems) == ["grid_pixels", "image_pixels"]
         for expression, expected in ((table.X, [1, 2, 3, 4]), (table.layers["counts"], [2, 4, 6, 8])):
             # AnnData persistence can restore sparse matrices instead of arrays.
             assert isinstance(expression, sparse.csr_array | sparse.csr_matrix)

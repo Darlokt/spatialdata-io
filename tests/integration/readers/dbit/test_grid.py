@@ -6,10 +6,14 @@ from itertools import islice, product
 from typing import TYPE_CHECKING
 
 import anndata as ad
+import imagecodecs
 import numpy as np
 import pandas as pd
+import pytest
 from scipy import sparse
+from spatialdata import transform
 from spatialdata.models import get_table_keys
+from spatialdata.transformations import Identity, Scale, get_transformation
 
 from spatialdata_io import dbit
 
@@ -107,3 +111,42 @@ class TestDbit:
         np.testing.assert_allclose(grid.bounds.to_numpy(), [[0, 49, 1, 50], [49, 0, 50, 1]])
         assert get_table_keys(table) == ("maximum", "region", "pixel_id")
         assert table.obs["pixel_id"].tolist() == grid.index.tolist() == [0, 1]
+
+    @pytest.mark.parametrize("border_scale", [0.0, 1.0, 2.5, 3.9])
+    def test_image_overlay_matches_vertices_scaled_into_image_pixels(self, tmp_path: Path, border_scale: float) -> None:
+        """The grid-to-image scale renders the squares where pixel-unit vertices used to be.
+
+        Earlier versions stored ``(c - 1 + corner) * s + inset * (s * border_scale)``;
+        the transform now computes ``((c - 1 + corner) + inset * border_scale) * s``.
+        Both differ only by the rounding of one multiplication distributed over a
+        sum whose terms have the same magnitude, so a few ulps of the result.
+        """
+        sequences = ["".join(bases) for bases in islice(product("ACGT", repeat=8), 100)]
+        a, b = sequences[:50], sequences[50:]
+        rows = [f"A{position}\t{a[position - 1]}\n" for position in range(1, 51)]
+        rows.extend(f"B{position}\t{b[position - 1]}\n" for position in range(1, 51))
+        (tmp_path / "barcode_list.txt").write_text("".join(rows), encoding="utf-8")
+        positions = np.array([[1, 1], [17, 33], [33, 17], [50, 1], [1, 50], [50, 50]], dtype=np.int64)
+        ad.AnnData(
+            X=sparse.csr_array(np.ones((len(positions), 1), dtype=np.int32)),
+            obs=pd.DataFrame(index=[b[y - 1] + a[x - 1] for x, y in positions]),
+            var=pd.DataFrame(index=["gene"]),
+        ).write_h5ad(tmp_path / "overlay.h5ad")
+        # 997 / 50 = 19.94 is not exactly representable.
+        (tmp_path / "tissue_lowres_image.png").write_bytes(imagecodecs.png_encode(np.zeros((7, 997), np.uint8)))
+
+        result = dbit(tmp_path, border_scale=border_scale)
+
+        step = 997 / 50
+        shapes = result.shapes["overlay"]
+        assert get_transformation(shapes, get_all=True) == {
+            "grid_pixels": Identity(),
+            "image_pixels": Scale([step, step], axes=("x", "y")),
+        }
+        corners = np.array([[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]], dtype=np.float64)
+        inset = np.array([[1, 1], [1, -1], [-1, -1], [-1, 1], [1, 1]], dtype=np.float64) * 0.125
+        ordered = positions[np.lexsort((positions[:, 1], positions[:, 0]))]  # Rows are sorted by A, then B.
+        expected = (ordered[:, None, :] - 1 + corners) * step + inset * (step * border_scale)
+        overlay = transform(shapes, to_coordinate_system="image_pixels")
+        actual = np.stack([np.asarray(polygon.exterior.coords) for polygon in overlay.geometry])
+        np.testing.assert_allclose(actual, expected, rtol=4 * np.finfo(np.float64).eps, atol=0)

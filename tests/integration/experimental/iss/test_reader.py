@@ -403,11 +403,15 @@ class TestIss:
             result = iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
         assert not tasks
         for element in (result.images["region_raw_image"], result.labels["region_labels_image"]):
-            transform = get_transformation(element, to_coordinate_system="global")
+            transformations = get_transformation(element, get_all=True)
+            assert isinstance(transformations, dict)
+            assert list(transformations) == ["global"]
+            transform = transformations["global"]
             assert isinstance(transform, Scale)
             np.testing.assert_allclose(
                 transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")) @ [4, 3, 1], [1.2, 2.1, 1]
             )
+        assert result.coordinate_systems == ["global"]
         np.testing.assert_array_equal(result.tables["table"].obsm["spatial_source"], [[2, 4], [26, 9]])
         np.testing.assert_array_equal(result.images["region_raw_image"].data.compute(), iss_dataset.raw)
 
@@ -441,8 +445,9 @@ class TestIss:
             metadata={"axes": "CYX", "PhysicalSizeX": 0.3},
         )
         result = iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
-        assert get_transformation(result.images["region_raw_image"], to_coordinate_system="global") == Identity()
-        assert get_transformation(result.labels["region_labels_image"], to_coordinate_system="global") == Identity()
+        for element in (result.images["region_raw_image"], result.labels["region_labels_image"]):
+            assert get_transformation(element, get_all=True) == {"image_pixels": Identity()}
+        assert result.coordinate_systems == ["image_pixels"]
 
     @pytest.mark.parametrize("instance_key", [None, "segmentation_id"])
     def test_artifacts_preserve_values_order_transforms_and_linkage(
@@ -479,8 +484,9 @@ class TestIss:
         assert labels.chunks == ((32,), (40,))
         np.testing.assert_array_equal(image.data.compute(), iss_dataset.raw)
         np.testing.assert_array_equal(labels.data.compute(), iss_dataset.labels)
-        assert get_transformation(image, get_all=True) == {"global": Identity()}
-        assert get_transformation(labels, get_all=True) == {"global": Identity()}
+        assert get_transformation(image, get_all=True) == {"image_pixels": Identity()}
+        assert get_transformation(labels, get_all=True) == {"image_pixels": Identity()}
+        assert result.coordinate_systems == ["image_pixels"]
 
         table = result.tables["table"]
         assert isinstance(table.X, sparse.csr_array)
@@ -496,6 +502,25 @@ class TestIss:
         assert table.obs["region"].tolist() == ["fov_labels_image", "fov_labels_image"]
         assert get_table_keys(table) == ("fov_labels_image", "region", instance_key or "instance_id")
         np.testing.assert_array_equal(table.obsm["spatial_source"], [[2.0, 4.0], [26.0, 9.0]])
+
+    @pytest.mark.parametrize("dataset_id", ["table", "Fov.1-a_b", "_x"])
+    def test_element_names_from_valid_dataset_ids_persist(
+        self, iss_dataset: IssDataset, tmp_path: Path, dataset_id: str
+    ) -> None:
+        result = iss(
+            iss_dataset.root,
+            raw_image_file="raw.tiff",
+            labels_file="labels.tiff",
+            table_file="cells.h5ad",
+            dataset_id=dataset_id,
+        )
+        result.write(tmp_path / "out.zarr")
+        restored = read_zarr(tmp_path / "out.zarr")
+
+        assert list(restored.images) == [f"{dataset_id}_raw_image"]
+        assert list(restored.labels) == [f"{dataset_id}_labels_image"]
+        assert list(restored.tables) == ["table"]
+        assert get_table_keys(restored.tables["table"]) == (f"{dataset_id}_labels_image", "region", "instance_id")
 
     @pytest.mark.parametrize("channels", [1, 2, 3, 4])
     @pytest.mark.parametrize("factors", [(), (2, 2)])

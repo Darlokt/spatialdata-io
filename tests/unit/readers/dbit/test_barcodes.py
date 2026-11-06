@@ -10,7 +10,7 @@ import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import require_file
-from spatialdata_io.readers.dbit._barcodes import _read_barcodes
+from spatialdata_io.readers.dbit._barcodes import read_barcodes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,7 +23,7 @@ class TestReadBarcodes:
         path = tmp_path / "barcodes.txt"
         path.write_text("B2\taaaaaaaa\nA1\tTTTTTTTT\nB1\tgggggggg\nA2\tAAAAAAAA\n", encoding="utf-8")
 
-        result = _read_barcodes(require_file(path, context=ReaderErrorContext("dbit", "barcodes")))
+        result = read_barcodes(require_file(path, context=ReaderErrorContext("dbit", "barcodes")))
 
         assert result.a == {"TTTTTTTT": 1, "AAAAAAAA": 2}
         assert result.b == {"GGGGGGGG": 1, "AAAAAAAA": 2}
@@ -62,7 +62,7 @@ class TestReadBarcodes:
         path.write_text(contents, encoding="utf-8")
 
         with pytest.raises(ReaderFormatError) as raised:
-            _read_barcodes(require_file(path, context=ReaderErrorContext("dbit", "barcodes")))
+            read_barcodes(require_file(path, context=ReaderErrorContext("dbit", "barcodes")))
 
         assert raised.value.path == path
         assert raised.value.context.reader == "dbit"
@@ -80,7 +80,7 @@ class TestReadBarcodes:
         path.write_bytes(contents)
 
         with pytest.raises(error_type) as raised:
-            _read_barcodes(require_file(path, context=ReaderErrorContext("dbit", "barcodes")))
+            read_barcodes(require_file(path, context=ReaderErrorContext("dbit", "barcodes")))
 
         assert any(str(path) in note for note in raised.value.__notes__)
         path.unlink()

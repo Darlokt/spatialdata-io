@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 def _write_layout(path: Path) -> tuple[np.ndarray, np.ndarray]:
     image_directory = path / "ome"
-    mask_directory = path / "masks_deepcell"
+    mask_directory = path / "masks"
     image_directory.mkdir()
     mask_directory.mkdir()
 
@@ -129,9 +129,9 @@ class TestSteinbock:
         assert unchanged.obs_names.equals(original.obs_names)
         assert "region" not in unchanged.obs
 
-    @pytest.mark.parametrize("kind", ["deepcell", "ilastik"])
+    @pytest.mark.parametrize("masks_dir", ["masks", "masks_ilastik"])
     def test_imc_sidecar_exact_sample_calibration_and_native_centroids(
-        self, steinbock_dataset: SteinbockDataset, kind: Literal["deepcell", "ilastik"]
+        self, steinbock_dataset: SteinbockDataset, masks_dir: str
     ) -> None:
         root = steinbock_dataset.root
         # This producer-shaped sidecar includes an unrelated acquisition and
@@ -145,13 +145,14 @@ class TestSteinbock:
         )
         tasks: list[object] = []
         with Callback(posttask=lambda *args: tasks.append(args)):
-            result = steinbock(root, labels_kind=kind)
+            result = steinbock(root, masks_dir=masks_dir)
         assert not tasks
         for element in (result.images["sample-a_image"], result.labels["sample-a_labels"]):
             transform = get_transformation(element, to_coordinate_system="sample-a")
             assert isinstance(transform, Scale)
             np.testing.assert_array_equal(transform.scale, [0.5, 2.5])
-        assert get_transformation(result.images["sample-b_image"], to_coordinate_system="sample-b") == Identity()
+        assert get_transformation(result.images["sample-b_image"], get_all=True) == {"sample-b_pixels": Identity()}
+        assert sorted(result.coordinate_systems) == ["sample-a", "sample-b_pixels"]
         np.testing.assert_array_equal(
             result.tables["table"].obsm["spatial_pixels"], [[3, 1.5], [8.5, 5], [8.5, 5], [3, 1.5]]
         )
@@ -204,7 +205,7 @@ class TestSteinbock:
         (root / "images.csv").write_text("image,width_px,height_px\nother.tiff,12,8\n", encoding="utf-8")
         result = steinbock(root)
         for name in ("sample-a", "sample-b"):
-            assert get_transformation(result.images[f"{name}_image"], to_coordinate_system=name) == Identity()
+            assert get_transformation(result.images[f"{name}_image"], get_all=True) == {f"{name}_pixels": Identity()}
 
     @pytest.mark.parametrize("physical_x", [0.5, 0.4])
     def test_sidecar_and_ome_agreement(self, steinbock_dataset: SteinbockDataset, physical_x: float) -> None:
@@ -241,7 +242,10 @@ class TestSteinbock:
         result = steinbock(tmp_path)
         assert result.coordinate_systems == ["global"]
         for element in (result.images["sample_image"], result.labels["sample_labels"]):
-            transform = get_transformation(element, to_coordinate_system="global")
+            transforms = get_transformation(element, get_all=True)
+            assert isinstance(transforms, dict)
+            assert list(transforms) == ["global"]
+            transform = transforms["global"]
             assert isinstance(transform, Scale)
             np.testing.assert_array_equal(transform.scale, [0.3, 0.7])
 
@@ -255,8 +259,8 @@ class TestSteinbock:
             metadata={"axes": "CYX", "PhysicalSizeX": 0.3},
         )
         tifffile.imwrite(
-            root / "masks_deepcell" / "sample-a.tiff",
-            steinbock_dataset.deepcell["sample-a"],
+            root / "masks" / "sample-a.tiff",
+            steinbock_dataset.masks["sample-a"],
             ome=True,
             metadata={"axes": "YX", "PhysicalSizeX": 0.4},
         )
@@ -268,6 +272,9 @@ class TestSteinbock:
 
         result = steinbock(tmp_path)
 
+        assert result.coordinate_systems == ["sample_pixels"]
+        for element in (result.images["sample_image"], result.labels["sample_labels"]):
+            assert get_transformation(element, get_all=True) == {"sample_pixels": Identity()}
         assert list(result.images) == ["sample_image"]
         assert list(result.labels) == ["sample_labels"]
         assert list(result.tables) == ["table"]
@@ -299,11 +306,12 @@ class TestSteinbock:
         assert table.var.columns.tolist() == ["Channel_Name"]
         assert get_table_keys(table) == ("sample_labels", "region", "cell_id")
 
-    @pytest.mark.parametrize("labels_kind", ["deepcell", "ilastik"])
+    @pytest.mark.parametrize("masks_dir", [None, "masks_ilastik"])
     def test_two_samples_preserve_compound_ids_and_cleanup(
-        self, steinbock_dataset: SteinbockDataset, labels_kind: Literal["deepcell", "ilastik"]
+        self, steinbock_dataset: SteinbockDataset, masks_dir: str | None
     ) -> None:
-        if labels_kind == "ilastik":
+        """The default reads masks/; masks_dir selects another segmentation."""
+        if masks_dir is not None:
             # This segmentation fixture shifts each object down by one pixel.
             # Its cell table must describe the same selected segmentation.
             path = steinbock_dataset.root / "cells.h5ad"
@@ -313,11 +321,15 @@ class TestSteinbock:
             with ad.settings.override(disallow_forward_slash_in_h5ad=False):
                 source.write_h5ad(path)
 
-        result = steinbock(steinbock_dataset.root, labels_kind=labels_kind)
+        result = (
+            steinbock(steinbock_dataset.root)
+            if masks_dir is None
+            else steinbock(steinbock_dataset.root, masks_dir=masks_dir)
+        )
 
         assert list(result.images) == ["sample-a_image", "sample-b_image"]
         assert list(result.labels) == ["sample-a_labels", "sample-b_labels"]
-        masks = steinbock_dataset.deepcell if labels_kind == "deepcell" else steinbock_dataset.ilastik
+        masks = steinbock_dataset.masks if masks_dir is None else steinbock_dataset.ilastik
         for sample in ("sample-a", "sample-b"):
             image = result.images[f"{sample}_image"]
             labels = result.labels[f"{sample}_labels"]
@@ -329,8 +341,8 @@ class TestSteinbock:
             assert labels.dtype == np.dtype(np.uint16)
             np.testing.assert_array_equal(image.data.compute(), steinbock_dataset.images[sample])
             np.testing.assert_array_equal(labels.data.compute(), masks[sample])
-            assert get_transformation(image, get_all=True) == {sample: Identity()}
-            assert get_transformation(labels, get_all=True) == {sample: Identity()}
+            assert get_transformation(image, get_all=True) == {f"{sample}_pixels": Identity()}
+            assert get_transformation(labels, get_all=True) == {f"{sample}_pixels": Identity()}
 
         table = result.tables["table"]
         assert table.obs_names.tolist() == [
@@ -352,13 +364,13 @@ class TestSteinbock:
 
         # Upstream measurements are (row, column). The linked table stores XY.
         expected_centroids = np.asarray([[3.0, 1.5], [8.5, 5.0], [8.5, 5.0], [3.0, 1.5]])
-        if labels_kind == "ilastik":
+        if masks_dir is not None:
             expected_centroids[:, 1] += 1
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], expected_centroids)
         assert get_table_keys(table) == (["sample-b_labels", "sample-a_labels"], "region", "cell_id")
 
     def test_unmatched_image_fails(self, steinbock_dataset: SteinbockDataset) -> None:
-        (steinbock_dataset.root / "masks_deepcell" / "sample-a.tiff").unlink()
+        (steinbock_dataset.root / "masks" / "sample-a.tiff").unlink()
 
         with pytest.raises(ReaderFormatError, match=r"paired|match|mask"):
             steinbock(steinbock_dataset.root)
@@ -382,9 +394,20 @@ class TestSteinbock:
         assert element.coords["c"].to_numpy().tolist() == names
         np.testing.assert_array_equal(element.data.compute(), image)
 
+    def test_rgb_image_is_rejected(self, steinbock_dataset: SteinbockDataset) -> None:
+        """An interleaved RGB OME-TIFF is not a Steinbock channel stack and gets no colour channels."""
+        path = steinbock_dataset.root / "ome" / "sample-a.ome.tiff"
+        tifffile.imwrite(path, np.zeros((8, 12, 3), dtype=np.uint8), ome=True, photometric="rgb")
+
+        with pytest.raises(ReaderFormatError, match="Axis 's' has length 3") as caught:
+            steinbock(steinbock_dataset.root)
+
+        assert caught.value.context.artifact == "OME image"
+        assert caught.value.path == path
+
     def test_unmatched_mask_fails(self, steinbock_dataset: SteinbockDataset) -> None:
         tifffile.imwrite(
-            steinbock_dataset.root / "masks_deepcell" / "orphan.tiff",
+            steinbock_dataset.root / "masks" / "orphan.tiff",
             np.zeros((8, 12), dtype=np.uint16),
         )
 
@@ -409,7 +432,7 @@ class TestSteinbock:
         identifiers = [2**53 + 1, np.iinfo(dtype).max]
         mask = np.zeros((4, 5), dtype=dtype)
         mask[1, 1], mask[3, 2] = identifiers
-        tifffile.imwrite(tmp_path / "masks_deepcell" / "sample.tiff", mask, photometric="minisblack")
+        tifffile.imwrite(tmp_path / "masks" / "sample.tiff", mask, photometric="minisblack")
         path = tmp_path / "cells.h5ad"
         source = ad.read_h5ad(path)
         source.obs_names = [f"Object {identifier} in sample.tiff" for identifier in identifiers]
@@ -676,9 +699,86 @@ class TestSteinbockPathPolicy:
         expected = steinbock(root)
         link_outside_root(root / "cells.h5ad")
         link_outside_root(root / "ome" / "sample-a.ome.tiff")
-        link_outside_root(root / "masks_deepcell" / "sample-a.tiff")
+        link_outside_root(root / "masks" / "sample-a.tiff")
 
         with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
             steinbock(root)
 
         assert_spatial_data_objects_are_identical(steinbock(root, path_policy="relaxed"), expected)
+
+    @pytest.mark.parametrize("policy", ["strict", "relaxed"])
+    def test_symlinked_table_file_follows_the_policy(
+        self,
+        steinbock_dataset: SteinbockDataset,
+        link_outside_root: Callable[[Path], Path],
+        policy: Literal["strict", "relaxed"],
+    ) -> None:
+        root = steinbock_dataset.root
+        expected = steinbock(root)
+        (root / "cells.h5ad").rename(root / "objects.h5ad")
+        link_outside_root(root / "objects.h5ad")
+
+        if policy == "strict":
+            with pytest.raises(ReaderFormatError, match="path_policy='relaxed'") as caught:
+                steinbock(root, table_file="objects.h5ad")
+            assert caught.value.context.artifact == "cell table"
+        else:
+            result = steinbock(root, table_file="objects.h5ad", path_policy=policy)
+            assert_spatial_data_objects_are_identical(result, expected)
+
+
+class TestSteinbockSources:
+    """``masks_dir`` selects a contained mask directory; ``table_file`` names the table."""
+
+    def test_custom_masks_dir(self, steinbock_dataset: SteinbockDataset) -> None:
+        root = steinbock_dataset.root
+        (root / "masks").rename(root / "segmentation")
+
+        with pytest.raises(FileNotFoundError) as caught:
+            steinbock(root)
+        assert caught.value.filename == str(root / "masks")
+
+        result = steinbock(root, masks_dir="segmentation")
+        for sample, mask in steinbock_dataset.masks.items():
+            np.testing.assert_array_equal(result.labels[f"{sample}_labels"].data.compute(), mask)
+
+    def test_nested_masks_dir(self, steinbock_dataset: SteinbockDataset) -> None:
+        root = steinbock_dataset.root
+        (root / "segmentations").mkdir()
+        (root / "masks").rename(root / "segmentations" / "deepcell")
+
+        result = steinbock(root, masks_dir="segmentations/deepcell")
+
+        np.testing.assert_array_equal(
+            result.labels["sample-a_labels"].data.compute(), steinbock_dataset.masks["sample-a"]
+        )
+
+    def test_masks_dir_symlink_outside_root_follows_the_policy(
+        self, steinbock_dataset: SteinbockDataset, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        root = steinbock_dataset.root
+        expected = steinbock(root)
+        outside = tmp_path_factory.mktemp("external") / "masks"
+        (root / "masks").rename(outside)
+        (root / "masks").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'") as caught:
+            steinbock(root)
+        assert caught.value.context.artifact == "masks"
+        assert_spatial_data_objects_are_identical(steinbock(root, path_policy="relaxed"), expected)
+
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_custom_table_file(self, steinbock_dataset: SteinbockDataset, tmp_path: Path, *, absolute: bool) -> None:
+        root = steinbock_dataset.root
+        expected = steinbock(root)
+        table_file: Path | str = tmp_path / "objects.h5ad" if absolute else "exports/objects.h5ad"
+        (root / "exports").mkdir()
+        (root / "cells.h5ad").rename(root / table_file)
+
+        with pytest.raises(FileNotFoundError):
+            steinbock(root)
+        assert_spatial_data_objects_are_identical(steinbock(root, table_file=table_file), expected)
+
+    def test_relative_table_file_cannot_leave_the_root(self, steinbock_dataset: SteinbockDataset) -> None:
+        with pytest.raises(ReaderFormatError, match="root"):
+            steinbock(steinbock_dataset.root, table_file="../cells.h5ad")

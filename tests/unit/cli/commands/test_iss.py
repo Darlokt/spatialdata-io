@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ import pytest
 
 from spatialdata_io._cli.commands.iss import iss_command
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.experimental.iss import iss
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -109,6 +111,24 @@ class TestIssCommand:
             chunks=expected,
             path_policy="strict",
         )
+
+    def test_options_follow_the_reader_signature(self) -> None:
+        options = [parameter.name for parameter in iss_command.params]
+        reader_parameters = list(inspect.signature(iss).parameters)
+
+        assert options == ["input_path", "output_path", *reader_parameters[1:]]
+        assert reader_parameters == [
+            "path",
+            "raw_image_file",
+            "labels_file",
+            "table_file",
+            "instance_key",
+            "dataset_id",
+            "data_axes",
+            "scale_factors",
+            "chunks",
+            "path_policy",
+        ]
 
     @pytest.mark.parametrize("omitted", ["--raw-image-file", "--labels-file", "--table-file"])
     def test_required_artifacts(self, tmp_path: Path, runner: CliRunner, omitted: str) -> None:

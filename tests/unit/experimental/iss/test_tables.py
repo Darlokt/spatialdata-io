@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -9,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spatialdata_io.experimental.iss._tables import _read_table, _set_instance_ids
+from spatialdata_io.experimental.iss._tables import _set_instance_ids, read_table
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from tests.integration.experimental.iss.conftest import write_iss_dataset
@@ -34,7 +35,7 @@ class TestReadTable:
         else:
             source.obsm.pop("spatial", None)
         source.write_h5ad(path)
-        table = _read_table(ArtifactFile(path), instance_key=None, label_dtype=np.dtype(np.uint16))
+        table = read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
         assert "spatial" not in table.obsm
         assert "spatialdata_io_positions" not in table.uns
         if present:
@@ -50,14 +51,14 @@ class TestReadTable:
         source.obsm["spatial_source"] = np.ones((2, 4))
         source.write_h5ad(path)
         with pytest.raises(ReaderFormatError, match="spatial_source"):
-            _read_table(ArtifactFile(path), instance_key=None, label_dtype=np.dtype(np.uint16))
+            read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
 
     def test_read_failure_has_context(self, tmp_path: Path) -> None:
         path = tmp_path / "bad.h5ad"
         path.write_bytes(b"not HDF5")
 
         with pytest.raises(OSError, match="file signature") as caught:
-            _read_table(ArtifactFile(path), instance_key=None, label_dtype=np.dtype(np.uint16))
+            read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
 
         assert any("iss" in note and str(path) in note for note in caught.value.__notes__)
 
@@ -77,13 +78,80 @@ class TestReadTable:
         table.write_h5ad(path)
 
         with pytest.raises(ReaderFormatError):
-            _read_table(ArtifactFile(path), instance_key=None, label_dtype=np.dtype(np.uint16))
+            read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
+
+    @pytest.mark.parametrize("instance_key", [None, "segmentation_id"])
+    def test_linkage_columns_and_annotation_storage(self, tmp_path: Path, instance_key: str | None) -> None:
+        write_iss_dataset(tmp_path)
+
+        table = read_table(
+            ArtifactFile(tmp_path / "cells.h5ad"),
+            region="fov_labels_image",
+            instance_key=instance_key,
+            label_dtype=np.dtype(np.uint16),
+        )
+
+        assert isinstance(table.obs, pd.DataFrame)
+        expected = ["segmentation_id", "cell_type"] + ([] if instance_key else ["instance_id"]) + ["region"]
+        assert table.obs.columns.tolist() == expected
+        assert table.obs["region"].tolist() == ["fov_labels_image"] * 2
+        assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
+        assert table.obs[instance_key or "instance_id"].tolist() == [7, 2]
+        # Arrow-backed generated IDs are converted to AnnData-compatible storage before linkage.
+        assert str(table.obs[instance_key or "instance_id"].dtype) == "int64"
+
+    def test_conflicting_region_field(self, tmp_path: Path) -> None:
+        write_iss_dataset(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.obs["region"] = ["fov_labels_image", "other"]
+        source.write_h5ad(path)
+
+        with pytest.raises(ReaderFormatError, match="conflicting reserved observation column 'region'"):
+            read_table(
+                ArtifactFile(path), region="fov_labels_image", instance_key=None, label_dtype=np.dtype(np.uint16)
+            )
+
+    def test_duplicate_feature_warning_is_suppressed_only_inside_the_read(
+        self, tmp_path: Path, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        write_iss_dataset(tmp_path)
+        # Control: reading the same file directly emits AnnData's advice.
+        with pytest.warns(UserWarning, match=r"Variable names are not unique"):
+            ad.read_h5ad(tmp_path / "cells.h5ad")
+        recwarn.clear()
+        filters = list(warnings.filters)
+
+        table = read_table(
+            ArtifactFile(tmp_path / "cells.h5ad"), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16)
+        )
+
+        assert table.var_names.tolist() == ["GeneB", "GeneA", "GeneB-1"]
+        assert not [warning for warning in recwarn if "names are not unique" in str(warning.message)]
+        assert warnings.filters == filters
+
+    def test_other_warnings_of_the_read_still_reach_the_caller(self, tmp_path: Path) -> None:
+        write_iss_dataset(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.obs_names = ["7", "7"]
+        source.write_h5ad(path)
+        filters = list(warnings.filters)
+
+        with (
+            pytest.raises(ReaderFormatError, match="duplicate observations"),
+            pytest.warns(UserWarning, match=r"Observation names are not unique") as reported,
+        ):
+            read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
+
+        assert not [warning for warning in reported if "Variable names" in str(warning.message)]
+        assert warnings.filters == filters
 
     def test_feature_uniqueness_preserves_order_and_file(self, tmp_path: Path) -> None:
         write_iss_dataset(tmp_path)
         path = ArtifactFile(tmp_path / "cells.h5ad")
 
-        table = _read_table(path, instance_key=None, label_dtype=np.dtype(np.uint16))
+        table = read_table(path, region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
 
         assert table.var_names.tolist() == ["GeneB", "GeneA", "GeneB-1"]
         assert ad.read_h5ad(path).var_names.tolist() == ["GeneB", "GeneA", "GeneB"]
@@ -92,12 +160,12 @@ class TestReadTable:
 class TestSetInstanceIds:
     """Preserve exact integers and reject nonsensical label references."""
 
-    @pytest.mark.parametrize("value", ["cell-a", "1.5"])
-    def test_invalid_index(self, tmp_path: Path, value: str) -> None:
-        """Invalid index."""
-        obs = pd.DataFrame(index=[value])
+    @pytest.mark.parametrize("value", ["cell-a", "1.5", "0_7", "+2", "-2", " 2", "2 ", "\u0667", "", "1e3"])
+    def test_names_other_than_ascii_digits_are_rejected(self, tmp_path: Path, value: str) -> None:
+        # int() would accept several of these spellings and link the row to a wrong or unintended label.
+        obs = pd.DataFrame(index=["3", value])
 
-        with pytest.raises(ReaderFormatError):
+        with pytest.raises(ReaderFormatError, match="not ASCII decimal digits"):
             _set_instance_ids(
                 obs, instance_key=None, label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "counts.h5ad")
             )

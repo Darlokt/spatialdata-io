@@ -11,10 +11,10 @@ import pytest
 from scipy import sparse
 
 from spatialdata_io.experimental.iss._schemas import (
-    _validate_index_ids,
-    _validate_instance_ids,
-    _validate_output_column,
-    _validate_table,
+    validate_index_ids,
+    validate_instance_ids,
+    validate_output_column,
+    validate_table,
 )
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
@@ -28,7 +28,7 @@ class TestValidateTable:
 
     def test_expression_duplicates_are_left_for_safe_normalization(self, tmp_path: Path) -> None:
         table = ad.AnnData(sparse.csr_array((np.asarray([100, 100], dtype=np.int8), [0, 0], [0, 2, 2]), shape=(2, 2)))
-        _validate_table(table, path=ArtifactFile(tmp_path / "source.h5ad"))
+        validate_table(table, path=ArtifactFile(tmp_path / "source.h5ad"), instance_key=None)
 
     @pytest.mark.parametrize("destination", ["spatial_source", "spatialdata_io_positions"])
     def test_reserved_coordinate_destinations(self, tmp_path: Path, destination: str) -> None:
@@ -40,7 +40,7 @@ class TestValidateTable:
         else:
             table.obsm[destination] = native
         with pytest.raises(ReaderFormatError, match="occupied"):
-            _validate_table(table, path=ArtifactFile(tmp_path / "source.h5ad"))
+            validate_table(table, path=ArtifactFile(tmp_path / "source.h5ad"), instance_key=None)
         assert table.obsm["spatial"] is native
 
     @pytest.mark.parametrize("axis", ["obs", "var"])
@@ -50,7 +50,7 @@ class TestValidateTable:
         frame = pd.DataFrame([[1, 2], [3, 4]], index=["0", "1"], columns=["same", "same"])
         setattr(table, axis, frame)
         with pytest.raises(ReaderFormatError, match="duplicate annotation columns"):
-            _validate_table(table, path=ArtifactFile(tmp_path / "table.h5ad"))
+            validate_table(table, path=ArtifactFile(tmp_path / "table.h5ad"), instance_key=None)
 
     def test_extensions_and_reordered_columns_are_retained(self, tmp_path: Path) -> None:
         """Extensions and reordered columns are retained."""
@@ -59,13 +59,13 @@ class TestValidateTable:
         table.obs["label"] = pd.Categorical(["T", "B"])
         assert isinstance(table.obs, pd.DataFrame)
         before = table.obs.copy()
-        _validate_table(table, path=ArtifactFile(tmp_path / "table.h5ad"))
+        validate_table(table, path=ArtifactFile(tmp_path / "table.h5ad"), instance_key=None)
         pd.testing.assert_frame_equal(table.obs, before)
 
     def test_missing_selected_instance_column(self, tmp_path: Path) -> None:
         """Missing selected instance column."""
         with pytest.raises(ReaderFormatError, match="missing observation column"):
-            _validate_table(
+            validate_table(
                 ad.AnnData(np.ones((1, 1))), path=ArtifactFile(tmp_path / "table.h5ad"), instance_key="missing"
             )
 
@@ -76,7 +76,7 @@ class TestValidateInstanceIds:
     @pytest.mark.parametrize("dtype", ["uint64", "UInt64", "uint64[pyarrow]"])
     def test_uint64_limit(self, tmp_path: Path, dtype: str) -> None:
         """Uint64 limit."""
-        _validate_instance_ids(
+        validate_instance_ids(
             pd.Series([2**64 - 1], dtype=dtype),
             label_dtype=np.dtype(np.uint64),
             path=ArtifactFile(tmp_path / "table.h5ad"),
@@ -86,7 +86,7 @@ class TestValidateInstanceIds:
     def test_nulls_rejected(self, tmp_path: Path, dtype: str) -> None:
         """Nulls rejected."""
         with pytest.raises(ReaderFormatError, match="null or noninteger"):
-            _validate_instance_ids(
+            validate_instance_ids(
                 pd.Series([None], dtype=dtype),
                 label_dtype=np.dtype(np.uint64),
                 path=ArtifactFile(tmp_path / "table.h5ad"),
@@ -100,7 +100,7 @@ class TestValidateInstanceIds:
         obs = pd.DataFrame({"cell_id": values})
 
         with pytest.raises(ReaderFormatError):
-            _validate_instance_ids(
+            validate_instance_ids(
                 obs["cell_id"],
                 label_dtype=np.dtype(np.uint16),
                 path=ArtifactFile(tmp_path / "counts.h5ad"),
@@ -115,7 +115,7 @@ class TestValidateOutputColumn:
         """Conflicts with exact wide id."""
         obs = pd.DataFrame({"instance_id": [existing]})
         with pytest.raises(ReaderFormatError, match="conflicting reserved"):
-            _validate_output_column(
+            validate_output_column(
                 obs,
                 "instance_id",
                 pd.Series([2**53 + 1], dtype="uint64[pyarrow]"),
@@ -126,7 +126,7 @@ class TestValidateOutputColumn:
     def test_equal_or_absent_fields(self, tmp_path: Path, *, present: bool) -> None:
         """Equal or absent fields."""
         obs = pd.DataFrame({"instance_id": [2**64 - 1]}) if present else pd.DataFrame(index=[0])
-        _validate_output_column(
+        validate_output_column(
             obs,
             "instance_id",
             pd.Series([2**64 - 1], dtype="uint64[pyarrow]"),
@@ -141,4 +141,4 @@ class TestValidateIndexIds:
     def test_nonpositive_or_out_of_range(self, tmp_path: Path, value: int) -> None:
         """Respect label background and dtype bounds without float conversion."""
         with pytest.raises(ReaderFormatError, match="nonpositive or out-of-range"):
-            _validate_index_ids([value], label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "table.h5ad"))
+            validate_index_ids([value], label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "table.h5ad"))

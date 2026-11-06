@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from spatialdata_io.experimental.iss._layout import _discover_layout
+from spatialdata_io.experimental.iss._layout import discover_layout, validate_artifact_names
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from tests.integration.experimental.iss.conftest import write_iss_dataset
 
@@ -20,7 +20,7 @@ class TestDiscoverLayout:
     def test_relative_files_and_immutable_layout(self, tmp_path: Path) -> None:
         write_iss_dataset(tmp_path)
 
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
 
@@ -38,7 +38,7 @@ class TestDiscoverLayout:
             (tmp_path / filename).mkdir()
 
         with pytest.raises(IsADirectoryError if wrong_kind else FileNotFoundError):
-            _discover_layout(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+            discover_layout(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
 
     def test_absolute_override_may_be_outside_root(self, tmp_path: Path) -> None:
         root = tmp_path / "dataset"
@@ -47,12 +47,12 @@ class TestDiscoverLayout:
         outside = tmp_path / "outside.tiff"
         (root / "raw.tiff").rename(outside)
 
-        layout = _discover_layout(root, raw_image_file=outside, labels_file="labels.tiff", table_file="cells.h5ad")
+        layout = discover_layout(root, raw_image_file=outside, labels_file="labels.tiff", table_file="cells.h5ad")
 
         assert layout.raw_image == outside.resolve()
 
         with pytest.raises(ReaderFormatError, match="outside"):
-            _discover_layout(root, raw_image_file="../outside.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+            discover_layout(root, raw_image_file="../outside.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
 
     def test_relative_symlink_cannot_escape(self, tmp_path: Path) -> None:
         root = tmp_path / "dataset"
@@ -63,20 +63,7 @@ class TestDiscoverLayout:
         (root / "raw.tiff").symlink_to(outside)
 
         with pytest.raises(ReaderFormatError, match="outside"):
-            _discover_layout(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
-
-    @pytest.mark.parametrize("target", ["raw", "labels", "table"])
-    def test_unsupported_suffix(self, tmp_path: Path, target: str) -> None:
-        write_iss_dataset(tmp_path)
-        (tmp_path / "wrong.csv").touch()
-
-        with pytest.raises(ValueError, match="ISS"):
-            _discover_layout(
-                tmp_path,
-                raw_image_file="wrong.csv" if target == "raw" else "raw.tiff",
-                labels_file="wrong.csv" if target == "labels" else "labels.tiff",
-                table_file="wrong.csv" if target == "table" else "cells.h5ad",
-            )
+            discover_layout(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
 
     @pytest.mark.parametrize("exists", [False, True])
     def test_root_kind(self, tmp_path: Path, *, exists: bool) -> None:
@@ -85,4 +72,23 @@ class TestDiscoverLayout:
             root.touch()
 
         with pytest.raises(NotADirectoryError if exists else FileNotFoundError):
-            _discover_layout(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+            discover_layout(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+
+
+class TestValidateArtifactNames:
+    """Check the caller's file suffixes without touching the filesystem."""
+
+    @pytest.mark.parametrize(
+        ("target", "option"), [("raw", "raw_image_file"), ("labels", "labels_file"), ("table", "table_file")]
+    )
+    def test_unsupported_suffix(self, target: str, option: str) -> None:
+        with pytest.raises(ValueError, match=f"ISS {option} 'wrong.csv'"):
+            validate_artifact_names(
+                "wrong.csv" if target == "raw" else "raw.tiff",
+                "wrong.csv" if target == "labels" else "labels.tiff",
+                "wrong.csv" if target == "table" else "cells.h5ad",
+            )
+
+    @pytest.mark.parametrize("raster", ["raw.TIF", "raw.tiff", "dir/raw.btf", "/absent/raw.Tiff"])
+    def test_supported_suffixes_are_case_insensitive(self, raster: str) -> None:
+        validate_artifact_names(raster, raster, "cells.H5AD")

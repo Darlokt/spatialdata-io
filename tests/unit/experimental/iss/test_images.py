@@ -13,9 +13,9 @@ from spatialdata.transformations import Identity, get_transformation
 from xarray import DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
-from spatialdata_io.experimental.iss._images import _read_raster, _read_rasters, _validate_data_axes
-from spatialdata_io.experimental.iss._layout import _discover_layout
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.experimental.iss._images import _read_raster, read_rasters, validate_data_axes
+from spatialdata_io.experimental.iss._layout import discover_layout
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from tests.integration.experimental.iss.conftest import write_iss_dataset
@@ -31,16 +31,16 @@ class TestValidateDataAxes:
 
     @pytest.mark.parametrize(("axes", "expected"), [(None, None), ("CYX", "cyx"), ("YXS", "yxs")])
     def test_valid_axes(self, axes: str | None, expected: str | None) -> None:
-        assert _validate_data_axes(axes) == expected
+        assert validate_data_axes(axes) == expected
 
     @pytest.mark.parametrize("axes", ["", "CCYX", "QX", "C1YX", "C YX", "CÝX"])
     def test_invalid_axis_names(self, axes: str) -> None:
         with pytest.raises(ValueError, match="data_axes"):
-            _validate_data_axes(axes)
+            validate_data_axes(axes)
 
     def test_invalid_axes_type(self) -> None:
         with pytest.raises(TypeError, match="data_axes"):
-            _validate_data_axes(["c", "y", "x"])  # pyrefly: ignore[bad-argument-type] - Exercise an untyped caller boundary.
+            validate_data_axes(["c", "y", "x"])  # pyrefly: ignore[bad-argument-type] - Exercise an untyped caller boundary.
 
 
 class TestReadRaster:
@@ -51,7 +51,9 @@ class TestReadRaster:
         path.write_bytes(b"not TIFF")
 
         with pytest.raises(ValueError, match="TIFF") as caught:
-            _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
+            _read_raster(
+                ArtifactFile(path), context=ReaderErrorContext("iss", "raw image"), target_axes=("c", "y", "x")
+            )
 
         assert any("iss" in note and str(path) in note for note in caught.value.__notes__)
 
@@ -64,7 +66,9 @@ class TestReadRaster:
                 )
 
         with pytest.raises(ReaderFormatError, match="2 series"):
-            _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
+            _read_raster(
+                ArtifactFile(path), context=ReaderErrorContext("iss", "raw image"), target_axes=("c", "y", "x")
+            )
 
     def test_unknown_stack_axis_requires_explicit_override(self, tmp_path: Path) -> None:
         path = tmp_path / "stack.tiff"
@@ -72,9 +76,16 @@ class TestReadRaster:
         tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "QYX"})
 
         with pytest.raises(ReaderFormatError, match="Axis 'q'"):
-            _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
+            _read_raster(
+                ArtifactFile(path), context=ReaderErrorContext("iss", "raw image"), target_axes=("c", "y", "x")
+            )
 
-        image, _ = _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"), data_axes="CYX")
+        image, _ = _read_raster(
+            ArtifactFile(path),
+            context=ReaderErrorContext("iss", "raw image"),
+            target_axes=("c", "y", "x"),
+            data_axes="CYX",
+        )
         np.testing.assert_array_equal(image.compute(), source)
 
     def test_samples_need_an_explicit_channel_interpretation(self, tmp_path: Path) -> None:
@@ -83,9 +94,16 @@ class TestReadRaster:
         tifffile.imwrite(path, source, photometric="rgb")
 
         with pytest.raises(ReaderFormatError, match="Axis 's'"):
-            _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"))
+            _read_raster(
+                ArtifactFile(path), context=ReaderErrorContext("iss", "raw image"), target_axes=("c", "y", "x")
+            )
 
-        image, _ = _read_raster(ArtifactFile(path), name="raw image", target_axes=("c", "y", "x"), data_axes="YXC")
+        image, _ = _read_raster(
+            ArtifactFile(path),
+            context=ReaderErrorContext("iss", "raw image"),
+            target_axes=("c", "y", "x"),
+            data_axes="YXC",
+        )
         np.testing.assert_array_equal(image.compute(), source.transpose(2, 0, 1))
 
 
@@ -109,14 +127,14 @@ class TestReadRasters:
         shape = (4, 5) if invalid == "shape" else (32, 40)
         tifffile.imwrite(tmp_path / "labels.tiff", np.zeros(shape, dtype=dtype), photometric="minisblack")
 
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         factors = (64,) if invalid == "factor" else (2,) if invalid in {"uint64", "int64"} else ()
 
         with pytest.raises(ValueError, match=r"extent|integer label|32-bit"):
-            _read_rasters(layout, data_axes=None, raster=make_raster_options(factors))
+            read_rasters(layout, data_axes=None, raster=make_raster_options(factors))
         pixels.assert_not_called()
 
     @pytest.mark.parametrize("names", [["DAPI", "CD3"], ["DAPI", "DAPI"], None])
@@ -125,10 +143,10 @@ class TestReadRasters:
         metadata = {"axes": "CYX"} if names is None else {"axes": "CYX", "Channel": {"Name": names}}
         tifffile.imwrite(tmp_path / "raw.tiff", dataset.raw, ome=True, photometric="minisblack", metadata=metadata)
 
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
-        result = _read_rasters(layout, data_axes=None, raster=make_raster_options())
+        result = read_rasters(layout, data_axes=None, raster=make_raster_options())
         expected = names if names is not None and len(set(names)) == 2 else ["Channel:0:0", "Channel:0:1"]
         assert result.image.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(result.image.data.compute(), dataset.raw)
@@ -142,12 +160,12 @@ class TestReadRasters:
         write_iss_dataset(tmp_path)
         source = np.arange(32 * 40 * samples, dtype=np.uint8).reshape(32, 40, samples)
         tifffile.imwrite(tmp_path / "raw.tiff", source, ome=ome, photometric="rgb", metadata={"axes": "YXS"})
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         with pytest.raises(ReaderFormatError, match="Axis 's'"):
-            _read_rasters(layout, data_axes=None, raster=make_raster_options())
-        result = _read_rasters(layout, data_axes="yxc", raster=make_raster_options())
+            read_rasters(layout, data_axes=None, raster=make_raster_options())
+        result = read_rasters(layout, data_axes="yxc", raster=make_raster_options())
         assert result.image.coords["c"].to_numpy().tolist() == list("rgba"[:samples])
         np.testing.assert_array_equal(result.image.data.compute(), source.transpose(2, 0, 1))
 
@@ -168,11 +186,11 @@ class TestReadRasters:
         tifffile.imwrite(
             tmp_path / "raw.tiff", source, ome=ome, photometric="minisblack", planarconfig="contig", metadata=metadata
         )
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
 
-        result = _read_rasters(layout, data_axes="yxc", raster=make_raster_options())
+        result = read_rasters(layout, data_axes="yxc", raster=make_raster_options())
 
         assert result.image.coords["c"].to_numpy().tolist() == expected
 
@@ -196,7 +214,7 @@ class TestReadRasters:
             tmp_path / "labels.tiff", labels, photometric="minisblack", tile=(16, 16), compression=compression
         )
 
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         # Chunks equal to the 16-pixel tiles keep one task per stored tile.
@@ -205,7 +223,7 @@ class TestReadRasters:
         tasks = mocker.Mock()
 
         with Callback(posttask=tasks):
-            result = _read_rasters(layout, data_axes=None, raster=raster)
+            result = read_rasters(layout, data_axes=None, raster=raster)
         tasks.assert_not_called()
         pixels.assert_not_called()
 
@@ -234,10 +252,10 @@ class TestReadRasters:
         )
         tifffile.imwrite(tmp_path / "labels.tiff", source, photometric="minisblack", tile=(16, 16))
 
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
-        result = _read_rasters(layout, data_axes=None, raster=make_raster_options(factors))
+        result = read_rasters(layout, data_axes=None, raster=make_raster_options(factors))
 
         assert isinstance(result.labels, DataTree)
         for level in result.labels.children.values():
@@ -259,12 +277,12 @@ class TestPhysicalTransform:
             photometric="minisblack",
             metadata={"axes": "CYX", "PhysicalSizeX": 0.3, "PhysicalSizeY": 0.7},
         )
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
-        result = _read_rasters(layout, data_axes="cxy", raster=make_raster_options())
-        assert get_transformation(result.image, to_coordinate_system="global") == Identity()
-        assert get_transformation(result.labels, to_coordinate_system="global") == Identity()
+        result = read_rasters(layout, data_axes="cxy", raster=make_raster_options())
+        assert get_transformation(result.image, get_all=True) == {"image_pixels": Identity()}
+        assert get_transformation(result.labels, get_all=True) == {"image_pixels": Identity()}
         np.testing.assert_array_equal(result.image.data.compute(), fixture.raw.transpose(0, 2, 1))
 
     def test_partial_raw_and_labels_conflict(self, tmp_path: Path) -> None:
@@ -283,8 +301,8 @@ class TestPhysicalTransform:
             photometric="minisblack",
             metadata={"axes": "YX", "PhysicalSizeX": 0.4},
         )
-        layout = _discover_layout(
+        layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
         with pytest.raises(ReaderFormatError, match="calibration"):
-            _read_rasters(layout, data_axes=None, raster=make_raster_options())
+            read_rasters(layout, data_axes=None, raster=make_raster_options())

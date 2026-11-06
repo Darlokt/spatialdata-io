@@ -23,8 +23,9 @@ class TestPackage:
         package = importlib.import_module("spatialdata_io.readers.steinbock")
         parameters = inspect.signature(package.steinbock).parameters
 
-        assert list(parameters) == ["path", "labels_kind", "scale_factors", "chunks", "path_policy"]
-        assert parameters["labels_kind"].default == "deepcell"
+        assert list(parameters) == ["path", "masks_dir", "table_file", "scale_factors", "chunks", "path_policy"]
+        assert parameters["masks_dir"].default == "masks"
+        assert parameters["table_file"].default == "cells.h5ad"
         assert all(
             parameter.kind == inspect.Parameter.KEYWORD_ONLY for name, parameter in parameters.items() if name != "path"
         )

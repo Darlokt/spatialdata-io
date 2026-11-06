@@ -56,7 +56,7 @@ class TestPackage:
             "border_scale": 1.0,
             "invalid_geometries": "keep",
             "data_axes": None,
-            "tiff_series": 0,
+            "tiff_series": None,
             "tiff_level": 0,
             "scale_factors": DEFAULT_SCALE_FACTORS,
             "chunks": DEFAULT_CHUNKS,

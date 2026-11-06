@@ -10,12 +10,13 @@ import numpy as np
 import pytest
 import tifffile
 from dask.callbacks import Callback
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Identity, Scale, get_transformation
 from tifffile.zarr import ZarrTiffStore
 from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image._encoded as encoded
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_tasks
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.dbit import dbit
 from tests.integration.readers.dbit.test_reader import _write_layout
 
@@ -61,7 +62,7 @@ class TestDbitImages:
         assert image.dtype == np.dtype(np.uint16)
         assert image.data.chunksize == (1, 16, 16)
         assert image.coords["c"].to_numpy().tolist() == [0, 1]
-        assert get_transformation(image, get_all=True) == {"global": Identity()}
+        assert get_transformation(image, get_all=True) == {"image_pixels": Identity()}
 
         # Pickle before installing resource trackers: the graph must retain only paths and selection state.
         restored = pickle.loads(pickle.dumps(image.data))  # noqa: S301, RUF100 - Only deserialize this test's own graph.
@@ -147,12 +148,20 @@ class TestDbitImages:
                 metadata={"axes": "CYX"},
             )
 
+        with pytest.raises(ReaderFormatError, match="found 2 series"):
+            dbit(tmp_path, image_file=path)
+
         result = dbit(tmp_path, image_file=path, tiff_series=1, tiff_level=1, include_border=False)
 
         image = result.images["sample_image"]
         assert image.shape == (4, 6, 8)
         np.testing.assert_array_equal(image.data.compute(), np.full((4, 6, 8), 17, dtype=np.uint16))
-        np.testing.assert_array_equal(result.shapes["sample"].total_bounds, [0, 0, 8, 8])
+        # Two grid steps span the 8-pixel width of the selected level.
+        np.testing.assert_array_equal(result.shapes["sample"].total_bounds, [0, 0, 2, 2])
+        assert get_transformation(result.shapes["sample"], get_all=True) == {
+            "grid_pixels": Identity(),
+            "image_pixels": Scale([4.0, 4.0], axes=("x", "y")),
+        }
 
     def test_default_chunks_hold_one_channel(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)
@@ -181,7 +190,10 @@ class TestDbitImages:
         np.testing.assert_array_equal(pyramid["scale0"]["image"].data.compute(), source)
         assert pyramid["scale1"]["image"].shape == (2, 6, 8)
         # Two grid positions per axis over the 16-pixel full-resolution width.
-        np.testing.assert_array_equal(result.shapes["sample"].total_bounds, [0, 0, 16, 16])
+        assert get_transformation(result.shapes["sample"], get_all=True) == {
+            "grid_pixels": Identity(),
+            "image_pixels": Scale([8.0, 8.0], axes=("x", "y")),
+        }
 
     def test_channel_count_never_sets_grid_scale(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)
@@ -195,7 +207,10 @@ class TestDbitImages:
 
         result = dbit(tmp_path, image_file=path, include_border=False)
 
-        np.testing.assert_array_equal(result.shapes["sample"].total_bounds, [0, 0, 3, 3])
+        assert get_transformation(result.shapes["sample"], get_all=True) == {
+            "grid_pixels": Identity(),
+            "image_pixels": Scale([1.5, 1.5], axes=("x", "y")),
+        }
 
     @pytest.mark.parametrize("fail", [False, True])
     def test_compute_closes_tiff_and_store_on_success_and_failure(
