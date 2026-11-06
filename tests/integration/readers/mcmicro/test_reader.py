@@ -14,6 +14,7 @@ from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataTree
 
@@ -24,6 +25,7 @@ from spatialdata_io.readers.mcmicro import mcmicro
 from tests.integration.readers.mcmicro._fixtures import write_mcmicro_dataset
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from anndata import AnnData
@@ -236,3 +238,20 @@ class TestMcmicro:
         restored = read_zarr(output)
         assert set(restored.labels) == {"sample_part_7_method_a_cells"}
         assert restored.tables["table"].shape == (2, 2)
+
+
+class TestMcmicroPathPolicy:
+    """Discovered artifacts follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        fixture = write_mcmicro_dataset(tmp_path)
+        expected = mcmicro(fixture.root)
+        link_outside_root(fixture.root / "markers.csv")
+        link_outside_root(fixture.root / "registration" / "sample_part_7.ome.tif")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            mcmicro(fixture.root)
+
+        assert_spatial_data_objects_are_identical(mcmicro(fixture.root, path_policy="relaxed"), expected)

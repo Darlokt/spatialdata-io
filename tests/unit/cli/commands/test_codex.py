@@ -67,6 +67,7 @@ class TestCodexCommand:
             tiff_series=1,
             scale_factors=(2, 4),
             chunks=(1, 16, 32),
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -87,6 +88,7 @@ class TestCodexCommand:
             tiff_series=None,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
 
     def test_scalar_chunks(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
@@ -135,6 +137,7 @@ class TestCodexCommand:
             "tiff_series",
             "scale_factors",
             "chunks",
+            "path_policy",
         ]
         for name in ("cell_table_file", "image_file"):
             option_type = options[name].type

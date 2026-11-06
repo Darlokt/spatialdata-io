@@ -11,7 +11,6 @@ import pytest
 from scipy import sparse
 
 from spatialdata_io.experimental.iss._schemas import (
-    _validate_expression,
     _validate_index_ids,
     _validate_instance_ids,
     _validate_output_column,
@@ -22,121 +21,6 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from pytest_mock import MockerFixture
-
-
-class TestValidateExpression:
-    """Guard declared expression slots without mutating compressed source storage."""
-
-    def test_dense_expression_with_absent_counts_is_preserved(self, tmp_path: Path) -> None:
-        expression = np.asarray([[100, 100], [0, 0]], dtype=np.int8)
-        table = ad.AnnData(expression)
-        _validate_expression(table, path=ArtifactFile(tmp_path / "source.h5ad"))
-        assert table.X is expression
-        assert "counts" not in table.layers
-        np.testing.assert_array_equal(expression, [[100, 100], [0, 0]])
-
-    @pytest.mark.parametrize("dtype", ["float32", "bool"])
-    def test_noninteger_duplicates_keep_their_existing_policy(self, tmp_path: Path, dtype: str) -> None:
-        expression = sparse.csr_array((np.asarray([1, 1], dtype=dtype), [0, 0], [0, 2, 2]), shape=(2, 2))
-        table = ad.AnnData(expression)
-        table.layers["counts"] = expression.copy()
-        _validate_expression(table, path=ArtifactFile(tmp_path / "source.h5ad"))
-        assert table.X is expression
-        for actual in (expression, table.layers["counts"]):
-            assert isinstance(actual, sparse.csr_array)
-            assert actual.dtype == np.dtype(dtype)
-            np.testing.assert_array_equal(actual.data, [1, 1])
-            np.testing.assert_array_equal(actual.indices, [0, 0])
-
-    @pytest.mark.parametrize("slot", ["X", "counts"])
-    @pytest.mark.parametrize("storage", ["csr", "csc"])
-    @pytest.mark.parametrize(
-        "case",
-        [
-            ("int8", [100, 100], True),
-            ("uint8", [200, 200], True),
-            ("int64", [2**63 - 1, 1], True),
-            ("uint64", [2**63, 2**63], True),
-            ("int64", [2**63 - 2, 1], False),
-            ("uint64", [2**64 - 2, 1], False),
-            ("int8", [120, 120, -120], False),
-        ],
-    )
-    def test_integer_duplicate_sums_before_normalization(
-        self, tmp_path: Path, slot: str, storage: str, case: tuple[str, list[int], bool]
-    ) -> None:
-        dtype, values, _ = case
-        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
-        expression = constructor(
-            (np.asarray(values, dtype=dtype), np.zeros(len(values), dtype=np.int32), [0, len(values), len(values)]),
-            shape=(2, 2),
-        )
-        table = ad.AnnData(np.ones((2, 2)))
-        if slot == "X":
-            table.X = expression
-        else:
-            table.layers[slot] = expression
-        original = (expression.data.copy(), expression.indices.copy(), expression.indptr.copy())
-        path = ArtifactFile(tmp_path / "source.h5ad")
-
-        _validate_expression(table, path=path)
-
-        assert (table.X if slot == "X" else table.layers[slot]) is expression
-        for actual, expected in zip((expression.data, expression.indices, expression.indptr), original, strict=True):
-            np.testing.assert_array_equal(actual, expected)
-
-    @pytest.mark.parametrize("storage", ["csr", "csc"])
-    def test_unsorted_unique_integer_entries_are_not_duplicate_sums(self, tmp_path: Path, storage: str) -> None:
-        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
-        expression = constructor((np.asarray([127, 127], dtype=np.int8), [1, 0], [0, 2, 2]), shape=(2, 2))
-        table = ad.AnnData(expression)
-        _validate_expression(table, path=ArtifactFile(tmp_path / "source.h5ad"))
-        np.testing.assert_array_equal(expression.data, [127, 127])
-        np.testing.assert_array_equal(expression.indices, [1, 0])
-        assert not expression.has_sorted_indices
-
-    def test_unrelated_integer_layer_is_outside_expression_contract(self, tmp_path: Path) -> None:
-        table = ad.AnnData(np.ones((2, 2)))
-        expression = sparse.csr_array((np.asarray([100, 100], dtype=np.int8), [0, 0], [0, 2, 2]), shape=(2, 2))
-        table.layers["metadata"] = expression
-        _validate_expression(table, path=ArtifactFile(tmp_path / "source.h5ad"))
-        assert table.layers["metadata"] is expression
-        np.testing.assert_array_equal(expression.data, [100, 100])
-
-    @pytest.mark.parametrize("slot", ["X", "counts"])
-    @pytest.mark.parametrize("storage", ["csr", "csc"])
-    def test_legacy_compressed_matrix_overflow(self, tmp_path: Path, slot: str, storage: str) -> None:
-        constructor = sparse.csr_matrix if storage == "csr" else sparse.csc_matrix
-        expression = constructor((np.asarray([100, 100], dtype=np.int8), [0, 0], [0, 2, 2]), shape=(2, 2))
-        table = ad.AnnData(np.ones((2, 2)))
-        if slot == "X":
-            table.X = expression
-        else:
-            table.layers[slot] = expression
-        _validate_expression(table, path=ArtifactFile(tmp_path / "source.h5ad"))
-        np.testing.assert_array_equal(expression.data, [100, 100])
-
-    @pytest.mark.parametrize("invalid", ["range", "dtype"])
-    def test_malformed_compressed_storage_preserves_error_and_context(
-        self, tmp_path: Path, mocker: MockerFixture, invalid: str
-    ) -> None:
-        expression = sparse.csr_array(np.eye(2, dtype=np.int64))
-        table = ad.AnnData(expression)
-        if invalid == "range":
-            expression.indices[0] = 2
-        else:
-            mocker.patch.object(expression, "indices", np.asarray([0, 1], dtype=np.float64))
-        original = expression.indices.copy()
-        path = ArtifactFile(tmp_path / "source.h5ad")
-        with pytest.raises(ValueError if invalid == "range" else TypeError, match="indices") as caught:
-            _validate_expression(table, path=path)
-        notes = " ".join(caught.value.__notes__)
-        assert "iss" in notes
-        assert "X" in notes
-        assert str(path) in notes
-        np.testing.assert_array_equal(expression.indices, original)
 
 
 class TestValidateTable:

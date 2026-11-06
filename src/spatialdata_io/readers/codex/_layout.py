@@ -1,4 +1,21 @@
-"""Deterministic CODEX table and stitched-image discovery."""
+"""Discover the CODEX cell table, stitched image and optional experiment file of one region.
+
+A processor-style region directory holds one regional cell table and at most
+one stitched image; other files are ignored::
+
+    region/
+    ├── reg001_compensated.csv     # cell table: exactly one *.csv or *.fcs
+    ├── stitched.tif               # optional: zero or one *.tif, *.tiff or *.btf
+    └── experiment.json            # never discovered; only read when selected
+
+Suffixes are matched case-insensitively. Several tables (for example
+compensated and uncompensated, or CSV and FCS) or several images are ambiguous
+and require ``cell_table_file`` or ``image_file``; which one to use is a
+scientific choice, so none is preferred. The experiment file is only read when
+the caller selects it, because its association with the table cannot be
+inferred from the directory. Relative file options resolve against the dataset
+directory; absolute ones may point anywhere.
+"""
 
 from __future__ import annotations
 
@@ -19,63 +36,68 @@ from spatialdata_io.readers._utils.paths import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from spatialdata_io.readers._utils.paths import PathPolicy
+
 _CELL_SUFFIXES = frozenset({".csv", ".fcs"})
 _IMAGE_SUFFIXES = frozenset({".tif", ".tiff", ".btf"})
+_LAYOUT_CONTEXT = ReaderErrorContext("codex", "dataset layout")
+_CELL_CONTEXT = ReaderErrorContext("codex", "cell table")
+_IMAGE_CONTEXT = ReaderErrorContext("codex", "stitched image")
+_EXPERIMENT_CONTEXT = ReaderErrorContext("codex", "experiment calibration")
 
 
 @dataclass(frozen=True, slots=True)
-class _CodexLayout:
-    """Hold canonical validated source paths without open resources or loaded data."""
+class CodexLayout:
+    """Validated source files of one region, without open resources or loaded data."""
 
     cell_table: ArtifactFile
     image: ArtifactFile | None
     experiment: ArtifactFile | None
 
 
-def _discover_layout(
+def discover_layout(
     path: str | Path,
     *,
     cell_table_file: str | Path | None,
     image_file: str | Path | None,
     experiment_file: str | Path | None = None,
-) -> _CodexLayout:
-    """Resolve exactly one selected cell table and zero or one stitched image."""
-    root = normalize_dataset_root(path, context=ReaderErrorContext("codex", "dataset layout"))
-    candidates = sorted_paths(root.iterdir(), context=ReaderErrorContext("codex", "dataset layout"), search_path=root)
+    path_policy: PathPolicy = "strict",
+) -> CodexLayout:
+    """Resolve exactly one cell table, zero or one stitched image and the selected experiment."""
+    root = normalize_dataset_root(path, context=_LAYOUT_CONTEXT, path_policy=path_policy)
+    candidates = sorted_paths(root.path.iterdir(), context=_LAYOUT_CONTEXT, search_path=root.path)
 
-    cell_context = ReaderErrorContext("codex", "cell table")
     if cell_table_file is None:
         candidate = require_unique_path(
             (item for item in candidates if item.suffix.lower() in _CELL_SUFFIXES),
-            context=cell_context,
-            search_path=root,
+            context=_CELL_CONTEXT,
+            search_path=root.path,
         )
-        cell_table = require_metadata_file(root, candidate, context=cell_context)
+        cell_table = require_metadata_file(root, candidate, context=_CELL_CONTEXT)
     else:
-        cell_table = require_caller_file(root, cell_table_file, context=cell_context)
+        cell_table = require_caller_file(root, cell_table_file, context=_CELL_CONTEXT)
     if cell_table.suffix.lower() not in _CELL_SUFFIXES:
         raise ReaderFormatError(
-            context=cell_context, path=cell_table, found=cell_table.suffix, expected="a .csv or .fcs cell table"
+            context=_CELL_CONTEXT, path=cell_table, found=cell_table.suffix, expected="a .csv or .fcs cell table"
         )
 
-    image_context = ReaderErrorContext("codex", "stitched image")
     if image_file is None:
         image_candidate = optional_unique_path(
             (item for item in candidates if item.suffix.lower() in _IMAGE_SUFFIXES),
-            context=image_context,
-            search_path=root,
+            context=_IMAGE_CONTEXT,
+            search_path=root.path,
         )
-        image = None if image_candidate is None else require_metadata_file(root, image_candidate, context=image_context)
+        image = (
+            None if image_candidate is None else require_metadata_file(root, image_candidate, context=_IMAGE_CONTEXT)
+        )
     else:
-        image = require_caller_file(root, image_file, context=image_context)
+        image = require_caller_file(root, image_file, context=_IMAGE_CONTEXT)
     if image is not None and image.suffix.lower() not in _IMAGE_SUFFIXES:
         raise ReaderFormatError(
-            context=image_context, path=image, found=image.suffix, expected="a TIFF, OME-TIFF, BigTIFF, or BTF image"
+            context=_IMAGE_CONTEXT, path=image, found=image.suffix, expected="a TIFF, OME-TIFF, BigTIFF, or BTF image"
         )
 
     experiment = (
-        None
-        if experiment_file is None
-        else require_caller_file(root, experiment_file, context=ReaderErrorContext("codex", "experiment calibration"))
+        None if experiment_file is None else require_caller_file(root, experiment_file, context=_EXPERIMENT_CONTEXT)
     )
-    return _CodexLayout(cell_table, image, experiment)
+    return CodexLayout(cell_table, image, experiment)

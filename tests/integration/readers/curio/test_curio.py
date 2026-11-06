@@ -12,6 +12,7 @@ from anndata.tests.helpers import assert_equal
 from scipy import sparse
 from spatialdata import SpatialData
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Scale, get_transformation
 
 from spatialdata_io import __version__, curio
@@ -19,6 +20,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from tests.integration.readers.curio._fixtures import write_curio
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -247,7 +249,8 @@ class TestCurio:
         assert shapes.geometry.geom_type.tolist() == ["Point"] * 3
         np.testing.assert_array_equal(shapes.geometry.x, [30, 10, 20])
         np.testing.assert_array_equal(shapes.geometry.y, [4, 8, 2])
-        np.testing.assert_array_equal(shapes["radius"], [10, 10, 10])
+        # Half the nominal 10 µm bead diameter, in 0.647 µm Seeker pixels.
+        np.testing.assert_allclose(shapes["radius"] * 0.647, [5.0, 5.0, 5.0], rtol=1e-15)
         np.testing.assert_array_equal(
             table.obsm["spatial_pixels"], np.column_stack((shapes.geometry.x, shapes.geometry.y))
         )
@@ -361,3 +364,20 @@ class TestCurio:
         assert result.tables["table"].obs_names.tolist() == identifiers
         assert result.tables["table"].var_names.tolist() == identifiers
         np.testing.assert_array_equal(result.tables["table"].var["I"], [0.4, np.nan, 0.8])
+
+
+class TestCurioPathPolicy:
+    """Discovered artifacts follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        write_curio(tmp_path)
+        expected = curio(tmp_path)
+        link_outside_root(tmp_path / "sample_anndata.h5ad")
+        link_outside_root(tmp_path / "sample_Metrics.csv")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            curio(tmp_path)
+
+        assert_spatial_data_objects_are_identical(curio(tmp_path, path_policy="relaxed"), expected)

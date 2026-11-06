@@ -11,6 +11,7 @@ import pytest
 from spatialdata.models import TableModel
 
 from spatialdata_io.readers._utils.image import TiffMetadata
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.macsima._channels import NO_PADDING, PlannedChannel
 from spatialdata_io.readers.macsima._metadata import ChannelMetadata, ChannelSource
 from spatialdata_io.readers.macsima._schemas import CHANNEL_VAR_DTYPES
@@ -40,7 +41,7 @@ _BLEACH = ChannelMetadata(
 
 def _channel(name: str, metadata: ChannelMetadata) -> PlannedChannel:
     source = ChannelSource(
-        tiff=TiffMetadata(path=Path("/data/channel.tif"), series=(), ome=None),
+        tiff=TiffMetadata(path=ArtifactFile(Path("/data/channel.tif")), series=(), ome=None),
         software_version="1.1.1",
         major=1,
         metadata=metadata,

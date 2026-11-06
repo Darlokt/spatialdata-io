@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from spatialdata import SpatialData
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.steinbock._images import _read_rasters
@@ -31,6 +32,7 @@ def steinbock(
     labels_kind: Literal["deepcell", "ilastik"] = "deepcell",
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read an unversioned Steinbock OME-image, mask, and AnnData export.
 
@@ -69,6 +71,15 @@ def steinbock(
         One positive size for every axis or three ``c, y, x`` sizes of the
         images; labels use the ``y`` and ``x`` sizes. By default one channel per
         chunk and square 1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -162,7 +173,7 @@ def steinbock(
     duplicate_sums: list[SparseDuplicateSummary] = []
     raster = make_raster_options(scale_factors, chunks)
 
-    layout = _discover_layout(path, labels_kind=labels_kind)
+    layout = _discover_layout(path, labels_kind=labels_kind, path_policy=path_policy)
     metadata = (
         read_image_metadata(layout.image_metadata, {f"{sample.name}.tiff" for sample in layout.samples})
         if layout.image_metadata is not None
@@ -186,17 +197,14 @@ def steinbock(
     prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
 
     # All identifier and coordinate mutations precede the one final linkage.
-    try:
-        table = parse_linked_table(
-            table,
-            TableLinkage(tuple(table.obs["region"].unique()), "region", "cell_id"),
-            context=context,
-            duplicate_sums=duplicate_sums,
-            expression_layers=("counts",) if "counts" in table.layers else (),
-        )
-    except (TypeError, ValueError) as error:
-        add_reader_context(error, context=ReaderErrorContext("steinbock", "linked expression"), path=layout.table)
-        raise
+    table = parse_linked_table(
+        table,
+        TableLinkage(tuple(table.obs["region"].unique()), "region", "cell_id"),
+        context=context,
+        path=layout.table,
+        duplicate_sums=duplicate_sums,
+        expression_layers=("counts",) if "counts" in table.layers else (),
+    )
 
     result = SpatialData(
         images={f"{name}_image": sample.image for name, sample in samples.items()},

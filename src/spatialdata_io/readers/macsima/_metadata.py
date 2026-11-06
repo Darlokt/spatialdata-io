@@ -17,14 +17,13 @@ from typing import TYPE_CHECKING
 
 from ome_types.model import UnitsLength
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.image import inspect_tiff
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import inspect_tiff, ome_pixel_sizes_um
 from spatialdata_io.readers.macsima._schemas import (
     EXPOSURE_UNIT,
     ImageType,
     SchemaMajor,
     normalize_image_type,
-    pixel_size_um,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +39,8 @@ if TYPE_CHECKING:
 
 _ARTIFACT = "channel image"
 _VERSION_KEYS = ("SoftwareVersion", "Software version")  # v1, v0
+# MACSiQView declares pixel sizes in µm or nm; other units are unproved.
+_PIXEL_SIZE_UNITS = frozenset({UnitsLength.MICROMETER, UnitsLength.NANOMETER})
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,14 +292,14 @@ def _shape_yx(tiff: TiffMetadata, pixels: Pixels, origin: _Origin) -> tuple[int,
     return sizes["Y"], sizes["X"]
 
 
-def _isotropic_pixel_size_um(pixels: Pixels, origin: _Origin) -> float:
-    """Return the square pixel size in micrometers."""
-    size_x = pixel_size_um(
-        pixels.physical_size_x, pixels.physical_size_x_unit, context=origin.context, path=origin.path
-    )
-    size_y = pixel_size_um(
-        pixels.physical_size_y, pixels.physical_size_y_unit, context=origin.context, path=origin.path
-    )
+def _isotropic_pixel_size_um(tiff: TiffMetadata, pixels: Pixels, origin: _Origin) -> float:
+    """Return the square pixel size in micrometers, declared in µm or nm."""
+    for unit in (pixels.physical_size_x_unit, pixels.physical_size_y_unit):
+        if unit not in _PIXEL_SIZE_UNITS:
+            raise origin.error(found=f"physical size unit {unit.value!r}", expected="µm or nm")
+    size_x, size_y = ome_pixel_sizes_um(tiff, series=0, axes=("x", "y"), context=origin.context)
+    if size_x is None or size_y is None:
+        raise origin.error(found=f"physical pixel size {(size_y, size_x)!r} (y, x)", expected="a finite positive size")
     if size_x != size_y:
         raise origin.error(found=f"pixel size {size_y} µm (y) by {size_x} µm (x)", expected="square pixels")
     return size_x
@@ -343,16 +344,12 @@ def read_channel(path: ArtifactFile) -> ChannelSource | None:
         If the file cannot be read. Inspection errors carry reader context.
     """
     origin = _Origin(path, ReaderErrorContext("macsima", _ARTIFACT))
-    try:
-        with warnings.catch_warnings():
-            # MACSiQView IDs violate OME ID patterns; ome-types casts them and
-            # then reports references to the original IDs. Both are benign.
-            warnings.filterwarnings("ignore", message=r"Casting invalid \w*ID", category=UserWarning)
-            warnings.filterwarnings("ignore", message=r"Reference to unknown ID", category=UserWarning)
-            tiff = inspect_tiff(path)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=origin.context, path=path)
-        raise
+    with warnings.catch_warnings():
+        # MACSiQView IDs violate OME ID patterns; ome-types casts them and
+        # then reports references to the original IDs. Both are benign.
+        warnings.filterwarnings("ignore", message=r"Casting invalid \w*ID", category=UserWarning)
+        warnings.filterwarnings("ignore", message=r"Reference to unknown ID", category=UserWarning)
+        tiff = inspect_tiff(path, context=origin.context)
 
     ome = tiff.ome
     if ome is None:
@@ -373,7 +370,7 @@ def read_channel(path: ArtifactFile) -> ChannelSource | None:
         software_version=version,
         major=major,
         metadata=_channel_metadata(fields, major=major, well=_well(ome, origin), origin=origin),
-        pixel_size_um=_isotropic_pixel_size_um(pixels, origin),
+        pixel_size_um=_isotropic_pixel_size_um(tiff, pixels, origin),
         offset_yx=_offset_yx(pixels, origin),
         shape_yx=_shape_yx(tiff, pixels, origin),
         dtype=tiff.series[0].levels[0].dtype,

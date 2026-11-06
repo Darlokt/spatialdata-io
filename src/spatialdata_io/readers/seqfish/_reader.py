@@ -7,9 +7,10 @@ from typing import TYPE_CHECKING, Literal, cast
 import pandas as pd
 from spatialdata import SpatialData
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import finalize_count_arrays
 from spatialdata_io.readers.seqfish._geometry import make_circles, read_boundaries
@@ -41,6 +42,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     rois: Sequence[str] | None = None,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read the repeated Spatial Genomics seqFISH ROI export layout.
 
@@ -88,6 +90,15 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         One positive size for every axis or three ``c, y, x`` sizes of the
         images; labels use the ``y`` and ``x`` sizes. By default one channel per
         chunk and square 1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -147,7 +158,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         rois=rois,
     )
     options = make_raster_options(scale_factors=scale_factors, chunks=chunks)
-    roi_layouts = discover_layout(path, selection)
+    roi_layouts = discover_layout(path, selection, path_policy=path_policy)
     images: dict[str, DataArray | DataTree] = {}
     labels: dict[str, DataArray | DataTree] = {}
     points: dict[str, DataFrame] = {}

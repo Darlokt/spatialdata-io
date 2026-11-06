@@ -21,6 +21,7 @@ stereoseq.md
 xenium.md
 visium_hd.md
 raster_options.md
+dataset_paths.md
 table_contracts.md
 legacy_anndata.md
 changelog.md

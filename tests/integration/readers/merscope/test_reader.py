@@ -20,6 +20,7 @@ from scipy import sparse
 from shapely.geometry import MultiPolygon, Polygon
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Identity, get_transformation
 
 from spatialdata_io import __version__
@@ -29,6 +30,7 @@ from spatialdata_io.readers.merscope import merscope
 from tests.integration.readers.merscope._fixtures import write_merscope_dataset
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -384,7 +386,7 @@ class TestMerscope:
                 "ignored": ['a comma, and a "quote"'] * 80,
             }
         ).to_csv(fixture.root / "detected_transcripts.csv", index=False)
-        mocker.patch("spatialdata_io.readers.merscope._transcripts._BLOCK_BYTES", 256)
+        mocker.patch("spatialdata_io.readers._utils.csv._blocks.CSV_BLOCK_BYTES", 256)
         completed: list[str] = []
         with Callback(posttask=lambda key, *_: completed.append(str(key))):
             result = merscope(fixture.root)
@@ -608,3 +610,26 @@ class TestMerscope:
         assert points[assignment].tolist() == expected
         assert "z" not in points.columns
         assert_array_equal(points["z_raw"], [0, 2, 2, 0])
+
+
+class TestMerscopePathPolicy:
+    """Region and VPT artifacts follow the dataset root's symlink policy."""
+
+    @pytest.mark.parametrize("profile", ["standard", "cellpose"])
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self,
+        tmp_path: Path,
+        link_outside_root: Callable[[Path], Path],
+        profile: Literal["standard", "cellpose"],
+    ) -> None:
+        fixture = write_merscope_dataset(tmp_path, profile=profile)
+        vpt = None if profile == "standard" else fixture.analysis
+        expected = merscope(fixture.root, vpt_directory=vpt)
+        link_outside_root(fixture.analysis / "cell_by_gene.csv")
+        link_outside_root(fixture.root / "images" / "mosaic_DAPI_z0.tif")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            merscope(fixture.root, vpt_directory=vpt)
+
+        relaxed = merscope(fixture.root, vpt_directory=vpt, path_policy="relaxed")
+        assert_spatial_data_objects_are_identical(relaxed, expected)

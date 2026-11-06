@@ -1,10 +1,25 @@
-"""CODEX source fields, dynamic cycle channels, exact IDs, and Arrow annotations.
+"""Validate the CODEX cell-table schema: named fields, cycle channels, IDs, regions and numbers.
 
-Required cell fields are named and unordered; every extra non-cycle field is
-preserved. Only complete cycNNN_chNNN names denote expression. CSV identifiers
-remain lexical until exact signed/unsigned 64-bit normalization. FCS primitive
-numeric widths are retained. Unknown CSV annotations retain exact text;
-required IDs, coordinates, regions, and compensated intensities must be valid.
+A processor-style regional cell table (CSV or FCS) has one row per segmented
+cell and these named fields, in any order::
+
+    cell_id        integral cell identifier, unique within the region
+    region         one region per table: a positive integer or a name
+    x, y           cell position in native region pixels
+    cycNNN_chNNN   one integrated intensity per cycle and channel (>= 1 field)
+    ...            any further field (tile_num, z, size, tsne_x, ...) is metadata
+
+Only complete ``cyc<digits>_ch<digits>`` names denote expression; a name such as
+``cyc001_ch002_note`` is metadata. Compensated intensities may be negative.
+Akoya CSV exports may qualify every header as ``short_name:long_label``; the
+short names identify fields and the expression long labels become markers.
+
+CSV values are decoded as text. Unknown annotations keep their exact text;
+expression, ``x``, ``y`` and ``region`` are converted to Arrow-backed int64,
+uint64 or float64 only when no value changes; cell IDs are converted exactly to
+one signed or unsigned 64-bit dtype. FCS parameters keep their native numeric
+widths. Processor output contract:
+https://help.codex.bio/codex/processor/technical-notes/expected-output
 """
 
 from __future__ import annotations
@@ -28,13 +43,18 @@ STRING_DTYPE = pd.ArrowDtype(pa.string())
 FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 INTEGER_DTYPES = {"i": pd.ArrowDtype(pa.int64()), "u": pd.ArrowDtype(pa.uint64())}
 REQUIRED_COLUMNS = frozenset({"cell_id", "region", "x", "y"})
+CELL_TABLE_CONTEXT = ReaderErrorContext("codex", "cell table")
 _CYCLE_COLUMN = re.compile(r"cyc\d+_ch\d+")
 _ZERO_PATTERN = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
+# The region names the shapes element. Other element names are fixed, and
+# SpatialData compares names case-insensitively across element types.
+_RESERVED_REGIONS = frozenset({"table", "images"})
+_REGION_EXPECTED = "a positive integer region or a valid element name (letters, digits, '_-.')"
 
 
 def schema_error(path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
-    """Describe a source-schema violation with its CODEX artifact identity."""
-    return ReaderFormatError(context=ReaderErrorContext("codex", path.name), path=path, found=found, expected=expected)
+    """Describe a cell-table schema violation."""
+    return ReaderFormatError(context=CELL_TABLE_CONTEXT, path=path, found=found, expected=expected)
 
 
 def cell_columns(columns: list[str], path: ArtifactFile) -> tuple[list[str], list[str]]:
@@ -132,19 +152,29 @@ def cell_ids(values: pd.Series, path: ArtifactFile) -> npt.NDArray[np.int64 | np
 
 
 def region_name(regions: pd.Series, path: ArtifactFile) -> str:
-    """Require one region and normalize positive integral values to string names."""
+    """Require one region and return it as the shapes element name.
+
+    Positive integral values become decimal strings; names must be valid
+    SpatialData element names that do not collide with ``table`` or ``images``.
+    """
     if regions.isna().any() or regions.ne(regions.iloc[0]).any():
         raise schema_error(path, found="missing or multiple regions", expected="one non-null region per cell table")
 
     region = regions.iloc[0]
     if isinstance(region, (int, float, np.integer, np.floating)):
         if isinstance(region, bool) or not np.isfinite(region) or region <= 0 or region != int(region):
-            raise schema_error(path, found=f"region {region!r}", expected="a positive integer region or nonempty name")
+            raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED)
         return str(int(region))
 
-    if isinstance(region, str) and region:
+    if (
+        isinstance(region, str)
+        and region not in {"", ".", ".."}
+        and not region.startswith("__")
+        and region.casefold() not in _RESERVED_REGIONS
+        and all(character.isalnum() or character in "_-." for character in region)
+    ):
         return region
-    raise schema_error(path, found=f"region {region!r}", expected="a positive integer region or nonempty name")
+    raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED)
 
 
 def validate_csv_fields(frame: pd.DataFrame, path: ArtifactFile) -> None:
@@ -178,8 +208,14 @@ def normalize_csv_numbers(frame: pd.DataFrame, columns: list[str], path: Artifac
 
         try:
             numeric = source.replace("", pd.NA).astype(FLOAT_DTYPE)
-        except (ValueError, pa.ArrowInvalid):
-            continue
+        except ValueError:
+            # pandas accepts whitespace around decimals, as around integers,
+            # but Arrow does not. Stripping costs a pass, so only on failure.
+            source = source.str.strip()
+            try:
+                numeric = source.replace("", pd.NA).astype(FLOAT_DTYPE)
+            except ValueError:
+                continue
 
         values = numeric.to_numpy(dtype=np.float64, na_value=np.nan)
         # Sparse signal blocks contain many literal zeros. Only a nonzero

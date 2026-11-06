@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import pytest
+from click.testing import CliRunner
 
 from spatialdata_io._cli import cli
 from spatialdata_io._cli.commands.generic import generic_command
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+
+if TYPE_CHECKING:
+    from pytest_mock import MockerFixture
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +51,15 @@ _READER_CASES = (
 # Readers without images or labels.
 _WITHOUT_RASTER_OPTIONS = frozenset({"curio"})
 _RASTER_DEFAULTS = {"scale_factors": DEFAULT_SCALE_FACTORS, "chunks": DEFAULT_CHUNKS}
+_COMMAND_DIRECTORY = Path(__file__).parents[3] / "src" / "spatialdata_io" / "_cli" / "commands"
+# Dataset command modules whose options end with ``--path-policy``; generic takes a single file.
+_COMMAND_MODULES = {
+    path.stem: path for path in _COMMAND_DIRECTORY.glob("*.py") if path.stem not in {"__init__", "generic", "curio"}
+}
+# Options that a command requires besides the dataset root and output store.
+_REQUIRED_ARGUMENTS = {
+    "iss": ("--raw-image-file", "raw.tif", "--labels-file", "labels.tif", "--table-file", "table.h5ad"),
+}
 
 
 def _reader_parameters(case: _ReaderCase) -> set[str]:
@@ -81,6 +96,64 @@ class TestCliAlignment:
         for name, default in _RASTER_DEFAULTS.items():
             assert parameters[name].default == default
             assert command[name].default == default
+
+
+class TestPathPolicyAlignment:
+    """Every dataset command exposes the reader's symlink policy with the same default."""
+
+    @pytest.mark.parametrize("case", _READER_CASES, ids=lambda case: case.reader)
+    def test_reader_and_command_default_to_strict(self, case: _ReaderCase) -> None:
+        reader = getattr(importlib.import_module(case.module), case.reader)
+        parameter = inspect.signature(reader).parameters["path_policy"]
+        option = {parameter.name: parameter for parameter in cli.commands[case.command].params}["path_policy"]
+
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default == "strict"
+        assert option.default == "strict"
+        assert isinstance(option.type, click.Choice)
+        assert list(option.type.choices) == ["strict", "relaxed"]
+
+    @pytest.mark.parametrize("case", _READER_CASES, ids=lambda case: case.reader)
+    def test_path_policy_is_the_last_reader_parameter_and_command_option(self, case: _ReaderCase) -> None:
+        reader = getattr(importlib.import_module(case.module), case.reader)
+        command = cli.commands[case.command]
+
+        assert list(inspect.signature(reader).parameters)[-1] == "path_policy"
+        assert command.params[-1].name == "path_policy"
+        assert [parameter.name for parameter in command.params[:2]] == ["input_path", "output_path"]
+
+    @pytest.mark.parametrize("command", sorted(_COMMAND_MODULES), ids=str)
+    def test_option_typed_dicts_keep_their_docstring_first_and_path_policy_last(self, command: str) -> None:
+        tree = ast.parse(_COMMAND_MODULES[command].read_text(encoding="utf-8"))
+        classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name.endswith("Options")]
+
+        assert len(classes) == 1
+        for node in classes:
+            # A docstring, when present, is the first statement; no string is stranded among the fields.
+            assert all(isinstance(statement, ast.AnnAssign) for statement in node.body[1:])
+            last = node.body[-1]
+            assert isinstance(last, ast.AnnAssign)
+            assert isinstance(last.target, ast.Name)
+            assert last.target.id == "path_policy"
+
+    @pytest.mark.parametrize("case", _READER_CASES, ids=lambda case: case.reader)
+    def test_relaxed_flag_reaches_the_reader(self, case: _ReaderCase, tmp_path: Path, mocker: MockerFixture) -> None:
+        reader = mocker.patch(f"{case.module}.{case.reader}")
+        arguments = [
+            "--input",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "output.zarr"),
+            "--path-policy",
+            "relaxed",
+            *_REQUIRED_ARGUMENTS.get(case.reader, ()),
+        ]
+
+        result = CliRunner().invoke(cli.commands[case.command], arguments)
+
+        assert result.exit_code == 0, result.output
+        reader.assert_called_once()
+        assert reader.call_args.kwargs["path_policy"] == "relaxed"
 
 
 @pytest.mark.dbit
@@ -257,5 +330,5 @@ class TestGenericCommandContract:
         assert options["chunks"].default == ()
         assert options["scale_factors"].multiple
         assert options["scale_factors"].default == ()
-        assert options["tiff_series"].default == 0
+        assert options["tiff_series"].default is None
         assert options["tiff_level"].default == 0

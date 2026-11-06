@@ -9,8 +9,9 @@ import pytest
 import tifffile
 from tifffile.zarr import ZarrTiffStore
 
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext
 from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from tests.integration.readers._utils.image.conftest import TiffOptions
 
 if TYPE_CHECKING:
@@ -20,6 +21,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
     from tests.integration.readers._utils.image.conftest import TiffFactory
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 class TestInspectTiff:
@@ -48,7 +52,7 @@ class TestInspectTiff:
         )
         segment_spy = mocker.spy(tifffile.FileHandle, "read_segments")
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
 
         level = metadata.series[0].levels[0]
         assert segment_spy.call_count == 0
@@ -82,7 +86,7 @@ class TestInspectTiff:
         mocker.patch.object(tifffile.FileHandle, "close", new=tracked_file_close)
         mocker.patch.object(ZarrTiffStore, "close", new=tracked_store_close)
 
-        inspect_tiff(path)
+        inspect_tiff(path, context=_RASTER_CONTEXT)
 
         assert len(closed_handles) == 1
         assert closed_handles[0].closed
@@ -99,7 +103,7 @@ class TestInspectTiff:
             ),
         )
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
 
         assert metadata.series[0].levels[0].shape == cyx_data.shape
 
@@ -108,7 +112,7 @@ class TestInspectTiff:
     ) -> None:
         path = write_tiff(cyx_data, TiffOptions(name="image.data"))
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
 
         assert metadata.series[0].levels[0].shape == cyx_data.shape
 
@@ -120,7 +124,7 @@ class TestInspectTiff:
             writer.write(first, photometric="minisblack", metadata={"axes": "YX"})
             writer.write(second, photometric="minisblack", metadata={"axes": "YX"})
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert tuple(series.levels[0].shape for series in metadata.series) == (
             first.shape,
@@ -141,7 +145,7 @@ class TestInspectTiff:
             )
             writer.write(reduced, tile=(16, 16), subfiletype=1, photometric="minisblack")
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert tuple(level.shape for level in metadata.series[0].levels) == (
             base.shape,
@@ -151,7 +155,7 @@ class TestInspectTiff:
     def test_discovers_linked_ome_paths(self, linked_ome_tiff: tuple[Path, NDArray[np.uint16]]) -> None:
         path, data = linked_ome_tiff
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert metadata.ome is not None
         assert metadata.series[0].levels[0].shape == data.shape
@@ -165,7 +169,21 @@ class TestInspectTiff:
         path.with_name("second.ome.tif").unlink()
 
         with pytest.raises(RasterFormatError, match="non-file TIFF source"):
-            inspect_tiff(path)
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+
+    def test_rejects_symlinked_source_without_linked_files_beside_its_target(
+        self,
+        linked_ome_tiff: tuple[Path, NDArray[np.uint16]],
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        # tifffile reads linked files beside the real path and would zero-fill missing ones.
+        path, _ = linked_ome_tiff
+        target = tmp_path_factory.mktemp("object-store") / "0123abcd"
+        path.replace(target)
+        path.symlink_to(target)
+
+        with pytest.raises(RasterFormatError, match="non-file TIFF source"):
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
     def test_resolves_renamed_single_file_ome_by_its_own_uuid(self, tmp_path: Path) -> None:
         # Public releases rename exported files; FileName keeps the export name.
@@ -182,10 +200,12 @@ class TestInspectTiff:
         path = tmp_path / "release-name.ome.tif"
         tifffile.imwrite(path, data, description=xml, metadata=None)
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert metadata.series[0].levels[0].shape == (4, 5)
-        np.testing.assert_array_equal(read_tiff(metadata, series=0, level=0).data.compute(), data)
+        np.testing.assert_array_equal(
+            read_tiff(metadata, series=0, level=0, context=_RASTER_CONTEXT).data.compute(), data
+        )
 
     def test_preserves_missing_duplicate_channels_and_anisotropic_units(
         self,
@@ -212,7 +232,7 @@ class TestInspectTiff:
         missing_name_xml = ome_xml.replace('Name="None"', " " * len('Name="None"'))
         tifffile.tiffcomment(path, missing_name_xml.encode())
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert metadata.ome is not None
         pixels = metadata.ome.images[0].pixels
@@ -245,7 +265,7 @@ class TestInspectTiff:
             },
         )
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert metadata.ome is not None
         pixels = metadata.ome.images[0].pixels
@@ -282,7 +302,7 @@ class TestInspectTiff:
         path.with_name("second.ome.tif").write_bytes(b"not a TIFF")
 
         with pytest.raises(RasterFormatError, match="signature"):
-            inspect_tiff(path)
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
     def test_rejects_linked_ome_path_outside_source_directory(
         self,
@@ -300,7 +320,7 @@ class TestInspectTiff:
         )
 
         with pytest.raises(RasterFormatError, match="escapes the TIFF source directory"):
-            inspect_tiff(path)
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
     def test_rejects_inconsistent_ome_image_mapping(self, tmp_path: Path) -> None:
         path = tmp_path / "inconsistent.ome.tif"
@@ -318,7 +338,7 @@ class TestInspectTiff:
         tifffile.imwrite(path, np.zeros((3, 4), dtype=np.uint8), description=xml, metadata=None)
 
         with pytest.raises(RasterFormatError, match="reuses TIFF IFD"):
-            inspect_tiff(path)
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
     def test_closes_tiff_after_malformed_ome_metadata(
         self,
@@ -335,5 +355,5 @@ class TestInspectTiff:
         close_spy = mocker.spy(tifffile.FileHandle, "close")
 
         with pytest.raises(RasterFormatError, match="Cannot parse OME metadata"):
-            inspect_tiff(path)
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
         assert close_spy.call_count >= 1

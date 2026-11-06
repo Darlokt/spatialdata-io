@@ -30,5 +30,5 @@ class TestCurioCommand:
         result = runner.invoke(curio_command, ["--input", str(tmp_path), "--output", str(output)])
 
         assert result.exit_code == 0, result.output
-        reader.assert_called_once_with(tmp_path)
+        reader.assert_called_once_with(tmp_path, path_policy="strict")
         reader_result.write.assert_called_once_with(output)

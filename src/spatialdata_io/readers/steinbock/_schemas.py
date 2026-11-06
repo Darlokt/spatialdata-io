@@ -19,11 +19,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.table import validate_compressed_sparse
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -86,16 +84,6 @@ def _validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
             found=f"occupied generated observation columns {occupied!r}",
             expected="unoccupied cell_id and region destinations",
         )
-
-    # Validate storage before numerical normalization; imported duplicate sums
-    # are promoted losslessly by the shared table boundary.
-    for slot, expression in (("X", table.X), ("counts", table.layers.get("counts"))):
-        if isinstance(expression, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
-            try:
-                validate_compressed_sparse(expression)
-            except (TypeError, ValueError) as error:
-                add_reader_context(error, context=ReaderErrorContext("steinbock", f"cell table {slot}"), path=path)
-                raise
 
 
 def _instance_identifiers(obs: pd.DataFrame, samples: Mapping[str, LabelGrid], path: ArtifactFile) -> list[int]:

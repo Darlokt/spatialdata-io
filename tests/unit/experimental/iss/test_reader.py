@@ -115,7 +115,8 @@ class TestIss:
                 instance_key="segmentation_id",
             )
         pixels.assert_not_called()
-        assert any("iss" in note and str(table_file) in note for note in caught.value.__notes__)
+        messages = (str(caught.value), *getattr(caught.value, "__notes__", ()))
+        assert any("iss" in message and str(table_file) in message for message in messages)
 
     def test_sparse_expression_is_never_densified(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_iss_dataset(tmp_path)

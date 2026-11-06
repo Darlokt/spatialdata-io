@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose, prod
+from math import isclose
 from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_pixel_sizes_um, read_tiff
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import (
+    inspect_tiff,
+    normalize_raster_axes,
+    ome_channel_names,
+    ome_pixel_sizes_um,
+    raster_channel_names,
+    read_tiff,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -24,7 +31,6 @@ if TYPE_CHECKING:
 
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
-_MAX_EXACT_LABEL_BYTES = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,18 +66,14 @@ def _read_raster(
 ) -> tuple[Array, TiffMetadata]:
     """Inspect one full-resolution series and normalize named axes lazily."""
     context = ReaderErrorContext("iss", name)
-    try:
-        metadata = inspect_tiff(path)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=context, path=path)
-        raise
+    metadata = inspect_tiff(path, context=context)
 
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=context, path=path, found=f"{len(metadata.series)} series", expected="exactly one TIFF series"
         )
 
-    raster = read_tiff(metadata, series=0, level=0)
+    raster = read_tiff(metadata, series=0, level=0, context=context)
     axes = tuple(axis.lower() for axis in (raster.axes if data_axes is None else data_axes))
 
     # C is scientific channels. S only loses its axis when it is singleton.
@@ -136,53 +138,21 @@ def _read_rasters(layout: _IssLayout, *, data_axes: str | None, raster: RasterOp
             found=f"dtype {labels.dtype}",
             expected="integer label pixels, with zero reserved for background",
         )
-    factors = raster.scale_factors
-    if factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
-        message = (
-            "Generated label pyramids require <=32-bit integer labels. The upstream model rounds 64-bit IDs. "
-            "Use scale_factors=() for exact 64-bit labels."
-        )
-        raise ValueError(message)
-    if factors and min(labels.shape) < prod(factors):
-        message = f"Requested scale factors {factors} exceed the spatial extent of ISS labels {layout.labels}."
-        raise ValueError(message)
+    raster.validate_label_pyramid(labels, element=f"ISS labels {layout.labels}")
 
-    # OME names describe scientific channels, regardless of a three/four-channel count.
-    channel_names = None
-    ome = metadata.ome
-    if ome is not None:
-        channels = ome.images[0].pixels.channels
-        source_axes = tuple(axis.lower() for axis in metadata.series[0].levels[0].axes)
-        samples_expanded = (
-            data_axes is not None
-            and "s" in source_axes
-            and data_axes[source_axes.index("s")] == "c"
-            and len(channels) == 1
-            and channels[0].samples_per_pixel == image.shape[0]
-        )
-        if samples_expanded:
-            channel_names = [f"{channels[0].id}:sample:{index}" for index in range(int(image.shape[0]))]
-        elif len(channels) != image.shape[0]:
-            raise ReaderFormatError(
-                context=ReaderErrorContext("iss", "raw image channels"),
-                path=layout.raw_image,
-                found=f"{len(channels)} OME channels and {image.shape[0]} raster channels",
-                expected="one OME channel record per output channel",
-            )
-        else:
-            names = [channel.name for channel in channels]
-            channel_names = (
-                [str(name) for name in names]
-                if all(names) and len(set(names)) == len(names)
-                else [channel.id for channel in channels]
-            )
-        if len(set(channel_names)) != len(channel_names):
-            raise ReaderFormatError(
-                context=ReaderErrorContext("iss", "raw image channels"),
-                path=layout.raw_image,
-                found=f"duplicate channel identifiers {channel_names!r}",
-                expected="unique channel names or OME IDs",
-            )
+    # A three/four-channel count never implies RGB. Declared RGB samples and OME
+    # sample records both apply only when data_axes mapped the samples axis to C.
+    level = metadata.series[0].levels[0]
+    source_axes = tuple(axis.lower() for axis in level.axes)
+    samples = data_axes is not None and "s" in source_axes and data_axes[source_axes.index("s")] == "c"
+    ome = ome_channel_names(
+        metadata,
+        series=0,
+        count=int(image.shape[0]),
+        samples=samples,
+        context=ReaderErrorContext("iss", "raw image channels"),
+    )
+    channel_names = raster_channel_names(level.color, samples=samples, ome=ome)
 
     transform = _physical_transform(metadata, label_metadata, data_axes)
     return _IssRasters(

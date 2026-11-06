@@ -10,9 +10,10 @@ import pandas as pd
 from spatialdata import SpatialData
 from xarray import DataArray, DataTree
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.xenium._aligned import read_aligned
 from spatialdata_io.readers.xenium._analysis import read_analysis
@@ -248,7 +249,7 @@ def _transcripts(layout: XeniumLayout, counts: Counts | None) -> dd.DataFrame:
 
 def _table(layout: XeniumLayout, counts: Counts, cells: Cells, store: CellStore | None) -> ad.AnnData:
     """Combine counts and annotations, then add the optional secondary analysis."""
-    table = build_table(cells, counts, store, path=layout.root)
+    table = build_table(cells, counts, store, path=layout.root.path)
     if layout.analysis is None:
         return table
     analysis = read_analysis(layout.analysis, table.obs_names)
@@ -256,7 +257,7 @@ def _table(layout: XeniumLayout, counts: Counts, cells: Cells, store: CellStore 
     if conflicts:
         raise ReaderFormatError(
             context=ReaderErrorContext("xenium", "analysis"),
-            path=layout.root,
+            path=layout.root.path,
             found=f"clusterings {conflicts!r} named like cell annotations",
             expected="distinct analysis and annotation names",
         )
@@ -316,6 +317,7 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     include_analysis: bool = False,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read a 10x Genomics Xenium output bundle.
 
@@ -384,6 +386,15 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         One positive size for every axis or three ``c, y, x`` sizes of the
         images; labels use the ``y`` and ``x`` sizes. By default one channel per
         chunk and square 1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -463,7 +474,7 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     policy = validate_invalid_geometry_policy(invalid_geometries)
     raster = make_raster_options(scale_factors, chunks)
 
-    layout = discover_layout(path, selection)
+    layout = discover_layout(path, selection, path_policy=path_policy)
     experiment = layout.experiment
     version = None if experiment.version is None else str(experiment.version)
 
@@ -486,7 +497,9 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     shapes = _shapes(layout, store, cells, circles=selection.cell_circles, policy=policy)
     labels = _labels(layout, store, selection, raster)
     images = _images(layout, raster)
-    _check_grid(labels | {name: image for name, image in images.items() if name.startswith("morphology")}, layout.root)
+    _check_grid(
+        labels | {name: image for name, image in images.items() if name.startswith("morphology")}, layout.root.path
+    )
     points = {} if layout.transcripts is None else {"transcripts": _transcripts(layout, counts)}
     tables = {}
     if counts is not None and cells is not None:

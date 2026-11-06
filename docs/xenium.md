@@ -164,6 +164,8 @@ The alignment matrix `M` maps image pixels to morphology pixels; without it the 
 
 `scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks; `xenium_aligned_image` takes the same options. Each label task opens the zip store, reads its chunk and closes it, so graphs hold paths, not open files. Constructing the result executes no pixel or transcript tasks; the table and shapes are eager.
 
+`path_policy="relaxed"` reads git-annex and DVC bundles whose files are symlinks to targets elsewhere. A multi-file `morphology_focus/` set whose members link to separate targets is the exception: tifffile looks for the other channel files beside the real location of the opened file, so the read fails with `RasterFormatError` instead of returning zero-filled channels. See [Dataset paths and symlinks](dataset_paths.md#known-limitation-multi-file-ome-tiff-sets).
+
 ## Python and command line
 
 ```python
@@ -192,3 +194,4 @@ python -m spatialdata_io xenium --input outs --output outs.zarr --feature-types 
 | `cell_id_str_from_prefix_suffix_uint32`, `prefix_suffix_uint32_from_cell_id_str` | removed; the string `cell_id` is in every table |
 | `xenium_aligned_image(image_path, alignment_file, imread_kwargs, image_models_kwargs, dims, rgba, c_coords)` | `xenium_aligned_image(image_file, alignment_file=None, *, pixel_size, data_axes=None, scale_factors=(), chunks=(1, 1024, 1024))` |
 | `xenium_explorer_selection(path, pixel_size, return_list)` | `xenium_explorer_selection(path, *, invalid_geometries="keep")` returning shapes in µm |
+| out-of-root symlinked artifacts accepted | rejected by default; `path_policy="relaxed"` accepts them, except a multi-file `morphology_focus/` set whose members link to separate targets ([Dataset paths and symlinks](dataset_paths.md#known-limitation-multi-file-ome-tiff-sets)) |

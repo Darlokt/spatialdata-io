@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -14,6 +13,7 @@ import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
+from spatialdata_io.readers._utils.csv import read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -55,16 +55,6 @@ class _Measurements:
     blocks: list[sparse.csr_array]
     cell_ids: pd.Series
     annotations: pa.Table
-
-
-def _read_header(path: ArtifactFile) -> list[str]:
-    """Read the first physical UTF-8 CSV record before interpreting names."""
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        header = handle.readline()
-    try:
-        return next(csv.reader([header], strict=True), [])
-    except csv.Error as error:
-        raise schema_error(path, found="malformed CSV header", expected="one consistently quoted header") from error
 
 
 def _read_measurements(
@@ -165,7 +155,9 @@ def read_table(
     source_grids: list[ImageGrid] = []
     for quantification in quantifications:
         path = quantification.path
-        current = quantification_columns(_read_header(path), panel.features, path)
+        current = quantification_columns(
+            read_csv_header(path, context=ReaderErrorContext("mcmicro", path.name)), panel.features, path
+        )
         if columns is None:
             columns = current
         elif set(current.names) != set(columns.names):

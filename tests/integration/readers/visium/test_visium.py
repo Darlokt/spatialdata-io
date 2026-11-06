@@ -21,6 +21,7 @@ from scipy import sparse
 from scipy.io import mmwrite
 from spatialdata import SpatialData
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import BaseTransformation, get_transformation
 from xarray import DataArray, DataTree
 
@@ -499,3 +500,68 @@ class TestVisiumDownloadedWorkflow:
         assert isinstance(result.tables["table"].X, sparse.sparray)
         assert result.tables["table"].var_names.is_unique
         assert result.attrs["spatialdata_io_format_version"] == software_version
+
+
+class TestVisiumPathPolicy:
+    """Every discovered artifact follows the dataset root's symlink policy.
+
+    Earlier releases accepted these out-of-root symlinks without a policy.
+    """
+
+    @pytest.mark.parametrize("counts", ["h5", "mex"])
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path], counts: Literal["h5", "mex"]
+    ) -> None:
+        if counts == "h5":
+            _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+            linked = [tmp_path / "filtered_feature_bc_matrix.h5"]
+        else:
+            _write_mex(tmp_path / "filtered_feature_bc_matrix", compressed=True)
+            # The MEX reader opens these three files below the discovered directory.
+            linked = [tmp_path / "filtered_feature_bc_matrix" / "matrix.mtx.gz"]
+        _write_spatial(tmp_path, version="v2")
+        linked += [tmp_path / "spatial" / "tissue_positions.csv", tmp_path / "spatial" / "tissue_hires_image.png"]
+        expected = visium(tmp_path, dataset_id="sample")
+        for artifact in linked:
+            link_outside_root(artifact)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            visium(tmp_path, dataset_id="sample")
+
+        relaxed = visium(tmp_path, dataset_id="sample", path_policy="relaxed")
+        assert_spatial_data_objects_are_identical(relaxed, expected)
+
+    def test_relative_overrides_follow_the_path_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        _write_h5(tmp_path / "selected.h5")
+        _write_spatial(tmp_path, version="v2")
+        (tmp_path / "spatial" / "tissue_positions.csv").rename(tmp_path / "positions.csv")
+        options = {"counts_source": "selected.h5", "positions_file": "positions.csv"}
+        expected = visium(tmp_path, dataset_id="sample", **options)
+        link_outside_root(tmp_path / "selected.h5")
+        link_outside_root(tmp_path / "positions.csv")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            visium(tmp_path, dataset_id="sample", **options)
+
+        relaxed = visium(tmp_path, dataset_id="sample", path_policy="relaxed", **options)
+        assert_spatial_data_objects_are_identical(relaxed, expected)
+
+    def test_strict_rejects_each_discovered_artifact(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        _write_mex(tmp_path / "filtered_feature_bc_matrix", compressed=False)
+        _write_spatial(tmp_path, version="v2")
+        artifacts = [
+            "filtered_feature_bc_matrix/barcodes.tsv",
+            "filtered_feature_bc_matrix/features.tsv",
+            "spatial/scalefactors_json.json",
+            "spatial/tissue_lowres_image.png",
+        ]
+        for artifact in artifacts:
+            target = link_outside_root(tmp_path / artifact)
+            with pytest.raises(ReaderFormatError, match="resolving outside the dataset root"):
+                visium(tmp_path, dataset_id="sample")
+            (tmp_path / artifact).unlink()
+            target.rename(tmp_path / artifact)

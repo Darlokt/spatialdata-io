@@ -130,7 +130,7 @@ sdata = stereoseq(
 )
 ```
 
-`adjusted_cell_counts_file` selects the source for adjusted cells. Overrides are also available in structured layouts. They resolve relative to the supplied dataset root; absolute caller paths are permitted. An override does not select a product by itself. Paths discovered from a dataset must remain inside that dataset root.
+`adjusted_cell_counts_file` selects the source for adjusted cells. Overrides are also available in structured layouts. They resolve relative to the supplied dataset root; absolute caller paths are permitted. An override does not select a product by itself. Paths discovered from a dataset must remain inside that dataset root unless `path_policy="relaxed"` ([Dataset paths and symlinks](dataset_paths.md)).
 
 For qualified square exports such as `sample.HE.gef` or `sample.region.label.gef`, supply both `sample_id="sample"` and the explicit `square_counts_file`. This identifies the sample without truncating sample IDs that contain dots; conflicting GEF sample metadata still fails.
 

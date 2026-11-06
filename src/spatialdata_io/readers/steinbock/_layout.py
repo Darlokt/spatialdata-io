@@ -9,7 +9,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     normalize_dataset_root,
-    optional_file,
+    optional_metadata_file,
     require_metadata_directory,
     require_metadata_file,
     sorted_paths,
@@ -17,6 +17,8 @@ from spatialdata_io.readers._utils.paths import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.paths import PathPolicy
 
 _IMAGE_SUFFIX = ".ome.tiff"
 _LABEL_SUFFIX = ".tiff"
@@ -40,14 +42,16 @@ class _SteinbockLayout:
     image_metadata: ArtifactFile | None
 
 
-def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilastik"]) -> _SteinbockLayout:
+def _discover_layout(
+    path: str | Path, *, labels_kind: Literal["deepcell", "ilastik"], path_policy: PathPolicy = "strict"
+) -> _SteinbockLayout:
     """Resolve a nonempty exact image/mask pairing without omitting unmatched samples."""
     if labels_kind not in {"deepcell", "ilastik"}:
         message = "labels_kind must be 'deepcell' or 'ilastik'."
         raise ValueError(message)
 
     context = ReaderErrorContext("steinbock", "dataset layout")
-    root = normalize_dataset_root(path, context=context)
+    root = normalize_dataset_root(path, context=context, path_policy=path_policy)
     table = require_metadata_file(root, "cells.h5ad", context=ReaderErrorContext("steinbock", "counts"))
     images_context = ReaderErrorContext("steinbock", "OME images")
     masks_context = ReaderErrorContext("steinbock", f"{labels_kind} masks")
@@ -68,7 +72,7 @@ def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilas
     if not images or "" in images or "" in masks or images.keys() != masks.keys():
         raise ReaderFormatError(
             context=context,
-            path=root,
+            path=root.path,
             found=(
                 f"{len(images)} images and {len(masks)} masks. "
                 f"Unmasked images {sorted(images.keys() - masks.keys())!r}, "
@@ -88,7 +92,7 @@ def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilas
     if invalid_names or len({name.lower() for name in images}) != len(images):
         raise ReaderFormatError(
             context=context,
-            path=root,
+            path=root.path,
             found=f"invalid or case-insensitively conflicting sample names {list(images)!r}",
             expected=(
                 "case-insensitively distinct sample names containing only alphanumeric characters, '_', '-', or '.', "
@@ -97,9 +101,8 @@ def _discover_layout(path: str | Path, *, labels_kind: Literal["deepcell", "ilas
         )
 
     context = ReaderErrorContext("steinbock", "IMC images.csv")
-    image_metadata = optional_file(root / "images.csv", context=context)
     return _SteinbockLayout(
         table,
         tuple(_SampleLayout(name, image, masks[name]) for name, image in images.items()),
-        require_metadata_file(root, image_metadata, context=context) if image_metadata is not None else None,
+        optional_metadata_file(root, "images.csv", context=context),
     )

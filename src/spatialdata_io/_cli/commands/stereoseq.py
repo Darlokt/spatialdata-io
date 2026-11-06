@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         image_roles: tuple[Literal["registered", "mask", "tissue_cut", "distance_mask", "expression"], ...]
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        path_policy: Literal["strict", "relaxed"]
 
 
 def _bin_sizes(
@@ -112,6 +113,7 @@ def _bin_sizes(
     show_default=True,
     help="Keep invalid contours, drop affected raw cells, or fail.",
 )
+@path_policy_option
 def stereoseq_command(input_path: Path, output_path: Path, **options: Unpack[_StereoseqOptions]) -> None:
     """Select products explicitly, read them, and write the resulting SpatialData."""
     from spatialdata_io.readers.stereoseq import stereoseq  # noqa: PLC0415, RUF100 - Keep command help lightweight.
@@ -130,5 +132,6 @@ def stereoseq_command(input_path: Path, output_path: Path, **options: Unpack[_St
         image_roles=options["image_roles"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
+        path_policy=options["path_policy"],
     )
     result.write(output_path)

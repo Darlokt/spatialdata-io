@@ -15,7 +15,7 @@ dataset/
 
 `table_file`, `barcode_positions_file`, and `image_file` override discovery. Relative overrides resolve against `path`; absolute overrides may point outside that directory. Missing or ambiguous required artifacts fail. An explicitly requested image must exist; when the default image is absent, the reader returns the table and shapes without an image. Image overrides support TIFF, OME-TIFF, BigTIFF/BTF, PNG, and JPEG.
 
-Discovered artifacts, including symlink targets, must remain inside the dataset root. The barcode map is a headerless, tab-separated file with exactly two columns and at most fifty A and fifty B positions:
+Discovered artifacts, including symlink targets, must remain inside the dataset root unless `path_policy="relaxed"` ([Dataset paths and symlinks](dataset_paths.md)). The barcode map is a headerless, tab-separated file with exactly two columns and at most fifty A and fifty B positions:
 
 ```text
 A1	AACCGGTT
@@ -56,7 +56,7 @@ Without an image these are barcode-grid units; with an image they use the docume
 
 TIFF metadata supplies source axes when they are unambiguous. Use `data_axes`, such as `"CYX"` or `"YXC"`, when an explicit interpretation is required. `tiff_series=0` and `tiff_level=0` select the first TIFF series and its first resolution level; other nonnegative indices select an existing series or pyramid level. PNG and JPEG use their encoded image layout and do not accept TIFF-specific selection or axis overrides.
 
-Images preserve numeric channel coordinates for ordinary RGB input. Reliable scientific channel names from OME metadata are retained in source order.
+Image channels are named `r, g, b`, or `r, g, b, a` with a declared alpha sample, when the image's samples become its channels and the file itself declares them RGB: TIFF `PhotometricInterpretation` RGB (alpha through `ExtraSamples`) or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6 (alpha through colour type 6 or `tRNS`), and three-component JPEG. Viewers composite such images as colour. Otherwise reliable scientific channel names from OME metadata are retained in source order; OME declares an interleaved image as one channel with several samples per pixel, so its samples are named `<name or ID>:sample:0`, `:sample:1`, … (for example `Channel:0:0:sample:0`). Images without either declaration, such as grayscale PNG or non-OME `MinIsBlack` TIFF samples, keep positional channel coordinates. The channel count or dtype never makes an image RGB.
 
 `scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A pyramid is generated only when `scale_factors` requests one; the grid scale always uses the full-resolution extent of the selected TIFF level. Image options other than their defaults require an image. Metadata inspection is eager, while pixel decoding stays lazy until the returned image is computed or written. TIFF tasks decode the tiles or strips that overlap the computed chunks. PNG and JPEG can require decoding the entire encoded frame even for a small selection; rechunking does not change that codec limitation.
 
@@ -94,6 +94,8 @@ python -m spatialdata_io dbit --input dataset --output sample.zarr \
 `--include-border/--no-include-border` is a boolean flag pair. The previous `anndata_path`, `barcode_position`, `image_path`, and `border` arguments and their CLI options have been removed.
 
 Images are now chunked `(1, 1024, 1024)` by default instead of keeping the storage-aligned chunks of the source, and `chunks=None` is no longer accepted. Pass `chunks` explicitly to choose another layout. The new `scale_factors` option builds pyramid levels.
+
+Images whose file declares RGB samples (RGB TIFF and OME-TIFF, RGB, RGBA and palette PNG, three-component JPEG) now have channel coordinates `r, g, b` or `r, g, b, a` instead of positional indexes or `<name or ID>:sample:<k>`.
 
 ## Complete synthetic example
 
@@ -135,6 +137,7 @@ with TemporaryDirectory() as directory:
     np.testing.assert_allclose(sdata.shapes["sample"].total_bounds, [0.625, 0.625, 9.375, 9.375])
     image = sdata.images["sample_image"]
     assert image.dims == ("c", "y", "x")
+    assert image.coords["c"].values.tolist() == ["r", "g", "b"]
     np.testing.assert_array_equal(image.data.compute(), pixels.transpose(2, 0, 1))
 ```
 

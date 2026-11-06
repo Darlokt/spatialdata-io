@@ -76,6 +76,7 @@ class TestVisiumCommand:
             tiff_series=2,
             scale_factors=(2,),
             chunks=(1, 256, 256),
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -95,6 +96,7 @@ class TestVisiumCommand:
             "tiff_series",
             "scale_factors",
             "chunks",
+            "path_policy",
         ]
 
         for name in ("counts_source", "fullres_image_file", "positions_file", "scale_factors_file"):

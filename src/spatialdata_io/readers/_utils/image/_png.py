@@ -1,3 +1,29 @@
+"""Inspect PNG headers and read PNG pixels as one delayed whole-frame task.
+
+A PNG starts with an 8-byte signature and an ``IHDR`` chunk (width, height, bit
+depth, color type, interlace), followed by chunks up to the first ``IDAT``::
+
+    signature | IHDR | [PLTE] [tRNS] [ancillary ...] | IDAT ... | IEND
+
+Inspection reads only those headers, skipping ancillary payloads, and derives
+the decoded shape, dtype and declared sample colours. One sample per pixel
+decodes to ``(y, x)``, several to ``(y, x, s)`` with an interleaved samples axis
+``s``. 16-bit images decode to uint16, all others to uint8. Unknown critical
+chunks are rejected.
+
+The colour type declares the samples; palette entries are RGB triples, and a
+``tRNS`` chunk adds an alpha sample::
+
+    colour type          samples (without / with tRNS)    color
+    0 grayscale          gray / gray, alpha               None
+    2 RGB                R, G, B / R, G, B, A             "rgb" / "rgba"
+    3 palette            R, G, B / R, G, B, A             "rgb" / "rgba"
+    4 grayscale + alpha  gray, alpha                      None
+    6 RGB + alpha        R, G, B, A                       "rgba"
+
+See the PNG specification: https://www.w3.org/TR/png/
+"""
+
 from __future__ import annotations
 
 import struct
@@ -5,14 +31,17 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, add_reader_context
 from spatialdata_io.readers._utils.image._encoded import encoded_result, validate_decoded_size
-from spatialdata_io.readers._utils.image._path import normalize_file_path
 from spatialdata_io.readers._utils.image._types import LazyRaster, _EncodedHeader
 
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import BinaryIO
+
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
+    from spatialdata_io.readers._utils.image._types import SampleColor
+    from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _IHDR_SIZE = 13
@@ -35,6 +64,7 @@ _BASE_CHANNELS = {_GRAYSCALE: 1, _RGB: 3, _INDEXED: 3, _GRAYSCALE_ALPHA: 2, _RGB
 
 
 def _read_exact(stream: BinaryIO, size: int, *, context: str) -> bytes:
+    """Read exactly ``size`` bytes, raising ``RasterFormatError`` on truncation."""
     data = stream.read(size)
     if len(data) != size:
         message = f"Truncated PNG while reading {context}."
@@ -43,6 +73,7 @@ def _read_exact(stream: BinaryIO, size: int, *, context: str) -> bytes:
 
 
 def _validate_transparency(color_type: int, payload_size: int, palette_entries: int) -> None:
+    """Require the ``tRNS`` payload size to match the color type and palette length."""
     expected = {0: 2, 2: 6}.get(color_type)
     valid = (
         payload_size == expected
@@ -56,14 +87,16 @@ def _validate_transparency(color_type: int, payload_size: int, palette_entries: 
 
 def _png_output_metadata(
     path: Path,
-    ihdr: tuple[int, int, int, int] | None,
+    ihdr: tuple[int, int, int, int],
     *,
     has_palette: bool,
     has_transparency: bool,
 ) -> _EncodedHeader:
-    if ihdr is None:
-        message = f"PNG {path} has no IHDR chunk before image data."
-        raise RasterFormatError(message)
+    """Derive the decoded shape, dtype, axes and sample colours from validated ``IHDR`` fields.
+
+    ``ihdr`` holds width, height, bit depth and color type. A ``tRNS`` chunk adds an
+    alpha sample to grayscale, RGB and palette images.
+    """
     width, height, bit_depth, color_type = ihdr
     valid_depths = _VALID_DEPTHS.get(color_type)
     if valid_depths is None or bit_depth not in valid_depths:
@@ -77,17 +110,25 @@ def _png_output_metadata(
     if has_transparency and color_type in {_GRAYSCALE, _RGB, _INDEXED}:
         channels += 1
     shape = (height, width) if channels == 1 else (height, width, channels)
-    axes = ("y", "x") if channels == 1 else ("y", "x", "c")
+    axes = ("y", "x") if channels == 1 else ("y", "x", "s")
+    color: SampleColor | None = None
+    if color_type in {_RGB, _INDEXED, _RGBA}:
+        color = "rgba" if color_type == _RGBA or has_transparency else "rgb"
     metadata = _EncodedHeader(
         shape=shape,
         dtype=np.dtype(np.uint16 if bit_depth == _UINT16_DEPTH else np.uint8),
         axes=axes,
+        color=color,
     )
     validate_decoded_size(metadata)
     return metadata
 
 
 def _parse_ihdr(path: Path, payload: bytes) -> tuple[int, int, int, int]:
+    """Unpack the ``IHDR`` payload into width, height, bit depth and color type.
+
+    The compression and filter methods must be 0 and the interlace method 0 or 1.
+    """
     width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
     if compression != 0 or filtering != 0 or interlace not in {0, 1}:
         message = f"PNG {path} uses unsupported IHDR methods."
@@ -102,6 +143,12 @@ def _parse_optional_chunk(
     ihdr: tuple[int, int, int, int],
     state: tuple[int, bool],
 ) -> tuple[int, bool]:
+    """Validate one chunk preceding the first ``IDAT``.
+
+    ``state`` and the return value are the palette entry count and whether ``tRNS`` was
+    seen. Unknown critical chunks and repeated ``IHDR``, ``PLTE`` or ``tRNS`` chunks are
+    rejected.
+    """
     palette_entries, has_transparency = state
     if any(byte not in _ASCII_LETTERS for byte in chunk_type):
         message = f"PNG {path} contains an invalid chunk type {chunk_type!r}."
@@ -181,7 +228,7 @@ def inspect_png_header(path: Path) -> _EncodedHeader:
     )
 
 
-def read_png(path: str | Path) -> LazyRaster:
+def read_png(path: ArtifactFile, /, *, context: ReaderErrorContext) -> LazyRaster:
     """Read PNG pixels as one delayed whole-frame task.
 
     Metadata inspection is eager and skips ancillary payloads; pixel decoding is lazy. Computing
@@ -191,18 +238,32 @@ def read_png(path: str | Path) -> LazyRaster:
     Parameters
     ----------
     path
-        PNG source. Its byte signature and header are validated; file
-        names and extensions remain layout-reader concerns.
+        Validated regular PNG file. Its byte signature and header are
+        validated here; file names and extensions remain reader concerns.
+    context
+        Reader and artifact identity added to inspection failures.
 
     Returns
     -------
     LazyRaster
-        One whole-frame Dask source chunk in exact decoder axis order.
+        One whole-frame Dask source chunk in exact decoder axis order, with
+        the sample colours its colour type declares.
 
     Raises
     ------
     RasterFormatError
         If the header is malformed or describes an unsupported PNG.
+    OSError
+        If the file cannot be read.
+
+    Notes
+    -----
+    Inspection failures keep their type and gain a note naming ``context``
+    and ``path``.
     """
-    normalized = normalize_file_path(path)
-    return encoded_result(normalized, "png", inspect_png_header(normalized))
+    try:
+        header = inspect_png_header(path)
+    except (OSError, ValueError) as error:
+        add_reader_context(error, context=context, path=path)
+        raise
+    return encoded_result(path, "png", header)

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose, prod
+from math import isclose
 from typing import TYPE_CHECKING, cast
 
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_pixel_sizes_um, read_tiff
 
 if TYPE_CHECKING:
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
-_MAX_EXACT_LABEL_BYTES = 4
 _CALIBRATION = ReaderErrorContext("mcmicro", "OME calibration")
 
 
@@ -45,11 +44,7 @@ class ImageGrid:
 def _read(path: ArtifactFile, artifact: str, target_axes: tuple[str, ...]) -> tuple[Array, TiffMetadata]:
     """Inspect once and normalize the full-resolution series to named 2D axes."""
     context = ReaderErrorContext("mcmicro", artifact)
-    try:
-        metadata = inspect_tiff(path)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=context, path=path)
-        raise
+    metadata = inspect_tiff(path, context=context)
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=context,
@@ -58,7 +53,7 @@ def _read(path: ArtifactFile, artifact: str, target_axes: tuple[str, ...]) -> tu
             expected="one full-resolution series",
         )
 
-    raster = read_tiff(metadata, series=0, level=0)
+    raster = read_tiff(metadata, series=0, level=0, context=context)
     try:
         array = normalize_raster_axes(
             raster.data,
@@ -75,13 +70,6 @@ def _read(path: ArtifactFile, artifact: str, target_axes: tuple[str, ...]) -> tu
         ) from error
 
     return array, metadata
-
-
-def _check_pyramid(array: Array, options: RasterOptions) -> None:
-    """Reject pyramid factors that would eliminate a spatial dimension."""
-    if options.scale_factors and min(array.shape[-2:]) < prod(options.scale_factors):
-        message = f"Requested scale factors {options.scale_factors} exceed the spatial extent of an MCMICRO raster."
-        raise ValueError(message)
 
 
 def _declared_sizes(metadata: TiffMetadata) -> tuple[float | None, float | None]:
@@ -101,7 +89,7 @@ def read_image(
             found=f"{image.shape[0]} channels for {len(channels)} markers",
             expected="one registered channel per markers.csv row",
         )
-    _check_pyramid(image, options)
+    options.validate_image_pyramid(image, element="an MCMICRO raster")
 
     # TIFF inspection provides finite integer dimensions; Dask's general Array
     # annotation also permits unknown NaN dimensions.
@@ -141,10 +129,7 @@ def read_labels(
         raise ReaderFormatError(
             context=context, path=path, found=str(labels.dtype), expected="integer labels with background zero"
         )
-    if options.scale_factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
-        message = "Generated label pyramids require <=32-bit labels; use scale_factors=() for exact 64-bit IDs."
-        raise ValueError(message)
-    _check_pyramid(labels, options)
+    options.validate_label_pyramid(labels, element="an MCMICRO mask")
 
     declared = _declared_sizes(metadata)
     if grid is None:

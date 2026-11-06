@@ -12,7 +12,9 @@ from spatialdata_io.readers._utils.image.tiff._types import TiffLevelMetadata
 def _level(
     shape: tuple[int, ...], native_chunks: tuple[int, ...], axes: str, dtype: str = "uint16"
 ) -> TiffLevelMetadata:
-    return TiffLevelMetadata(shape=shape, dtype=np.dtype(dtype), axes=tuple(axes), native_chunks=native_chunks)
+    return TiffLevelMetadata(
+        shape=shape, dtype=np.dtype(dtype), axes=tuple(axes), native_chunks=native_chunks, color=None
+    )
 
 
 class TestTaskChunks:

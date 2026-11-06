@@ -9,13 +9,13 @@ import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import (
     invalid_geometry_mask,
     raise_invalid_geometries,
     validate_invalid_geometry_policy,
 )
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.visium_hd._cells import read_cell_table, read_nucleus_table
 from spatialdata_io.readers.visium_hd._geometry import bin_squares, read_boundaries
@@ -246,6 +246,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
     make_var_names_unique: bool = True,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read Space Ranger 3.0-4.1 Visium HD output in physical slide micrometres.
 
@@ -295,6 +296,15 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         returns one scale. Every factor must be at least two.
     chunks
         Image chunk size or (c, y, x) sizes; labels use y and x sizes.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -361,6 +371,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         include_images=include_images,
         include_cytassist_image=include_cytassist_image,
         fullres_image_file=fullres_image_file,
+        path_policy=path_policy,
     )
 
     identity_sources = [source.counts for source in layout.bins]

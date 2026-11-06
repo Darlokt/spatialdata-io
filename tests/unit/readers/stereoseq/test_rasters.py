@@ -215,3 +215,10 @@ class TestReadMask:
         labels = read_mask(source, raster=DEFAULT_OPTIONS)
         assert isinstance(labels, DataArray)
         assert_array_equal(labels.data.compute(), pixels)
+
+    def test_rejects_scale_factors_beyond_the_mask_extent(self, tmp_path: Path) -> None:
+        path = tmp_path / "sample_mask.tif"
+        tifffile.imwrite(path, np.zeros((16, 24), dtype=np.uint32), metadata={"axes": "YX"})
+
+        with pytest.raises(ValueError, match=r"exceed the spatial extent of Stereo-seq mask 'mask' \(16 x 24 pixels\)"):
+            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=make_raster_options((4, 8), 8))

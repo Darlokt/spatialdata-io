@@ -29,6 +29,7 @@ import pyarrow.parquet as pq
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
+from spatialdata_io.readers._utils.csv import parse_csv_header, read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory
 from spatialdata_io.readers._utils.table import (
@@ -141,17 +142,13 @@ def _extract_archive(file: ArtifactFile, destination: Path, *, metadata_only: bo
 def _read_matrix(source: CountSource) -> ad.AnnData:
     """Read every feature of a count source into an owned canonical CSR table."""
     if isinstance(source, H5Counts):
-        return read_10x_h5(source.file, context=_context("cell_feature_matrix.h5"), gex_only=False)
+        return read_10x_h5(source.file, context=_context("cell_feature_matrix.h5"))
     if isinstance(source, MtxDirectory):
-        return read_10x_mtx(
-            source.directory, context=_context("cell_feature_matrix"), make_unique=False, gex_only=False
-        )
+        return read_10x_mtx(source.directory, context=_context("cell_feature_matrix"), make_unique=False)
     # The returned table holds only in-memory copies; the directory is removed.
     with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
         directory = _extract_archive(source.file, Path(temporary))
-        return read_10x_mtx(
-            directory, context=_context("cell_feature_matrix.tar.gz"), make_unique=False, gex_only=False
-        )
+        return read_10x_mtx(directory, context=_context("cell_feature_matrix.tar.gz"), make_unique=False)
 
 
 def _protein_scaling(source: CountSource) -> int:
@@ -289,18 +286,11 @@ def read_feature_index(source: CountSource) -> FeatureIndex:
 
 def read_header(source: TabularSource) -> list[str]:
     """Read only the first record of a CSV twin."""
-    if source.kind == "csv_gz":
-        with gzip.open(source.file, "rt", encoding="utf-8-sig", newline="") as handle:
-            line = handle.readline()
-    else:
-        with source.file.open(encoding="utf-8-sig", newline="") as handle:
-            line = handle.readline()
-    try:
-        return next(csv.reader([line], strict=True), [])
-    except csv.Error as error:
-        raise schema_error(
-            source.file, source.file.name, found="a malformed CSV header", expected="one CSV header record"
-        ) from error
+    context = ReaderErrorContext("xenium", source.file.name)
+    if source.kind == "csv":
+        return read_csv_header(source.file, context=context)
+    with gzip.open(source.file, "rb") as handle:
+        return parse_csv_header(handle.readline(), context=context, path=source.file)
 
 
 def read_csv_table(

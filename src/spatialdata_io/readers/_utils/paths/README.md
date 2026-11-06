@@ -13,9 +13,9 @@ another.
 
 The package owns:
 
-- canonical existing dataset roots;
+- canonical existing dataset roots and their path policy;
 - required and optional regular-file and directory validation;
-- distinct caller and metadata path-origin policies;
+- distinct caller and dataset (metadata) path-origin rules;
 - deterministic one-pass candidate materialization and unique selection;
 - precise standard path exceptions and contextual format failures; and
 - metadata-only filesystem work with no content loading.
@@ -41,23 +41,33 @@ canonical absolute `Path` objects:
 ```python
 ArtifactFile = NewType("ArtifactFile", Path)
 ArtifactDirectory = NewType("ArtifactDirectory", Path)
-DatasetRoot = NewType("DatasetRoot", ArtifactDirectory)
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetRoot:
+    path: ArtifactDirectory
+    path_policy: PathPolicy  # Literal["strict", "relaxed"]
 ```
 
-`ArtifactFile` records successful regular-file validation,
-`ArtifactDirectory` records successful directory validation, and `DatasetRoot`
-additionally records that caller root normalization was applied. A dataset root
-is therefore accepted wherever an `ArtifactDirectory` is required. All three
-remain `Path` subtypes to static type checkers and are the identical `Path`
-objects at runtime: no wrapper object, copying, or conversion is introduced.
+`ArtifactFile` records successful regular-file validation and
+`ArtifactDirectory` records successful directory validation. Both remain `Path`
+subtypes to static type checkers and are the identical `Path` objects at
+runtime: no wrapper object, copying, or conversion is introduced.
+`DatasetRoot` pairs the canonical root directory with the path policy chosen
+for one reader call. It is the single representation of that policy: every
+root-relative validator reads it from the root, so readers never pass the
+policy to helpers. Use `root.path` wherever a directory path is needed.
 
-Only this package's validation functions construct these markers. Reader code
+Only this package's validation functions construct these values. Reader code
 imports them for annotations and stores returned values; it must not call the
 `NewType` constructors to relabel an unvalidated `Path`.
 
-Every successful validator returns the canonical resolved target. This gives
-path-backed delayed tasks one stable source spelling and prevents a validated
-symlink alias from later being redirected elsewhere. Readers that derive
+Dataset validators of a strict root and the root-free validators return the
+canonical resolved target. This gives path-backed delayed tasks one stable
+source spelling and prevents a validated symlink alias from later being
+redirected elsewhere. Caller validators, and every validator of a relaxed root,
+return the resolved parent directory joined with the given final name instead;
+see the origin rules below. Readers that derive
 scientific identifiers from a candidate's lexical filename must record that
 identifier before validation or store it separately from the canonical I/O
 path.
@@ -71,10 +81,35 @@ Aliases remain distinct during candidate discovery. Two names pointing at one
 target can still make a vendor layout ambiguous; canonicalization happens only
 after the reader selects and validates one candidate.
 
-## Reader-owned, caller, and metadata paths
+## Path policy
 
-Reader-owned exact paths use `require_file()`, `require_directory()`,
-`optional_file()`, and `optional_directory()`:
+A public reader exposes `path_policy: Literal["strict", "relaxed"] = "strict"`
+and passes it once to `normalize_dataset_root()`, which validates it before any
+filesystem access (`TypeError` for a non-string, `ValueError` for another
+value) and stores it in the returned `DatasetRoot`. Every artifact that a reader
+resolves from, or discovers under, that root obeys it:
+
+- `"strict"`: the artifact must resolve, symlinks followed, to a target inside
+  the dataset root; otherwise `ReaderFormatError` is raised and its message
+  names the relaxed policy.
+- `"relaxed"`: the artifact may be a symlink whose target lies anywhere, as in
+  git-annex and DVC datasets.
+
+Lexical containment applies in both modes, and kind checks, missing and
+dangling targets behave identically in both modes. The exact rules per origin
+are listed below.
+
+Libraries that resolve symlinks themselves still read the target. In
+particular, tifffile opens linked files of a multi-file OME-TIFF beside the real
+path of the opened file, so the shared TIFF inspection checks linked files
+there and rejects a scattered set instead of reading zero-filled data.
+
+## Dataset, caller, and root-free paths
+
+Every path under a dataset root, whether a reader-owned name, a discovered
+entry, or a value read from metadata, uses `require_metadata_file()`,
+`require_metadata_directory()`, `optional_metadata_file()`, or
+`optional_metadata_directory()`:
 
 ```python
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
@@ -82,20 +117,32 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
-    require_file,
+    require_metadata_file,
 )
 
 context = ReaderErrorContext(reader="example", artifact="counts")
-root: DatasetRoot = normalize_dataset_root("dataset", context=context)
-counts: ArtifactFile = require_file(root / "counts.h5", context=context)
+root: DatasetRoot = normalize_dataset_root("dataset", context=context, path_policy="strict")
+counts: ArtifactFile = require_metadata_file(root, "counts.h5", context=context)
 ```
 
-Caller and metadata origins have different authority:
+`require_file()` and `require_directory()` remain for paths without a dataset
+root: a single caller-selected file of a root-free reader, or a reader-created
+directory such as an archive extraction target. They never apply a policy.
 
-- caller paths expand `~`; relative values resolve against and remain within the
-  dataset root, while explicit absolute values may be external;
-- metadata paths are interpreted literally without `~` expansion, and relative
-  or absolute values must resolve within the dataset root.
+Paths have three origins:
+
+| Origin | Lexical check | Target, strict root | Target, relaxed root | Returned path |
+| --- | --- | --- | --- | --- |
+| Dataset (reader-owned name, discovered entry, metadata value; no `~` expansion) | inside the root | inside the root | anywhere | strict: canonical target; relaxed: resolved parent + own name |
+| Relative caller path (`~` expanded) | inside the root | inside the root | anywhere | resolved parent + given name |
+| Absolute caller path (`~` expanded) | none | anywhere | anywhere | resolved parent + given name |
+
+"Resolved parent + name" keeps the final name the dataset or the caller gave,
+because git-annex and DVC targets are named by content hashes (DVC cache entries
+have no suffix). Names and suffixes that identify samples, channels or formats
+therefore never come from a link target, and paths joined to a returned
+directory stay lexically inside the root. A strict rejection names the relaxed
+policy in its message.
 
 Paths that require containment are checked lexically before filesystem access,
 then checked again after strict resolution to reject symlink escapes. Explicit
@@ -153,7 +200,7 @@ import scanpy as sc
 from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
 
 adata = sc.read_10x_h5(layout.counts_h5)
-metadata = inspect_tiff(layout.morphology)
+metadata = inspect_tiff(layout.morphology, context=context)
 image = read_tiff(metadata, series=0, level=0)
 ```
 
@@ -161,7 +208,7 @@ The direct Scanpy call demonstrates ecosystem compatibility. Vendor readers
 should use the focused shared count-source boundary once it is available so
 sparse-array normalization and source error context remain centralized.
 
-Likewise, a `DatasetRoot` can be passed directly to a directory consumer such
+Likewise, `root.path` can be passed directly to a directory consumer such
 as `scanpy.read_10x_mtx()`. Focused shared source utilities should accept the
 nominal artifact type and trust its path contract instead of resolving or
 kind-checking it again. Broad direct-entry utilities such as the existing image
@@ -178,6 +225,7 @@ boundaries rather than this path package.
 Optional means that only the final path component may be absent. Its parent must
 resolve to an existing directory. This makes malformed layouts explicit:
 
+- lexically escaping path: raise `ReaderFormatError`, even when absent;
 - absent leaf under a valid directory: return `None`;
 - missing or dangling parent: raise `FileNotFoundError`;
 - dangling leaf symlink: raise `FileNotFoundError`;
@@ -194,16 +242,16 @@ or both, then apply their format meaning after deterministic selection:
 
 ```python
 from spatialdata_io.readers._utils.paths import (
-    require_directory,
+    require_metadata_directory,
     require_unique_path,
 )
 
 candidate = require_unique_path(
-    (path for path in root.iterdir() if path.name.startswith("analysis-")),
+    (path for path in root.path.iterdir() if path.name.startswith("analysis-")),
     context=layout_context,
-    search_path=root,
+    search_path=root.path,
 )
-analysis_directory = require_directory(candidate, context=layout_context)
+analysis_directory = require_metadata_directory(root, candidate, context=layout_context)
 ```
 
 `sorted_paths()` consumes a filesystem iterable once and attaches reader and
@@ -237,7 +285,7 @@ reader-layout exception.
 ## Performance and resources
 
 Successful validation performs one strict canonical resolution and one explicit
-kind inspection. Additional `lstat` work is limited to optional-leaf handling or
+kind inspection; a relaxed root adds one resolution of the artifact's parent. Additional `lstat` work is limited to optional-leaf handling or
 failure diagnosis. Directory validators never scan directory contents.
 
 Creating an artifact marker is an identity call with no wrapper allocation.
@@ -255,5 +303,6 @@ AnnData, Dask, Arrow, Scanpy, SpatialData, or raster-library dependency.
 Add a capability only when at least two concrete readers demonstrate the same
 filesystem safety or representation contract. Extensions must remain
 vendor-neutral, precisely typed, independently tested, and content-free. Do not
-add vendor branches, callback discovery, generic resource management, an
-`allow_external` switch, or a universal layout schema.
+add vendor branches, callback discovery, generic resource management,
+per-artifact containment switches beside the root's path policy, or a universal
+layout schema.

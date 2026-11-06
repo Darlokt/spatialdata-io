@@ -1,4 +1,4 @@
-"""CODEX layout, source schemas, identifier precision, and image options."""
+"""CODEX stitched-image options, axes, channels, pyramids and laziness."""
 
 from __future__ import annotations
 
@@ -11,16 +11,18 @@ import tifffile
 from spatialdata.transformations import Identity
 from xarray import DataArray, DataTree
 
-from spatialdata_io.readers._utils.image import make_raster_options
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.codex import codex
-from spatialdata_io.readers.codex._images import _read_image, _validate_image_options
+from spatialdata_io.readers.codex._images import read_image, validate_image_options
 from tests.integration.readers.codex._fixtures import write_csv, write_image
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from pytest_mock import MockerFixture
     from spatialdata import SpatialData
 
 DEFAULT_OPTIONS = make_raster_options()
@@ -29,14 +31,33 @@ DEFAULT_OPTIONS = make_raster_options()
 class TestValidateImageOptions:
     """Reject invalid public options before expensive source work."""
 
-    @pytest.mark.parametrize("series", [-1, True, 1.5])
-    def test_invalid_series(self, series: float) -> None:
-        with pytest.raises(ValueError, match="tiff_series"):
-            _validate_image_options(None, series)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
+    def test_valid(self) -> None:
+        validate_image_options(None, None)
+        validate_image_options("TZCYX", 0)
+        validate_image_options("yxs", 3)
 
-    def test_invalid_axes_type(self) -> None:
+    def test_negative_series(self) -> None:
+        with pytest.raises(ValueError, match="tiff_series must be nonnegative"):
+            validate_image_options(None, -1)
+
+    @pytest.mark.parametrize("series", [True, 1.5, "0"])
+    def test_series_type(self, series: object) -> None:
+        with pytest.raises(TypeError, match="tiff_series"):
+            validate_image_options(None, series)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
+
+    @pytest.mark.parametrize("axes", [["c", "y", "x"], ("C", "Y", "X"), b"CYX"])
+    def test_axes_type(self, axes: object) -> None:
         with pytest.raises(TypeError, match="data_axes"):
-            _validate_image_options(["c", "y", "x"], None)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
+            validate_image_options(axes, None)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
+
+    @pytest.mark.parametrize("axes", ["", "C Y", "CY1", "CYy", "c-y-x"])
+    def test_invalid_axes(self, axes: str) -> None:
+        with pytest.raises(ValueError, match="distinct single-letter"):
+            validate_image_options(axes, None)
+
+    def test_options_are_validated_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="data_axes"):
+            codex(tmp_path / "missing", data_axes="CYY")
 
     @pytest.mark.parametrize(
         "read",
@@ -74,7 +95,7 @@ class TestReadImage:
         path.write_bytes(b"invalid TIFF")
 
         with pytest.raises(ValueError, match="TIFF") as caught:
-            _read_image(
+            read_image(
                 ArtifactFile(path),
                 data_axes=None,
                 tiff_series=None,
@@ -89,7 +110,7 @@ class TestReadImage:
         path = tmp_path / "image.tif"
         image = write_image(path)
 
-        result = _read_image(
+        result = read_image(
             ArtifactFile(path),
             data_axes=None,
             tiff_series=None,
@@ -107,7 +128,7 @@ class TestReadImage:
         path = tmp_path / "image.tif"
         image = write_image(path)
 
-        result = _read_image(
+        result = read_image(
             ArtifactFile(path),
             data_axes=None,
             tiff_series=None,
@@ -128,7 +149,7 @@ class TestReadImage:
         path = tmp_path / "image.tif"
         tifffile.imwrite(path, np.ones((2, 3), dtype=np.uint8), metadata={"axes": "YX"})
 
-        result = _read_image(
+        result = read_image(
             ArtifactFile(path),
             data_axes=None,
             tiff_series=None,
@@ -148,7 +169,7 @@ class TestReadImage:
             path, np.zeros((channels, 8, 10), dtype=np.uint16), metadata={"axes": "CYX"}, photometric="minisblack"
         )
 
-        result = _read_image(
+        result = read_image(
             ArtifactFile(path),
             data_axes=None,
             tiff_series=None,
@@ -164,7 +185,7 @@ class TestReadImage:
         image = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
         tifffile.imwrite(path, image, photometric="rgb")
 
-        result = _read_image(
+        result = read_image(
             ArtifactFile(path),
             data_axes=None,
             tiff_series=None,
@@ -182,7 +203,7 @@ class TestReadImage:
         )
 
         with pytest.raises(ValueError, match="Axis 'q'"):
-            _read_image(
+            read_image(
                 ArtifactFile(path),
                 data_axes=None,
                 tiff_series=None,
@@ -191,7 +212,7 @@ class TestReadImage:
                 transformation=Identity(),
             )
 
-        result = _read_image(
+        result = read_image(
             ArtifactFile(path),
             data_axes="CYX",
             tiff_series=None,
@@ -219,7 +240,7 @@ class TestReadImage:
         tifffile.imwrite(
             path, source, ome=True, photometric="minisblack", metadata={"axes": "CYX", "Channel": {"Name": names}}
         )
-        result = _read_image(
+        result = read_image(
             ArtifactFile(path),
             data_axes=None,
             tiff_series=None,
@@ -230,16 +251,114 @@ class TestReadImage:
         assert result.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(result.data.compute(), source)
 
-    def test_invalid_declared_axes(self, tmp_path: Path) -> None:
-        path = tmp_path / "image.tif"
-        write_image(path)
+    def test_ome_channel_count_mismatch_is_rejected(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "image.ome.tif"
+        tifffile.imwrite(
+            path,
+            np.zeros((2, 8, 10), dtype=np.uint16),
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "Channel": {"Name": ["CD3", "DAPI"]}},
+        )
+        metadata = inspect_tiff(ArtifactFile(path), context=ReaderErrorContext("test", "raster"))
+        assert metadata.ome is not None
+        metadata.ome.images[0].pixels.channels.pop()
+        mocker.patch("spatialdata_io.readers.codex._images.inspect_tiff", return_value=metadata)
 
-        with pytest.raises(ValueError, match="duplicate"):
-            _read_image(
+        with pytest.raises(ReaderFormatError, match="1 OME channels for 2 raster channels"):
+            read_image(
                 ArtifactFile(path),
-                data_axes="YYX",
+                data_axes=None,
                 tiff_series=None,
                 raster=DEFAULT_OPTIONS,
                 frame="image_pixels",
                 transformation=Identity(),
             )
+
+    def test_axes_rank_mismatch(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.tif"
+        write_image(path)
+
+        with pytest.raises(ValueError, match="rank 2 does not match array rank 3"):
+            read_image(
+                ArtifactFile(path),
+                data_axes="YX",
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
+
+    @pytest.mark.parametrize(
+        ("ome", "samples", "expected"),
+        [
+            pytest.param(True, (3, "rgb", None), ["r", "g", "b"], id="ome-rgb"),
+            pytest.param(True, (4, "rgb", ["unassalpha"]), ["r", "g", "b", "a"], id="ome-rgba"),
+            pytest.param(
+                True,
+                (3, "minisblack", None),
+                [f"Channel:0:0:sample:{index}" for index in range(3)],
+                id="ome-minisblack",
+            ),
+            pytest.param(False, (3, "rgb", None), ["r", "g", "b"], id="plain-rgb"),
+            pytest.param(False, (3, "minisblack", None), [0, 1, 2], id="plain-minisblack"),
+        ],
+    )
+    def test_sample_channels_follow_the_declared_colour_model(
+        self,
+        tmp_path: Path,
+        samples: tuple[int, str, list[str] | None],
+        expected: list[str | int],
+        *,
+        ome: bool,
+    ) -> None:
+        """Declared RGB(A) samples are r, g, b(, a); other OME samples are named by record and sample."""
+        count, photometric, extrasamples = samples
+        path = tmp_path / "image.tif"
+        image = np.arange(8 * 10 * count, dtype=np.uint8).reshape(8, 10, count)
+        tifffile.imwrite(
+            path, image, ome=ome, photometric=photometric, planarconfig="contig", extrasamples=extrasamples
+        )
+
+        result = read_image(
+            ArtifactFile(path),
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
+
+        assert result.coords["c"].to_numpy().tolist() == expected
+        np.testing.assert_array_equal(result.data.compute(), image.transpose(2, 0, 1))
+
+    def test_scale_factors_exceeding_the_extent(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.tif"
+        write_image(path)
+
+        with pytest.raises(ValueError, match=r"exceed the spatial extent of the stitched image \(32 x 40 pixels\)"):
+            read_image(
+                ArtifactFile(path),
+                data_axes=None,
+                tiff_series=None,
+                raster=make_raster_options((4, 4, 4)),
+                frame="image_pixels",
+                transformation=Identity(),
+            )
+
+    def test_series_selection_out_of_range(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.tif"
+        write_image(path)
+
+        with pytest.raises(IndexError, match="series index 1") as caught:
+            read_image(
+                ArtifactFile(path),
+                data_axes=None,
+                tiff_series=1,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
+
+        context = ReaderErrorContext("codex", "stitched image")
+        assert caught.value.__notes__ == [f"While handling {context.describe(path=path)}."]

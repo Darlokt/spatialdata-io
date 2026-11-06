@@ -82,24 +82,25 @@ def _read_fullres(path: ArtifactFile, options: ImageOptions) -> LazyRaster:
     with path.open("rb") as handle:
         is_tiff = handle.read(4) in _TIFF_HEADERS
 
+    context = ReaderErrorContext("visium_hd", "full-resolution image")
     if is_tiff:
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(path, context=context)
         series = options.tiff_series
         if series is None:
             if len(metadata.series) != 1:
                 message = f"Full-resolution TIFF has {len(metadata.series)} series; select tiff_series explicitly."
                 raise ValueError(message)
             series = 0
-        return read_tiff(metadata, series=series, level=0)
+        return read_tiff(metadata, series=series, level=0, context=context)
 
     if options.data_axes is not None or options.tiff_series is not None:
         message = "data_axes and tiff_series apply only to TIFF-family full-resolution images."
         raise ValueError(message)
 
     if path.suffix.lower() == ".png":
-        return read_png(path)
+        return read_png(path, context=context)
     if path.suffix.lower() in {".jpg", ".jpeg"}:
-        return read_jpeg(path)
+        return read_jpeg(path, context=context)
 
     message = f"Unsupported full-resolution image format: {path.name!r}."
     raise ValueError(message)
@@ -163,7 +164,7 @@ def read_images(
         if path is None:
             continue
 
-        pixels = _normalize(read_png(path))
+        pixels = _normalize(read_png(path, context=ReaderErrorContext("visium_hd", name)))
         if name == "hires_image":
             hires_shape = (int(pixels.shape[1]), int(pixels.shape[2]))
         matrix = frame.image_pixels_to_global @ np.diag([1 / scale, 1 / scale, 1.0])
@@ -203,16 +204,17 @@ def _cytassist_image(
             expected="a non-null CytAssist matrix pair for requested image placement",
         )
 
-    metadata = inspect_tiff(path)
+    context = ReaderErrorContext("visium_hd", "CytAssist image")
+    metadata = inspect_tiff(path, context=context)
     if len(metadata.series) != 1:
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "CytAssist image"),
+            context=context,
             path=path,
             found=f"{len(metadata.series)} TIFF series",
             expected="one unambiguous CytAssist image series",
         )
 
-    pixels = _normalize(read_tiff(metadata, series=0, level=0))
+    pixels = _normalize(read_tiff(metadata, series=0, level=0, context=context))
     warped, matrix = warp_cytassist(pixels, frame, source.cytassist, options)
     image = _parse_image(warped, matrix, options)
     image.attrs["interpolation"] = "bilinear"

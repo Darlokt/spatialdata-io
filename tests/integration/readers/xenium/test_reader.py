@@ -18,16 +18,18 @@ from scanpy import read_10x_h5
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Affine, BaseTransformation, Identity, Scale, Translation, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io import __version__
 from spatialdata_io._cli.commands.xenium import xenium_command
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderFormatError
 from spatialdata_io.readers.xenium import xenium
 from tests.integration.readers.xenium import _fixtures as fx
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from anndata import AnnData
@@ -565,3 +567,40 @@ class TestXenium:
         translation = _transform(restored.shapes["cell_boundaries"])
         assert isinstance(translation, Translation)
         np.testing.assert_array_equal(translation.translation, [HALF, HALF])
+
+
+class TestXeniumPathPolicy:
+    """Every discovered artifact follows the dataset root's symlink policy.
+
+    Earlier releases accepted these out-of-root symlinks without a policy.
+    """
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        expected = xenium(bundle.root)
+        for name in (
+            "experiment.xenium",
+            "cells.parquet",
+            "transcripts.parquet",
+            "cells.zarr.zip",
+            "cell_feature_matrix.h5",
+            "gene_panel.json",
+        ):
+            link_outside_root(bundle.root / name)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            xenium(bundle.root)
+
+        assert_spatial_data_objects_are_identical(xenium(bundle.root, path_policy="relaxed"), expected)
+
+    def test_relaxed_policy_rejects_a_scattered_multi_file_focus_set(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        link_outside_root(bundle.root / "morphology_focus" / "ch0000_dapi.ome.tif")
+
+        # tifffile opens the other OME files beside the target, where they do not exist.
+        with pytest.raises(RasterFormatError, match="non-file TIFF source"):
+            xenium(bundle.root, path_policy="relaxed")

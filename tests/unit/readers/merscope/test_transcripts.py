@@ -13,6 +13,7 @@ from numpy.testing import assert_array_equal
 from spatialdata.transformations import Identity, get_transformation
 
 import spatialdata_io.readers.merscope._transcripts as transcript_module
+from spatialdata_io.readers._utils.csv import _blocks as csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.merscope._layout import TranscriptSource
@@ -51,7 +52,7 @@ class TestReadTranscripts:
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv")
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 256)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
         tasks = mocker.Mock()
         initial_filters = list(warnings.filters)
         with Callback(posttask=tasks):
@@ -111,7 +112,7 @@ class TestReadTranscripts:
         self, tmp_path: Path, mocker: MockerFixture, gene: str, cell: str, message: str
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv", last_gene=gene, last_cell=cell)
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 256)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
         points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=("9007199254740993",))
         assert points.npartitions > 1
         first = points.partitions[0].compute()
@@ -126,7 +127,7 @@ class TestReadTranscripts:
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv")
         source.path.write_bytes(content)
-        parser = mocker.spy(transcript_module, "read_bytes")
+        parser = mocker.spy(csv_blocks, "read_bytes")
         with pytest.raises(ReaderFormatError, match="malformed CSV header"):
             read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         parser.assert_not_called()
@@ -136,10 +137,10 @@ class TestReadTranscripts:
         source = _write_source(tmp_path / "transcripts.csv")
         with source.path.open("a", encoding="utf-8") as output:
             output.write(record)
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 256)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
         points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         assert not points.partitions[0].compute().empty
-        with pytest.raises(ReaderFormatError, match="malformed transcript CSV"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV records"):
             points.partitions[-1].compute()
 
     def test_model_failure_restores_warning_filters(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -158,8 +159,8 @@ class TestReadTranscripts:
             "gene,global_x,global_y,ignored\nGeneB,0.10000000000000002,2," + "a" * (128 * 1024) + "\n",
             encoding="utf-8",
         )
-        storage = mocker.spy(transcript_module, "read_bytes")
-        parser = mocker.spy(transcript_module, "_read_partition")
+        storage = mocker.spy(csv_blocks, "read_bytes")
+        parser = mocker.spy(csv_blocks, "_read_block")
         points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
         parser.assert_not_called()
         assert storage.call_args.kwargs["sample"] is False

@@ -38,6 +38,7 @@ class TestSteinbockCommand:
             labels_kind="deepcell",
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -76,6 +77,7 @@ class TestSteinbockCommand:
             labels_kind="ilastik",
             scale_factors=(2, 3),
             chunks=expected_chunks,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -113,6 +115,7 @@ class TestSteinbockCommand:
             "labels_kind",
             "scale_factors",
             "chunks",
+            "path_policy",
         ]
         reader_parameters = inspect.signature(steinbock).parameters
         assert set(reader_parameters) - {"path"} == set(options) - {"input_path", "output_path"}

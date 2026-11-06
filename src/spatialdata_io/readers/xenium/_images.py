@@ -18,7 +18,7 @@ from ome_types.model import UnitsLength
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
 
 if TYPE_CHECKING:
@@ -42,11 +42,7 @@ def read_morphology(images: FocusImages, *, pixel_size: float, raster: RasterOpt
         different from the OME-TIFF files beside it.
     """
     context = ReaderErrorContext("xenium", images.entry.name)
-    try:
-        metadata = inspect_tiff(images.entry)
-    except (OSError, ValueError) as caught:
-        add_reader_context(caught, context=context, path=images.entry)
-        raise
+    metadata = inspect_tiff(images.entry, context=context)
 
     def error(*, found: str, expected: str) -> ReaderFormatError:
         return ReaderFormatError(context=context, path=images.entry, found=found, expected=expected)
@@ -82,7 +78,7 @@ def read_morphology(images: FocusImages, *, pixel_size: float, raster: RasterOpt
             expected=f"exactly the OME-TIFF files {sorted(path.name for path in images.files)}",
         )
 
-    lazy = read_tiff(metadata, series=0, level=0)
+    lazy = read_tiff(metadata, series=0, level=0, context=context)
     data = normalize_raster_axes(lazy.data, lazy.axes, target_axes=("c", "y", "x"), add_missing=("c",))
     if data.shape[0] != len(names):
         raise error(found=f"{data.shape[0]} channels for {len(names)} names", expected="one OME name per channel")

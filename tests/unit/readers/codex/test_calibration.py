@@ -11,7 +11,7 @@ from spatialdata.transformations import Affine
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.codex._calibration import read_experiment_scale, validate_calibration
+from spatialdata_io.readers.codex._calibration import read_experiment, resolve_calibration, validate_calibration
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,7 +77,7 @@ class TestValidateCalibration:
             validate_calibration(None, mapping)
 
 
-class TestReadExperimentScale:
+class TestReadExperiment:
     """Interpret explicitly selected producer declarations without association guesses."""
 
     @pytest.mark.parametrize(
@@ -86,14 +86,29 @@ class TestReadExperimentScale:
     def test_known_declarations(self, tmp_path: Path, version: str, resolution: float) -> None:
         path = tmp_path / "experiment.json"
         path.write_text(json.dumps({"version": version, "xyResolution": resolution}))
-        assert read_experiment_scale(ArtifactFile(path)) == resolution / 1000
+
+        calibration = read_experiment(ArtifactFile(path))
+
+        assert calibration.pixel_size_um == resolution / 1000
+        assert calibration.version == version
+        assert "Akoya experiment xyResolution" in calibration.source
 
     @pytest.mark.parametrize("value", [None, True, "377", 0, -1, 5e-324])
     def test_invalid_resolution(self, tmp_path: Path, value: object) -> None:
         path = tmp_path / "experiment.json"
         path.write_text(json.dumps({"version": "1.7.0.6", "xyResolution": value}))
-        with pytest.raises(ReaderFormatError, match=r"positive|representable"):
-            read_experiment_scale(ArtifactFile(path))
+
+        with pytest.raises(ReaderFormatError, match=r"positive|representable") as caught:
+            read_experiment(ArtifactFile(path))
+
+        assert caught.value.context.detected_version == "1.7.0.6"
+
+    def test_huge_integer_resolution(self, tmp_path: Path) -> None:
+        path = tmp_path / "experiment.json"
+        path.write_text('{"version": "1.7.0.6", "xyResolution": 1' + "0" * 400 + "}")
+
+        with pytest.raises(ReaderFormatError):
+            read_experiment(ArtifactFile(path))
 
     @pytest.mark.parametrize(
         "metadata", [{}, {"version": 1.7}, {"version": "2.0", "xyResolution": 377}, {"per_pixel_XY_resolution": 377}]
@@ -101,11 +116,46 @@ class TestReadExperimentScale:
     def test_unsupported_profile(self, tmp_path: Path, metadata: dict[str, object]) -> None:
         path = tmp_path / "experiment.json"
         path.write_text(json.dumps(metadata))
-        with pytest.raises(ReaderFormatError, match="Akoya version"):
-            read_experiment_scale(ArtifactFile(path))
 
-    def test_bounded(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="Akoya version"):
+            read_experiment(ArtifactFile(path))
+
+    def test_large_file_is_not_capped(self, tmp_path: Path) -> None:
+        """Size is not a validity criterion; the strict JSON reader parses any size."""
         path = tmp_path / "experiment.json"
-        path.write_bytes(b" " * (1024 * 1024 + 1))
-        with pytest.raises(ReaderFormatError, match="over 1 MiB"):
-            read_experiment_scale(ArtifactFile(path))
+        path.write_text(json.dumps({"version": "1.7.0.6", "xyResolution": 500, "notes": "x" * (2 * 1024 * 1024)}))
+
+        assert read_experiment(ArtifactFile(path)).pixel_size_um == 0.5
+
+
+class TestResolveCalibration:
+    """Choose the caller scale or the experiment declaration and require agreement."""
+
+    def test_uncalibrated(self) -> None:
+        assert resolve_calibration(None, None) is None
+
+    def test_caller_scale(self) -> None:
+        calibration = resolve_calibration(0.5, None)
+
+        assert calibration is not None
+        assert calibration.pixel_size_um == 0.5
+        assert calibration.version is None
+        assert calibration.source.startswith("Caller-declared")
+
+    @pytest.mark.parametrize("pixel_size_um", [None, 0.5])
+    def test_experiment(self, tmp_path: Path, pixel_size_um: float | None) -> None:
+        path = tmp_path / "experiment.json"
+        path.write_text('{"version": "1.5.0.38", "xyResolution": 500}')
+
+        calibration = resolve_calibration(pixel_size_um, ArtifactFile(path))
+
+        assert calibration is not None
+        assert calibration.pixel_size_um == 0.5
+        assert calibration.version == "1.5.0.38"
+
+    def test_conflict(self, tmp_path: Path) -> None:
+        path = tmp_path / "experiment.json"
+        path.write_text('{"version": "1.5.0.38", "xyResolution": 500}')
+
+        with pytest.raises(ValueError, match=r"0\.6 conflicts .* \(0\.5\)"):
+            resolve_calibration(0.6, ArtifactFile(path))

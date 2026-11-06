@@ -15,7 +15,7 @@ from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
 import spatialdata_io.readers.seqfish._rasters as raster_module
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._rasters import read_calibration, read_dapi, read_image, read_labels
@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from pytest_mock import MockerFixture
     from spatialdata.transformations import BaseTransformation
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 def _write_dapi(path: Path, *, names: list[str] | None = None, compression: str | None = None) -> NDArray[np.uint16]:
@@ -85,7 +88,7 @@ class TestReadCalibration:
             )
         else:
             _write_dapi(path)
-            metadata = inspect_tiff(ArtifactFile(path))
+            metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
             ome = metadata.ome
             assert ome is not None
             ome.images[0].pixels.channels = []
@@ -143,6 +146,18 @@ class TestReadDapi:
         with pytest.raises(ReaderFormatError, match="singleton additional axes"):
             read_dapi(ArtifactFile(path))
 
+    def test_rgb_ome_samples_fail_before_channel_names(self, tmp_path: Path) -> None:
+        """A DAPI stain is a scientific channel; an interleaved RGB samples axis is not interpreted."""
+        path = tmp_path / "DAPI.ome.tiff"
+        tifffile.imwrite(
+            path,
+            np.zeros((16, 16, 3), dtype=np.uint8),
+            photometric="rgb",
+            metadata={"axes": "YXS", "PhysicalSizeX": 0.2, "PhysicalSizeY": 0.5},
+        )
+        with pytest.raises(ReaderFormatError, match="Axis 's' has length 3"):
+            read_dapi(ArtifactFile(path))
+
     def test_singleton_axes_preserve_singleton_spatial_dimensions(self, tmp_path: Path) -> None:
         path = tmp_path / "DAPI.tiff"
         data = np.arange(16, dtype=np.uint16).reshape(1, 1, 1, 16)
@@ -163,7 +178,7 @@ class TestReadDapi:
     def test_invalid_external_channel_metadata(self, tmp_path: Path, mocker: MockerFixture, invalid: str) -> None:
         path = tmp_path / "DAPI.tiff"
         _write_dapi(path)
-        metadata = inspect_tiff(ArtifactFile(path))
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
         ome = metadata.ome
         assert ome is not None
         ome.images[0].pixels.channels = (

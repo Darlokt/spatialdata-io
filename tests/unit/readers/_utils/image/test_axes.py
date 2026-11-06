@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import dask.array as da
 import numpy as np
 import pytest
@@ -24,20 +22,14 @@ class TestNormalizeRasterAxes:
         assert result.shape == (5, 2, 3)
         np.testing.assert_array_equal(result.compute(), source.transpose(2, 0, 1))
 
-    def test_selects_non_singleton_axes_and_drops_singletons(self) -> None:
-        source = np.arange(2 * 1 * 3 * 4).reshape(2, 1, 3, 4)
-        data = da.from_array(source, chunks=(1, 1, 3, 4))
-        selectors = {"T": 1}
+    def test_drops_singleton_axes_absent_from_target(self) -> None:
+        source = np.arange(3 * 4).reshape(1, 3, 1, 4)
+        data = da.from_array(source, chunks=(1, 3, 1, 4))
 
-        result = normalize_raster_axes(
-            data,
-            ("t", "z", "y", "x"),
-            target_axes=("y", "x"),
-            selectors=selectors,
-        )
+        result = normalize_raster_axes(data, ("t", "y", "Z", "x"), target_axes=("y", "x"))
 
-        np.testing.assert_array_equal(result.compute(), source[1, 0])
-        assert selectors == {"T": 1}
+        assert result.shape == (3, 4)
+        np.testing.assert_array_equal(result.compute(), source[0, :, 0, :])
 
     def test_adds_only_explicit_missing_singleton_axes(self) -> None:
         source = np.arange(12).reshape(3, 4)
@@ -71,26 +63,21 @@ class TestNormalizeRasterAxes:
         assert result.shape == (1, 3, 4)
 
     @pytest.mark.parametrize(
-        ("source_axes", "target_axes", "selectors", "add_missing", "match"),
+        ("source_axes", "target_axes", "add_missing", "match"),
         [
-            (("y",), ("y", "x"), None, (), "rank"),
-            (("y", "y"), ("y", "x"), None, (), "duplicate"),
-            (("c", "y"), ("c", "y"), None, (), "contain 'x' and 'y'"),
-            (("t", "y", "x"), ("y", "x"), None, (), "explicit selector"),
-            (("t", "y", "x"), ("y", "x"), {"t": 2}, (), "valid range"),
-            (("y", "x"), ("c", "y", "x"), None, (), "add_missing"),
-            (("y", "x"), ("y", "x"), {"z": 0}, (), "absent from source_axes"),
-            (("t", "y", "x"), ("y", "x"), {"t": 0, "T": 0}, (), "duplicate"),
-            (("y", "x"), ("y", "x"), {"y": 0}, (), "omitted from target_axes"),
-            (("y", "x"), ("y", "x"), None, ("z",), "absent from target_axes"),
-            (("yy", "x"), ("y", "x"), None, (), "single alphabetic"),
+            (("y",), ("y", "x"), (), "rank"),
+            (("y", "y"), ("y", "x"), (), "duplicate"),
+            (("c", "y"), ("c", "y"), (), "contain 'x' and 'y'"),
+            (("t", "y", "x"), ("y", "x"), (), r"Axis 't' has length 2 and is absent from target_axes"),
+            (("y", "x"), ("c", "y", "x"), (), "add_missing"),
+            (("y", "x"), ("y", "x"), ("z",), "add_missing contains axes absent from target_axes"),
+            (("yy", "x"), ("y", "x"), (), "single alphabetic"),
         ],
     )
     def test_rejects_ambiguous_or_invalid_axes(
         self,
         source_axes: tuple[str, ...],
         target_axes: tuple[str, ...],
-        selectors: dict[str, int] | None,
         add_missing: tuple[str, ...],
         match: str,
     ) -> None:
@@ -98,22 +85,4 @@ class TestNormalizeRasterAxes:
         data = da.zeros(shape, chunks=shape)
 
         with pytest.raises(ValueError, match=match):
-            normalize_raster_axes(
-                data,
-                source_axes,
-                target_axes=target_axes,
-                selectors=selectors,
-                add_missing=add_missing,
-            )
-
-    @pytest.mark.parametrize("selectors", [{1: 0}, {"z": True}, {"z": 1.5}])
-    def test_rejects_invalid_selector_types(self, selectors: object) -> None:
-        data = da.zeros((2, 3, 4), chunks=(1, 3, 4))
-
-        with pytest.raises(TypeError, match=r"(?:Selector|selectors keys)"):
-            normalize_raster_axes(
-                data,
-                ("z", "y", "x"),
-                target_axes=("y", "x"),
-                selectors=cast("dict[str, int]", selectors),
-            )
+            normalize_raster_axes(data, source_axes, target_axes=target_axes, add_missing=add_missing)

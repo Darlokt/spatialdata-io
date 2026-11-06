@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
 
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.visium._geometry import make_circles, make_transforms
 from spatialdata_io.readers.visium._images import make_image_options, read_images
@@ -36,6 +36,7 @@ def visium(  # noqa: PLR0913, RUF100
     tiff_series: int | None = None,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] | Mapping[str, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read one single-library Space Ranger Visium output directory.
 
@@ -131,6 +132,15 @@ def visium(  # noqa: PLR0913, RUF100
         for every axis, three ``c, y, x`` sizes, or a mapping keyed by exactly
         ``c``, ``y`` and ``x``. By default one channel per chunk and square
         1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -186,6 +196,7 @@ def visium(  # noqa: PLR0913, RUF100
         fullres_image_file=fullres_image_file,
         positions_file=positions_file,
         scale_factors_file=scale_factors_file,
+        path_policy=path_policy,
     )
 
     count_metadata = read_count_metadata(layout.counts)

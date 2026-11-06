@@ -255,6 +255,8 @@ choices and defaults agree.
 | `dataset_id` | Fixed element names; concatenate by sample |
 | `gex_only` | All source features retained |
 
+Discovered artifacts that are symlinks to targets outside the dataset directory are now rejected by default; earlier releases accepted them. Pass `path_policy="relaxed"` for git-annex or DVC datasets ([Dataset paths and symlinks](dataset_paths.md)).
+
 For multiple samples, use `spatialdata.concatenate({"sample_a": a, "sample_b": b})`
 to suffix element names and update table regions and observation names together.
 Separate coordinate systems are needed if samples are not physically aligned.

@@ -11,9 +11,10 @@ import numpy as np
 import pytest
 import tifffile
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import LazyRaster
 from spatialdata_io.readers.generic import image
+from spatialdata_io.readers.generic._images import _ome_samples_mode
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -52,7 +53,7 @@ class TestImage:
             image(path, "yx", "sample")
 
         assert error.value.context.reader == "generic"
-        assert error.value.context.artifact == "OME calibration"
+        assert error.value.context.artifact == "image"
         assert error.value.path == path
         assert error.value.found == "OME X dimension 25 disagrees with its base raster"
         assert error.value.expected == "matching source and OME spatial dimensions"
@@ -150,7 +151,7 @@ class TestImage:
         assert parse.call_args.kwargs["chunks"] == expected
 
     def test_forwards_owned_scale_factors_to_the_model(self, mocker: MockerFixture) -> None:
-        data = da.zeros((5, 7), chunks=(5, 7), dtype=np.uint8)
+        data = da.zeros((8, 9), chunks=(8, 9), dtype=np.uint8)
         mocker.patch(
             "spatialdata_io.readers.generic._images._read_raster",
             return_value=(LazyRaster(data=data, axes=("y", "x")), None),
@@ -170,8 +171,31 @@ class TestImage:
         with pytest.raises(ValueError, match="at least 2"):
             image("missing.tif", "yx", "global", scale_factors=(1,))
 
-    def test_forwards_tiff_selection_once(self, mocker: MockerFixture) -> None:
-        metadata = mocker.sentinel.metadata
+    @pytest.mark.parametrize(("scale_factors", "valid"), [((2, 4), True), ((2, 8), False)])
+    def test_rejects_pyramid_below_one_pixel_before_model_construction(
+        self, mocker: MockerFixture, scale_factors: tuple[int, ...], *, valid: bool
+    ) -> None:
+        data = da.zeros((5, 8, 9), chunks=(5, 8, 9), dtype=np.uint8)
+        mocker.patch(
+            "spatialdata_io.readers.generic._images._read_raster",
+            return_value=(LazyRaster(data=data, axes=("z", "y", "x")), None),
+        )
+        parse = mocker.patch(
+            "spatialdata_io.readers.generic._images.Image3DModel.parse",
+            return_value=mocker.sentinel.image,
+        )
+
+        if valid:
+            assert image("image.tif", "zyx", "global", scale_factors=scale_factors) is mocker.sentinel.image
+            return
+        with pytest.raises(ValueError, match=r"exceed the spatial extent of the image \(8 x 9 pixels\)"):
+            image("image.tif", "zyx", "global", scale_factors=scale_factors)
+        parse.assert_not_called()
+
+    def test_forwards_tiff_selection_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "image.btf"
+        path.touch()
+        metadata = mocker.Mock(ome=None)
         data = da.zeros((3, 5, 7), chunks=(1, 5, 7), dtype=np.uint8)
         inspect = mocker.patch(
             "spatialdata_io.readers.generic._images.inspect_tiff",
@@ -182,35 +206,61 @@ class TestImage:
             return_value=LazyRaster(data=data, axes=("c", "y", "x")),
         )
 
-        image("image.btf", "cyx", "global", tiff_series=2, tiff_level=1)
+        image(path, "cyx", "global", tiff_series=2, tiff_level=1)
 
-        inspect.assert_called_once_with(Path("image.btf"))
-        read.assert_called_once_with(metadata, series=2, level=1)
+        inspect.assert_called_once_with(path.resolve(), context=ReaderErrorContext("generic", "image"))
+        read.assert_called_once_with(metadata, series=2, level=1, context=ReaderErrorContext("generic", "image"))
 
+    def test_rejects_missing_and_directory_sources(self, tmp_path: Path) -> None:
+        directory = tmp_path / "image.png"
+        directory.mkdir()
+
+        with pytest.raises(FileNotFoundError, match=r"reader 'generic', artifact 'image'") as missing:
+            image(tmp_path / "missing.tif", "yx", "global")
+        with pytest.raises(IsADirectoryError, match="expected an existing regular file; found a directory"):
+            image(directory, "yx", "global")
+
+        assert missing.value.filename == str(tmp_path / "missing.tif")
+
+    @pytest.mark.parametrize(("tiff_series", "tiff_level"), [(None, 1), (0, 0)])
     @pytest.mark.parametrize("suffix", ["png", "jpg", "jpeg"])
-    def test_rejects_tiff_selection_for_encoded_images(self, suffix: str) -> None:
+    def test_rejects_tiff_selection_for_encoded_images(
+        self, suffix: str, tiff_series: int | None, tiff_level: int
+    ) -> None:
         with pytest.raises(ValueError, match="only select TIFF"):
-            image(f"image.{suffix}", "yx", "global", tiff_level=1)
+            image(f"image.{suffix}", "yx", "global", tiff_series=tiff_series, tiff_level=tiff_level)
 
     @pytest.mark.parametrize(
         "axes",
-        ["", "x", "cy", "tcyx", "cyyx", "channel,y,x"],
+        ["", "x", "cy", "tcyx", "cyyx", "yxx", "channel,y,x", ("channel", "y", "x")],
     )
-    def test_rejects_unsupported_or_malformed_axes(self, axes: str) -> None:
-        with pytest.raises(ValueError, match="data_axes"):
+    def test_rejects_unsupported_or_malformed_axes(self, axes: str | tuple[str, ...]) -> None:
+        with pytest.raises(ValueError, match="data_axes must be a permutation"):
             image("image.tif", axes, "global")
 
+    @pytest.mark.parametrize("axes", [None, 3, ("y", 1)])
+    def test_rejects_nonstring_axes(self, axes: object) -> None:
+        with pytest.raises(TypeError, match="data_axes must be a string or a sequence"):
+            image("image.tif", cast("str", axes), "global")
+
     @pytest.mark.parametrize(
-        ("tiff_series", "tiff_level", "match"),
-        [(-1, 0, "tiff_series"), (0, -1, "tiff_level"), (True, 0, "tiff_series")],
+        ("tiff_series", "tiff_level", "error", "match"),
+        [
+            (-1, 0, ValueError, "tiff_series must be non-negative"),
+            (0, -1, ValueError, "tiff_level must be non-negative"),
+            (True, 0, TypeError, "tiff_series must be an integer"),
+            ("0", 0, TypeError, "tiff_series must be an integer"),
+            (0, 1.0, TypeError, "tiff_level must be an integer"),
+        ],
     )
     def test_rejects_invalid_tiff_selection(
         self,
         tiff_series: int,
         tiff_level: int,
+        error: type[Exception],
         match: str,
     ) -> None:
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(error, match=match):
             image(
                 "image.tif",
                 "yx",
@@ -279,6 +329,28 @@ class TestImage:
             image("image.bmp", "yx", "global")
 
 
+class TestOmeSamplesMode:
+    """Decide whether the caller's channels are OME channels, OME samples or neither."""
+
+    @pytest.mark.parametrize(
+        ("declared", "axes", "expected"),
+        [
+            ("cyx", "cyx", False),
+            ("zcyx", "zcyx", False),
+            ("yx", "yx", False),
+            ("yxs", "yxc", True),
+            ("cyxs", "cyxz", False),
+            ("cyxs", "zyxc", None),
+            ("cyx", "zyx", None),
+            ("zyx", "cyx", None),
+            ("qyx", "cyx", None),
+            ("yxs", "yxz", None),
+        ],
+    )
+    def test_maps_the_callers_channel_axis(self, declared: str, axes: str, expected: bool | None) -> None:  # noqa: FBT001
+        assert _ome_samples_mode(tuple(declared), tuple(axes)) is expected
+
+
 class TestImageArchitecture:
     """Prevent the generic package from regaining pixel-reader ownership."""
 
@@ -297,9 +369,7 @@ class TestImageArchitecture:
             calls = {
                 node.func.attr
                 for node in ast.walk(tree)
-                if isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and not (isinstance(node.func.value, ast.Name) and node.func.value.id == "json")
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
             }
 
             assert imports.isdisjoint(forbidden_imports), path

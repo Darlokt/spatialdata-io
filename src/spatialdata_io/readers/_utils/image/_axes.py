@@ -1,3 +1,5 @@
+"""Select, insert and reorder explicitly named raster axes of a lazy array."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -5,10 +7,11 @@ from typing import TYPE_CHECKING
 import dask.array as da
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Collection, Sequence
 
 
 def _normalize_axes(axes: Sequence[str], *, parameter: str) -> tuple[str, ...]:
+    """Return lowercased axis names, requiring unique single alphabetic letters."""
     normalized = tuple(axis.lower() for axis in axes)
     if any(len(axis) != 1 or not axis.isalpha() for axis in normalized):
         message = f"{parameter} must contain single alphabetic axis names; found {tuple(axes)!r}."
@@ -20,6 +23,7 @@ def _normalize_axes(axes: Sequence[str], *, parameter: str) -> tuple[str, ...]:
 
 
 def _validate_axes_contract(data: da.Array, source: tuple[str, ...], target: tuple[str, ...]) -> None:
+    """Require the source rank to match ``data`` and both axis sets to contain ``x`` and ``y``."""
     if len(source) != data.ndim:
         message = (
             f"source_axes rank {len(source)} does not match array rank {data.ndim}; "
@@ -31,57 +35,18 @@ def _validate_axes_contract(data: da.Array, source: tuple[str, ...], target: tup
         raise ValueError(message)
 
 
-def _normalize_selectors(
-    selectors: Mapping[str, int] | None,
-    source: tuple[str, ...],
-    target: tuple[str, ...],
-) -> dict[str, int]:
-    normalized: dict[str, int] = {}
-    for axis, index in (selectors or {}).items():
-        if not isinstance(axis, str):
-            message = f"selectors keys must be axis-name strings; found {axis!r}."
-            raise TypeError(message)
-        if isinstance(index, bool) or not isinstance(index, int):
-            message = f"Selector for axis {axis!r} must be an integer; found {index!r}."
-            raise TypeError(message)
-        normalized_axis = axis.lower()
-        if normalized_axis in normalized:
-            message = "selectors contains duplicate axes after case normalization."
-            raise ValueError(message)
-        normalized[normalized_axis] = index
-    unknown = set(normalized).difference(source)
-    if unknown:
-        message = f"selectors contains axes absent from source_axes: {sorted(unknown)}."
-        raise ValueError(message)
-    selected_targets = set(normalized).intersection(target)
-    if selected_targets:
-        message = f"Axes named in selectors must be omitted from target_axes; found {sorted(selected_targets)}."
-        raise ValueError(message)
-    return normalized
-
-
-def _select_source_axes(
-    data: da.Array,
-    source: tuple[str, ...],
-    target: tuple[str, ...],
-    selectors: Mapping[str, int],
-) -> tuple[da.Array, list[str]]:
+def _drop_source_axes(data: da.Array, source: tuple[str, ...], target: tuple[str, ...]) -> tuple[da.Array, list[str]]:
+    """Drop singleton source axes absent from the target; any other omission is ambiguous."""
     indexer: list[slice | int] = []
     remaining: list[str] = []
     for axis, size in zip(source, data.shape, strict=True):
         if axis in target:
             indexer.append(slice(None))
             remaining.append(axis)
-        elif axis in selectors:
-            index = selectors[axis]
-            if index < 0 or index >= size:
-                message = f"Selector for axis {axis!r} is {index}, but its valid range is [0, {size})."
-                raise ValueError(message)
-            indexer.append(index)
         elif size == 1:
             indexer.append(0)
         else:
-            message = f"Axis {axis!r} has length {size} and is absent from target_axes; provide an explicit selector."
+            message = f"Axis {axis!r} has length {size} and is absent from target_axes."
             raise ValueError(message)
     return data[tuple(indexer)], remaining
 
@@ -92,6 +57,10 @@ def _add_target_axes(
     target: tuple[str, ...],
     add_missing: Collection[str],
 ) -> tuple[da.Array, list[str]]:
+    """Append length-one dimensions for target axes named in ``add_missing``.
+
+    Return the expanded array and the updated axis order; any other absent target axis is an error.
+    """
     allowed = set(_normalize_axes(tuple(add_missing), parameter="add_missing"))
     invalid = allowed.difference(target)
     if invalid:
@@ -113,17 +82,17 @@ def normalize_raster_axes(
     source_axes: Sequence[str],
     *,
     target_axes: Sequence[str],
-    selectors: Mapping[str, int] | None = None,
     add_missing: Collection[str] = (),
 ) -> da.Array:
-    """Select, add, and transpose explicitly named raster axes without computing pixels.
+    """Drop, add, and transpose explicitly named raster axes without computing pixels.
 
     Names are case-insensitive single letters. Readers may use a format's
     declared axis labels or an explicit reader-owned override; this helper does
-    not assign semantics to unfamiliar labels. Unwanted non-singleton axes
-    require explicit integer selectors; unwanted singleton axes may be dropped.
-    Missing target axes are added only when named in ``add_missing``. Both
-    source and target must contain the spatial axes ``x`` and ``y``.
+    not assign semantics to unfamiliar labels. Singleton source axes absent
+    from the target are dropped; a non-singleton one is an error, so no plane
+    is ever selected implicitly. Missing target axes are added only when named
+    in ``add_missing``. Both source and target must contain the spatial axes
+    ``x`` and ``y``.
 
     Parameters
     ----------
@@ -133,30 +102,24 @@ def normalize_raster_axes(
         File-declared axes in current array order.
     target_axes
         Required axes and their returned order.
-    selectors
-        Integer selections for source axes intentionally omitted from the
-        target. A selector can never silently select a retained axis.
     add_missing
         Target axes that may be inserted as length-one dimensions.
 
     Returns
     -------
     dask.array.Array
-        A lazy view built only from slicing, singleton insertion, and
+        A lazy view built only from singleton removal and insertion, and
         transposition.
 
     Raises
     ------
-    TypeError
-        If selector keys are not strings or selector values are not integers.
     ValueError
-        If axes are invalid, ambiguous, incomplete, or require an implicit
-        non-singleton selection.
+        If axes are invalid, ambiguous or incomplete, or a non-singleton source
+        axis is absent from the target.
     """
     source = _normalize_axes(source_axes, parameter="source_axes")
     target = _normalize_axes(target_axes, parameter="target_axes")
     _validate_axes_contract(data, source, target)
-    normalized_selectors = _normalize_selectors(selectors, source, target)
-    result, remaining = _select_source_axes(data, source, target, normalized_selectors)
+    result, remaining = _drop_source_axes(data, source, target)
     result, remaining = _add_target_axes(result, remaining, target, add_missing)
     return result.transpose(tuple(remaining.index(axis) for axis in target))

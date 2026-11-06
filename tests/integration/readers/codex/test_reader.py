@@ -16,6 +16,7 @@ from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Affine, BaseTransformation, get_transformation
 from xarray import DataArray, DataTree
 
@@ -28,6 +29,8 @@ from spatialdata_io.readers.codex import codex
 from tests.integration.readers.codex._fixtures import cell_frame, write_csv, write_fcs, write_image
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pytest_mock import MockerFixture
 
 
@@ -357,6 +360,58 @@ class TestCodex:
         assert raster.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(raster.data.compute(), image[0, 0])
 
+    @pytest.mark.parametrize(
+        ("photometric", "name", "data_axes", "expected"),
+        [
+            ("rgb", None, None, ["r", "g", "b"]),
+            ("rgb", "H&E", None, ["r", "g", "b"]),
+            ("rgb", "H&E", "YXC", ["r", "g", "b"]),
+            ("minisblack", None, None, [f"Channel:0:0:sample:{index}" for index in range(3)]),
+            ("minisblack", "H&E", "YXC", [f"H&E:sample:{index}" for index in range(3)]),
+        ],
+    )
+    def test_ome_samples_follow_the_declared_colour_model(
+        self, tmp_path: Path, photometric: str, name: str | None, data_axes: str | None, expected: list[str]
+    ) -> None:
+        """OME declares interleaved samples as one channel record; the TIFF declares whether they are RGB."""
+        write_csv(tmp_path / "cells.csv")
+        image = np.arange(8 * 10 * 3, dtype=np.uint8).reshape(8, 10, 3)
+        tifffile.imwrite(
+            tmp_path / "stitched.ome.tif",
+            image,
+            photometric=photometric,
+            planarconfig="contig",
+            metadata={"axes": "YXS"} if name is None else {"axes": "YXS", "Channel": {"Name": [name]}},
+        )
+        with tifffile.TiffFile(tmp_path / "stitched.ome.tif") as tiff:
+            assert tiff.series[0].axes == "YXS"
+            assert 'SamplesPerPixel="3"' in str(tiff.ome_metadata)
+
+        result = codex(tmp_path, data_axes=data_axes)
+        raster = result.images["images"]
+
+        assert raster.dims == ("c", "y", "x")
+        assert raster.dtype == np.uint8
+        assert raster.coords["c"].to_numpy().tolist() == expected
+        np.testing.assert_array_equal(raster.data.compute(), image.transpose(2, 0, 1))
+
+    def test_rgba_ome_samples_are_named_with_alpha(self, tmp_path: Path) -> None:
+        """ExtraSamples declares the fourth RGB sample as alpha."""
+        write_csv(tmp_path / "cells.csv")
+        image = np.arange(8 * 10 * 4, dtype=np.uint8).reshape(8, 10, 4)
+        tifffile.imwrite(
+            tmp_path / "stitched.ome.tif",
+            image,
+            photometric="rgb",
+            extrasamples=["assocalpha"],
+            metadata={"axes": "YXS"},
+        )
+
+        raster = codex(tmp_path).images["images"]
+
+        assert raster.coords["c"].to_numpy().tolist() == ["r", "g", "b", "a"]
+        np.testing.assert_array_equal(raster.data.compute(), image.transpose(2, 0, 1))
+
     def test_csv_multiple_batches_and_exact_identifiers(self, tmp_path: Path) -> None:
         """Keep sparse values and large lexical IDs exact across the production CSV batch boundary."""
         path = tmp_path / "cells.csv"
@@ -379,6 +434,16 @@ class TestCodex:
         ]
         np.testing.assert_array_equal(table.X[[0, 10_000], :].toarray(), [[1, 0], [1.25, 0]])
         assert table.X.nnz == 10_001
+
+    @pytest.mark.parametrize("region", ["table", "reg 1"])
+    def test_region_must_name_a_shapes_element(self, tmp_path: Path, region: str) -> None:
+        """A region that cannot name the shapes element fails as a malformed table."""
+        frame = cell_frame()
+        frame["region"] = region
+        write_csv(tmp_path / "cells.csv", frame)
+
+        with pytest.raises(ReaderFormatError, match="valid element name"):
+            codex(tmp_path)
 
     def test_float_lexeme_does_not_round_other_cell_id(self, tmp_path: Path) -> None:
         """Retain a large integer ID when another source ID uses an integral decimal token."""
@@ -434,9 +499,18 @@ class TestCodexCalibration:
         selected = sidecar if absolute else Path("experiment.json")
         result = codex(tmp_path, experiment_file=selected)
         np.testing.assert_array_equal(result.tables["table"].obsm["spatial"], [[10, 0.75], [1.25, 15], [6.5, 4]])
+        assert result.attrs == {
+            "spatialdata_io_reader": "codex",
+            "spatialdata_io_software_version": __version__,
+            "spatialdata_io_format_version": "1.7.0.6",
+        }
+        calibration = result.tables["table"].uns[POSITIONS_KEY]["coordinates"]["spatial"]["calibration"]["global"]
+        assert calibration.startswith("Caller-associated Akoya experiment")
         with pytest.raises(ValueError, match="conflicts"):
             codex(tmp_path, experiment_file=selected, pixel_size_um=0.6)
-        codex(tmp_path, experiment_file=selected, pixel_size_um=0.5)
+        matching = codex(tmp_path, experiment_file=selected, pixel_size_um=0.5)
+        assert matching.attrs["spatialdata_io_format_version"] == "1.7.0.6"
+        assert "spatialdata_io_format_version" not in codex(tmp_path, pixel_size_um=0.5).attrs
 
     def test_no_automatic_sidecar_or_image_association(self, tmp_path: Path) -> None:
         write_csv(tmp_path / "cells.csv")
@@ -450,7 +524,7 @@ class TestCodexCalibration:
 
     def test_mapping_requires_image(self, tmp_path: Path) -> None:
         write_csv(tmp_path / "cells.csv")
-        with pytest.raises(ValueError, match="requires an image"):
+        with pytest.raises(ValueError, match="require an image"):
             codex(tmp_path, image_to_table=Affine(np.eye(3), input_axes=("x", "y"), output_axes=("x", "y")))
 
     @pytest.mark.parametrize("storage", ["h5ad", "zarr", "spatialdata"])
@@ -547,3 +621,37 @@ class TestCodexCalibration:
 
         with np.errstate(under="ignore"), pytest.raises(ValueError, match="physical"):
             codex(tmp_path, pixel_size_um=1e-300)
+
+
+class TestCodexPathPolicy:
+    """Discovered artifacts follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        write_csv(tmp_path / "cells.csv")
+        write_image(tmp_path / "stitched.tif")
+        expected = codex(tmp_path)
+        link_outside_root(tmp_path / "cells.csv")
+        link_outside_root(tmp_path / "stitched.tif")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            codex(tmp_path)
+
+        assert_spatial_data_objects_are_identical(codex(tmp_path, path_policy="relaxed"), expected)
+
+    def test_relative_overrides_follow_the_path_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        write_csv(tmp_path / "first.csv")
+        write_csv(tmp_path / "second.csv")
+        write_image(tmp_path / "stitched.tif")
+        expected = codex(tmp_path, cell_table_file="second.csv", image_file="stitched.tif")
+        for name in ("second.csv", "stitched.tif"):
+            link_outside_root(tmp_path / name)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            codex(tmp_path, cell_table_file="second.csv", image_file="stitched.tif")
+
+        relaxed = codex(tmp_path, cell_table_file="second.csv", image_file="stitched.tif", path_policy="relaxed")
+        assert_spatial_data_objects_are_identical(relaxed, expected)

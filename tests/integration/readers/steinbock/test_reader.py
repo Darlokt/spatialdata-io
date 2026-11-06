@@ -14,6 +14,7 @@ from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataTree
 
@@ -22,6 +23,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.steinbock import steinbock
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
     from typing import Literal
 
@@ -662,3 +664,21 @@ class TestSteinbock:
         assert table.obsm["spatial_pixels"].dtype == np.dtype(dtype.lower())
         for column in ("centroid-0", "centroid-1"):
             pd.testing.assert_series_equal(table.obs[column], original.obs[column], check_exact=True)
+
+
+class TestSteinbockPathPolicy:
+    """Discovered artifacts follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, steinbock_dataset: SteinbockDataset, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        root = steinbock_dataset.root
+        expected = steinbock(root)
+        link_outside_root(root / "cells.h5ad")
+        link_outside_root(root / "ome" / "sample-a.ome.tiff")
+        link_outside_root(root / "masks_deepcell" / "sample-a.tiff")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            steinbock(root)
+
+        assert_spatial_data_objects_are_identical(steinbock(root, path_policy="relaxed"), expected)

@@ -11,7 +11,7 @@ import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import TiffMetadata
-from spatialdata_io.readers._utils.paths import ArtifactDirectory
+from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 from spatialdata_io.readers.macsima._channels import (
     NO_PADDING,
     ChannelOptions,
@@ -56,7 +56,7 @@ def _source(  # noqa: PLR0913, RUF100 - Each keyword varies one planned property
         exposure_ms=10.0,
     )
     return ChannelSource(
-        tiff=TiffMetadata(path=Path(path or f"/data/run/{name}_{cycle}.tif"), series=(), ome=None),
+        tiff=TiffMetadata(path=ArtifactFile(Path(path or f"/data/run/{name}_{cycle}.tif")), series=(), ome=None),
         software_version="1.1.1",
         major=1,
         metadata=metadata,

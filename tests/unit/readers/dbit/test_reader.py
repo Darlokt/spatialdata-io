@@ -164,12 +164,13 @@ class TestDbit:
         source.obs["pixel_id"] = [90, 91]
         mocker.patch("spatialdata_io.readers.dbit._tables.ad.read_h5ad", return_value=source)
 
-        def checked_linkage(
+        def checked_linkage(  # noqa: PLR0913 - mirrors the keyword-only linkage signature
             table: ad.AnnData,
             target: TableLinkage,
             /,
             *,
             context: ReaderErrorContext,
+            path: Path,
             expression_layers: tuple[str, ...],
             expected_instance_ids: Mapping[str, pd.Index],
         ) -> ad.AnnData:
@@ -181,6 +182,7 @@ class TestDbit:
                 table,
                 target,
                 context=context,
+                path=path,
                 expression_layers=expression_layers,
                 expected_instance_ids=expected_instance_ids,
             )
@@ -221,12 +223,14 @@ class TestDbit:
         assert isinstance(quality, np.ndarray)
         np.testing.assert_allclose(quality, [[0.1, 0.2], [0.3, 0.4]])
 
-    def test_linkage_failure_preserves_artifact_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_linkage_failure_carries_table_context(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)
-        mocker.patch.object(dbit_reader, "parse_linked_table", side_effect=ValueError("injected linkage failure"))
+        table = ad.read_h5ad(tmp_path / "sample.h5ad")
+        table.X = np.full(table.shape, np.nan)
+        table.write_h5ad(tmp_path / "sample.h5ad")
 
-        with pytest.raises(ValueError, match="injected linkage failure") as caught:
+        with pytest.raises(ValueError, match="finite") as caught:
             dbit(tmp_path)
 
         notes = caught.value.__notes__
-        assert any("dbit" in note and str(tmp_path / "sample.h5ad") in note for note in notes)
+        assert any("dbit" in note and str((tmp_path / "sample.h5ad").resolve()) in note for note in notes)

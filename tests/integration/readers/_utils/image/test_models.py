@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from dask.callbacks import Callback
 from spatialdata.models import Image2DModel, Labels2DModel
 
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
 from tests.integration.readers._utils.image.conftest import TiffOptions
 
@@ -13,6 +14,9 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from tests.integration.readers._utils.image.conftest import TiffFactory
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 class TestModelComposition:
@@ -27,7 +31,9 @@ class TestModelComposition:
             cyx_data,
             TiffOptions(compression="deflate", tile=(16, 16)),
         )
-        image_result = read_tiff(inspect_tiff(image_path), series=0, level=0)
+        image_result = read_tiff(
+            inspect_tiff(image_path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
         image = normalize_raster_axes(
             image_result.data,
             image_result.axes,
@@ -37,7 +43,9 @@ class TestModelComposition:
             cyx_data[0],
             TiffOptions(name="labels.tif", rowsperstrip=5, axes="YX"),
         )
-        labels_result = read_tiff(inspect_tiff(labels_path), series=0, level=0)
+        labels_result = read_tiff(
+            inspect_tiff(labels_path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
         labels = normalize_raster_axes(
             labels_result.data,
             labels_result.axes,

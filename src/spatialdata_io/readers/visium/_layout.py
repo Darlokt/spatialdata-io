@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.paths import (
@@ -12,15 +13,18 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
-    optional_directory,
-    optional_file,
+    optional_metadata_directory,
+    optional_metadata_file,
     optional_unique_path,
     require_caller_directory,
     require_caller_file,
-    require_directory,
-    require_file,
+    require_metadata_directory,
+    require_metadata_file,
 )
 from spatialdata_io.readers.visium._schemas import PositionFormat, classify_position_row
+
+if TYPE_CHECKING:
+    from spatialdata_io.readers._utils.paths import PathPolicy
 
 FILTERED_H5 = "filtered_feature_bc_matrix.h5"
 FILTERED_MTX = "filtered_feature_bc_matrix"
@@ -122,6 +126,15 @@ def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | No
     )
 
 
+def _require_mtx_members(root: DatasetRoot, counts: MtxCounts) -> MtxCounts:
+    """Apply the root's path policy to the three discovered files that the MEX reader opens."""
+    extension = ".gz" if counts.compressed else ""
+    for name in ("matrix.mtx", "barcodes.tsv", "features.tsv"):
+        member = counts.path / f"{counts.prefix or ''}{name}{extension}"
+        require_metadata_file(root, member, context=_context("count matrix"))
+    return counts
+
+
 def _explicit_counts(root: DatasetRoot, source: str | Path) -> CountsLayout:
     """Validate and interpret a caller-selected count source."""
     source_path = Path(source).expanduser()
@@ -138,47 +151,47 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
     if source is not None:
         return _explicit_counts(root, source)
 
-    standard_h5 = optional_file(root / FILTERED_H5, context=_context("count matrix"))
+    standard_h5 = optional_metadata_file(root, FILTERED_H5, context=_context("count matrix"))
     if standard_h5 is not None:
         return H5Counts(path=standard_h5, filename_prefix=None)
 
-    standard_mtx = optional_directory(root / FILTERED_MTX, context=_context("count matrix"))
+    standard_mtx = optional_metadata_directory(root, FILTERED_MTX, context=_context("count matrix"))
     if standard_mtx is not None:
-        return _inspect_mtx_directory(standard_mtx, filename_prefix=None)
+        return _require_mtx_members(root, _inspect_mtx_directory(standard_mtx, filename_prefix=None))
 
     h5_candidate = optional_unique_path(
-        root.glob(f"*_{FILTERED_H5}"),
+        root.path.glob(f"*_{FILTERED_H5}"),
         context=_context("legacy prefixed HDF5 count matrix"),
-        search_path=root,
+        search_path=root.path,
     )
     mtx_candidate = optional_unique_path(
-        root.glob(f"*_{FILTERED_MTX}"),
+        root.path.glob(f"*_{FILTERED_MTX}"),
         context=_context("legacy prefixed MEX count matrix"),
-        search_path=root,
+        search_path=root.path,
     )
     if h5_candidate is not None and mtx_candidate is not None:
         raise ReaderFormatError(
             context=_context("count matrix"),
             found=f"both {h5_candidate.name!r} and {mtx_candidate.name!r}",
             expected="one legacy prefixed count source",
-            path=root,
+            path=root.path,
         )
 
     if h5_candidate is not None:
         prefix = h5_candidate.name[: -len(f"_{FILTERED_H5}")]
         return H5Counts(
-            path=require_file(h5_candidate, context=_context("count matrix")),
+            path=require_metadata_file(root, h5_candidate, context=_context("count matrix")),
             filename_prefix=prefix,
         )
 
     if mtx_candidate is not None:
         prefix = mtx_candidate.name[: -len(f"_{FILTERED_MTX}")]
-        directory = require_directory(mtx_candidate, context=_context("count matrix"))
-        return _inspect_mtx_directory(directory, filename_prefix=prefix)
+        directory = require_metadata_directory(root, mtx_candidate, context=_context("count matrix"))
+        return _require_mtx_members(root, _inspect_mtx_directory(directory, filename_prefix=prefix))
 
     # Preserve a precise path exception for the required default artifact.
     return H5Counts(
-        path=require_file(root / FILTERED_H5, context=_context("count matrix")),
+        path=require_metadata_file(root, FILTERED_H5, context=_context("count matrix")),
         filename_prefix=None,
     )
 
@@ -212,28 +225,29 @@ def _discover_positions(root: DatasetRoot, override: str | Path | None) -> tuple
     if override is not None:
         path = require_caller_file(root, override, context=_context("tissue positions"))
     else:
-        current = optional_file(root / "spatial" / POSITIONS_V2, context=_context("tissue positions"))
-        path = current or require_file(root / "spatial" / POSITIONS_V1, context=_context("tissue positions"))
+        current = optional_metadata_file(root, f"spatial/{POSITIONS_V2}", context=_context("tissue positions"))
+        path = current or require_metadata_file(root, f"spatial/{POSITIONS_V1}", context=_context("tissue positions"))
 
     return path, _position_format(path)
 
 
-def discover_layout(
+def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public artifact selections.
     path: str | Path,
     *,
     counts_source: str | Path | None,
     fullres_image_file: str | Path | None,
     positions_file: str | Path | None,
     scale_factors_file: str | Path | None,
+    path_policy: PathPolicy = "strict",
 ) -> VisiumLayout:
     """Discover exactly one supported single-library Visium layout."""
-    root = normalize_dataset_root(path, context=_context("dataset root"))
-    spatial = optional_directory(root / "spatial", context=_context("spatial output"))
+    root = normalize_dataset_root(path, context=_context("dataset root"), path_policy=path_policy)
+    spatial = optional_metadata_directory(root, "spatial", context=_context("spatial output"))
     positions, position_format = _discover_positions(root, positions_file)
     scale_factors = (
         require_caller_file(root, scale_factors_file, context=_context("scale factors"))
         if scale_factors_file is not None
-        else require_file(root / "spatial" / SCALE_FACTORS, context=_context("scale factors"))
+        else require_metadata_file(root, f"spatial/{SCALE_FACTORS}", context=_context("scale factors"))
     )
 
     fullres = (
@@ -241,8 +255,16 @@ def discover_layout(
         if fullres_image_file is not None
         else None
     )
-    hires = None if spatial is None else optional_file(spatial / HIRES_IMAGE, context=_context("hires image"))
-    lowres = None if spatial is None else optional_file(spatial / LOWRES_IMAGE, context=_context("lowres image"))
+    hires = (
+        None
+        if spatial is None
+        else optional_metadata_file(root, spatial / HIRES_IMAGE, context=_context("hires image"))
+    )
+    lowres = (
+        None
+        if spatial is None
+        else optional_metadata_file(root, spatial / LOWRES_IMAGE, context=_context("lowres image"))
+    )
 
     return VisiumLayout(
         counts=_discover_counts(root, counts_source),

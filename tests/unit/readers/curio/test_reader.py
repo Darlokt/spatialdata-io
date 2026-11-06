@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
-import pandas as pd
 import pytest
 from scipy import sparse
 
@@ -25,26 +24,24 @@ class TestCurio:
     """Exercise final normalization and contextual parser failures."""
 
     @pytest.mark.parametrize(
-        "suffix",
+        ("suffix", "artifact"),
         [
-            "cluster_assignment.txt",
-            "Metrics.csv",
-            "variable_features_clusters.txt",
-            "variable_features_spatial_moransi.txt",
+            ("cluster_assignment.txt", "cluster assignments"),
+            ("Metrics.csv", "metrics"),
+            ("variable_features_clusters.txt", "cluster features"),
+            ("variable_features_spatial_moransi.txt", "Moran features"),
         ],
     )
-    def test_empty_enrichment_context(self, tmp_path: Path, suffix: str) -> None:
+    def test_empty_enrichment_context(self, tmp_path: Path, suffix: str, artifact: str) -> None:
         write_curio(tmp_path)
         path = tmp_path / f"sample_{suffix}"
         path.write_text("", encoding="utf-8")
 
-        with pytest.raises((pd.errors.EmptyDataError, ReaderFormatError)) as raised:
+        with pytest.raises(ReaderFormatError) as raised:
             curio(tmp_path)
 
-        details = str(raised.value) + " ".join(getattr(raised.value, "__notes__", []))
-
-        assert "curio" in details
-        assert str(path) in details
+        assert raised.value.context.artifact == artifact
+        assert raised.value.path == path
 
     def test_dense_expression_becomes_sparse(self, tmp_path: Path) -> None:
         write_curio(tmp_path)

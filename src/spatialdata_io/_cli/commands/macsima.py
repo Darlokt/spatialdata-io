@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         split_threshold_nuclei_channel: int | None
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        path_policy: Literal["strict", "relaxed"]
 
 
 def _split_threshold(_context: click.Context, _parameter: click.Parameter, value: str) -> int | None:
@@ -71,6 +72,7 @@ def _split_threshold(_context: click.Context, _parameter: click.Parameter, value
 )
 @scale_factors_option
 @chunks_option
+@path_policy_option
 def macsima_command(input_path: Path, output_path: Path, **options: Unpack[_MacsimaOptions]) -> None:
     """Read processed MACSima exports, then write the SpatialData store."""
     from spatialdata_io.readers.macsima import macsima  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
@@ -85,5 +87,6 @@ def macsima_command(input_path: Path, output_path: Path, **options: Unpack[_Macs
         split_threshold_nuclei_channel=options["split_threshold_nuclei_channel"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
+        path_policy=options["path_policy"],
     )
     result.write(output_path)

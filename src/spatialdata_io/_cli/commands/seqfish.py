@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         rois: tuple[str, ...]
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        path_policy: Literal["strict", "relaxed"]
 
 
 @click.command(name="seqfish")
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     show_default=True,
     help="Keep invalid polygon topology, drop affected cells, or fail.",
 )
+@path_policy_option
 def seqfish_command(input_path: Path, output_path: Path, **options: Unpack[_SeqfishOptions]) -> None:
     """Read seqFISH, then write the requested SpatialData store."""
     from spatialdata_io.readers.seqfish import seqfish  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
@@ -70,5 +72,6 @@ def seqfish_command(input_path: Path, output_path: Path, **options: Unpack[_Seqf
         rois=options["rois"] or None,
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
+        path_policy=options["path_policy"],
     )
     result.write(output_path)

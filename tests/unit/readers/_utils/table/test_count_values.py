@@ -9,7 +9,7 @@ import pytest
 from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table import count_accumulation_dtype, finalize_count_arrays
+from spatialdata_io.readers._utils.table import _count_values, count_accumulation_dtype, finalize_count_arrays
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -149,11 +149,32 @@ class TestFinalizeCountArrays:
         with pytest.raises(ReaderFormatError, match="negative"):
             finalize_count_arrays((source,), context=_CONTEXT)
 
-    def test_empty_family_and_wrong_container(self) -> None:
+    def test_empty_family(self) -> None:
         with pytest.raises(ValueError, match="at least one"):
             finalize_count_arrays((), context=_CONTEXT)
-        with pytest.raises(TypeError, match="CSR sparse arrays"):
-            finalize_count_arrays((cast("sparse.csr_array", sparse.csr_matrix([[1]])),), context=_CONTEXT)
+
+    @pytest.mark.parametrize("dtype", ["int64", "uint64", "float64", "longdouble"])
+    def test_skips_elementwise_casts_for_values_within_exact_integer_range(
+        self, dtype: str, mocker: MockerFixture
+    ) -> None:
+        cast_check = mocker.spy(_count_values, "_exact_float_cast")
+        source = sparse.csr_array(np.array([[0, 1, 2**24]], dtype=dtype))
+
+        (result,) = finalize_count_arrays((source,), context=_CONTEXT)
+
+        cast_check.assert_not_called()
+        assert result.dtype == np.dtype(np.float32)
+        np.testing.assert_array_equal(result.data, [1, 2**24])
+
+    def test_checks_only_float32_between_exact_integer_ranges(self, mocker: MockerFixture) -> None:
+        cast_check = mocker.spy(_count_values, "_exact_float_cast")
+        exact = sparse.csr_array(np.array([[2**25]], dtype=np.int64))
+        inexact = sparse.csr_array(np.array([[2**24 + 1]], dtype=np.int64))
+
+        assert finalize_count_arrays((exact,), context=_CONTEXT)[0].dtype == np.dtype(np.float32)
+        assert finalize_count_arrays((inexact,), context=_CONTEXT)[0].dtype == np.dtype(np.float64)
+
+        assert [call.args[1] for call in cast_check.call_args_list] == [np.dtype(np.float32)] * 2
 
     def test_noncanonical_and_unsupported_values(self) -> None:
         source = sparse.csr_array((np.array([1, 2]), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))

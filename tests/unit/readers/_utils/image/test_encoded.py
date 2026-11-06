@@ -10,6 +10,7 @@ import pytest
 from spatialdata_io.readers._utils.errors import RasterFormatError
 from spatialdata_io.readers._utils.image._encoded import encoded_result, validate_decoded_size
 from spatialdata_io.readers._utils.image._types import _EncodedHeader
+from spatialdata_io.readers._utils.paths import ArtifactFile
 
 
 class TestValidateDecodedSize:
@@ -19,7 +20,8 @@ class TestValidateDecodedSize:
         metadata = _EncodedHeader(
             shape=(5, 7, 4),
             dtype=np.dtype(np.uint16),
-            axes=("y", "x", "c"),
+            axes=("y", "x", "s"),
+            color="rgba",
         )
 
         validate_decoded_size(metadata)
@@ -30,6 +32,7 @@ class TestValidateDecodedSize:
             shape=shape,
             dtype=np.dtype(np.uint8),
             axes=("y", "x"),
+            color=None,
         )
 
         with pytest.raises(RasterFormatError, match="positive"):
@@ -40,6 +43,7 @@ class TestValidateDecodedSize:
             shape=(np.iinfo(np.intp).max, 2),
             dtype=np.dtype(np.uint8),
             axes=("y", "x"),
+            color=None,
         )
 
         with pytest.raises(RasterFormatError, match="overflows"):
@@ -51,13 +55,15 @@ class TestEncodedResult:
 
     def test_builds_one_source_chunk_without_opening_path(self) -> None:
         metadata = _EncodedHeader(
-            shape=(5, 7),
+            shape=(5, 7, 3),
             dtype=np.dtype(np.uint8),
-            axes=("y", "x"),
+            axes=("y", "x", "s"),
+            color="rgb",
         )
 
-        result = encoded_result(Path("/not/opened/image.png"), "png", metadata)
+        result = encoded_result(ArtifactFile(Path("/not/opened/image.png")), "png", metadata)
 
-        assert result.axes == metadata.axes
-        assert result.data.chunks == ((5,), (7,))
+        assert result.axes == ("y", "x", "s")
+        assert result.color == "rgb"
+        assert result.data.chunks == ((5,), (7,), (3,))
         assert len(result.data.dask) == 1

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Self, cast, override
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.metadata import _json, read_json_object
+from spatialdata_io.readers._utils.metadata import _json, parse_json_object, read_json_object
 from spatialdata_io.readers._utils.paths import require_file
 
 if TYPE_CHECKING:
@@ -175,6 +175,26 @@ class TestReadJsonObject:
 
         assert isinstance(raised.value.__cause__, ValueError)
 
+    @pytest.mark.parametrize("token", ["1" + "0" * 400, "-1" + "0" * 400])
+    def test_rejects_integers_beyond_the_float_range(self, tmp_path: Path, token: str) -> None:
+        path = _artifact(tmp_path, f'{{"value":{token}}}'.encode())
+
+        with pytest.raises(ReaderFormatError, match="finite float range") as raised:
+            read_json_object(path, context=_CONTEXT)
+
+        assert isinstance(raised.value.__cause__, ValueError)
+
+    def test_keeps_exact_large_integers_within_the_float_range(self, tmp_path: Path) -> None:
+        path = _artifact(tmp_path, b'{"value":9007199254740993}')
+
+        assert read_json_object(path, context=_CONTEXT) == {"value": 2**53 + 1}
+
+    def test_rejects_integer_strings_beyond_the_conversion_limit(self, tmp_path: Path) -> None:
+        path = _artifact(tmp_path, b'{"value":' + b"1" * 5000 + b"}")
+
+        with pytest.raises(ReaderFormatError, match="numeric value beyond the parser limit"):
+            read_json_object(path, context=_CONTEXT)
+
     @pytest.mark.parametrize(
         "payload",
         [
@@ -274,3 +294,27 @@ class TestReadJsonObject:
             assert stream.close_attempted
         if stage == "read":
             assert stream.closed
+
+
+class TestParseJsonObject:
+    """Apply the strict object contract to text embedded in another container."""
+
+    def test_returns_owned_object(self, tmp_path: Path) -> None:
+        assert parse_json_object('{"a": [1, {"b": 2.5}]}', context=_CONTEXT, path=tmp_path) == {"a": [1, {"b": 2.5}]}
+
+    @pytest.mark.parametrize(
+        ("text", "found"),
+        [
+            ('{"a":1,"a":2}', "duplicate object name"),
+            ('{"a":NaN}', "nonstandard non-finite"),
+            ('{"a":1e400}', "finite float range"),
+            ("[]", "top-level JSON array"),
+            ("{", "malformed JSON at line 1, column 2"),
+        ],
+    )
+    def test_rejects_contract_violations_with_artifact_context(self, tmp_path: Path, text: str, found: str) -> None:
+        with pytest.raises(ReaderFormatError, match=found) as raised:
+            parse_json_object(text, context=_CONTEXT, path=tmp_path)
+
+        assert raised.value.context == _CONTEXT
+        assert raised.value.path == tmp_path

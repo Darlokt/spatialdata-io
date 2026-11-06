@@ -35,6 +35,16 @@ class TestReaderErrorContext:
             "reader 'visium', artifact 'counts'"
         )
 
+    def test_describes_failure(self, tmp_path: Path) -> None:
+        context = ReaderErrorContext(reader="curio", artifact="counts")
+
+        assert context.describe_failure(found="two", expected="one", path=tmp_path) == (
+            f"reader 'curio', artifact 'counts', path {str(tmp_path)!r}: expected one; found two."
+        )
+        assert context.describe_failure(found="two", expected="one") == (
+            "reader 'curio', artifact 'counts': expected one; found two."
+        )
+
     def test_is_frozen_and_slotted(self) -> None:
         context = ReaderErrorContext(reader="reader", artifact="artifact")
 

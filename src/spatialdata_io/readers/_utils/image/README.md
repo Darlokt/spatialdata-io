@@ -13,7 +13,9 @@ The package owns:
 - path-based, serializable Dask graphs;
 - task-local file and store ownership;
 - delayed PNG and JPEG decoding;
-- explicit, lazy axis selection and normalization.
+- explicit, lazy axis selection and normalization;
+- the colour model each source declares for its samples, and the one rule
+  that labels raster channels from it or from OME metadata.
 
 A vendor reader owns:
 
@@ -21,7 +23,8 @@ A vendor reader owns:
 - choosing a file, TIFF series, and pyramid level;
 - interpreting or overriding source axes;
 - selecting channels, time points, and z planes;
-- stacking files and assigning channel names;
+- stacking files, and deciding which source axis becomes the channel axis and
+  whether OME channel records describe it;
 - image-versus-label semantics;
 - transformations, coordinate systems, and SpatialData model construction;
 - requested/model rechunking after the native read layer.
@@ -35,15 +38,20 @@ with one meaning, validated by `make_raster_options()`:
   generated pyramid level, applied equally to images and labels;
   `DEFAULT_SCALE_FACTORS = ()` returns a single scale.
 - `chunks`: one positive size for every axis or three `c, y, x` sizes; labels
-  use the `y, x` sizes. `DEFAULT_CHUNKS = (1, DEFAULT_TILE_SIZE,
-  DEFAULT_TILE_SIZE)` gives one channel per chunk and square 1024-pixel tiles.
+  use the `y, x` sizes. `RasterOptions.chunks` always holds the three sizes.
+  `DEFAULT_CHUNKS = (1, 1024, 1024)` gives one channel per chunk and square
+  1024-pixel tiles.
 
-Readers use the constants as signature defaults, so a default changes in one
-place. `RasterOptions.image_chunks()` and `label_chunks()` return explicit
+Readers import the constants directly from `spatialdata_io._raster_defaults`
+as signature defaults, so a default changes in one place.
+`RasterOptions.image_chunks()` and `label_chunks()` return explicit
 per-axis sizes for the SpatialData model: without them the multiscale image
 builder rechunks to 256-pixel tiles and merges all channels. Square is only
-the default; any regular chunk grid is valid Zarr. Pyramid-extent and
-label-dtype limits stay with the reader.
+the default; any regular chunk grid is valid Zarr.
+`RasterOptions.validate_image_pyramid()` rejects factors that would shrink an
+element below one pixel, and `validate_label_pyramid()` additionally rejects
+generated levels of labels wider than 32 bits, whose IDs SpatialData's
+downsampling can round. Readers name the element in the message.
 
 ## Public workflow
 
@@ -56,22 +64,30 @@ from spatialdata.models import Image2DModel
 from spatialdata_io.readers._utils.image import (
     inspect_tiff,
     normalize_raster_axes,
+    ome_channel_names,
+    raster_channel_names,
     read_tiff,
 )
 
-metadata = inspect_tiff(path)
-raster = read_tiff(metadata, series=0, level=0)
+metadata = inspect_tiff(path, context=context)
+raster = read_tiff(metadata, series=0, level=0, context=context)
+axes = tuple(axis.lower() for axis in raster.axes)
 data = normalize_raster_axes(
     raster.data,
-    raster.axes,
+    tuple("c" if axis == "s" else axis for axis in axes),
     target_axes=("c", "y", "x"),
-    add_missing={"c"},
+    add_missing=("c",),
 )
-image = Image2DModel.parse(data, dims=("c", "y", "x"), rgb=None)
+samples = "s" in axes
+ome = ome_channel_names(metadata, series=0, count=int(data.shape[0]), samples=samples, context=context)
+names = raster_channel_names(raster.color, samples=samples, ome=ome)
+image = Image2DModel.parse(data, dims=("c", "y", "x"), c_coords=names, rgb=False)
 ```
 
 `series` and `level` are intentionally required. The utility must not silently
-choose the first image in a scientific file that contains several images.
+choose the first image in a scientific file that contains several images. An
+out-of-range series or level raises `IndexError` with a note naming the reader
+context and the TIFF path.
 
 PNG and JPEG have no selectable series or levels, so their entry points combine
 header inspection with lazy graph construction. Ancillary PNG and JPEG payloads
@@ -80,17 +96,21 @@ are skipped without materialization; no total header-size ceiling is imposed:
 ```python
 from spatialdata_io.readers._utils.image import read_jpeg, read_png
 
-png = read_png(png_path)
-jpeg = read_jpeg(jpeg_path)
+png = read_png(png_path, context=context)
+jpeg = read_jpeg(jpeg_path, context=context)
 ```
 
-All three readers return `LazyRaster(data, axes)`. Shape and dtype are available
-from `data.shape` and `data.dtype`; the result does not duplicate them.
+All three readers return `LazyRaster(data, axes, color)`. Shape and dtype are
+available from `data.shape` and `data.dtype`; the result does not duplicate
+them. Interleaved samples are the axis `s` for every format: TIFF `S`, and the
+gray+alpha, RGB or RGBA components of PNG and JPEG. `color` is the colour model
+the source declares for that axis (see below).
 
-Raster paths are expanded, strictly resolved to canonical regular-file targets,
-and then stored in delayed tasks. Layout readers may validate paths earlier via
-the shared path package, but this boundary independently protects its direct
-entry points and never stores a symlink alias in a graph.
+Entry points take an `ArtifactFile` already validated by the shared path
+package and do not resolve or kind-check it again; the canonical path is
+stored in delayed tasks. Every entry point takes the reader's
+`ReaderErrorContext`: inspection failures keep their type and gain a note
+naming the reader, artifact and path.
 
 Malformed encoded raster storage raises `RasterFormatError` from
 `spatialdata_io.readers._utils.errors`. The error type is centralized with other
@@ -101,15 +121,15 @@ failures retain their precise `TypeError` or `ValueError` contracts.
 ## TIFF and OME metadata
 
 `TiffMetadata.series` describes the arrays that `tifffile` can read. Every
-level records its actual `shape`, `dtype`, declared `axes`, and `native_chunks`.
-These are storage facts and may differ between pyramid levels.
+level records its actual `shape`, `dtype`, declared `axes`, `native_chunks` and
+samples `color`. These are storage facts and may differ between pyramid levels.
 
 For OME-TIFF, `TiffMetadata.ome` contains the complete parsed `ome_types` model.
 It provides logical XYZCT dimensions, physical sizes and units (including Z),
 channels, planes, timing, acquisition metadata, and structured annotations:
 
 ```python
-metadata = inspect_tiff(path)
+metadata = inspect_tiff(path, context=context)
 if metadata.ome is not None:
     pixels = metadata.ome.images[0].pixels
     logical_size = (
@@ -165,10 +185,11 @@ are inspected eagerly with a fixed byte bound, but pixels are decoded in one
 delayed whole-frame task. Computing even a small selection therefore decodes the
 whole frame.
 
-Axis normalization performs only lazy slicing, singleton insertion, and
-transposition. It never guesses an axis from dimension size. A non-singleton
-axis omitted from the target requires an explicit selector, and a missing target
-axis requires explicit permission to insert it. Axis labels are abstract
+Axis normalization performs only lazy singleton removal, singleton insertion,
+and transposition. It never guesses an axis from dimension size. A
+non-singleton axis omitted from the target is an error, so no plane is ever
+selected implicitly, and a missing target axis requires explicit permission to
+insert it. Axis labels are abstract
 single-letter names at this boundary: the calling reader must interpret unknown
 TIFF axes or replace them with an explicit, validated format-specific override.
 
@@ -215,17 +236,65 @@ Reader modules must not:
 - pass arbitrary decoder keyword mappings through public reader APIs;
 - introduce alternate TIFF backends or compatibility paths.
 
-## OME physical pixel sizes
+## OME physical pixel sizes and channel identities
 
 `ome_pixel_sizes_um(metadata, series=..., axes=..., context=...)` returns one
 entry per requested axis: the declared OME length converted from µm, nm or mm
-to finite positive micrometres, or `None` when that size is absent. Every entry
+to finite positive micrometres with one correctly rounded operation (9 nm is
+exactly `0.009`), or `None` when that size is absent. Every entry
 is `None` without OME metadata. A malformed present value or unsupported unit
 fails even when other sizes are absent, so partial declarations can still be
 compared between linked artifacts.
 
-Generic base images, ISS aligned pairs, MCMICRO local grids and Steinbock
-exports share this normalization. Readers decide whether an incomplete set
+Generic base images, ISS aligned pairs, MACSima channels, MCMICRO local grids,
+seqFISH and Steinbock exports share this normalization. Readers decide whether an incomplete set
 calibrates anything and continue to own axis association, selected
 series/levels, dimensions, cross-artifact agreement, registration and
 transformations. The helper assigns no frame and reads no pixels.
+
+`ome_channel_names(metadata, series=..., count=..., samples=..., context=...)`
+returns one OME identifier per raster channel. Each OME channel is identified by
+its name when all names are nonempty and unique, otherwise by its OME ID, which
+must then be unique. OME declares an interleaved RGB image as one `Channel`
+with `SamplesPerPixel="3"`, which `tifffile` exposes as a samples axis `S`.
+The reader states with `samples` whether the raster's channel axis is that
+samples axis. If it is, every OME channel expands to one identifier per sample,
+`<identifier>:sample:<index>` (an unnamed RGB channel gives
+`Channel:0:0:sample:0` to `Channel:0:0:sample:2`); these keep the source
+record and sample order without assuming a colour interpretation, and are
+unique whenever the channel identifiers are. A channel or sample count that
+differs from the raster raises instead of falling back to positions. It returns
+`None` without OME metadata. CODEX, DBiT, ISS, seqFISH and Steinbock use it;
+readers decide which source axis becomes the raster channel axis.
+
+## Channel labels from declared colour
+
+SpatialData labels colour channels `r, g, b(, a)`, and viewers composite images
+with those labels. A raster gets them only from its file's own declaration of
+the samples, exposed as `LazyRaster.color` and `TiffLevelMetadata.color`
+(`"rgb"`, `"rgba"` or `None`):
+
+| Source | `"rgb"` | `"rgba"` |
+| --- | --- | --- |
+| TIFF | `PhotometricInterpretation` RGB without `ExtraSamples`, or JPEG-compressed YCbCr with interleaved samples (decoded to RGB) | RGB with one `ExtraSamples` value of associated (1) or unassociated (2) alpha |
+| PNG | colour type 2 (RGB) or 3 (palette) | colour type 6, or type 2 or 3 with `tRNS` |
+| JPEG | three components (decoded to RGB) | never |
+
+Everything else declares no colour: `MinIsBlack`/`MinIsWhite` samples, RGB with
+an unspecified (0) or a second extra sample, uncompressed YCbCr, palette TIFF,
+grayscale and grayscale+alpha PNG, and one-component JPEG.
+
+`raster_channel_names(color, samples=..., ome=...)` applies the single
+labelling rule; readers must not reimplement it, infer RGB from a channel
+count or dtype, or pass `rgb=None` to SpatialData:
+
+1. `samples` (the raster's channel axis is the source's `s` axis) and a declared
+   `color`: `["r", "g", "b"]` or `["r", "g", "b", "a"]`;
+2. otherwise `ome`, the result of `ome_channel_names` when the reader has
+   established that the channel axis corresponds to the OME channels;
+3. otherwise `None`, which gives positional coordinates `0..n-1`.
+
+OME identifiers are computed and validated before the rule is applied, so
+corrupt OME channel records fail even when a colour declaration supplies the
+names. CODEX, DBiT, ISS and the generic image reader use the rule; pass
+`rgb=False` with the returned names to `Image2DModel.parse`.

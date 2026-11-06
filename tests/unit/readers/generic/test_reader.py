@@ -54,7 +54,7 @@ class TestGeneric:
             path,
             data_axes="YXC",
             coordinate_system="global",
-            tiff_series=0,
+            tiff_series=None,
             tiff_level=0,
             scale_factors=(),
             chunks=None,

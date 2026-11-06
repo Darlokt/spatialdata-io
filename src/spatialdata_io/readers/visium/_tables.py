@@ -85,7 +85,7 @@ def _read_counts(counts: CountsLayout, *, make_var_names_unique: bool) -> AnnDat
     """Read one validated count source and apply feature-name policy."""
     context = _context("count matrix")
     if isinstance(counts, H5Counts):
-        adata = read_10x_h5(counts.path, context=context, gex_only=False)
+        adata = read_10x_h5(counts.path, context=context)
         if make_var_names_unique:
             adata.var_names_make_unique()
         return adata
@@ -93,7 +93,6 @@ def _read_counts(counts: CountsLayout, *, make_var_names_unique: bool) -> AnnDat
     return read_10x_mtx(
         counts.path,
         context=context,
-        gex_only=False,
         make_unique=make_var_names_unique,
         prefix=counts.prefix,
         compressed=counts.compressed,

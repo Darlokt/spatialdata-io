@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 from typing import TYPE_CHECKING, cast
 
 import anndata as ad
@@ -13,6 +12,7 @@ import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
+from spatialdata_io.readers._utils.csv import read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -44,23 +44,9 @@ _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
 _MAX_BATCH_ROWS = 10_000
 
 
-def _read_header(path: ArtifactFile) -> list[str]:
-    """Read the first physical UTF-8 CSV record before interpreting names."""
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        header = handle.readline()
-    try:
-        columns = next(csv.reader([header], strict=True), list[str]())
-    except csv.Error as error:
-        raise schema_error(
-            path, found="malformed CSV header", expected="one consistently quoted header record"
-        ) from error
-    else:
-        return columns
-
-
 def read_feature_names(path: ArtifactFile) -> tuple[str, ...]:
     """Read only the count header, including blanks in exact source order."""
-    return count_columns(_read_header(path), path)
+    return count_columns(read_csv_header(path, context=ReaderErrorContext("merscope", path.name)), path)
 
 
 def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
@@ -75,7 +61,7 @@ def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
 
 def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[str, ...]]:
     """Stream exact counts, retaining only sparse blocks and required row identities."""
-    columns = _read_header(path)
+    columns = read_csv_header(path, context=ReaderErrorContext("merscope", path.name))
     features = count_columns(columns, path)
     rows_per_batch = max(1, min(_MAX_BATCH_ROWS, _BATCH_MEMORY_BYTES // (16 * len(features))))
     blocks: list[sparse.csr_array] = []
@@ -119,7 +105,7 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
 
 def _read_metadata(path: ArtifactFile) -> pd.DataFrame:
     """Read finite eager annotations once, preserving extra source fields as text."""
-    columns = metadata_columns(_read_header(path), path)
+    columns = metadata_columns(read_csv_header(path, context=ReaderErrorContext("merscope", path.name)), path)
     try:
         with path.open("rb") as handle:
             source = pacsv.read_csv(

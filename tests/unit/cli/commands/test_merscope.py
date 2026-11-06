@@ -43,6 +43,7 @@ class TestMerscopeCommand:
             invalid_geometries="keep",
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -96,6 +97,7 @@ class TestMerscopeCommand:
             invalid_geometries="keep",
             scale_factors=(2, 3),
             chunks=(1, 16, 32),
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 

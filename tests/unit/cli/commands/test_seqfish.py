@@ -41,6 +41,7 @@ class TestSeqfishCommand:
             rois=None,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -90,6 +91,7 @@ class TestSeqfishCommand:
             rois=("Roi2", "Roi1"),
             scale_factors=(2, 3),
             chunks=(1, 16, 32),
+            path_policy="strict",
         )
 
     def test_scalar_chunks(

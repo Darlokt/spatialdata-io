@@ -13,7 +13,8 @@ from dask import array as da
 from dask.callbacks import Callback
 from xarray import DataArray, DataTree
 
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, LazyRaster
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers._utils.image import LazyRaster
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium._geometry import VisiumTransforms, make_transforms

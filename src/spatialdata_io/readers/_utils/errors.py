@@ -53,6 +53,26 @@ class ReaderErrorContext:
             description += f", path {str(path)!r}"
         return description
 
+    def describe_failure(self, *, found: str, expected: str, path: Path | None = None) -> str:
+        """Return the stable message of a violated reader contract.
+
+        Parameters
+        ----------
+        found
+            Concise description of the observed state.
+        expected
+            Concise description of the required contract.
+        path
+            Optional artifact or search path associated with the failure.
+
+        Returns
+        -------
+        str
+            ``"<context>: expected <expected>; found <found>."``, shared by
+            :class:`ReaderFormatError` and contextual filesystem errors.
+        """
+        return f"{self.describe(path=path)}: expected {expected}; found {found}."
+
 
 class ReaderFormatError(ValueError):
     """A reader-declared layout, content, or schema contract was violated.
@@ -87,11 +107,12 @@ class ReaderFormatError(ValueError):
         expected: str,
         path: Path | None = None,
     ) -> None:
+        """Store the structured fields and render the stable contextual message."""
         self.context = context
         self.found = found
         self.expected = expected
         self.path = path
-        super().__init__(f"{context.describe(path=path)}: expected {expected}; found {found}.")
+        super().__init__(context.describe_failure(found=found, expected=expected, path=path))
 
     def __reduce__(self) -> tuple[object, tuple[ReaderErrorContext, str, str, Path | None], dict[str, object]]:
         """Return structured state for exception transport across processes."""
@@ -105,9 +126,9 @@ class ReaderFormatError(ValueError):
 class RasterFormatError(ValueError):
     """A raster source violates its declared storage-format contract.
 
-    This specialized type distinguishes malformed encoded raster content and
-    metadata from reader-layout and caller-option failures. It intentionally
-    remains a ``ValueError`` for compatibility with existing raster callers.
+    Raised by the shared raster boundary, which has no reader context, for
+    malformed or unsupported encoded content and metadata. Readers add their
+    context with :func:`add_reader_context` where they own the artifact.
     """
 
 
@@ -144,6 +165,7 @@ def _restore_reader_format_error(
     expected: str,
     path: Path | None,
 ) -> ReaderFormatError:
+    """Rebuild a ``ReaderFormatError`` from its pickled structured fields."""
     return ReaderFormatError(context=context, found=found, expected=expected, path=path)
 
 

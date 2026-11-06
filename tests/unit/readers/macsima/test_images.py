@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from pytest_mock import MockerFixture
 
-    from spatialdata_io.readers._utils.image.tiff._types import _TiffReadSpec
+    from spatialdata_io.readers._utils.image.tiff._dask import _TiffArray
 
 _DEFAULT = make_raster_options()
 
@@ -81,7 +81,7 @@ def _record_selections(mocker: MockerFixture) -> list[tuple[Path, tuple[slice, .
     reads: list[tuple[Path, tuple[slice, ...], int]] = []
     read_selection = tiff_dask._read_tiff_selection
 
-    def record(spec: _TiffReadSpec, selection: tuple[slice, ...]) -> NDArray[np.generic]:
+    def record(spec: _TiffArray, selection: tuple[slice, ...]) -> NDArray[np.generic]:
         result = read_selection(spec, selection)
         reads.append((spec.path, selection, result.nbytes))
         return result

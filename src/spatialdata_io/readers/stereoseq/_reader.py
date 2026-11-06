@@ -11,9 +11,10 @@ import pandas as pd
 from spatialdata import SpatialData
 from spatialdata.transformations import Scale, set_transformation
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import finalize_count_arrays
 from spatialdata_io.readers.stereoseq._analysis import read_analyses
@@ -147,6 +148,7 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
     image_roles: Sequence[Literal["registered", "mask", "tissue_cut", "distance_mask", "expression"]] = (),
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read independent SAW transcriptomic counts, clustering analysis and images.
 
@@ -204,6 +206,15 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         One positive size for every axis or three ``c, y, x`` sizes; by default
         one channel per chunk and square 1024-pixel tiles. Masks use the
         ``y, x`` sizes. Pixels remain lazy after return.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -298,11 +309,12 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
         adjusted_cell_counts_file=adjusted_cell_counts_file,
         analysis_files=analyses,
         image_roles=roles,
+        path_policy=path_policy,
     )
     square_counts = read_square(layout.square) if layout.square is not None else ()
     cell_counts = tuple(read_cells(source, read_borders=cell_geometry == "polygons") for source in layout.cells)
     products: tuple[SquareCounts | CellCounts, ...] = (*square_counts, *cell_counts)
-    _validate_frames(products, layout.sample_id, layout.root)
+    _validate_frames(products, layout.sample_id, layout.root.path)
 
     # Raw populations establish independent targets before any analysis is
     # matched against them; no analysis row order determines a raw identity.

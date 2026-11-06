@@ -17,6 +17,8 @@ from spatialdata_io.readers._utils.paths import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from spatialdata_io.readers._utils.paths import PathPolicy
+
 
 @dataclass(frozen=True, slots=True)
 class Selection:
@@ -99,7 +101,7 @@ def _roi_layout(root: DatasetRoot, name: str, selection: Selection) -> RoiLayout
     """Resolve exact artifacts; selected products cannot silently disappear."""
 
     def artifact(suffix: str) -> ArtifactFile:
-        """Keep discovered vendor paths inside their normalized dataset root."""
+        """Resolve discovered vendor paths under the root's path policy."""
         return require_metadata_file(root, f"{name}_{suffix}", context=ReaderErrorContext("seqfish", suffix))
 
     counts = artifact("CellxGene.csv")
@@ -115,20 +117,22 @@ def _roi_layout(root: DatasetRoot, name: str, selection: Selection) -> RoiLayout
     return RoiLayout(name, counts, cells, pixels, artifact("TranscriptList.csv") if selection.transcripts else None)
 
 
-def discover_layout(path: str | Path, selection: Selection) -> tuple[RoiLayout, ...]:
+def discover_layout(
+    path: str | Path, selection: Selection, *, path_policy: PathPolicy = "strict"
+) -> tuple[RoiLayout, ...]:
     """Inspect one directory and resolve the requested complete ROI groups."""
     context = ReaderErrorContext("seqfish", "ROI layout")
-    root = normalize_dataset_root(path, context=context)
+    root = normalize_dataset_root(path, context=context, path_policy=path_policy)
     names = {
         entry.name.removesuffix(suffix)
-        for entry in root.iterdir()
+        for entry in root.path.iterdir()
         for suffix in ("_CellCoordinates.csv", "_CellxGene.csv")
         if entry.name.endswith(suffix)
     }
     if not names or "" in names:
         raise ReaderFormatError(
             context=context,
-            path=root,
+            path=root.path,
             found="no valid ROI prefixes",
             expected="paired <ROI>_CellxGene/CellCoordinates.csv",
         )
@@ -136,6 +140,9 @@ def discover_layout(path: str | Path, selection: Selection) -> tuple[RoiLayout, 
     missing = set(requested).difference(names)
     if missing:
         raise ReaderFormatError(
-            context=context, path=root, found=f"unknown ROIs {sorted(missing)!r}", expected=f"ROIs in {sorted(names)!r}"
+            context=context,
+            path=root.path,
+            found=f"unknown ROIs {sorted(missing)!r}",
+            expected=f"ROIs in {sorted(names)!r}",
         )
     return tuple(_roi_layout(root, name, selection) for name in requested)

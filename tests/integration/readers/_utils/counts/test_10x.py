@@ -153,26 +153,8 @@ def _open_hdf5_sources() -> set[Path]:
 
 class TestRead10xH5:
     @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
-    def test_upstream_filtering_discards_unselected_entries(self, tmp_path: Path, values: tuple[float, float]) -> None:
-        """The boundary validates retained values, not source records removed by Scanpy."""
-        source = tmp_path / "unselected.h5"
-        _write_h5_v3(source)
-        with h5py.File(source, "r+") as handle:
-            data = _COUNTS.data.astype(np.float64)
-            data[:2] = values
-            del handle["matrix/data"]
-            handle.create_dataset("matrix/data", data=data)
-            handle["matrix/indices"][:2] = [1, 1]
-        table = read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT)
-        expression = _assert_canonical_sparse(table)
-        assert expression.shape == (4, 3)
-        assert expression[0:1].nnz == 0
-        np.testing.assert_array_equal(expression.data, [4.0, 5.0, 6.0])
-
-    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
-    @pytest.mark.parametrize(("genome", "gex_only"), [(None, False), (None, True), ("GRCh38", True)])
     def test_rejects_invalid_entries_before_duplicate_reduction(
-        self, tmp_path: Path, values: tuple[float, float], *, genome: str | None, gex_only: bool
+        self, tmp_path: Path, values: tuple[float, float]
     ) -> None:
         """Deliberately malformed HDF5 records must not become valid counts by summation."""
         source = tmp_path / "duplicates.h5"
@@ -185,7 +167,7 @@ class TestRead10xH5:
             handle["matrix/indices"][1] = 0
 
         with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
-            read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT, genome=genome, gex_only=gex_only)
+            read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT)
         assert source.resolve() not in _open_hdf5_sources()
 
     @pytest.mark.parametrize("value", [-1.0, 0.5])
@@ -198,40 +180,23 @@ class TestRead10xH5:
             del handle["matrix/data"]
             handle.create_dataset("matrix/data", data=values)
         with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
-            read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT, gex_only=False)
+            read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT)
 
-    @pytest.mark.parametrize(
-        ("genome", "gex_only", "selected"),
-        [
-            (None, False, (0, 1, 2, 3)),
-            (None, True, (0, 2, 3)),
-            ("GRCh38", False, (0, 1, 3)),
-            ("GRCh38", True, (0, 3)),
-        ],
-    )
-    # Pytest injects the boolean parameter from the explicit case table.
-    def test_v3_preserves_orientation_order_metadata_and_filtering(
-        self,
-        tmp_path: Path,
-        *,
-        genome: str | None,
-        gex_only: bool,
-        selected: tuple[int, ...],
-    ) -> None:
+    def test_v3_preserves_orientation_order_metadata_and_every_feature_type(self, tmp_path: Path) -> None:
         source = tmp_path / "matrix.h5"
         _write_h5_v3(source)
         path = require_file(source, context=_CONTEXT)
 
-        table = read_10x_h5(path, context=_CONTEXT, genome=genome, gex_only=gex_only)
+        table = read_10x_h5(path, context=_CONTEXT)
 
         expression = _assert_canonical_sparse(table)
-        _assert_sparse_equal(expression, _COUNTS[:, selected])
+        _assert_sparse_equal(expression, _COUNTS)
         assert tuple(table.obs_names) == _BARCODES
-        assert tuple(table.var_names) == tuple(_FEATURE_NAMES[index] for index in selected)
-        assert tuple(table.var["gene_ids"]) == tuple(_FEATURE_IDS[index] for index in selected)
-        assert tuple(table.var["feature_types"]) == tuple(_FEATURE_TYPES[index] for index in selected)
-        assert tuple(table.var["genome"]) == tuple(_GENOMES[index] for index in selected)
-        assert tuple(table.var["target_set"]) == tuple(("A", "protein", "B", "empty")[index] for index in selected)
+        assert tuple(table.var_names) == _FEATURE_NAMES
+        assert tuple(table.var["gene_ids"]) == _FEATURE_IDS
+        assert tuple(table.var["feature_types"]) == _FEATURE_TYPES
+        assert tuple(table.var["genome"]) == _GENOMES
+        assert tuple(table.var["target_set"]) == ("A", "protein", "B", "empty")
         assert "spatial" not in table.uns
         assert source.resolve() not in _open_hdf5_sources()
 
@@ -240,43 +205,12 @@ class TestRead10xH5:
         _write_h5_v3(source)
         path = require_file(source, context=_CONTEXT)
 
-        table = read_10x_h5(path, context=_CONTEXT, gex_only=False)
+        table = read_10x_h5(path, context=_CONTEXT)
         source.unlink()
 
         expression = _assert_canonical_sparse(table)
         _assert_sparse_equal(expression, _COUNTS)
         assert tuple(table.obs_names) == _BARCODES
-
-    def test_v3_supports_filtering_to_zero_features(self, tmp_path: Path) -> None:
-        source = tmp_path / "no-gex.h5"
-        _write_h5_v3(source)
-        with h5py.File(source, "r+") as file:
-            file["matrix/features/feature_type"][:] = np.asarray([b"Antibody Capture"] * 4)
-        path = require_file(source, context=_CONTEXT)
-
-        table = read_10x_h5(path, context=_CONTEXT, gex_only=True)
-
-        expression = _assert_canonical_sparse(table)
-        assert expression.shape == (4, 0)
-        assert expression.nnz == 0
-        assert tuple(table.obs_names) == _BARCODES
-        assert len(table.var_names) == 0
-
-    def test_legacy_selects_genome_and_preserves_order(self, tmp_path: Path) -> None:
-        source = tmp_path / "legacy.h5"
-        _write_h5_legacy(source, genomes=("GRCh38", "mm10"))
-        path = require_file(source, context=_CONTEXT)
-
-        table = read_10x_h5(path, context=_CONTEXT, genome="mm10", gex_only=True)
-
-        expression = _assert_canonical_sparse(table)
-        expected = sparse.csr_array(np.asarray([[11, 12], [13, 0]], dtype=np.int64))
-        _assert_sparse_equal(expression, expected)
-        assert tuple(table.obs_names) == ("legacy-b", "legacy-a")
-        assert tuple(table.var_names) == ("legacy-z", "legacy-a")
-        assert tuple(table.var["gene_ids"]) == ("legacy-id-z", "legacy-id-a")
-        assert "feature_types" not in table.var
-        assert source.resolve() not in _open_hdf5_sources()
 
     def test_legacy_single_genome_is_selected_implicitly(self, tmp_path: Path) -> None:
         source = tmp_path / "legacy-single.h5"
@@ -292,7 +226,7 @@ class TestRead10xH5:
         assert tuple(table.var_names) == ("legacy-z", "legacy-a")
         assert source.resolve() not in _open_hdf5_sources()
 
-    def test_legacy_multiple_genomes_require_selection_and_close_source(self, tmp_path: Path) -> None:
+    def test_legacy_multiple_genomes_are_rejected_and_close_source(self, tmp_path: Path) -> None:
         source = tmp_path / "legacy-multiple.h5"
         _write_h5_legacy(source, genomes=("GRCh38", "mm10"))
         path = require_file(source, context=_CONTEXT)
@@ -338,7 +272,7 @@ class TestRead10xMtx:
 
     @pytest.mark.parametrize(("compressed", "prefix"), [(False, ""), (False, "sample_"), (True, ""), (True, "样本_")])
     # Pytest injects the boolean parameter from the explicit case table.
-    def test_v3_preserves_orientation_order_filtering_and_unique_names(
+    def test_v3_preserves_orientation_order_every_feature_type_and_unique_names(
         self,
         tmp_path: Path,
         *,
@@ -351,46 +285,35 @@ class TestRead10xMtx:
         table = read_10x_mtx(path, context=_CONTEXT, prefix=prefix, compressed=compressed)
 
         expression = _assert_canonical_sparse(table)
-        _assert_sparse_equal(expression, _COUNTS[:, (0, 2, 3)])
+        _assert_sparse_equal(expression, _COUNTS)
         assert tuple(table.obs_names) == _BARCODES
-        assert tuple(table.var_names) == ("duplicate", "duplicate-1", "empty-gene")
-        assert tuple(table.var["gene_ids"]) == ("gene-id-a", "gene-id-b", "gene-id-empty")
-        assert tuple(table.var["feature_types"]) == (
-            "Gene Expression",
-            "Gene Expression",
-            "Gene Expression",
-        )
+        assert tuple(table.var_names) == ("duplicate", "protein", "duplicate-1", "empty-gene")
+        assert tuple(table.var["gene_ids"]) == _FEATURE_IDS
+        assert tuple(table.var["feature_types"]) == _FEATURE_TYPES
         assert "spatial" not in table.uns
 
         for artifact in family:
             if artifact.exists():
                 artifact.unlink()
-        _assert_sparse_equal(expression, _COUNTS[:, (0, 2, 3)])
+        _assert_sparse_equal(expression, _COUNTS)
 
-    def test_v3_gene_ids_and_all_feature_types(self, tmp_path: Path) -> None:
+    def test_v3_keeps_duplicate_symbols_without_make_unique(self, tmp_path: Path) -> None:
         _write_mtx_v3(tmp_path, prefix="all_", compressed=True)
         path = require_directory(tmp_path, context=_CONTEXT)
 
-        table = read_10x_mtx(
-            path,
-            context=_CONTEXT,
-            var_names="gene_ids",
-            make_unique=False,
-            gex_only=False,
-            prefix="all_",
-        )
+        table = read_10x_mtx(path, context=_CONTEXT, make_unique=False, prefix="all_")
 
         expression = _assert_canonical_sparse(table)
         _assert_sparse_equal(expression, _COUNTS)
-        assert tuple(table.var_names) == _FEATURE_IDS
-        assert tuple(table.var["gene_symbols"]) == _FEATURE_NAMES
+        assert tuple(table.var_names) == _FEATURE_NAMES
+        assert tuple(table.var["gene_ids"]) == _FEATURE_IDS
         assert tuple(table.var["feature_types"]) == _FEATURE_TYPES
 
-    def test_legacy_ignores_v3_compression_and_feature_filtering(self, tmp_path: Path) -> None:
+    def test_legacy_ignores_v3_compression(self, tmp_path: Path) -> None:
         _write_mtx_legacy(tmp_path, prefix="legacy_")
         path = require_directory(tmp_path, context=_CONTEXT)
 
-        table = read_10x_mtx(path, context=_CONTEXT, prefix="legacy_", compressed=True, gex_only=True)
+        table = read_10x_mtx(path, context=_CONTEXT, prefix="legacy_", compressed=True)
 
         expression = _assert_canonical_sparse(table)
         _assert_sparse_equal(expression, _COUNTS)

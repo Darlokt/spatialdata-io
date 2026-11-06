@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import Literal, TypedDict, Unpack
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         invalid_geometries: Literal["keep", "drop", "raise"]
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        path_policy: Literal["strict", "relaxed"]
 
 
 @click.command(name="merscope")
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
     show_default=True,
     help="Keep marked invalid source components, drop affected cells, or fail.",
 )
+@path_policy_option
 def merscope_command(input_path: Path, output_path: Path, **options: Unpack[_MerscopeOptions]) -> None:
     """Read MERSCOPE, then write the requested SpatialData store."""
     from spatialdata_io.readers.merscope import merscope  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
@@ -84,5 +86,6 @@ def merscope_command(input_path: Path, output_path: Path, **options: Unpack[_Mer
         invalid_geometries=options["invalid_geometries"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
+        path_policy=options["path_policy"],
     )
     result.write(output_path)

@@ -10,8 +10,9 @@ import numpy as np
 import pytest
 
 import spatialdata_io.readers._utils.image._encoded as encoded
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext
 from spatialdata_io.readers._utils.image import read_jpeg, read_png
+from spatialdata_io.readers._utils.paths import ArtifactFile
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -23,13 +24,16 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.image import LazyRaster
 
-    type EncodedReader = Callable[[str | Path], LazyRaster]
+    type EncodedReader = Callable[..., LazyRaster]
 
     class ClosedResource(Protocol):
         """Resource exposing closure state after task execution."""
 
         @property
         def closed(self) -> bool: ...
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 def _write_encoded(path: Path, codec: str) -> None:
@@ -59,7 +63,7 @@ class TestEncodedResult:
         _write_encoded(path, codec)
         spy = mocker.spy(encoded.imagecodecs, decoder_name)
 
-        result = reader(path)
+        result = reader(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert spy.call_count == 0
         cloudpickle.dumps(result.data)
@@ -82,7 +86,7 @@ class TestEncodedResult:
             return np.zeros((1, 1), dtype=np.uint8)
 
         mocker.patch.object(encoded.imagecodecs, "png_decode", side_effect=wrong_shape)
-        result = read_png(path)
+        result = read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         with pytest.raises(RasterFormatError, match="does not match"):
             result.data.compute(scheduler="synchronous")
@@ -104,7 +108,7 @@ class TestEncodedResult:
             raise RuntimeError(message)
 
         mocker.patch.object(encoded.imagecodecs, "jpeg8_decode", side_effect=fail)
-        result = read_jpeg(path)
+        result = read_jpeg(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         with pytest.raises(RuntimeError, match="decoder failed") as caught:
             result.data.compute(scheduler="synchronous")

@@ -13,7 +13,7 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
-    optional_directory,
+    optional_metadata_directory,
     require_metadata_directory,
     require_metadata_file,
     sorted_paths,
@@ -22,6 +22,8 @@ from spatialdata_io.readers.mcmicro._metadata import read_workflow
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.paths import PathPolicy
 
 _TIFF_SUFFIXES = (".tif", ".tiff", ".btf")
 _CORE = re.compile(r"(?P<core>[1-9][0-9]*)\.ome\.tif")
@@ -104,16 +106,13 @@ def _listing(directory: ArtifactDirectory, artifact: str) -> tuple[Path, ...]:
 
 
 def _file(root: DatasetRoot, relative: str, artifact: str) -> ArtifactFile:
-    """Resolve a discovered artifact and keep it inside the dataset root."""
+    """Resolve a discovered artifact under the root's path policy."""
     return require_metadata_file(root, relative, context=ReaderErrorContext("mcmicro", artifact))
 
 
 def _optional_output_directory(root: DatasetRoot, name: str) -> ArtifactDirectory | None:
     """Distinguish absent output from malformed or out-of-root output directories."""
-    context = ReaderErrorContext("mcmicro", name)
-    if optional_directory(root / name, context=context) is None:
-        return None
-    return require_metadata_directory(root, name, context=context)
+    return optional_metadata_directory(root, name, context=ReaderErrorContext("mcmicro", name))
 
 
 def _image_id(name: str) -> str:
@@ -303,12 +302,14 @@ def _require_unique_keys(layout: McmicroLayout, root: DatasetRoot) -> None:
         keys.append(TABLE_KEY)
     duplicates = sorted(key for key, count in Counter(keys).items() if count > 1)
     if duplicates:
-        raise _error(root, artifact="element names", found=f"colliding keys {duplicates!r}", expected="unique keys")
+        raise _error(
+            root.path, artifact="element names", found=f"colliding keys {duplicates!r}", expected="unique keys"
+        )
 
 
-def discover_layout(path: str | Path) -> McmicroLayout:
+def discover_layout(path: str | Path, *, path_policy: PathPolicy = "strict") -> McmicroLayout:
     """Resolve the workflow mode and every supported output artifact once."""
-    root = normalize_dataset_root(path, context=ReaderErrorContext("mcmicro", "dataset root"))
+    root = normalize_dataset_root(path, context=ReaderErrorContext("mcmicro", "dataset root"), path_policy=path_policy)
     mode = read_workflow(_file(root, "qc/params.yml", "workflow parameters"))
     markers = _file(root, "markers.csv", "markers")
     registered_id, registered = _registered_image(root)

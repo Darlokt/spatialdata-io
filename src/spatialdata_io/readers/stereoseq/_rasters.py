@@ -16,21 +16,20 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.image import LazyRaster, RasterOptions
     from spatialdata_io.readers.stereoseq._layout import ImageSource
 
-_MAX_EXACT_LABEL_BYTES = 4
-
 
 def _read(source: ImageSource) -> LazyRaster:
     """Read the single full-resolution series of one registered TIFF."""
-    metadata = inspect_tiff(source.file)
+    context = ReaderErrorContext("stereoseq", source.name)
+    metadata = inspect_tiff(source.file, context=context)
     if len(metadata.series) != 1:
         raise ReaderFormatError(
-            context=ReaderErrorContext("stereoseq", source.name),
+            context=context,
             path=source.file,
             found=f"{len(metadata.series)} TIFF series",
             expected="one registered image series",
         )
 
-    return read_tiff(metadata, series=0, level=0)
+    return read_tiff(metadata, series=0, level=0, context=context)
 
 
 def read_image(source: ImageSource, *, raster: RasterOptions) -> DataArray | DataTree:
@@ -70,9 +69,7 @@ def read_mask(source: ImageSource, *, raster: RasterOptions) -> DataArray | Data
             found=f"{data.dtype} pixels",
             expected="a boolean or integer mask",
         )
-    if raster.scale_factors and data.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
-        message = "Generated label pyramids require <=32-bit masks; use scale_factors=() for exact 64-bit values."
-        raise ValueError(message)
+    raster.validate_label_pyramid(data, element=f"Stereo-seq mask {source.name!r}")
 
     return Labels2DModel.parse(
         data,

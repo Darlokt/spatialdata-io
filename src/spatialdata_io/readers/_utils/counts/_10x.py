@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import gzip
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scanpy import read_10x_h5 as _scanpy_read_10x_h5
@@ -16,6 +16,7 @@ from spatialdata_io.readers._utils.table import (
     normalize_owned_anndata,
     validate_compressed_sparse,
 )
+from spatialdata_io.readers._utils.table._duplicates import maximum_span
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,13 +27,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 
 _VALIDATION_BATCH_SIZE = 1_048_576
-
-_WINDOWS_RESERVED_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
-_WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
-    | {f"COM{suffix}" for suffix in "123456789¹²³"}
-    | {f"LPT{suffix}" for suffix in "123456789¹²³"}
-)
 
 
 def _prepare_count_arithmetic(
@@ -58,11 +52,7 @@ def _prepare_count_arithmetic(
         if source.has_canonical_format:
             return source
 
-    maximum_records = 0
-    for start in range(0, len(source.indptr) - 1, _VALIDATION_BATCH_SIZE):
-        spans = np.diff(source.indptr[start : start + _VALIDATION_BATCH_SIZE + 1])
-        maximum_records = max(maximum_records, int(spans.max(initial=0)))
-    bound = int(source.data.max(initial=0)) * maximum_records
+    bound = int(source.data.max(initial=0)) * maximum_span(source.indptr)
     dtype = count_accumulation_dtype(bound)
     if dtype is None:
         raise ReaderFormatError(
@@ -103,10 +93,11 @@ def _validate_count_values(
 
 
 def _normalize_counts(adata: AnnData, path: Path, context: ReaderErrorContext) -> AnnData:
-    # The shared owner rejects these containers before even accessing X.
-    if adata.is_view or adata.isbacked:
-        return normalize_owned_anndata(adata)
+    """Validate the Scanpy count matrix and return ``adata`` normalized to canonical CSR.
 
+    Entries are inspected before normalization so that summing duplicates cannot hide
+    a negative or fractional source value.
+    """
     matrix = adata.X
     if matrix is None:
         raise ReaderFormatError(context=context, path=path, found="missing count data", expected="a count matrix")
@@ -152,14 +143,7 @@ def _validate_mtx_header(
         )
 
 
-def read_10x_h5(
-    path: ArtifactFile,
-    /,
-    *,
-    context: ReaderErrorContext,
-    genome: str | None = None,
-    gex_only: bool = True,
-) -> AnnData:
+def read_10x_h5(path: ArtifactFile, /, *, context: ReaderErrorContext) -> AnnData:
     """Read one validated 10x HDF5 count container into owned sparse storage.
 
     Parameters
@@ -171,10 +155,6 @@ def read_10x_h5(
     context
         Reader and artifact identity added to failures without changing their
         exception type or traceback.
-    genome
-        Optional genome forwarded to :func:`scanpy.read_10x_h5`.
-    gex_only
-        Whether Scanpy should retain only ``Gene Expression`` features.
 
     Returns
     -------
@@ -184,55 +164,31 @@ def read_10x_h5(
 
     Notes
     -----
-    Network fallback is disabled. Scanpy owns source parsing, filtering,
-    alignment, and source lifetime. Canonical CSR matrix storage can be wrapped
+    Network fallback is disabled and every feature type is retained; readers
+    own feature selection. Scanpy owns source parsing, alignment, and source
+    lifetime. Canonical CSR matrix storage can be wrapped
     as a sparse array without copying its buffers.
     Count checks inspect entries retained by Scanpy before local duplicate
     summation. Integer duplicates combine losslessly; decoded floating and
     boolean counts use a proved float32/float64 partial-sum bound before adding
     duplicates. An unproved floating bound raises a contextual precision error.
-    Canonical decoded values retain their dtype. Filtering and source decoding
-    can already discard or round information; local reduction cannot recover it.
+    Canonical decoded values retain their dtype. Source decoding can already
+    round information; local reduction cannot recover it.
     """
     try:
-        adata = _scanpy_read_10x_h5(
-            path,
-            genome=genome,
-            gex_only=gex_only,
-            backup_url=None,
-        )
+        adata = _scanpy_read_10x_h5(path, gex_only=False, backup_url=None)
         return _normalize_counts(adata, path, context)
     except Exception as error:
         add_reader_context(error, context=context, path=path)
         raise
 
 
-def _validate_mtx_prefix(prefix: str | None) -> None:
-    if prefix is None or prefix == "":
-        return
-
-    has_reserved_character = any(
-        character < " " or character in _WINDOWS_RESERVED_FILENAME_CHARACTERS for character in prefix
-    )
-    companion_stem = f"{prefix}matrix.mtx".partition(".")[0].rstrip(" ").upper()
-    if has_reserved_character or companion_stem in _WINDOWS_RESERVED_DEVICE_NAMES:
-        message = (
-            "prefix must be portable filename text without control characters, path separators, "
-            "Windows-reserved characters, drives, or device names."
-        )
-        raise ValueError(message)
-
-
-# Scanpy's independent source options stay explicit; an options bag or kwargs
-# would erase this boundary's static contract.
-def read_10x_mtx(  # noqa: PLR0913, RUF100
+def read_10x_mtx(
     path: ArtifactDirectory,
     /,
     *,
     context: ReaderErrorContext,
-    var_names: Literal["gene_symbols", "gene_ids"] = "gene_symbols",
     make_unique: bool = True,
-    gex_only: bool = True,
     prefix: str | None = None,
     compressed: bool = True,
 ) -> AnnData:
@@ -246,16 +202,12 @@ def read_10x_mtx(  # noqa: PLR0913, RUF100
     context
         Reader and artifact identity added to failures without changing their
         exception type or traceback.
-    var_names
-        Feature field Scanpy should use for ``var_names``.
     make_unique
-        Whether Scanpy should make selected variable names unique.
-    gex_only
-        Whether Scanpy should retain only ``Gene Expression`` features.
+        Whether Scanpy should make the gene-symbol ``var_names`` unique.
     prefix
-        Portable lexical text prepended to every companion filename. Control
-        characters, path separators, Windows-reserved characters, drives, and
-        generated device names are rejected before source access.
+        Filename prefix shared by the companion files, as discovered by the
+        reader in ``path``. Scanpy concatenates it with the fixed companion
+        basenames, so it must not contain a path separator.
     compressed
         Whether Scanpy should expect gzip-compressed v3 companion files.
 
@@ -267,30 +219,28 @@ def read_10x_mtx(  # noqa: PLR0913, RUF100
 
     Raises
     ------
-    ValueError
-        If ``prefix`` is not portable filename text or can alter the validated
-        source directory.
+    ReaderFormatError
+        If the MatrixMarket header does not declare an integer coordinate
+        matrix, or counts are negative, nonfinite or fractional.
 
     Notes
     -----
-    Scanpy caching is disabled. Scanpy owns source parsing, filtering,
-    alignment, and source lifetime. Literal ``.`` and ``..`` prefixes are safe
-    because Scanpy concatenates them with fixed companion basenames.
-    Only the MatrixMarket header is inspected outside Scanpy. Its parser can
+    Scanpy caching is disabled and every feature type is retained; readers own
+    feature selection. Scanpy owns source parsing, alignment, and source
+    lifetime. Only the MatrixMarket header is inspected outside Scanpy. Its parser can
     truncate malformed integer tokens and sum duplicates before returning;
     validation of its result cannot recover those source records. Retained
     duplicates use checked integer or bound-proven floating arithmetic.
     Canonical decoded float32 values retain their upstream precision limits.
     """
     try:
-        _validate_mtx_prefix(prefix)
         _validate_mtx_header(path, context=context, prefix=prefix, compressed=compressed)
         adata = _scanpy_read_10x_mtx(
             path,
-            var_names=var_names,
+            var_names="gene_symbols",
             make_unique=make_unique,
             cache=False,
-            gex_only=gex_only,
+            gex_only=False,
             prefix=prefix,
             compressed=compressed,
         )

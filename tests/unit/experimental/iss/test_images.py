@@ -135,9 +135,10 @@ class TestReadRasters:
 
     @pytest.mark.parametrize("ome", [False, True])
     @pytest.mark.parametrize("samples", [3, 4])
-    def test_explicit_sample_expansion_preserves_values_and_identities(
+    def test_explicit_rgb_samples_preserve_values_and_colour_names(
         self, tmp_path: Path, *, ome: bool, samples: int
     ) -> None:
+        # tifffile declares the fourth RGB sample as unassociated alpha.
         write_iss_dataset(tmp_path)
         source = np.arange(32 * 40 * samples, dtype=np.uint8).reshape(32, 40, samples)
         tifffile.imwrite(tmp_path / "raw.tiff", source, ome=ome, photometric="rgb", metadata={"axes": "YXS"})
@@ -147,9 +148,33 @@ class TestReadRasters:
         with pytest.raises(ReaderFormatError, match="Axis 's'"):
             _read_rasters(layout, data_axes=None, raster=make_raster_options())
         result = _read_rasters(layout, data_axes="yxc", raster=make_raster_options())
-        expected = [f"Channel:0:0:sample:{index}" for index in range(samples)] if ome else list(range(samples))
-        assert result.image.coords["c"].to_numpy().tolist() == expected
+        assert result.image.coords["c"].to_numpy().tolist() == list("rgba"[:samples])
         np.testing.assert_array_equal(result.image.data.compute(), source.transpose(2, 0, 1))
+
+    @pytest.mark.parametrize(
+        ("ome", "name", "expected"),
+        [
+            (False, None, [0, 1, 2]),
+            (True, None, [f"Channel:0:0:sample:{index}" for index in range(3)]),
+            (True, "H&E", ["H&E:sample:0", "H&E:sample:1", "H&E:sample:2"]),
+        ],
+    )
+    def test_undeclared_samples_use_ome_or_positional_identities(
+        self, tmp_path: Path, *, ome: bool, name: str | None, expected: list[str | int]
+    ) -> None:
+        write_iss_dataset(tmp_path)
+        source = np.arange(32 * 40 * 3, dtype=np.uint8).reshape(32, 40, 3)
+        metadata = {"axes": "YXS"} if name is None else {"axes": "YXS", "Channel": {"Name": [name]}}
+        tifffile.imwrite(
+            tmp_path / "raw.tiff", source, ome=ome, photometric="minisblack", planarconfig="contig", metadata=metadata
+        )
+        layout = _discover_layout(
+            tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+        )
+
+        result = _read_rasters(layout, data_axes="yxc", raster=make_raster_options())
+
+        assert result.image.coords["c"].to_numpy().tolist() == expected
 
     @pytest.mark.parametrize("compression", [None, "deflate"])
     def test_lazy_native_tiles_are_serializable_and_bounded(

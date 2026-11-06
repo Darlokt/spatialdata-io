@@ -14,6 +14,7 @@ from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataArray, DataTree
 
@@ -23,6 +24,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from tests.integration.experimental.iss.conftest import write_iss_dataset
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -332,12 +334,29 @@ class TestIss:
         assert unchanged.obs_names.equals(original.obs_names)
         assert "region" not in unchanged.obs
 
-    @pytest.mark.parametrize("ome", [False, True])
+    @pytest.mark.parametrize(
+        ("photometric", "ome", "expected"),
+        [
+            ("rgb", False, ["r", "g", "b"]),
+            ("rgb", True, ["r", "g", "b"]),
+            ("minisblack", False, [0, 1, 2]),
+            ("minisblack", True, [f"Channel:0:0:sample:{index}" for index in range(3)]),
+        ],
+    )
     @pytest.mark.parametrize("axes", ["YXC", "yXc"])
-    def test_explicit_sample_channels_compose_with_linked_tables(self, tmp_path: Path, axes: str, *, ome: bool) -> None:
+    def test_explicit_sample_channels_compose_with_linked_tables(
+        self, tmp_path: Path, axes: str, photometric: str, *, ome: bool, expected: list[str | int]
+    ) -> None:
         dataset = write_iss_dataset(tmp_path)
         source = np.arange(32 * 40 * 3, dtype=np.uint8).reshape(32, 40, 3)
-        tifffile.imwrite(tmp_path / "raw.tiff", source, ome=ome, photometric="rgb", metadata={"axes": "YXS"})
+        tifffile.imwrite(
+            tmp_path / "raw.tiff",
+            source,
+            ome=ome,
+            photometric=photometric,
+            planarconfig="contig",
+            metadata={"axes": "YXS"},
+        )
         result = iss(
             tmp_path,
             raw_image_file="raw.tiff",
@@ -347,7 +366,6 @@ class TestIss:
             dataset_id="samples",
         )
         image = result.images["samples_raw_image"]
-        expected = [f"Channel:0:0:sample:{index}" for index in range(3)] if ome else [0, 1, 2]
         assert image.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(image.data.compute(), source.transpose(2, 0, 1))
         np.testing.assert_array_equal(result.labels["samples_labels_image"].data.compute(), dataset.labels)
@@ -636,3 +654,45 @@ class TestIss:
         else:
             result = iss(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
             assert result.tables["table"].obs[field].tolist() == source.obs[field].tolist()
+
+
+class TestIssPathPolicy:
+    """Relative caller files follow the dataset root's symlink policy."""
+
+    def test_annexed_caller_files_require_the_relaxed_policy(
+        self, iss_dataset: IssDataset, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        root = iss_dataset.root
+        expected = iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+        # Suffix checks use the names the caller gave, not the suffixless targets.
+        for name in ("raw.tiff", "labels.tiff", "cells.h5ad"):
+            link_outside_root(root / name)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+
+        relaxed = iss(
+            root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad", path_policy="relaxed"
+        )
+        assert_spatial_data_objects_are_identical(relaxed, expected)
+
+    def test_absolute_links_keep_their_names_under_the_strict_policy(
+        self, iss_dataset: IssDataset, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        root = iss_dataset.root
+        expected = iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+        link_outside_root(root / "cells.h5ad")
+
+        actual = iss(root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file=root / "cells.h5ad")
+
+        assert_spatial_data_objects_are_identical(actual, expected)
+
+    def test_rejects_an_invalid_policy_before_reading(self, iss_dataset: IssDataset) -> None:
+        with pytest.raises(ValueError, match="path_policy must be 'strict' or 'relaxed'"):
+            iss(
+                iss_dataset.root,
+                raw_image_file="raw.tiff",
+                labels_file="labels.tiff",
+                table_file="cells.h5ad",
+                path_policy="lenient",  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+            )

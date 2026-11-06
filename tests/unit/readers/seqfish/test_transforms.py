@@ -10,6 +10,7 @@ from ome_types.model import OME, Image, Pixels, Pixels_DimensionOrder, PixelType
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import TiffMetadata
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._transforms import pixel_scale
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ def _metadata(path: Path) -> TiffMetadata:
         physical_size_x=0.2,
         physical_size_y=0.5,
     )
-    return TiffMetadata(path, (), OME(images=[Image(pixels=pixels)]))
+    return TiffMetadata(ArtifactFile(path), (), OME(images=[Image(pixels=pixels)]))
 
 
 class TestPixelScale:

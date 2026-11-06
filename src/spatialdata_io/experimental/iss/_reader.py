@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import pandas as pd
 from spatialdata import SpatialData
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.experimental.iss._images import _read_rasters, _validate_data_axes
 from spatialdata_io.experimental.iss._layout import _discover_layout
 from spatialdata_io.experimental.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY, _validate_output_column
 from spatialdata_io.experimental.iss._tables import _read_table
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 
@@ -35,6 +36,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     data_axes: str | None = None,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read an experimental unversioned ISS image, segmentation, and linked h5ad table.
 
@@ -76,15 +78,28 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         stack. Otherwise TIFF axes are used. Scientific C channels never
         become RGB based on their number. Non-singleton sample axes require
         an explicit interpretation as C, for example ``YXC`` for RGB ``YXS``.
-        Expanded OME samples use ``<OME channel ID>:sample:<zero-based index>``
-        identities; plain TIFF samples use positional identities.
-        Singleton nonspatial axes may be
-        removed, while singleton X/Y dimensions are retained. Labels require
-        YX and only singleton extra axes.
+        Samples the TIFF declares RGB (``PhotometricInterpretation`` RGB or
+        JPEG-compressed YCbCr) are named ``r, g, b``, plus ``a`` for a
+        fourth sample declared alpha by ``ExtraSamples``. Other expanded OME
+        samples use ``<identifier>:sample:<zero-based index>`` identities,
+        where the identifier is the OME channel name when names are nonempty
+        and unique, otherwise the OME channel ID; other plain TIFF samples
+        use positional identities. Singleton nonspatial axes may be removed,
+        while singleton X/Y dimensions are retained. Labels require YX and
+        only singleton extra axes.
     chunks
         One positive size for every axis or three ``c, y, x`` sizes of the
         images; labels use the ``y`` and ``x`` sizes. By default one channel per
         chunk and square 1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -159,7 +174,13 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     raw_axes = _validate_data_axes(data_axes)
     raster = make_raster_options(scale_factors, chunks)
 
-    layout = _discover_layout(path, raw_image_file=raw_image_file, labels_file=labels_file, table_file=table_file)
+    layout = _discover_layout(
+        path,
+        raw_image_file=raw_image_file,
+        labels_file=labels_file,
+        table_file=table_file,
+        path_policy=path_policy,
+    )
     rasters = _read_rasters(layout, data_axes=raw_axes, raster=raster)
     table = _read_table(layout.table, instance_key=instance_key, label_dtype=rasters.label_dtype)
 
@@ -176,17 +197,14 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     prepare_anndata_dataframe(obs, context=context)
     prepare_anndata_dataframe(var, context=context)
 
-    try:
-        table = parse_linked_table(
-            table,
-            TableLinkage((region,), REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY),
-            context=context,
-            duplicate_sums=duplicate_sums,
-            expression_layers=("counts",) if "counts" in table.layers else (),
-        )
-    except (ValueError, TypeError) as error:
-        add_reader_context(error, context=context, path=layout.table)
-        raise
+    table = parse_linked_table(
+        table,
+        TableLinkage((region,), REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY),
+        context=context,
+        path=layout.table,
+        duplicate_sums=duplicate_sums,
+        expression_layers=("counts",) if "counts" in table.layers else (),
+    )
 
     result = SpatialData(
         images={f"{dataset_id}_raw_image": rasters.image}, labels={region: rasters.labels}, tables={"table": table}

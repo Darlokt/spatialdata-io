@@ -20,6 +20,7 @@ from scipy import sparse
 from shapely.geometry import Polygon
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Scale, get_transformation
 
 import spatialdata_io.readers.seqfish._rasters as raster_module
@@ -112,7 +113,7 @@ class TestSeqfish:
             "name,x,y,cell\n" + "".join(f"GeneA,{row},2,{cell}\n" for row, cell in enumerate(assignments)),
             encoding="utf-8",
         )
-        mocker.patch("spatialdata_io.readers.seqfish._transcripts._BLOCK_BYTES", 96)
+        mocker.patch("spatialdata_io.readers._utils.csv._blocks.CSV_BLOCK_BYTES", 96)
         result = seqfish(root)
         source_points = result.points["Roi1_TranscriptList"]
         assert source_points.npartitions > 3
@@ -461,7 +462,7 @@ class TestSeqfish:
             }
         )
         events.to_csv(root / "Roi1_TranscriptList.csv", index=False)
-        mocker.patch("spatialdata_io.readers.seqfish._transcripts._BLOCK_BYTES", 256)
+        mocker.patch("spatialdata_io.readers._utils.csv._blocks.CSV_BLOCK_BYTES", 256)
         constructed: list[str] = []
         with Callback(posttask=lambda key, *_: constructed.append(str(key))):
             result = seqfish(root)
@@ -621,3 +622,20 @@ class TestSeqfish:
         assert_array_equal(table.obsm["spatial"], result.tables["table_Roi1"].obsm["spatial"])
         assert len(restored.points["Roi1_TranscriptList"].compute()) == 9051
         assert restored.shapes["Roi1_Boundaries"].index.tolist() == result.shapes["Roi1_Boundaries"].index.tolist()
+
+
+class TestSeqfishPathPolicy:
+    """Discovered ROI artifacts follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1",))
+        expected = seqfish(root)
+        link_outside_root(root / "Roi1_CellxGene.csv")
+        link_outside_root(root / "Roi1_DAPI.tiff")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            seqfish(root)
+
+        assert_spatial_data_objects_are_identical(seqfish(root, path_policy="relaxed"), expected)

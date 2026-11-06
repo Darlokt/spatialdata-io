@@ -1,3 +1,10 @@
+"""Build the one-task Dask graph shared by the PNG and JPEG readers.
+
+Neither codec offers bounded spatial selection here, so the whole frame is one
+chunk whose task memory-maps the file, decodes it with ``imagecodecs`` and
+checks the result against the inspected shape and dtype.
+"""
+
 from __future__ import annotations
 
 import mmap
@@ -16,10 +23,11 @@ from spatialdata_io.readers._utils.image._types import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from typing import Literal
 
     from numpy.typing import NDArray
+
+    from spatialdata_io.readers._utils.paths import ArtifactFile
 
 
 def validate_decoded_size(metadata: _EncodedHeader) -> None:
@@ -36,6 +44,7 @@ def validate_decoded_size(metadata: _EncodedHeader) -> None:
 
 
 def _decode_encoded(spec: _EncodedReadSpec) -> NDArray[np.generic]:
+    """Decode one PNG or JPEG file and check it against the inspected shape and dtype."""
     try:
         with (
             spec.path.open("rb") as stream,
@@ -46,19 +55,18 @@ def _decode_encoded(spec: _EncodedReadSpec) -> NDArray[np.generic]:
         error.add_note(f"Failed to decode {spec.codec.upper()} source {spec.path}.")
         raise
 
-    expected_dtype = np.dtype(spec.dtype)
-    if result.shape != spec.shape or result.dtype != expected_dtype:
+    if result.shape != spec.shape or result.dtype != spec.dtype:
         message = (
             f"Decoded {spec.codec.upper()} result for {spec.path} does not match "
             "inspected metadata: "
-            f"expected shape={spec.shape}, dtype={expected_dtype}; "
+            f"expected shape={spec.shape}, dtype={spec.dtype}; "
             f"got shape={result.shape}, dtype={result.dtype}."
         )
         raise RasterFormatError(message)
     return result
 
 
-def encoded_result(path: Path, codec: Literal["png", "jpeg"], metadata: _EncodedHeader) -> LazyRaster:
+def encoded_result(path: ArtifactFile, codec: Literal["png", "jpeg"], metadata: _EncodedHeader) -> LazyRaster:
     """Construct a one-task lazy array for a previously inspected encoded image."""
     spec = _EncodedReadSpec(
         path=path,
@@ -72,4 +80,4 @@ def encoded_result(path: Path, codec: Literal["png", "jpeg"], metadata: _Encoded
     chunks = tuple((size,) for size in metadata.shape)
     meta = np.empty((0,) * len(metadata.shape), dtype=metadata.dtype)
     data = Array(graph, name, chunks, dtype=metadata.dtype, meta=meta)
-    return LazyRaster(data=data, axes=metadata.axes)
+    return LazyRaster(data=data, axes=metadata.axes, color=metadata.color)

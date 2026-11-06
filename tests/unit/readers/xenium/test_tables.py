@@ -78,7 +78,7 @@ class TestReadCounts:
         self, tmp_path: Path, feature_types: FeatureSelection, panel: ProteinPanel | None
     ) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
-        source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"), gex_only=False)
+        source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"))
         source_var = cast("pd.DataFrame", source.var)
         selected = (
             np.ones(len(bundle.features), dtype=bool)
@@ -100,7 +100,7 @@ class TestReadCounts:
 
     def test_preserves_missing_annotations_from_the_count_boundary(self, tmp_path: Path, mocker: MockerFixture) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
-        source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"), gex_only=False)
+        source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"))
         # The reader preserves the owned decoder result, including missing values;
         # Scanpy currently stringifies nonboolean additional HDF5 feature tags.
         source.var["score"] = np.asarray([0.5, np.nan, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])

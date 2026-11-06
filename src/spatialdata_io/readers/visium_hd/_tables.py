@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 def read_counts(path: ArtifactFile) -> AnnData:
     """Read shared sparse counts and validate the selected HD population."""
     context = ReaderErrorContext("visium_hd", "count matrix")
-    table = read_10x_h5(path, context=context, gex_only=False)
+    table = read_10x_h5(path, context=context)
     if not table.n_obs or not table.n_vars:
         raise ReaderFormatError(
             context=context,

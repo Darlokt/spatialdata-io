@@ -39,8 +39,8 @@ its distinct boolean reduction semantics. Sparse capacity beyond the terminal
 pointer is not an active count contribution.
 
 Scanpy converts int32 HDF5 values to float32 while other source dtypes can
-remain integer. Source integers may already have rounded before local checks;
-upstream filtering can discard unselected source entries. Local guarantees are
+remain integer. Source integers may already have rounded before local checks.
+Local guarantees are
 relative to the retained decoded contributions, not original source text.
 No expression records are reread and no source decoder is replaced. Final
 count-family storage remains reader-owned, as does Xenium protein scaling.
@@ -57,20 +57,20 @@ information; strict rejection of every malformed MTX record is not guaranteed.
 
 ## Explicit options and side effects
 
-The HDF5 boundary exposes only `genome` and `gex_only` and always passes
-`backup_url=None`; it cannot download a missing source. The Matrix Market
-boundary exposes `var_names`, `make_unique`, `gex_only`, `prefix`, and
-`compressed` and always passes `cache=False`; it cannot create or consume a
-Scanpy cache.
+The HDF5 boundary has no options and always passes `gex_only=False` and
+`backup_url=None`; it retains every feature type and cannot download a missing
+source. Multi-genome legacy HDF5 files are therefore rejected by Scanpy. The
+Matrix Market boundary exposes `make_unique`, `prefix`, and `compressed`, uses
+gene symbols as `var_names`, retains every feature type, and always passes
+`cache=False`; it cannot create or consume a Scanpy cache. Readers own feature
+selection.
 
-An MTX prefix is portable filename text, not a path. ASCII control characters,
-POSIX and Windows separators, Windows-reserved characters, drives, alternate
-data streams, and generated DOS device names are rejected before Scanpy is
-called. The empty prefix and literal dotted text, including `.` and `..`, are
-safe: Scanpy concatenates the prefix with fixed companion basenames.
+An MTX prefix is the filename prefix the reader discovered in the validated
+directory. Scanpy concatenates it with fixed companion basenames, so it cannot
+contain a path separator.
 
 Scanpy and AnnData continue to own storage-version interpretation, matrix
-orientation, barcode/feature alignment, feature metadata, filtering, and name
+orientation, barcode/feature alignment, feature metadata, and name
 uniqueness. Their failures and normalization failures retain their original
 identity, type, cause, and traceback and receive a reader/artifact/path note.
 

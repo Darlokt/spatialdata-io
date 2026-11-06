@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
 
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.mcmicro._layout import TABLE_KEY, WsiLayout, discover_layout
 from spatialdata_io.readers.mcmicro._metadata import read_markers
@@ -26,6 +27,7 @@ def mcmicro(
     *,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read the outputs of one MCMICRO whole-slide or tissue-microarray run.
 
@@ -71,6 +73,15 @@ def mcmicro(
         One positive size for every axis or three ``c, y, x`` sizes of the
         images; labels use the ``y`` and ``x`` sizes. By default one channel per
         chunk and square 1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -158,7 +169,7 @@ def mcmicro(
     options are not mutated.
     """
     options = make_raster_options(scale_factors, chunks)
-    layout = discover_layout(path)
+    layout = discover_layout(path, path_policy=path_policy)
     panel = read_markers(layout.markers)
 
     images: dict[str, DataArray | DataTree] = {}

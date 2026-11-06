@@ -23,6 +23,7 @@ _MAX_SAFE_INTEGER = 2**53
 
 
 def _exact_float(value: int) -> bool:
+    """Return whether ``value`` converts to ``float`` without rounding or overflow."""
     try:
         return float(value) == value
     except OverflowError:

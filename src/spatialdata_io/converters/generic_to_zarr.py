@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
 
-from spatialdata_io.readers._utils.image import DEFAULT_SCALE_FACTORS
+from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.generic import generic
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     data_axes: str | None = None,
     coordinate_system: str | None = None,
     *,
-    tiff_series: int = 0,
+    tiff_series: int | None = None,
     tiff_level: int = 0,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
@@ -53,7 +53,8 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         Calibrated images use micrometres; GeoJSON retains source units.
         Naming a shared frame does not convert or register GeoJSON coordinates.
     tiff_series
-        Zero-based TIFF series. Must remain zero for non-TIFF inputs.
+        Zero-based TIFF series. ``None`` reads the only series and fails for a
+        TIFF with several. Must be ``None`` for non-TIFF inputs.
     tiff_level
         Zero-based TIFF pyramid level. Must remain zero for non-TIFF inputs.
     scale_factors

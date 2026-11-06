@@ -94,7 +94,7 @@ class TestReadAnalysis:
             ({CLUSTERS: "Barcode,Cluster\na-1,x\n"}, "malformed CSV"),
             ({PCA: "Barcode,PC-1,PC-2\na-1,inf,2\n"}, "nonfinite projections"),
             ({PCA: "Barcode,PC-1,PC-2\na-1,,2\n"}, "nonfinite projections"),
-            ({PCA: '"Barcode\n'}, "malformed header"),
+            ({PCA: '"Barcode\n'}, "malformed CSV header"),
         ],
         ids=[
             "cluster-header",

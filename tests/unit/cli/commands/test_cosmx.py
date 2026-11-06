@@ -37,6 +37,7 @@ class TestCosmxCommand:
             pixel_size_um=None,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -68,6 +69,7 @@ class TestCosmxCommand:
             pixel_size_um=None,
             scale_factors=(2,),
             chunks=(3, 512, 512),
+            path_policy="strict",
         )
 
     def test_scalar_chunks(

@@ -21,7 +21,7 @@ from spatialdata_io.readers._utils.paths import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from spatialdata_io.readers._utils.paths import ArtifactDirectory
+    from spatialdata_io.readers._utils.paths import ArtifactDirectory, PathPolicy
 
 _MOSAIC_NAME = re.compile(r"mosaic_(?P<stain>.+)_z(?P<z>[0-9]+)\.tif")
 
@@ -162,7 +162,7 @@ def _vpt_boundaries(root: DatasetRoot, entries: frozenset[str]) -> ArtifactFile:
     require_unique_path(
         candidates,
         context=ReaderErrorContext("merscope", "VPT micron-space boundaries"),
-        search_path=root,
+        search_path=root.path,
     )
     return candidates[0]
 
@@ -212,27 +212,30 @@ def _mosaics(root: DatasetRoot, directory: ArtifactDirectory, z_layers: tuple[in
     return Mosaics(layers, transform)
 
 
-def discover_layout(
+def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public artifact selections.
     path: str | Path,
     selection: Selection,
     *,
     vpt_directory: str | Path | None = None,
     region_name: str | None = None,
     slide_name: str | None = None,
+    path_policy: PathPolicy = "strict",
 ) -> MerscopeLayout:
     """Resolve requested instrument/VPT products without interpreting pixels or rows."""
     _validate_name(region_name, "region_name")
     _validate_name(slide_name, "slide_name")
-    root = normalize_dataset_root(path, context=ReaderErrorContext("merscope", "region root"))
+    root = normalize_dataset_root(path, context=ReaderErrorContext("merscope", "region root"), path_policy=path_policy)
     names = Names(
-        root.name if region_name is None else region_name, root.parent.name if slide_name is None else slide_name
+        root.path.name if region_name is None else region_name,
+        root.path.parent.name if slide_name is None else slide_name,
     )
 
     vpt_root = None
     if vpt_directory is not None:
         context = ReaderErrorContext("merscope", "VPT directory")
         directory = require_caller_directory(root, vpt_directory, context=context)
-        vpt_root = normalize_dataset_root(directory, context=context)
+        # The analysis directory is a second root; its artifacts follow the same policy.
+        vpt_root = normalize_dataset_root(directory, context=context, path_policy=root.path_policy)
 
     analysis = root if vpt_root is None else vpt_root
     tables = (
@@ -242,7 +245,7 @@ def discover_layout(
     )
 
     entries = (
-        frozenset(entry.name for entry in analysis.iterdir())
+        frozenset(entry.name for entry in analysis.path.iterdir())
         if vpt_root is not None and (selection.boundaries or selection.transcripts)
         else frozenset()
     )

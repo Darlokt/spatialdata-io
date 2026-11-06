@@ -14,10 +14,11 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
+    PathPolicy,
     _core,
     normalize_dataset_root,
-    optional_directory,
-    optional_file,
+    optional_metadata_directory,
+    optional_metadata_file,
     optional_unique_path,
     require_caller_directory,
     require_caller_file,
@@ -37,26 +38,35 @@ if TYPE_CHECKING:
 _CONTEXT = ReaderErrorContext(reader="test_reader", artifact="test_artifact", detected_version="2")
 
 
-def _root(path: Path) -> DatasetRoot:
-    return normalize_dataset_root(path, context=_CONTEXT)
+def _root(path: Path, path_policy: PathPolicy = "strict") -> DatasetRoot:
+    return normalize_dataset_root(path, context=_CONTEXT, path_policy=path_policy)
 
 
-def _accept_artifact_directory(path: ArtifactDirectory) -> ArtifactDirectory:
-    return path
+def _annexed(tmp_path: Path, name: str = "artifact.csv") -> tuple[Path, Path]:
+    """Return a dataset root holding ``name`` as a git-annex style link to an external object."""
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    objects = tmp_path / "annex" / "objects"
+    objects.mkdir(parents=True, exist_ok=True)
+    target = objects / "SHA256E-s7--0123abcd.csv"
+    target.write_text("content")
+    (root / name).symlink_to(target)
+    return root, target
 
 
 def _static_return_contract(path: Path, root: DatasetRoot) -> None:
     """Exercise the complete nominal return contract for strict type checkers."""
-    assert_type(normalize_dataset_root(path, context=_CONTEXT), DatasetRoot)
+    assert_type(normalize_dataset_root(path, context=_CONTEXT, path_policy="strict"), DatasetRoot)
+    assert_type(root.path, ArtifactDirectory)
+    assert_type(root.path_policy, PathPolicy)
     assert_type(require_file(path, context=_CONTEXT), ArtifactFile)
-    assert_type(optional_file(path, context=_CONTEXT), ArtifactFile | None)
     assert_type(require_directory(path, context=_CONTEXT), ArtifactDirectory)
-    assert_type(optional_directory(path, context=_CONTEXT), ArtifactDirectory | None)
     assert_type(require_caller_file(root, path, context=_CONTEXT), ArtifactFile)
     assert_type(require_caller_directory(root, path, context=_CONTEXT), ArtifactDirectory)
     assert_type(require_metadata_file(root, path, context=_CONTEXT), ArtifactFile)
+    assert_type(optional_metadata_file(root, path, context=_CONTEXT), ArtifactFile | None)
     assert_type(require_metadata_directory(root, path, context=_CONTEXT), ArtifactDirectory)
-    assert_type(_accept_artifact_directory(root), ArtifactDirectory)
+    assert_type(optional_metadata_directory(root, path, context=_CONTEXT), ArtifactDirectory | None)
 
 
 class _OneShotPaths:
@@ -82,24 +92,47 @@ class TestNormalizeDatasetRoot:
         alias = tmp_path / "alias"
         alias.symlink_to(target, target_is_directory=True)
 
-        result = normalize_dataset_root(alias, context=_CONTEXT)
+        result = normalize_dataset_root(alias, context=_CONTEXT, path_policy="strict")
 
-        assert result == target.resolve()
-        assert Path(result).is_absolute()
+        assert result.path == target.resolve()
+        assert result.path.is_absolute()
+
+    @pytest.mark.parametrize("path_policy", ["strict", "relaxed"])
+    def test_records_the_path_policy(self, tmp_path: Path, path_policy: PathPolicy) -> None:
+        assert _root(tmp_path, path_policy) == DatasetRoot(ArtifactDirectory(tmp_path.resolve()), path_policy)
 
     def test_expands_user_path(self, tmp_path: Path, mocker: MockerFixture) -> None:
         root = tmp_path / "root"
         root.mkdir()
         expanduser = mocker.patch.object(Path, "expanduser", autospec=True, return_value=root)
 
-        assert normalize_dataset_root("~/root", context=_CONTEXT) == root.resolve()
+        assert normalize_dataset_root("~/root", context=_CONTEXT, path_policy="strict").path == root.resolve()
         expanduser.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("path_policy", "error", "message"),
+        [
+            (None, TypeError, "path_policy must be a string, not NoneType"),
+            (b"strict", TypeError, "path_policy must be a string, not bytes"),
+            ("Strict", ValueError, "path_policy must be 'strict' or 'relaxed', not 'Strict'"),
+            ("lenient", ValueError, "path_policy must be 'strict' or 'relaxed', not 'lenient'"),
+        ],
+    )
+    def test_rejects_invalid_policy_before_filesystem_access(
+        self, tmp_path: Path, mocker: MockerFixture, path_policy: object, error: type[Exception], message: str
+    ) -> None:
+        resolve = mocker.spy(_core, "_resolve_existing")
+
+        with pytest.raises(error, match=f"^test_reader: {message}"):
+            normalize_dataset_root(tmp_path / "missing", context=_CONTEXT, path_policy=path_policy)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+
+        resolve.assert_not_called()
 
     def test_rejects_missing_root_with_standard_fields(self, tmp_path: Path) -> None:
         missing = tmp_path / "missing"
 
         with pytest.raises(FileNotFoundError) as raised:
-            normalize_dataset_root(missing, context=_CONTEXT)
+            normalize_dataset_root(missing, context=_CONTEXT, path_policy="strict")
 
         assert raised.value.errno == errno.ENOENT
         assert raised.value.filename == str(missing)
@@ -110,7 +143,7 @@ class TestNormalizeDatasetRoot:
         path.touch()
 
         with pytest.raises(NotADirectoryError) as raised:
-            normalize_dataset_root(path, context=_CONTEXT)
+            normalize_dataset_root(path, context=_CONTEXT, path_policy="strict")
 
         assert raised.value.errno == errno.ENOTDIR
         assert raised.value.filename == str(path)
@@ -120,7 +153,7 @@ class TestNormalizeDatasetRoot:
         os.mkfifo(fifo)
 
         with pytest.raises(ReaderFormatError, match="non-regular"):
-            normalize_dataset_root(fifo, context=_CONTEXT)
+            normalize_dataset_root(fifo, context=_CONTEXT, path_policy="strict")
 
 
 class TestRequireFile:
@@ -207,73 +240,6 @@ class TestRequireDirectory:
             require_directory(fifo, context=_CONTEXT)
 
 
-class TestOptionalFile:
-    def test_returns_none_only_for_absent_leaf_with_valid_parent(self, tmp_path: Path) -> None:
-        assert optional_file(tmp_path / "missing", context=_CONTEXT) is None
-
-    def test_returns_canonical_existing_file(self, tmp_path: Path) -> None:
-        target = tmp_path / "target"
-        target.touch()
-        alias = tmp_path / "alias"
-        alias.symlink_to(target)
-
-        assert optional_file(alias, context=_CONTEXT) == target.resolve()
-
-    @pytest.mark.parametrize("parent_state", ["missing", "dangling"])
-    def test_rejects_missing_or_dangling_parent(self, tmp_path: Path, parent_state: str) -> None:
-        parent = tmp_path / "parent"
-        if parent_state == "dangling":
-            parent.symlink_to(tmp_path / "missing", target_is_directory=True)
-
-        with pytest.raises(FileNotFoundError, match="parent directory"):
-            optional_file(parent / "artifact", context=_CONTEXT)
-
-    def test_rejects_dangling_leaf_and_wrong_kind(self, tmp_path: Path) -> None:
-        dangling = tmp_path / "dangling"
-        dangling.symlink_to(tmp_path / "missing")
-        with pytest.raises(FileNotFoundError, match="dangling symlink"):
-            optional_file(dangling, context=_CONTEXT)
-        with pytest.raises(IsADirectoryError):
-            optional_file(tmp_path, context=_CONTEXT)
-
-    def test_contextualizes_lstat_error(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        error = PermissionError("denied")
-        mocker.patch.object(Path, "lstat", side_effect=error)
-
-        with pytest.raises(PermissionError) as raised:
-            optional_file(tmp_path / "file", context=_CONTEXT)
-
-        assert raised.value is error
-        assert "test_reader" in raised.value.__notes__[0]
-
-
-class TestOptionalDirectory:
-    def test_returns_none_for_absent_leaf(self, tmp_path: Path) -> None:
-        assert optional_directory(tmp_path / "missing", context=_CONTEXT) is None
-
-    def test_returns_canonical_existing_directory(self, tmp_path: Path) -> None:
-        target = tmp_path / "target"
-        target.mkdir()
-        alias = tmp_path / "alias"
-        alias.symlink_to(target, target_is_directory=True)
-
-        assert optional_directory(alias, context=_CONTEXT) == target.resolve()
-
-    def test_rejects_missing_parent_file_and_dangling_leaf(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError, match="parent directory"):
-            optional_directory(tmp_path / "missing" / "directory", context=_CONTEXT)
-
-        file_path = tmp_path / "file"
-        file_path.touch()
-        with pytest.raises(NotADirectoryError):
-            optional_directory(file_path, context=_CONTEXT)
-
-        dangling = tmp_path / "dangling"
-        dangling.symlink_to(tmp_path / "missing", target_is_directory=True)
-        with pytest.raises(FileNotFoundError):
-            optional_directory(dangling, context=_CONTEXT)
-
-
 class TestRequireCallerFile:
     def test_accepts_relative_internal_and_absolute_external_files(self, tmp_path: Path) -> None:
         root_path = tmp_path / "root"
@@ -311,6 +277,47 @@ class TestRequireCallerFile:
         with pytest.raises(ReaderFormatError, match="outside the dataset root"):
             require_caller_file(root, "alias", context=_CONTEXT)
 
+    def test_relative_symlink_follows_the_root_path_policy(self, tmp_path: Path) -> None:
+        root_path, _ = _annexed(tmp_path)
+
+        with pytest.raises(ReaderFormatError, match="pass path_policy='relaxed'"):
+            require_caller_file(_root(root_path), "artifact.csv", context=_CONTEXT)
+        result = require_caller_file(_root(root_path, "relaxed"), "artifact.csv", context=_CONTEXT)
+
+        assert result == root_path.resolve() / "artifact.csv"
+        assert result.read_text() == "content"
+
+    @pytest.mark.parametrize("path_policy", ["strict", "relaxed"])
+    def test_relative_traversal_is_rejected_under_both_policies(self, tmp_path: Path, path_policy: PathPolicy) -> None:
+        root_path, target = _annexed(tmp_path)
+        root = _root(root_path, path_policy)
+
+        with pytest.raises(ReaderFormatError, match="lexically outside the dataset root"):
+            require_caller_file(root, Path("..") / "annex" / "objects" / target.name, context=_CONTEXT)
+
+    @pytest.mark.parametrize("path_policy", ["strict", "relaxed"])
+    def test_keeps_the_given_name_under_both_policies(self, tmp_path: Path, path_policy: PathPolicy) -> None:
+        root_path, _ = _annexed(tmp_path)
+        cache = tmp_path / "dvc-cache" / "files" / "md5" / "ab"
+        cache.mkdir(parents=True)
+        entry = cache / "cdef0123"
+        entry.write_text("cached")
+        (root_path / "image.tif").symlink_to(entry)
+        (root_path / "nested").mkdir()
+        (root_path / "nested" / "real.csv").write_text("real")
+        (root_path / "alias.csv").symlink_to(root_path / "nested" / "real.csv")
+        root = _root(root_path, path_policy)
+
+        # Absolute links keep the caller's name and suffix, wherever their suffixless target lies.
+        absolute = require_caller_file(root, root_path / "image.tif", context=_CONTEXT)
+        assert absolute == root_path.resolve() / "image.tif"
+        assert absolute.suffix == ".tif"
+        assert absolute.read_text() == "cached"
+        # The suffixless cache entry itself keeps its own name.
+        assert require_caller_file(root, entry, context=_CONTEXT) == entry.resolve()
+        # A relative in-root alias keeps the alias name, not the target's.
+        assert require_caller_file(root, "alias.csv", context=_CONTEXT) == root_path.resolve() / "alias.csv"
+
     def test_rejects_missing_relative_traversal_before_resolution(self, tmp_path: Path, mocker: MockerFixture) -> None:
         root_path = tmp_path / "root"
         root_path.mkdir()
@@ -326,16 +333,16 @@ class TestRequireCallerFile:
         with pytest.raises(IsADirectoryError):
             require_caller_file(_root(tmp_path), tmp_path, context=_CONTEXT)
 
-    def test_resolves_and_checks_kind_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_resolves_the_path_and_its_parent_and_checks_kind_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "file"
         path.touch()
         root = _root(tmp_path)
         resolve = mocker.spy(_core, "_resolve_existing")
-        inspect_kind = mocker.spy(_core, "_filesystem_kind")
+        inspect_kind = mocker.spy(_core, "_require_resolved_kind")
 
         require_caller_file(root, "file", context=_CONTEXT)
 
-        resolve.assert_called_once()
+        assert [call.args[0] for call in resolve.call_args_list] == [path, tmp_path]
         inspect_kind.assert_called_once()
 
 
@@ -400,6 +407,63 @@ class TestRequireMetadataFile:
 
         resolve.assert_not_called()
 
+    def test_strict_root_rejects_a_symlink_to_an_external_target(self, tmp_path: Path) -> None:
+        root_path, _ = _annexed(tmp_path)
+
+        with pytest.raises(ReaderFormatError, match="resolving outside the dataset root") as raised:
+            require_metadata_file(_root(root_path), "artifact.csv", context=_CONTEXT)
+
+        assert "pass path_policy='relaxed'" in str(raised.value)
+        assert raised.value.path == root_path.resolve() / "artifact.csv"
+
+    def test_relaxed_root_accepts_a_symlink_and_keeps_its_name(self, tmp_path: Path) -> None:
+        root_path, _ = _annexed(tmp_path)
+        root = _root(root_path, "relaxed")
+
+        result = require_metadata_file(root, "artifact.csv", context=_CONTEXT)
+
+        assert result == root_path.resolve() / "artifact.csv"
+        assert result.suffix == ".csv"
+        assert result.read_text() == "content"
+
+    def test_relaxed_root_returns_internal_files_canonically(self, tmp_path: Path) -> None:
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        (nested / "artifact").touch()
+        (tmp_path / "alias").symlink_to(nested, target_is_directory=True)
+
+        result = require_metadata_file(_root(tmp_path, "relaxed"), "alias/artifact", context=_CONTEXT)
+
+        assert result == nested.resolve() / "artifact"
+
+    @pytest.mark.parametrize("path_policy", ["strict", "relaxed"])
+    def test_rejects_lexical_escapes_under_both_policies(
+        self, tmp_path: Path, mocker: MockerFixture, path_policy: PathPolicy
+    ) -> None:
+        root_path, target = _annexed(tmp_path)
+        root = _root(root_path, path_policy)
+        resolve = mocker.spy(_core, "_resolve_existing")
+
+        for escape in (Path("..") / "annex" / "objects" / target.name, target, Path("nested/../../outside")):
+            with pytest.raises(ReaderFormatError, match="lexically outside the dataset root"):
+                require_metadata_file(root, escape, context=_CONTEXT)
+
+        resolve.assert_not_called()
+
+    def test_relaxed_root_still_checks_the_target(self, tmp_path: Path) -> None:
+        root_path = tmp_path / "root"
+        root_path.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        (root_path / "directory_link").symlink_to(external, target_is_directory=True)
+        (root_path / "dangling").symlink_to(tmp_path / "missing")
+        root = _root(root_path, "relaxed")
+
+        with pytest.raises(IsADirectoryError):
+            require_metadata_file(root, "directory_link", context=_CONTEXT)
+        with pytest.raises(FileNotFoundError, match="dangling symlink"):
+            require_metadata_file(root, "dangling", context=_CONTEXT)
+
     def test_treats_tilde_literally(self, tmp_path: Path, mocker: MockerFixture) -> None:
         tilde_directory = tmp_path / "~vendor"
         tilde_directory.mkdir()
@@ -423,6 +487,25 @@ class TestRequireMetadataDirectory:
 
         assert require_metadata_directory(_root(tmp_path), "store.zarr", context=_CONTEXT) == directory.resolve()
 
+    def test_policy_decides_symlinked_directories_and_their_members(self, tmp_path: Path) -> None:
+        root_path = tmp_path / "root"
+        root_path.mkdir()
+        external = tmp_path / "external"
+        external.mkdir()
+        (external / "member.csv").write_text("member")
+        (root_path / "outputs").symlink_to(external, target_is_directory=True)
+
+        with pytest.raises(ReaderFormatError, match="pass path_policy='relaxed'"):
+            require_metadata_directory(_root(root_path), "outputs", context=_CONTEXT)
+
+        root = _root(root_path, "relaxed")
+        directory = require_metadata_directory(root, "outputs", context=_CONTEXT)
+        # Paths joined to a relaxed directory stay lexically inside the root.
+        member = require_metadata_file(root, directory / "member.csv", context=_CONTEXT)
+
+        assert directory == root_path.resolve() / "outputs"
+        assert member.read_text() == "member"
+
     def test_rejects_external_directory_and_file(self, tmp_path: Path) -> None:
         root_path = tmp_path / "root"
         root_path.mkdir()
@@ -436,6 +519,90 @@ class TestRequireMetadataDirectory:
             require_metadata_directory(root, external, context=_CONTEXT)
         with pytest.raises(NotADirectoryError):
             require_metadata_directory(root, "file", context=_CONTEXT)
+
+
+class TestOptionalMetadataFile:
+    def test_returns_none_only_for_absent_leaf_with_valid_parent(self, tmp_path: Path) -> None:
+        assert optional_metadata_file(_root(tmp_path), "missing", context=_CONTEXT) is None
+
+    def test_returns_canonical_existing_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.touch()
+        (tmp_path / "alias").symlink_to(target)
+
+        assert optional_metadata_file(_root(tmp_path), "alias", context=_CONTEXT) == target.resolve()
+
+    def test_follows_the_root_path_policy(self, tmp_path: Path) -> None:
+        root_path, _ = _annexed(tmp_path)
+
+        with pytest.raises(ReaderFormatError, match="pass path_policy='relaxed'"):
+            optional_metadata_file(_root(root_path), "artifact.csv", context=_CONTEXT)
+        assert (
+            optional_metadata_file(_root(root_path, "relaxed"), "artifact.csv", context=_CONTEXT)
+            == root_path.resolve() / "artifact.csv"
+        )
+
+    @pytest.mark.parametrize("path_policy", ["strict", "relaxed"])
+    def test_rejects_lexical_escape_even_when_absent(self, tmp_path: Path, path_policy: PathPolicy) -> None:
+        root_path = tmp_path / "root"
+        root_path.mkdir()
+
+        with pytest.raises(ReaderFormatError, match="lexically outside the dataset root"):
+            optional_metadata_file(_root(root_path, path_policy), Path("..") / "missing", context=_CONTEXT)
+
+    @pytest.mark.parametrize("parent_state", ["missing", "dangling"])
+    def test_rejects_missing_or_dangling_parent(self, tmp_path: Path, parent_state: str) -> None:
+        parent = tmp_path / "parent"
+        if parent_state == "dangling":
+            parent.symlink_to(tmp_path / "missing", target_is_directory=True)
+
+        with pytest.raises(FileNotFoundError, match="parent directory"):
+            optional_metadata_file(_root(tmp_path), "parent/artifact", context=_CONTEXT)
+
+    def test_rejects_dangling_leaf_and_wrong_kind(self, tmp_path: Path) -> None:
+        (tmp_path / "dangling").symlink_to(tmp_path / "missing")
+        (tmp_path / "directory").mkdir()
+        root = _root(tmp_path)
+
+        with pytest.raises(FileNotFoundError, match="dangling symlink"):
+            optional_metadata_file(root, "dangling", context=_CONTEXT)
+        with pytest.raises(IsADirectoryError):
+            optional_metadata_file(root, "directory", context=_CONTEXT)
+
+    def test_contextualizes_lstat_error(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        root = _root(tmp_path)
+        error = PermissionError("denied")
+        mocker.patch.object(Path, "lstat", side_effect=error)
+
+        with pytest.raises(PermissionError) as raised:
+            optional_metadata_file(root, "file", context=_CONTEXT)
+
+        assert raised.value is error
+        assert "test_reader" in raised.value.__notes__[0]
+
+
+class TestOptionalMetadataDirectory:
+    def test_returns_none_for_absent_leaf(self, tmp_path: Path) -> None:
+        assert optional_metadata_directory(_root(tmp_path), "missing", context=_CONTEXT) is None
+
+    def test_returns_canonical_existing_directory(self, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "alias").symlink_to(target, target_is_directory=True)
+
+        assert optional_metadata_directory(_root(tmp_path), "alias", context=_CONTEXT) == target.resolve()
+
+    def test_rejects_missing_parent_file_and_dangling_leaf(self, tmp_path: Path) -> None:
+        (tmp_path / "file").touch()
+        (tmp_path / "dangling").symlink_to(tmp_path / "missing", target_is_directory=True)
+        root = _root(tmp_path)
+
+        with pytest.raises(FileNotFoundError, match="parent directory"):
+            optional_metadata_directory(root, "missing/directory", context=_CONTEXT)
+        with pytest.raises(NotADirectoryError):
+            optional_metadata_directory(root, "file", context=_CONTEXT)
+        with pytest.raises(FileNotFoundError):
+            optional_metadata_directory(root, "dangling", context=_CONTEXT)
 
 
 class TestSortedPaths:

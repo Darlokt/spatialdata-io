@@ -30,7 +30,8 @@ frame. No universal stage origin or half-pixel correction is inferred.
 | CosMx | Native local `spatial_pixels` and global `global` retain exact pixels. Optional `pixel_size_um` calibrates the validated global pixel frame consistently for tables, rasters and transcripts, after existing signed placement. Stage-only millimetres do not establish a stage-to-pixel mapping. Current paired/optical source profiles need separate association and mapping evidence; no universal scale or fitted correction is substituted. |
 | Curio | Supported Seeker primary exports use manufacturer-declared approximately 0.647 µm/pixel. Preserve native XY in `spatial_pixels` and stored orientation; canonical `spatial` and display circles use this approximate scale. This does not establish a coordinate contract for arbitrary reprocessed/merged or Trekker products. |
 
-Optional OME calibration supports µm, nm and mm and preserves anisotropy. All
+Optional OME calibration supports µm, nm and mm, converted to micrometres with
+one correctly rounded operation, and preserves anisotropy. All
 retained spatial axes must have finite positive representable sizes; incomplete
 calibration leaves the entire grid in source units. Present malformed values or
 unsupported units fail. Linked-grid declarations must agree, including partial

@@ -96,7 +96,7 @@ class TestDbitImages:
         image = result.images["sample_image"]
         assert isinstance(image, DataArray)
         assert image.data.chunksize == (1, 4, 5)
-        assert image.coords["c"].to_numpy().tolist() == [0, 1, 2]
+        assert image.coords["c"].to_numpy().tolist() == ["r", "g", "b"]
 
         np.testing.assert_array_equal(
             image.data[:, :2, :3].compute(scheduler="synchronous"), expected[:2, :3].transpose(2, 0, 1)
@@ -104,6 +104,30 @@ class TestDbitImages:
 
         assert decode.call_count == 1
         assert decode.call_args.args[0].closed is True
+
+    @pytest.mark.parametrize(
+        ("name", "samples", "expected"),
+        [
+            ("rgba.png", 4, ["r", "g", "b", "a"]),
+            ("gray-alpha.png", 2, [0, 1]),
+            ("gray.png", 1, [0]),
+            ("gray.jpeg", 1, [0]),
+        ],
+    )
+    def test_encoded_channels_follow_the_declared_colour_type(
+        self, tmp_path: Path, name: str, samples: int, expected: list[str | int]
+    ) -> None:
+        _write_layout(tmp_path)
+        shape = (8, 10) if samples == 1 else (8, 10, samples)
+        source = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+        path = tmp_path / name
+        encode = imagecodecs.png_encode if path.suffix == ".png" else imagecodecs.jpeg8_encode
+        path.write_bytes(encode(source))
+
+        image = dbit(tmp_path, image_file=path).images["sample_image"]
+
+        assert image.coords["c"].to_numpy().tolist() == expected
+        assert image.shape == (samples, 8, 10)
 
     def test_selected_series_and_level_determine_spatial_scale(self, tmp_path: Path) -> None:
         _write_layout(tmp_path)

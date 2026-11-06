@@ -49,6 +49,7 @@ class TestDbitCommand:
             tiff_level=0,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -119,6 +120,7 @@ class TestDbitCommand:
             tiff_level=1,
             scale_factors=(2, 3),
             chunks=12 if len(chunk_values) == 1 else (1, 8, 16),
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 

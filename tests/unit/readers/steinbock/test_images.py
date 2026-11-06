@@ -12,8 +12,9 @@ from dask.callbacks import Callback
 from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.steinbock._images import _read_raster, _read_rasters
 from spatialdata_io.readers.steinbock._layout import _SampleLayout
@@ -112,6 +113,14 @@ class TestReadRasters:
         expected = names if names and all(names) and len(set(names)) == len(names) else ["Channel:0:0", "Channel:0:1"]
         assert result.image.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(result.image.data.compute(), image)
+
+    def test_rgb_ome_samples_fail_before_channel_names(self, tmp_path: Path) -> None:
+        """Steinbock images are scientific channel stacks; an interleaved samples axis is not interpreted."""
+        sample, _, _ = _write_sample(tmp_path)
+        tifffile.imwrite(sample.image, np.zeros((48, 64, 3), dtype=np.uint8), ome=True, photometric="rgb")
+
+        with pytest.raises(ReaderFormatError, match="Axis 's' has length 3"):
+            _read_rasters(sample, make_raster_options(), metadata=None, calibrated_frame=sample.name)
 
     @pytest.mark.parametrize("channels", [3, 4])
     def test_scientific_channels_are_not_rgb(self, tmp_path: Path, channels: int) -> None:

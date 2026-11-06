@@ -19,6 +19,8 @@ from spatialdata_io.readers._utils.paths import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from spatialdata_io.readers._utils.paths import PathPolicy
+
 _IMAGE_SUFFIXES = frozenset({".tif", ".tiff", ".btf", ".png", ".jpg", ".jpeg"})
 
 
@@ -37,20 +39,21 @@ def _discover_layout(
     table_file: str | Path | None,
     barcode_positions_file: str | Path | None,
     image_file: str | Path | None,
+    path_policy: PathPolicy = "strict",
 ) -> _DbitLayout:
     """Resolve one expression table, one barcode map, and zero or one image."""
     context = ReaderErrorContext("dbit", "dataset layout")
-    root = normalize_dataset_root(path, context=context)
-    candidates = sorted_paths(root.iterdir(), context=context, search_path=root)
+    root = normalize_dataset_root(path, context=context, path_policy=path_policy)
+    candidates = sorted_paths(root.path.iterdir(), context=context, search_path=root.path)
 
-    # Discovery must stay inside the root. Explicit caller overrides use the
-    # separate path policy that permits absolute files outside the dataset.
+    # Discovered artifacts follow the root's path policy. Explicit caller
+    # overrides use separate rules that permit absolute files outside the dataset.
     table_context = ReaderErrorContext("dbit", "expression table")
     if table_file is None:
         table_candidate = require_unique_path(
             (item for item in candidates if item.suffix.lower() == ".h5ad"),
             context=table_context,
-            search_path=root,
+            search_path=root.path,
         )
         table = require_metadata_file(root, table_candidate, context=table_context)
     else:
@@ -65,7 +68,7 @@ def _discover_layout(
         barcode_candidate = require_unique_path(
             (item for item in candidates if "barcode_list" in item.name),
             context=barcode_context,
-            search_path=root,
+            search_path=root.path,
         )
         barcode_positions = require_metadata_file(root, barcode_candidate, context=barcode_context)
     else:
@@ -78,7 +81,7 @@ def _discover_layout(
         image_candidate = optional_unique_path(
             (item for item in candidates if item.name.endswith("tissue_lowres_image.png")),
             context=image_context,
-            search_path=root,
+            search_path=root.path,
         )
         image = None if image_candidate is None else require_metadata_file(root, image_candidate, context=image_context)
     else:

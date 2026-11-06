@@ -79,7 +79,7 @@ to input size. Neither an Arrow backend nor `copy=False` proves that a conversio
 avoids allocation; validate that property for the actual path before claiming it.
 
 Readers should construct this CSR value before constructing `AnnData` whenever
-they already own dense columns or coordinate triplets. This avoids holding an
+they already own dense columns or sparse coordinates. This avoids holding an
 avoidable second dense expression copy inside `AnnData` before normalization.
 
 ## Existing sparse data
@@ -104,7 +104,8 @@ assert sparse.issparse(x) and x.format == "csr"
 CSR and CSC arrays and matrices have their compressed buffers validated before
 conversion or canonicality shortcuts. `validate_compressed_sparse()` exposes
 the same read-only structural check when a reader must inspect compressed
-spans before final normalization. It checks one-dimensional NumPy buffers,
+spans before an operation that trusts them, such as row reordering. Final
+linkage repeats the check, so a reader needs it only for that purpose. It checks one-dimensional NumPy buffers,
 integer indices/pointers safely representable by int64, equal data/index
 capacity, pointer length and initial zero, nondecreasing pointers, terminal
 extent, and active minor-axis bounds.
@@ -296,11 +297,12 @@ layout needs reader and version context. Raster storage retains the specialized
 `RasterFormatError` from the same centralized module.
 
 Malformed linkage values and target membership raise `ReaderFormatError` with
-reader context. Invalid reader-authored descriptors, stale parser metadata, and
-mapping keys outside the descriptor raise `ValueError`. Expression failures
-retain the precise normalization exception and location note. Public parser
-failures retain their original type, identity, traceback, and cause while
-gaining reader context.
+the reader context and the optional source `path` passed to
+`parse_linked_table()`. Invalid reader-authored descriptors and mapping keys
+outside the descriptor raise `ValueError`. Stale imported linkage metadata,
+expression normalization failures and public parser failures retain their
+original type, identity, traceback, and cause while gaining a note naming the
+reader context and path, so readers need no wrapper around the call.
 
 ## Sparse-array semantics
 
@@ -318,46 +320,11 @@ after construction:
 - sparse-array constructors derive index dtypes from the supplied index-array
   dtypes rather than downcasting based on their values.
 
-`csr_array_from_triplets()` therefore requires matching signed `int32` or
-`int64` row and column arrays and preserves that dtype in the returned CSR
-indices and index pointer. A shape too large for `int32` is rejected before
-construction so SciPy cannot silently promote the structure. Readers should
-choose `int32` when its range is sufficient and `int64` only for larger shapes
-or an explicit interoperability requirement.
-
 See SciPy's
 [migration guide](https://docs.scipy.org/doc/scipy/reference/sparse.migration_to_sparray.html)
-for the complete matrix-to-array behavior changes. Phase 2 owns construction;
-each later reader cohort remains responsible for auditing its sparse indexing,
+for the complete matrix-to-array behavior changes. This package owns construction;
+each reader remains responsible for auditing its sparse indexing,
 iteration, reductions, `*`, `@`, and power operations before adopting arrays.
-
-## Coordinate triplets
-
-Readers that already have observation, feature, and value vectors should avoid
-constructing a dense intermediate:
-
-```python
-import numpy as np
-
-from spatialdata_io.readers._utils.table import csr_array_from_triplets
-
-rows = np.asarray([0, 0, 1], dtype=np.int32)
-columns = np.asarray([1, 1, 0], dtype=np.int32)
-values = np.asarray([2, 3, 4], dtype=np.int32)
-
-x = csr_array_from_triplets(values, rows, columns, shape=(2, 2))
-# The duplicate at (0, 1) is stored once with value 5.
-```
-
-Empty tables retain their explicit dimensions:
-
-```python
-empty = np.asarray([], dtype=np.float32)
-indices = np.asarray([], dtype=np.int32)
-
-no_observations = csr_array_from_triplets(empty, indices, indices, shape=(0, 8))
-no_features = csr_array_from_triplets(empty, indices, indices, shape=(5, 0))
-```
 
 ## Eager execution and ownership
 
@@ -433,6 +400,8 @@ no array scans, I/O, aggregation or mutation.
 owned canonical CSR arrays after all count arithmetic. It validates finite,
 nonnegative integral values in bounded stored-buffer batches and chooses one
 common float32 dtype when every actual value is exact, otherwise float64.
+Batches whose largest value is at most 2²⁴ need no element-wise cast check,
+which keeps ordinary counts to one validation pass.
 Counts that neither dtype preserves raise `ReaderFormatError`. This is storage
 conversion, not scaling. Readers pass `path=` to identify the source artifact
 in numerical errors. It preserves explicit zeros, order, shapes and sparse

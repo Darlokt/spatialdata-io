@@ -54,6 +54,7 @@ class TestIssCommand:
             scale_factors=DEFAULT_SCALE_FACTORS,
             data_axes=None,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -106,6 +107,7 @@ class TestIssCommand:
             scale_factors=(2, 3),
             data_axes="CYX",
             chunks=expected,
+            path_policy="strict",
         )
 
     @pytest.mark.parametrize("omitted", ["--raw-image-file", "--labels-file", "--table-file"])

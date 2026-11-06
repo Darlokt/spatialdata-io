@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from math import prod
 from typing import TYPE_CHECKING, cast
 
 import dask.array as da
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
 
 if TYPE_CHECKING:
@@ -28,11 +27,7 @@ _IMAGE_AXES = ("c", "y", "x")
 def _read_channel(path: ArtifactFile) -> Array:
     """Create one source graph from one inspected full-resolution grayscale plane."""
     context = ReaderErrorContext("merscope", "mosaic channel")
-    try:
-        metadata = inspect_tiff(path)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=context, path=path)
-        raise
+    metadata = inspect_tiff(path, context=context)
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=context,
@@ -40,7 +35,7 @@ def _read_channel(path: ArtifactFile) -> Array:
             found=f"{len(metadata.series)} TIFF series",
             expected="one full-resolution grayscale series",
         )
-    raster = read_tiff(metadata, series=0, level=0)
+    raster = read_tiff(metadata, series=0, level=0, context=context)
     try:
         array = normalize_raster_axes(raster.data, raster.axes, target_axes=("y", "x"))
     except ValueError as error:
@@ -87,9 +82,7 @@ def read_images(
                     expected=f"common shape {reference[0]} and dtype {reference[1]}",
                 )
         image = da.stack(arrays, axis=0)
-        if options.scale_factors and min(image.shape[-2:]) < prod(options.scale_factors):
-            message = "Requested scale_factors exceed the spatial extent of a MERSCOPE mosaic."
-            raise ValueError(message)
+        options.validate_image_pyramid(image, element="a MERSCOPE mosaic")
         images[f"{dataset_id}_z{layer.z}"] = Image2DModel.parse(
             image,
             dims=_IMAGE_AXES,

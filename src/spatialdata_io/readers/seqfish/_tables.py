@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 from typing import TYPE_CHECKING, cast
 
 import anndata as ad
@@ -14,6 +13,7 @@ import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
+from spatialdata_io.readers._utils.csv import read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -42,20 +42,6 @@ _MAX_BATCH_ROWS = 10_000
 _CSV_BLOCK_BYTES = 1024 * 1024
 
 
-def _read_header(path: ArtifactFile) -> list[str]:
-    """Read the CSV header before Arrow can normalize duplicate names."""
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        header = handle.readline()
-        try:
-            columns = next(csv.reader([header], strict=True), list[str]())
-        except csv.Error as error:
-            raise schema_error(
-                path, found=f"malformed CSV: {error}", expected="consistently quoted CSV records"
-            ) from error
-        else:
-            return columns
-
-
 def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
     """Convert a bounded lexical block to exact nonnegative integer CSR."""
     columns: list[npt.NDArray[np.int64 | np.uint64]] = []
@@ -79,7 +65,7 @@ def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
 
 def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, npt.NDArray[np.int64 | np.uint64], tuple[str, ...]]:
     """Keep only bounded dense buffers and accumulate canonical sparse blocks."""
-    columns = _read_header(path)
+    columns = read_csv_header(path, context=ReaderErrorContext("seqfish", path.name))
     features = validate_count_columns(columns, path)
     # Budget parsed numeric columns plus their dense destination separately
     # from Arrow text buffers, sparse conversion and retained output blocks.
@@ -124,7 +110,7 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, npt.NDArray[np.i
 
 def _read_cells(path: ArtifactFile) -> pd.DataFrame:
     """Project cell metadata and validate its independent identity population."""
-    columns = _read_header(path)
+    columns = read_csv_header(path, context=ReaderErrorContext("seqfish", path.name))
     projected = validate_cell_columns(columns, path)
     try:
         with path.open("rb") as handle:

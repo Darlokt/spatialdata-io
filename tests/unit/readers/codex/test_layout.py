@@ -1,4 +1,4 @@
-"""CODEX layout, source schemas, identifier precision, and image options."""
+"""CODEX discovery of the cell table, stitched image and selected experiment file."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.codex._layout import _discover_layout
+from spatialdata_io.readers.codex._layout import discover_layout
 from tests.integration.readers.codex._fixtures import write_csv, write_image
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ class TestDiscoverLayout:
         write_csv(tmp_path / "cells.CSV")
         (tmp_path / "cells.csv.bak").touch()
 
-        layout = _discover_layout(tmp_path, cell_table_file=None, image_file=None)
+        layout = discover_layout(tmp_path, cell_table_file=None, image_file=None)
 
         assert layout.cell_table == (tmp_path / "cells.CSV").resolve()
         assert layout.image is None
@@ -29,13 +29,13 @@ class TestDiscoverLayout:
 
     def test_missing_table(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="cell table"):
-            _discover_layout(tmp_path, cell_table_file=None, image_file=None)
+            discover_layout(tmp_path, cell_table_file=None, image_file=None)
 
     def test_wrong_kind(self, tmp_path: Path) -> None:
         (tmp_path / "cells.csv").mkdir()
 
         with pytest.raises(IsADirectoryError):
-            _discover_layout(tmp_path, cell_table_file=None, image_file=None)
+            discover_layout(tmp_path, cell_table_file=None, image_file=None)
 
     def test_ambiguous_image_and_relative_override(self, tmp_path: Path) -> None:
         write_csv(tmp_path / "cells.csv")
@@ -43,9 +43,9 @@ class TestDiscoverLayout:
         write_image(tmp_path / "z.tif")
 
         with pytest.raises(ReaderFormatError, match="2 candidates"):
-            _discover_layout(tmp_path, cell_table_file=None, image_file=None)
+            discover_layout(tmp_path, cell_table_file=None, image_file=None)
 
-        layout = _discover_layout(tmp_path, cell_table_file="cells.csv", image_file="z.tif")
+        layout = discover_layout(tmp_path, cell_table_file="cells.csv", image_file="z.tif")
 
         assert layout.image == (tmp_path / "z.tif").resolve()
 
@@ -59,7 +59,7 @@ class TestDiscoverLayout:
         (root / artifact).symlink_to(tmp_path / artifact)
 
         with pytest.raises(ReaderFormatError, match="outside"):
-            _discover_layout(root, cell_table_file=None, image_file=None)
+            discover_layout(root, cell_table_file=None, image_file=None)
 
     @pytest.mark.parametrize("artifact", ["table", "image"])
     def test_override_suffix_validation(self, tmp_path: Path, artifact: str) -> None:
@@ -67,7 +67,7 @@ class TestDiscoverLayout:
         (tmp_path / "bad.txt").touch()
 
         with pytest.raises(ReaderFormatError, match=r"bad\.txt"):
-            _discover_layout(
+            discover_layout(
                 tmp_path,
                 cell_table_file="bad.txt" if artifact == "table" else None,
                 image_file="bad.txt" if artifact == "image" else None,

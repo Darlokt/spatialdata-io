@@ -1,13 +1,16 @@
+"""Closed, immutable metadata of an inspected TIFF source."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import numpy as np
     from ome_types.model import OME
+
+    from spatialdata_io.readers._utils.image._types import SampleColor
+    from spatialdata_io.readers._utils.paths import ArtifactFile
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,13 +19,16 @@ class TiffLevelMetadata:
 
     ``axes`` and ``shape`` describe the array exposed by ``tifffile`` for this
     level. ``native_chunks`` is the exact selection geometry exposed by its Zarr
-    store. No semantic axis selection or pyramid interpretation is applied.
+    store. ``color`` is the colour model the level declares for its samples
+    axis ``S`` (``None`` without one). No semantic axis selection or pyramid
+    interpretation is applied.
     """
 
     shape: tuple[int, ...]
     dtype: np.dtype[np.generic]
     axes: tuple[str, ...]
     native_chunks: tuple[int, ...]
+    color: SampleColor | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,16 +49,6 @@ class TiffMetadata:
     TIFF files or Zarr stores escape inspection.
     """
 
-    path: Path
+    path: ArtifactFile
     series: tuple[TiffSeriesMetadata, ...]
     ome: OME | None
-
-
-@dataclass(frozen=True, slots=True)
-class _TiffReadSpec:
-    """Minimal immutable state embedded in TIFF pixel tasks."""
-
-    path: Path
-    series: int
-    level: int
-    dtype: np.dtype[np.generic]

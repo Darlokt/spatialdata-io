@@ -10,7 +10,7 @@ import pytest
 import tifffile
 from xarray import DataArray, DataTree
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.dbit._images import _read_image, _validate_image_options
@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 DEFAULT_OPTIONS = make_raster_options()
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 class TestValidateImageOptions:
@@ -77,16 +80,58 @@ class TestReadImage:
         assert image.data.chunksize == (min(channels, 2), 2, 2)
         np.testing.assert_array_equal(image.data.compute(), source)
 
-    @pytest.mark.parametrize("channels", [3, 4])
-    def test_rgb_samples_keep_ordered_positional_labels(self, tmp_path: Path, channels: int) -> None:
+    @pytest.mark.parametrize(
+        ("samples", "photometric", "extrasamples", "expected"),
+        [
+            (3, "rgb", None, ["r", "g", "b"]),
+            (4, "rgb", ["unassalpha"], ["r", "g", "b", "a"]),
+            (4, "rgb", ["unspecified"], [0, 1, 2, 3]),
+            (3, "minisblack", None, [0, 1, 2]),
+        ],
+    )
+    def test_samples_are_named_by_the_declared_colour_model(
+        self,
+        tmp_path: Path,
+        samples: int,
+        photometric: str,
+        extrasamples: list[str] | None,
+        expected: list[str | int],
+    ) -> None:
         path = tmp_path / "image.tif"
-        source = np.arange(30 * channels, dtype=np.uint8).reshape(5, 6, channels)
-        tifffile.imwrite(path, source, photometric="rgb")
+        source = np.arange(30 * samples, dtype=np.uint8).reshape(5, 6, samples)
+        tifffile.imwrite(path, source, photometric=photometric, planarconfig="contig", extrasamples=extrasamples)
 
         image = _read_image(ArtifactFile(path), data_axes=None, tiff_series=0, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
-        assert image.coords["c"].to_numpy().tolist() == list(range(channels))
+        assert image.coords["c"].to_numpy().tolist() == expected
+        np.testing.assert_array_equal(image.data.compute(), source.transpose(2, 0, 1))
+
+    @pytest.mark.parametrize(
+        ("photometric", "name", "data_axes", "expected"),
+        [
+            ("rgb", None, None, ["r", "g", "b"]),
+            ("rgb", "H&E", "YXC", ["r", "g", "b"]),
+            ("minisblack", None, None, [f"Channel:0:0:sample:{index}" for index in range(3)]),
+            ("minisblack", "H&E", None, [f"H&E:sample:{index}" for index in range(3)]),
+            ("minisblack", "H&E", "YXC", [f"H&E:sample:{index}" for index in range(3)]),
+        ],
+    )
+    def test_ome_samples_are_named_by_colour_or_channel_record(
+        self, tmp_path: Path, photometric: str, name: str | None, data_axes: str | None, expected: list[str]
+    ) -> None:
+        """OME declares interleaved samples as one channel record; the TIFF declares whether they are RGB."""
+        path = tmp_path / "image.ome.tif"
+        source = np.arange(90, dtype=np.uint8).reshape(5, 6, 3)
+        metadata = {"axes": "YXS"} if name is None else {"axes": "YXS", "Channel": {"Name": [name]}}
+        tifffile.imwrite(path, source, photometric=photometric, planarconfig="contig", metadata=metadata)
+
+        image = _read_image(
+            ArtifactFile(path), data_axes=data_axes, tiff_series=0, tiff_level=0, raster=DEFAULT_OPTIONS
+        )
+
+        assert isinstance(image, DataArray)
+        assert image.coords["c"].to_numpy().tolist() == expected
         np.testing.assert_array_equal(image.data.compute(), source.transpose(2, 0, 1))
 
     @pytest.mark.parametrize("names", [["marker-b", "marker-a"], ["same", "same"], [None, None]])
@@ -158,12 +203,12 @@ class TestReadImage:
             metadata={"axes": "CYX", "Channel": {"Name": ["a", "b"]}},
         )
 
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
         assert metadata.ome is not None
         metadata.ome.images[0].pixels.channels.pop()
         mocker.patch("spatialdata_io.readers.dbit._images.inspect_tiff", return_value=metadata)
 
-        with pytest.raises(ReaderFormatError, match="OME channel records"):
+        with pytest.raises(ReaderFormatError, match="1 OME channels for 2 raster channels"):
             _read_image(ArtifactFile(path), data_axes=None, tiff_series=0, tiff_level=0, raster=DEFAULT_OPTIONS)
 
     @pytest.mark.parametrize(("series", "level"), [(1, 0), (0, 1)])
@@ -176,7 +221,8 @@ class TestReadImage:
                 ArtifactFile(path), data_axes=None, tiff_series=series, tiff_level=level, raster=DEFAULT_OPTIONS
             )
 
-        assert any("dbit" in note for note in caught.value.__notes__)
+        context = ReaderErrorContext("dbit", "histology image")
+        assert caught.value.__notes__ == [f"While handling {context.describe(path=path)}."]
 
     @pytest.mark.parametrize("suffix", [".tif", ".png", ".jpg"])
     def test_malformed_image_has_reader_context(self, tmp_path: Path, suffix: str) -> None:

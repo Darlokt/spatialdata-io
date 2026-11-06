@@ -16,10 +16,10 @@ import zarr
 from tifffile.zarr import ZarrTiffStore
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext
 from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
-from spatialdata_io.readers._utils.image.tiff._dask import _read_tiff_selection
-from spatialdata_io.readers._utils.image.tiff._types import _TiffReadSpec
+from spatialdata_io.readers._utils.image.tiff._dask import _read_tiff_selection, _TiffArray
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from tests.integration.readers._utils.image.conftest import TiffOptions
 
 if TYPE_CHECKING:
@@ -29,6 +29,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
     from tests.integration.readers._utils.image.conftest import TiffFactory
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 class _FinalPage(NamedTuple):
@@ -50,7 +53,9 @@ class TestReadTiff:
         source = np.asarray([[0, 2**53 + 1], [3, np.iinfo(source_dtype).max]], dtype=source_dtype)
         tifffile.imwrite(path, source, photometric="minisblack")
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         # TIFF decoding already returns native byte order, including for files
         # whose encoded pixels are big-endian.
@@ -81,7 +86,9 @@ class TestReadTiff:
         )
         selection_spy = mocker.spy(tiff_dask, "_read_tiff_selection")
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         selection_spy.assert_not_called()
         assert result.axes == ("Y", "X")
@@ -120,7 +127,7 @@ class TestReadTiff:
             TiffOptions(compression=compression, tile=tile, rowsperstrip=rowsperstrip),
         )
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(inspect_tiff(path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT)
 
         assert result.data.chunks == expected_chunks
         assert result.axes == ("C", "Y", "X")
@@ -132,13 +139,9 @@ class TestReadTiff:
         write_tiff: TiffFactory,
     ) -> None:
         path = write_tiff(cyx_data, TiffOptions(compression="deflate", tile=(16, 16)))
-        metadata = inspect_tiff(path)
-        spec = _TiffReadSpec(
-            path=metadata.path,
-            series=0,
-            level=0,
-            dtype=metadata.series[0].levels[0].dtype,
-        )
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
+        level = metadata.series[0].levels[0]
+        spec = _TiffArray(metadata.path, 0, 0, level.shape, level.dtype)
 
         result = _read_tiff_selection(
             spec,
@@ -165,7 +168,7 @@ class TestReadTiff:
     ) -> None:
         path = write_tiff(cyx_data, options)
         mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 2 * 5 * 23 * cyx_data.itemsize)
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(inspect_tiff(path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT)
         with tifffile.TiffFile(path) as tiff:
             payload_ranges = tuple(
                 (offset, offset + byte_count)
@@ -225,7 +228,9 @@ class TestReadTiff:
         # Three one-row strips per band leave a final band of two rows.
         mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 3 * 7 * source.itemsize + 1)
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         assert result.data.chunks == ((1, 1), (3, 3, 3, 2), (7,))
         np.testing.assert_array_equal(result.data.compute(), source)
@@ -249,12 +254,12 @@ class TestReadTiff:
         tifffile.imwrite(path, source, photometric=storage.photometric, rowsperstrip=1, byteorder=storage.byteorder)
         row_items = int(np.prod(storage.shape[1:]))
         mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 4 * row_items * source.itemsize)
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
         zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
         read_array = mocker.spy(tifffile.FileHandle, "read_array")
         file_close = mocker.spy(tifffile.FileHandle, "close")
 
-        result = read_tiff(metadata, series=0, level=0)
+        result = read_tiff(metadata, series=0, level=0, context=_RASTER_CONTEXT)
 
         assert result.data.chunks[0] == (4, 4, 3)
         np.testing.assert_array_equal(result.data[5:7].compute(scheduler="synchronous"), source[5:7])
@@ -281,10 +286,10 @@ class TestReadTiff:
         tifffile.imwrite(
             path, data, photometric="minisblack", rowsperstrip=1, compression=compression, predictor=predictor
         )
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
         zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
 
-        result = read_tiff(metadata, series=0, level=0)
+        result = read_tiff(metadata, series=0, level=0, context=_RASTER_CONTEXT)
 
         np.testing.assert_array_equal(result.data.compute(scheduler="synchronous"), data)
         assert zarr_open.call_count == prod(map(len, result.data.chunks))
@@ -295,8 +300,9 @@ class TestReadTiff:
         path = tmp_path / "final.tif"
         source = np.arange(9 * 5, dtype=np.uint16).reshape(9, 5)
         tifffile.imwrite(path, source, photometric="minisblack", rowsperstrip=1)
-        metadata = inspect_tiff(path)
-        spec = _TiffReadSpec(path=metadata.path, series=0, level=0, dtype=metadata.series[0].levels[0].dtype)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+        level = metadata.series[0].levels[0]
+        spec = _TiffArray(metadata.path, 0, 0, level.shape, level.dtype)
         zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
 
         result = _read_tiff_selection(spec, (slice(2, 6), slice(1, 4)))
@@ -331,7 +337,12 @@ class TestReadTiff:
         )
         tifffile.imwrite(tmp_path / "second.ome.tif", second, description=binary_only, metadata=None, rowsperstrip=1)
 
-        result = read_tiff(inspect_tiff(tmp_path / "first.ome.tif"), series=1, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(tmp_path / "first.ome.tif"), context=_RASTER_CONTEXT),
+            series=1,
+            level=0,
+            context=_RASTER_CONTEXT,
+        )
 
         np.testing.assert_array_equal(result.data.compute(), second)
 
@@ -343,7 +354,9 @@ class TestReadTiff:
             tiff.pages.first.tags["StripOffsets"].overwrite(0)
             tiff.pages.first.tags["StripByteCounts"].overwrite(0)
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         np.testing.assert_array_equal(result.data.compute(), np.zeros((16, 8), dtype=np.uint16))
 
@@ -354,7 +367,9 @@ class TestReadTiff:
             page = tiff.pages.first
             page.tags["StripByteCounts"].overwrite(page.nbytes - 32)
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         with pytest.raises(tifffile.TiffFileError, match="corrupted strip"):
             result.data.compute()
@@ -364,9 +379,12 @@ class TestReadTiff:
         source = np.arange(9 * 5 * 3, dtype=np.uint8).reshape(9, 5, 3)
         tifffile.imwrite(path, source, photometric="rgb", rowsperstrip=2)
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         assert result.axes == ("Y", "X", "S")
+        assert result.color == "rgb"
         assert result.data.chunks == ((9,), (5,), (3,))
         np.testing.assert_array_equal(result.data.compute(), source)
 
@@ -383,7 +401,9 @@ class TestReadTiff:
             metadata={"axes": "CYX"},
         )
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         assert tuple(axis_chunks[0] for axis_chunks in result.data.chunks) == (1, 16, 16)
         np.testing.assert_allclose(result.data.compute(), source, atol=5)
@@ -396,9 +416,9 @@ class TestReadTiff:
             writer.write(first, photometric="minisblack", metadata={"axes": "YX"})
             writer.write(second, photometric="minisblack", metadata={"axes": "YX"})
 
-        series_metadata = inspect_tiff(series_path)
+        series_metadata = inspect_tiff(ArtifactFile(series_path), context=_RASTER_CONTEXT)
         np.testing.assert_array_equal(
-            read_tiff(series_metadata, series=1, level=0).data.compute(),
+            read_tiff(series_metadata, series=1, level=0, context=_RASTER_CONTEXT).data.compute(),
             second,
         )
 
@@ -415,16 +435,18 @@ class TestReadTiff:
             )
             writer.write(reduced, tile=(16, 16), subfiletype=1, photometric="minisblack")
 
-        pyramid_metadata = inspect_tiff(pyramid_path)
+        pyramid_metadata = inspect_tiff(ArtifactFile(pyramid_path), context=_RASTER_CONTEXT)
         np.testing.assert_array_equal(
-            read_tiff(pyramid_metadata, series=0, level=1).data.compute(),
+            read_tiff(pyramid_metadata, series=0, level=1, context=_RASTER_CONTEXT).data.compute(),
             reduced,
         )
 
     def test_reads_linked_ome_planes(self, linked_ome_tiff: tuple[Path, NDArray[np.uint16]]) -> None:
         path, expected = linked_ome_tiff
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
 
         assert result.data.chunks == ((1, 1), (4,), (5,))
         np.testing.assert_array_equal(result.data.compute(), expected)
@@ -438,7 +460,7 @@ class TestReadTiff:
         path = write_tiff(cyx_data, TiffOptions(compression="deflate", tile=(16, 16)))
         selection_spy = mocker.spy(tiff_dask, "_read_tiff_selection")
 
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(inspect_tiff(path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT)
         rechunked = result.data.rechunk((1, 8, 8))
 
         assert selection_spy.call_count == 0
@@ -454,9 +476,9 @@ class TestReadTiff:
         write_tiff: TiffFactory,
     ) -> None:
         path = write_tiff(cyx_data, TiffOptions(compression="deflate", tile=(16, 16)))
-        metadata = inspect_tiff(path)
-        first = read_tiff(metadata, series=0, level=0).data
-        second = read_tiff(metadata, series=0, level=0).data
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
+        first = read_tiff(metadata, series=0, level=0, context=_RASTER_CONTEXT).data
+        second = read_tiff(metadata, series=0, level=0, context=_RASTER_CONTEXT).data
 
         assert first.name == second.name
         assert len(first.dask.layers) == 2
@@ -478,7 +500,7 @@ class TestReadTiff:
         write_tiff: TiffFactory,
     ) -> None:
         path = write_tiff(cyx_data, TiffOptions(compression="deflate", tile=(16, 16)))
-        data = read_tiff(inspect_tiff(path), series=0, level=0).data
+        data = read_tiff(inspect_tiff(path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT).data
         selection = data[:1, :2, :3]
 
         optimized = dask.optimize(selection)[0]
@@ -494,7 +516,7 @@ class TestReadTiff:
             (0, 1, "level index"),
         ],
     )
-    def test_rejects_invalid_indices(
+    def test_rejects_invalid_indices_with_reader_context(
         self,
         cyx_data: NDArray[np.uint16],
         write_tiff: TiffFactory,
@@ -502,10 +524,17 @@ class TestReadTiff:
         level: int,
         match: str,
     ) -> None:
-        metadata = inspect_tiff(write_tiff(cyx_data))
+        path = write_tiff(cyx_data)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
+        context = ReaderErrorContext("reader", "stitched image", detected_version="2.0")
 
-        with pytest.raises(IndexError, match=match):
-            read_tiff(metadata, series=series, level=level)
+        with pytest.raises(IndexError, match=match) as caught:
+            read_tiff(metadata, series=series, level=level, context=context)
+
+        assert caught.value.__notes__ == [f"While handling {context.describe(path=path)}."]
+        assert caught.value.__notes__[0] == (
+            f"While handling reader 'reader', artifact 'stitched image', detected version '2.0', path {str(path)!r}."
+        )
 
     def test_closes_resources_and_adds_selection_context_after_source_change(
         self,
@@ -513,7 +542,7 @@ class TestReadTiff:
         write_tiff: TiffFactory,
     ) -> None:
         path = write_tiff(cyx_data, TiffOptions(compression="deflate", tile=(16, 16)))
-        result = read_tiff(inspect_tiff(path), series=0, level=0)
+        result = read_tiff(inspect_tiff(path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT)
         path.write_bytes(b"corrupt")
 
         with pytest.raises(tifffile.TiffFileError, match="not a TIFF") as caught:
@@ -527,14 +556,14 @@ class TestReadTiff:
         mocker: MockerFixture,
     ) -> None:
         path = write_tiff(cyx_data, TiffOptions(compression="deflate", tile=(16, 16)))
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
         series = metadata.series[0]
         wrong_level = replace(series.levels[0], dtype=np.dtype(np.uint8))
         inconsistent = replace(metadata, series=(replace(series, levels=(wrong_level,)),))
         store_close = mocker.spy(ZarrTiffStore, "close")
         file_close = mocker.spy(tifffile.FileHandle, "close")
 
-        result = read_tiff(inconsistent, series=0, level=0)
+        result = read_tiff(inconsistent, series=0, level=0, context=_RASTER_CONTEXT)
 
         with pytest.raises(RasterFormatError, match="does not match inspected metadata"):
             result.data[:1, :16, :16].compute(scheduler="synchronous")

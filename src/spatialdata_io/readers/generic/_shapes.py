@@ -1,8 +1,28 @@
-"""Generic GeoJSON loading and SpatialData shape-model construction."""
+"""Read one caller-selected GeoJSON file as SpatialData polygon shapes.
+
+Two document kinds of RFC 7946 (https://www.rfc-editor.org/rfc/rfc7946) are
+supported; every geometry must be a 2D ``Polygon`` or ``MultiPolygon``::
+
+    {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "id": ..., "properties": {...}, "geometry": {"type": "Polygon", "coordinates": [...]}},
+            ...,
+        ],
+    }
+
+    {"type": "GeometryCollection", "geometries": [{"type": "MultiPolygon", "coordinates": [...]}, ...]}
+
+The document is strict UTF-8 JSON: duplicate object names, ``NaN`` and
+``Infinity`` are rejected rather than resolved by the parser. Rows keep source
+order with positional integer IDs; Feature IDs, properties and any ``crs``
+member are discarded. Coordinates keep the units of the source (pixels,
+micrometres or geographic degrees alike) and are never reprojected, rounded,
+closed or repaired.
+"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -10,13 +30,15 @@ import geopandas as gpd
 from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import (
     geojson_polygons,
     invalid_geometry_mask,
     raise_invalid_geometries,
     validate_invalid_geometry_policy,
 )
+from spatialdata_io.readers._utils.metadata import read_json_object
+from spatialdata_io.readers._utils.paths import require_file
 
 if TYPE_CHECKING:
     from geopandas import GeoDataFrame
@@ -34,29 +56,28 @@ def _error(path: Path, found: str) -> ReaderFormatError:
     )
 
 
-def _collection(document: object, path: Path) -> list[object]:
-    if not isinstance(document, dict):
-        raise _error(path, "a non-object document")
+def _geometry_objects(document: dict[str, object], path: Path) -> list[object]:
+    """Return the decoded geometry object of every row in source order."""
     kind = document.get("type")
     if kind == "FeatureCollection":
         features = document.get("features")
         if not isinstance(features, list):
             raise _error(path, "missing or malformed features")
-        values: list[object] = []
+        geometries: list[object] = []
         for position, feature in enumerate(features):
             if not isinstance(feature, dict) or feature.get("type") != "Feature":
                 raise _error(path, f"malformed feature {position}")
-            values.append(feature.get("geometry"))
+            geometries.append(feature.get("geometry"))
     elif kind == "GeometryCollection":
         members = document.get("geometries")
         if not isinstance(members, list):
             raise _error(path, "missing or malformed geometries")
-        values = members
+        geometries = members
     else:
         raise _error(path, f"unsupported top-level type {kind!r}")
-    if not values:
+    if not geometries:
         raise _error(path, "an empty collection")
-    return values
+    return geometries
 
 
 def geojson(
@@ -64,43 +85,50 @@ def geojson(
 ) -> GeoDataFrame:
     """Read GeoJSON polygons as a SpatialData shapes element.
 
+    ``FeatureCollection`` and ``GeometryCollection`` documents of 2D
+    ``Polygon`` and ``MultiPolygon`` geometries are supported; a single
+    geometry or ``Feature`` document is not.
+
     Parameters
     ----------
     path
-        GeoJSON file containing polygons or multipolygons.
+        GeoJSON file. ``~`` is expanded.
     coordinate_system
-        Source frame name containing a non-whitespace character, preserved
-        literally and receiving an identity transformation. Units
-        are those of the input; geographic coordinates are not reprojected.
+        Name of the coordinate system of the source coordinates, preserved
+        literally; it must contain a non-whitespace character.
     invalid_geometries
-        Keep invalid topology unchanged, drop entire invalid features, or
-        raise. Missing, empty, nonpolygon, nonfinite, nonplanar, open-ring
-        and float64-unrepresentable geometries fail under every policy.
-        Dropping every feature fails.
+        Policy for polygons that are not valid by ``shapely.is_valid``, such
+        as self-intersecting rings: ``"keep"`` preserves them unchanged,
+        ``"drop"`` removes their entire rows without renumbering the others,
+        and ``"raise"`` fails. Dropping every row fails.
 
     Returns
     -------
     geopandas.GeoDataFrame
-        Eager shapes in source order with positional integer IDs. Surviving
-        IDs are not renumbered. Feature IDs, properties and CRS declarations
-        are discarded, preserving the established output contract.
+        Eager shapes with a single ``geometry`` column, one row per feature or
+        geometry in source order, and positional integer IDs.
+
+        - Vertices, holes and multipart order are those of the source; nothing
+          is closed, rounded or repaired.
+        - Feature IDs, properties and ``crs`` declarations are discarded.
+        - Coordinates: an ``Identity`` to ``coordinate_system``; the units are
+          those of the source and geographic coordinates are not reprojected.
 
     Raises
     ------
     TypeError
-        The frame name is not a string.
+        If ``coordinate_system`` or ``invalid_geometries`` is not a string.
     ValueError
-        Options, document structure or geometry violate the supported contract.
-    OSError
-        The source cannot be opened or read.
-
-    Notes
-    -----
-    FeatureCollection and GeometryCollection documents are supported. The
-    standard JSON parser decodes the document once; geometries are validated
-    and constructed exactly by the shared GeoJSON polygon boundary, and no
-    geometry is closed, rounded or repaired. A single geometry
-    or Feature document is unsupported. No caller-owned object is mutated.
+        If ``coordinate_system`` or ``invalid_geometries`` has an invalid value.
+    ReaderFormatError
+        Under every policy, if the file is not strict UTF-8 JSON, the document
+        is not a nonempty supported collection, or a geometry is missing,
+        empty, nonpolygonal, nonplanar or nonfinite, has an open or short
+        ring, or has integer coordinates float64 cannot represent exactly.
+        Also for invalid geometries under ``"raise"`` and when ``"drop"``
+        removes every row.
+    FileNotFoundError, IsADirectoryError
+        If ``path`` does not name an existing regular file.
     """
     if not isinstance(coordinate_system, str):
         message = "coordinate_system must be a string."
@@ -108,25 +136,19 @@ def geojson(
     if not coordinate_system.strip():
         message = "coordinate_system must contain a non-whitespace character."
         raise ValueError(message)
-
     policy = validate_invalid_geometry_policy(invalid_geometries)
-    source_path = Path(path)
-    try:
-        with source_path.open(encoding="utf-8") as source:
-            document: object = json.load(source)
-    except OSError as error:
-        add_reader_context(error, context=_CONTEXT, path=source_path)
-        raise
-    except (UnicodeError, ValueError, RecursionError) as error:
-        raise _error(source_path, "malformed JSON") from error
-    geometries = geojson_polygons(_collection(document, source_path), context=_CONTEXT, path=source_path)
+
+    file = require_file(Path(path).expanduser(), context=_CONTEXT)
+    document = read_json_object(file, context=_CONTEXT)
+    geometries = geojson_polygons(_geometry_objects(document, file), context=_CONTEXT, path=file)
     frame = gpd.GeoDataFrame(geometry=geometries)
+
     if policy != "keep":
-        invalid = invalid_geometry_mask(frame.geometry.to_numpy())
+        invalid = invalid_geometry_mask(geometries)
         if policy == "raise":
-            raise_invalid_geometries(invalid, range(len(frame)), context=_CONTEXT, path=source_path)
+            raise_invalid_geometries(invalid, range(len(frame)), context=_CONTEXT, path=file)
         elif invalid.any():
             frame = frame.loc[~invalid]
             if frame.empty:
-                raise _error(source_path, "all geometries dropped, leaving an empty element")
+                raise _error(file, "all geometries dropped, leaving an empty element")
     return ShapesModel.parse(frame, transformations={coordinate_system: Identity()})

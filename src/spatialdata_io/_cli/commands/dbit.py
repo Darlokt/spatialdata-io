@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import Literal, TypedDict, Unpack
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         tiff_level: int
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        path_policy: Literal["strict", "relaxed"]
 
 
 @click.command(name="dbit")
@@ -93,6 +94,7 @@ if TYPE_CHECKING:
     show_default=True,
     help="Polygon policy; supported generated squares are valid in every mode.",
 )
+@path_policy_option
 def dbit_command(input_path: Path, output_path: Path, **options: Unpack[_DbitOptions]) -> None:
     """Read one DBiT dataset and write its linked SpatialData store."""
     # Click's range comparison accepts NaN, so check finiteness explicitly.
@@ -116,6 +118,7 @@ def dbit_command(input_path: Path, output_path: Path, **options: Unpack[_DbitOpt
         tiff_level=options["tiff_level"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
+        path_policy=options["path_policy"],
     )
 
     result.write(output_path)

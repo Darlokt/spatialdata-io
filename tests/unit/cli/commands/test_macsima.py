@@ -55,6 +55,7 @@ class TestMacsimaCommand:
             split_threshold_nuclei_channel=4,
             scale_factors=(2, 4),
             chunks=(1, 256, 512),
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -76,6 +77,7 @@ class TestMacsimaCommand:
             split_threshold_nuclei_channel=2,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
 
     @pytest.mark.parametrize("case", [("none", None), ("NONE", None), ("0", 0), ("7", 7)])

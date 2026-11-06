@@ -123,3 +123,4 @@ Corrections and contract changes that change results:
 - The `name` column of the channel table holds the marker; numbered or cycle-prefixed channel names remain in `var_names`.
 - Multiple-folder results keep their provenance.
 - Malformed metadata now fails instead of being skipped or silently becoming missing.
+- Discovered artifacts that are symlinks to targets outside the dataset directory are now rejected by default; earlier releases accepted them. Pass `path_policy="relaxed"` for git-annex or DVC datasets ([Dataset paths and symlinks](dataset_paths.md)).

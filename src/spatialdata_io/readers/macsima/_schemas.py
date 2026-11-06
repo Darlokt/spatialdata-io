@@ -9,11 +9,8 @@ belong to the version parsers in ``_metadata.py``.
 
 from __future__ import annotations
 
-import math
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
-
-from ome_types.model import UnitsLength
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
@@ -36,12 +33,6 @@ _IMAGE_TYPES: Mapping[SchemaMajor, Mapping[str, ImageType]] = MappingProxyType(
 # MACSiQView writes exposure times in milliseconds; an absent unit annotation
 # is read as milliseconds.
 EXPOSURE_UNIT = "ms"
-
-# Divisors convert OME physical pixel sizes to micrometers in one correctly
-# rounded operation (170 nm becomes exactly the float nearest to 0.17 µm).
-_MICROMETER_DIVISORS: Mapping[UnitsLength, int] = MappingProxyType(
-    {UnitsLength.MICROMETER: 1, UnitsLength.NANOMETER: 1000}
-)
 
 # Columns of the channel table's ``var`` in output order. ``name`` holds the
 # marker (bleach images carry a ``_background`` suffix), ``exposure`` is in
@@ -68,24 +59,3 @@ def normalize_image_type(value: str, *, major: SchemaMajor, context: ReaderError
             context=context, path=path, found=f"image type {value!r}", expected=f"one of {sorted(vocabulary)}"
         )
     return vocabulary[value]
-
-
-def pixel_size_um(size: float | None, unit: UnitsLength, *, context: ReaderErrorContext, path: Path) -> float:
-    """Convert one finite positive OME physical pixel size to micrometers."""
-    if unit not in _MICROMETER_DIVISORS:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"physical size unit {unit.value!r}", expected="µm or nm"
-        )
-    if size is None or not math.isfinite(size) or size <= 0:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"physical pixel size {size!r}", expected="a finite positive size"
-        )
-    converted = size / _MICROMETER_DIVISORS[unit]
-    if not math.isfinite(converted) or converted <= 0:
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"physical pixel size {size!r} {unit.value}",
-            expected="a finite positive size in micrometers after conversion",
-        )
-    return converted

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
@@ -10,6 +9,7 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 import yaml
 
+from spatialdata_io.readers._utils.csv import parse_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.mcmicro._schemas import MarkerPanel, normalize_markers, schema_error, validate_columns
 
@@ -64,10 +64,7 @@ def read_markers(path: ArtifactFile) -> MarkerPanel:
     expected = "a comma-delimited marker panel"
     try:
         with path.open("rb") as source:
-            try:
-                columns = next(csv.reader([source.readline().decode("utf-8-sig")], strict=True), [])
-            except (UnicodeDecodeError, csv.Error) as error:
-                raise schema_error(path, found="malformed CSV header", expected=expected) from error
+            columns = parse_csv_header(source.readline(), context=ReaderErrorContext("mcmicro", path.name), path=path)
             validate_columns(columns, path)
             source.seek(0)
             table = pacsv.read_csv(

@@ -13,7 +13,6 @@ from scipy import sparse
 
 from spatialdata_io.readers._utils.table import (
     as_csr_array,
-    csr_array_from_triplets,
     validate_compressed_sparse,
 )
 
@@ -345,179 +344,6 @@ class TestAsCsrArray:
             as_csr_array(source)
 
 
-class TestCsrArrayFromTriplets:
-    """Validate coordinate construction, bounds, and duplicate semantics."""
-
-    def test_sums_duplicates_sorts_indices_and_preserves_dtype(self) -> None:
-        values = np.asarray([2, 3, 4, -1], dtype=np.int16)
-        rows = np.asarray([0, 0, 1, 1], dtype=np.int64)
-        columns = np.asarray([1, 1, 0, 0], dtype=np.int64)
-        values_before = values.copy()
-        rows_before = rows.copy()
-        columns_before = columns.copy()
-
-        result = csr_array_from_triplets(values, rows, columns, shape=(2, 2))
-
-        _assert_canonical_csr(result)
-        assert result.dtype == np.int16
-        assert result.indices.dtype == np.int64
-        assert result.indptr.dtype == np.int64
-        np.testing.assert_array_equal(result.toarray(), np.asarray([[0, 5], [3, 0]], dtype=np.int16))
-        np.testing.assert_array_equal(values, values_before)
-        np.testing.assert_array_equal(rows, rows_before)
-        np.testing.assert_array_equal(columns, columns_before)
-
-    def test_preserves_explicit_zero_from_duplicate_cancellation(self) -> None:
-        result = csr_array_from_triplets(
-            np.asarray([2, -2], dtype=np.int8),
-            np.asarray([0, 0], dtype=np.int32),
-            np.asarray([1, 1], dtype=np.int32),
-            shape=(1, 2),
-        )
-
-        _assert_canonical_csr(result)
-        assert result.nnz == 1
-        assert result.data[0] == 0
-
-    @pytest.mark.parametrize("shape", [(0, 0), (0, 5), (4, 0)])
-    def test_supports_empty_dimensions(self, shape: tuple[int, int]) -> None:
-        result = csr_array_from_triplets(
-            np.asarray([], dtype=np.float32),
-            np.asarray([], dtype=np.int32),
-            np.asarray([], dtype=np.int32),
-            shape=shape,
-        )
-
-        _assert_canonical_csr(result)
-        assert result.shape == shape
-        assert result.dtype == np.float32
-        assert result.indices.dtype == np.int32
-        assert result.indptr.dtype == np.int32
-        assert result.nnz == 0
-
-    @pytest.mark.parametrize(
-        ("triplets", "shape", "error", "match"),
-        [
-            ((np.asarray([[1]]), np.asarray([0]), np.asarray([0])), (1, 1), ValueError, "one-dimensional"),
-            ((np.asarray([1]), np.asarray([[0]]), np.asarray([0])), (1, 1), ValueError, "one-dimensional"),
-            ((np.asarray([1]), np.asarray([0]), np.asarray([[0]])), (1, 1), ValueError, "one-dimensional"),
-            ((np.asarray([1, 2]), np.asarray([0]), np.asarray([0])), (1, 1), ValueError, "equal lengths"),
-            ((np.asarray([1 + 0j]), np.asarray([0]), np.asarray([0])), (1, 1), TypeError, "complex"),
-            (
-                (np.asarray([1], dtype=np.float16), np.asarray([0]), np.asarray([0])),
-                (1, 1),
-                TypeError,
-                "Float16",
-            ),
-            ((np.asarray([np.nan]), np.asarray([0]), np.asarray([0])), (1, 1), ValueError, "finite"),
-            ((np.asarray([1]), np.asarray([0.0]), np.asarray([0])), (1, 1), TypeError, "int32 or int64"),
-            ((np.asarray([1]), np.asarray([False]), np.asarray([0])), (1, 1), TypeError, "int32 or int64"),
-            ((np.asarray([1]), np.asarray([0]), np.asarray([0.0])), (1, 1), TypeError, "int32 or int64"),
-            (
-                (np.asarray([1]), np.asarray([0], dtype=np.uint32), np.asarray([0], dtype=np.uint32)),
-                (1, 1),
-                TypeError,
-                "int32 or int64",
-            ),
-            (
-                (np.asarray([1]), np.asarray([0], dtype=np.int16), np.asarray([0], dtype=np.int16)),
-                (1, 1),
-                TypeError,
-                "int32 or int64",
-            ),
-            (
-                (np.asarray([1]), np.asarray([0], dtype=np.int32), np.asarray([0], dtype=np.int64)),
-                (1, 1),
-                TypeError,
-                "same dtype",
-            ),
-            ((np.asarray([1]), np.asarray([-1]), np.asarray([0])), (1, 1), ValueError, "row_indices"),
-            ((np.asarray([1]), np.asarray([1]), np.asarray([0])), (1, 1), ValueError, "row_indices"),
-            ((np.asarray([1]), np.asarray([0]), np.asarray([-1])), (1, 1), ValueError, "column_indices"),
-            ((np.asarray([1]), np.asarray([0]), np.asarray([1])), (1, 1), ValueError, "column_indices"),
-            (
-                (
-                    np.asarray([], dtype=int),
-                    np.asarray([], dtype=int),
-                    np.asarray([], dtype=int),
-                ),
-                (-1, 1),
-                ValueError,
-                "nonnegative",
-            ),
-        ],
-    )
-    def test_rejects_invalid_triplets(
-        self,
-        triplets: tuple[np.ndarray, np.ndarray, np.ndarray],
-        shape: tuple[int, int],
-        error: type[Exception],
-        match: str,
-    ) -> None:
-        values, rows, columns = triplets
-        with pytest.raises(error, match=match):
-            csr_array_from_triplets(values, rows, columns, shape=shape)
-
-    @pytest.mark.parametrize("shape", [[1, 1], (1,), (1, 2, 3), (True, 1), (1.5, 1)])
-    def test_rejects_invalid_shapes(self, shape: object) -> None:
-        empty = np.asarray([], dtype=np.float32)
-        indices = np.asarray([], dtype=np.int32)
-
-        with pytest.raises(TypeError, match="pair of nonnegative integers"):
-            csr_array_from_triplets(empty, indices, indices, shape=cast("tuple[int, int]", shape))
-
-    def test_accepts_numpy_integer_shape_dimensions(self) -> None:
-        result = csr_array_from_triplets(
-            np.asarray([1], dtype=np.uint8),
-            np.asarray([0], dtype=np.int64),
-            np.asarray([1], dtype=np.int64),
-            shape=cast("tuple[int, int]", (np.int32(1), np.int64(2))),
-        )
-
-        _assert_canonical_csr(result)
-        assert result.shape == (1, 2)
-        assert result.indices.dtype == np.int64
-        assert result.indptr.dtype == np.int64
-
-    def test_rejects_shape_that_requires_wider_indices(self) -> None:
-        empty = np.asarray([], dtype=np.float32)
-        indices = np.asarray([], dtype=np.int32)
-        shape = (0, np.iinfo(np.int32).max + 1)
-
-        with pytest.raises(ValueError, match="cannot be represented by int32"):
-            csr_array_from_triplets(empty, indices, indices, shape=shape)
-
-    @pytest.mark.parametrize("parameter", ["values", "row_indices", "column_indices"])
-    def test_rejects_non_ndarray_triplet_inputs(self, parameter: str) -> None:
-        arrays: dict[str, object] = {
-            "values": np.asarray([1]),
-            "row_indices": np.asarray([0]),
-            "column_indices": np.asarray([0]),
-        }
-        arrays[parameter] = [0]
-
-        with pytest.raises(TypeError, match=f"{parameter} must be a plain NumPy ndarray"):
-            csr_array_from_triplets(
-                cast("np.ndarray", arrays["values"]),
-                cast("np.ndarray", arrays["row_indices"]),
-                cast("np.ndarray", arrays["column_indices"]),
-                shape=(1, 1),
-            )
-
-    def test_rejects_nonfinite_duplicate_sum(self) -> None:
-        maximum = np.finfo(np.float32).max
-        with (
-            np.errstate(over="ignore"),
-            pytest.raises(ValueError, match="summed values must contain only finite"),
-        ):
-            csr_array_from_triplets(
-                np.asarray([maximum, maximum], dtype=np.float32),
-                np.asarray([0, 0], dtype=np.int32),
-                np.asarray([0, 0], dtype=np.int32),
-                shape=(1, 1),
-            )
-
-
 class TestValidateCompressedSparse:
     """Inspect raw buffers before any compiled sparse traversal."""
 
@@ -646,7 +472,7 @@ class TestValidateCompressedSparse:
     def test_rejects_corrupted_shape(self) -> None:
         source = sparse.csr_array([[1]])
         source.__dict__["_shape"] = (-1, 1)
-        with pytest.raises(ValueError, match="nonnegative"):
+        with pytest.raises(ValueError, match="indptr must have length 0"):
             validate_compressed_sparse(source)
 
     def test_scans_pointers_and_indices_in_bounded_chunks(self, mocker: MockerFixture) -> None:

@@ -1,17 +1,35 @@
-"""Own H5AD loading and identifier-aligned Curio enrichment."""
+"""Load the Curio H5AD and align the four text enrichments to it by identifier.
+
+``read_h5ad`` loads the whole H5AD eagerly; the reader owns the result and
+enriches it in place. Observation and feature order, ``X`` and every imported
+slot stay as stored. The text files add:
+
+- ``obs["cluster"]``: categorical cluster labels aligned by bead ID, with
+  categories in order of first occurrence along the H5AD rows;
+- ``uns[<Category>]``: one ``{metric: value}`` dictionary per metric category;
+- ``uns["Top_cluster_defining_features"]``: the cluster-features table, with
+  empty cells as missing values;
+- one ``var`` column per Moran statistic, joined by feature ID, missing for
+  features the file does not list.
+
+Text files are UTF-8, optionally with a byte-order mark. pandas' Python parser
+is used because it keeps NUL characters for rejection, distinguishes a missing
+field from an empty one and rejects malformed quoting; blank lines are skipped.
+The files are small (one row per bead, metric or listed feature).
+"""
 
 from __future__ import annotations
 
-import csv
 from typing import TYPE_CHECKING, cast
 
 import anndata as ad
 import pandas as pd
-from scipy import sparse
 
+from spatialdata_io.readers._utils.csv import read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.table import validate_compressed_sparse
+from spatialdata_io.readers.curio._layout import CLUSTER_FEATURES, CLUSTERS, COUNTS, METRICS, MORAN_FEATURES
 from spatialdata_io.readers.curio._schemas import (
+    CLUSTER_COLUMNS,
     DEFINING_FEATURES_KEY,
     STRING_DTYPE,
     normalize_moran,
@@ -26,119 +44,101 @@ from spatialdata_io.readers.curio._schemas import (
 
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.curio._layout import _CurioLayout
+    from spatialdata_io.readers.curio._layout import CurioLayout
 
 
-def _read_named_table(path: ArtifactFile, *, delimiter: str, feature_ids: bool = False) -> pd.DataFrame:
-    """Read the raw header before parsing lexical Arrow annotation fields."""
-    with path.open(encoding="utf-8-sig", newline="") as source:
-        header = source.readline()
+def read_table(layout: CurioLayout) -> ad.AnnData:
+    """Load the H5AD and attach clusters, metrics, defining features and Moran statistics."""
+    try:
+        table = ad.read_h5ad(layout.counts)
+    except (OSError, ValueError) as error:
+        add_reader_context(error, context=ReaderErrorContext("curio", COUNTS), path=layout.counts)
+        raise
+    validate_counts(table, layout.counts)
 
-        columns = next(csv.reader([header], delimiter=delimiter, strict=True), [])
-        validate_header(columns, path, feature_ids=feature_ids)
+    clusters = _read_rows(layout.clusters, CLUSTERS, delimiter="\t", columns=CLUSTER_COLUMNS, header=False)
+    validate_clusters(clusters, table.obs_names, layout.clusters)
+    labels = clusters.set_index("bead_id")["cluster"].reindex(table.obs_names)
+    table.obs["cluster"] = pd.Categorical(labels, categories=labels.unique())
 
-        # pandas' Python engine preserves NUL and distinguishes missing fields;
-        # its index_col=[] path needs an explicit header-only case.
-        position = source.tell()
-        if not source.read(1):
-            return pd.DataFrame({column: pd.Series([], dtype=STRING_DTYPE) for column in columns})
-        source.seek(position)
+    _add_metrics(table, layout.metrics)
 
-        try:
+    defining = _read_named_rows(layout.cluster_features, CLUSTER_FEATURES, delimiter="\t")
+    table.uns[DEFINING_FEATURES_KEY] = defining.replace("", pd.NA)
+
+    # read_h5ad returns eager DataFrames; AnnData's annotation also includes backed Dataset2D.
+    table.var = _join_moran(cast("pd.DataFrame", table.var), layout.moran_features)
+    return table
+
+
+def _add_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
+    """Store each metric category as a ``{metric: value}`` dictionary in source order."""
+    metrics = _read_named_rows(path, METRICS, delimiter=",")
+    validate_metrics(metrics, path, set(table.uns))
+
+    name, value = metrics.columns[:2]
+    for category, group in metrics.groupby("Category", sort=False):
+        table.uns[str(category)] = dict(zip(group[name], group[value], strict=True))
+
+
+def _join_moran(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
+    """Join parsed Moran statistics onto ``var`` by feature ID, keeping feature order."""
+    moran = _read_named_rows(path, MORAN_FEATURES, delimiter="\t", feature_ids=True)
+    moran = moran.set_index(moran.columns[0])
+    validate_moran(moran, features, path)
+    normalize_moran(moran, path)
+
+    # Match the H5AD index representation so the join keeps it.
+    moran.index = moran.index.astype(features.index.dtype)
+    return features.join(moran, how="left", validate="one_to_one")
+
+
+def _read_named_rows(path: ArtifactFile, artifact: str, *, delimiter: str, feature_ids: bool = False) -> pd.DataFrame:
+    """Read a text table whose header names its columns."""
+    columns = read_csv_header(path, context=ReaderErrorContext("curio", artifact), delimiter=delimiter)
+    validate_header(columns, artifact, path, feature_ids=feature_ids)
+    return _read_rows(path, artifact, delimiter=delimiter, columns=columns, header=True)
+
+
+def _read_rows(path: ArtifactFile, artifact: str, *, delimiter: str, columns: list[str], header: bool) -> pd.DataFrame:
+    """Read every cell as an exact string, requiring one field per column in every row."""
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as source:
+            if header:
+                # The header was parsed strictly from the first physical line.
+                source.readline()
+
+            # pandas fails on input without records when index_col=[], so build the empty frame here.
+            position = source.tell()
+            if not source.read(1):
+                return pd.DataFrame({column: pd.Series([], dtype=STRING_DTYPE) for column in columns})
+            source.seek(position)
+
             frame = pd.read_csv(
                 source,
                 sep=delimiter,
                 names=columns,
                 header=None,
+                index_col=[],
                 dtype=STRING_DTYPE,
                 keep_default_na=False,
                 engine="python",
-                index_col=[],
             )
-        except pd.errors.ParserError as error:
-            raise schema_error(
-                path, found=f"malformed enrichment rows: {error}", expected="one field per enrichment header column"
-            ) from error
-
-    if not isinstance(frame.index, pd.RangeIndex) or frame.isna().any(axis=None):
-        raise schema_error(path, found="inconsistent row width", expected="one field per enrichment header column")
-
-    validate_text(frame, path)
-    return frame
-
-
-def _read_table(layout: _CurioLayout) -> ad.AnnData:
-    """Load owned counts and align enrichments without changing expression order."""
-    try:
-        table = ad.read_h5ad(layout.counts)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=ReaderErrorContext("curio", "counts"), path=layout.counts)
+    except OSError as error:
+        add_reader_context(error, context=ReaderErrorContext("curio", artifact), path=path)
         raise
+    except UnicodeDecodeError as error:
+        raise schema_error(artifact, path, found="text that is not valid UTF-8", expected="UTF-8 text") from error
+    except pd.errors.ParserError as error:
+        raise schema_error(
+            artifact, path, found=f"malformed rows ({error})", expected="one field per column in every row"
+        ) from error
 
-    validate_counts(table, layout.counts)
-    if isinstance(table.X, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
-        try:
-            validate_compressed_sparse(table.X)
-        except (TypeError, ValueError) as error:
-            add_reader_context(error, context=ReaderErrorContext("curio", "counts X"), path=layout.counts)
-            raise
-
-    try:
-        clusters = pd.read_csv(
-            layout.clusters, sep="\t", header=None, dtype=STRING_DTYPE, keep_default_na=False, engine="python"
+    # Short rows are padded with missing values; longer rows raise ParserError above.
+    if frame.isna().any(axis=None):
+        raise schema_error(
+            artifact, path, found="rows with missing fields", expected="one field per column in every row"
         )
 
-        validate_clusters(clusters, table.obs_names, layout.clusters)
-        clusters.columns = ["bead_id", "cluster"]
-        validate_text(clusters, layout.clusters)
-    except (pd.errors.ParserError, pd.errors.EmptyDataError) as error:
-        add_reader_context(error, context=ReaderErrorContext("curio", "cluster assignments"), path=layout.clusters)
-        raise
-
-    labels = clusters.set_index("bead_id")["cluster"].reindex(table.obs_names)
-    table.obs["cluster"] = pd.Categorical(labels, categories=labels.unique())
-
-    _enrich_metrics(table, layout.metrics)
-
-    try:
-        defining = _read_named_table(layout.cluster_features, delimiter="\t")
-        table.uns[DEFINING_FEATURES_KEY] = defining.replace("", pd.NA)
-    except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
-        add_reader_context(error, context=ReaderErrorContext("curio", "cluster features"), path=layout.cluster_features)
-        raise
-
-    # read_h5ad returns eager DataFrames; AnnData's annotation also includes backed Dataset2D.
-    table.var = _enrich_features(cast("pd.DataFrame", table.var), layout.moran_features)
-    return table
-
-
-def _enrich_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
-    """Attach validated metric dictionaries with source category order."""
-    try:
-        metrics = _read_named_table(path, delimiter=",")
-        validate_metrics(metrics, path, set(table.uns))
-        metrics = metrics[[metrics.columns[0], metrics.columns[1], "Category"]]
-    except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
-        add_reader_context(error, context=ReaderErrorContext("curio", "metrics"), path=path)
-        raise
-
-    for category, group in metrics.groupby("Category", sort=False):
-        table.uns[str(category)] = dict(zip(group.iloc[:, 0], group.iloc[:, 1], strict=True))
-
-
-def _enrich_features(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
-    """Join finite statistics by feature ID without changing count-column order."""
-    try:
-        moran = _read_named_table(path, delimiter="\t", feature_ids=True)
-        identifier = moran.columns[0]
-
-        moran = moran.set_index(identifier)
-        validate_moran(moran, features, path)
-        normalize_moran(moran, path)
-    except (pd.errors.ParserError, pd.errors.EmptyDataError, csv.Error) as error:
-        add_reader_context(error, context=ReaderErrorContext("curio", "Moran features"), path=path)
-        raise
-
-    # Match the existing H5AD index representation so pandas preserves it through the join.
-    moran.index = moran.index.astype(features.index.dtype)
-    return features.join(moran, how="left", validate="one_to_one")
+    validate_text(frame, artifact, path)
+    return frame

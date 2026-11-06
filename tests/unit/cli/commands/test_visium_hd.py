@@ -43,6 +43,7 @@ class TestVisiumHdCommand:
             make_var_names_unique=True,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 

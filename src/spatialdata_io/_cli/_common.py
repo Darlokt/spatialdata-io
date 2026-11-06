@@ -35,6 +35,21 @@ def dataset_io_options[**P](function: Callable[P, None]) -> Callable[P, None]:
     )(with_output)
 
 
+def path_policy_option[**P](function: Callable[P, None]) -> Callable[P, None]:
+    """Add the shared ``--path-policy`` option as the last option of a dataset command."""
+    return click.option(
+        "--path-policy",
+        type=click.Choice(["strict", "relaxed"]),
+        default="strict",
+        show_default=True,
+        help=(
+            "Symlinks inside the input dataset: 'strict' requires every artifact and relative file option "
+            "to resolve inside it; 'relaxed' also accepts symlinks to targets elsewhere, as in git-annex or DVC "
+            "datasets."
+        ),
+    )(function)
+
+
 def _chunks(
     _context: click.Context, _parameter: click.Parameter, values: tuple[int, ...]
 ) -> int | tuple[int, int, int]:

@@ -8,12 +8,14 @@ import h5py
 import pytest
 from numpy.testing import assert_array_equal
 from scipy.sparse import csr_array
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 
 from spatialdata_io import stereoseq
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from tests.integration.readers.stereoseq._fixtures import write_square_gef
+from tests.integration.readers.stereoseq._fixtures import write_dataset, write_square_gef
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -41,3 +43,21 @@ class TestStereoseq:
             handle.attrs["sn"] = "other"
         with pytest.raises(ReaderFormatError, match="inconsistent source sample"):
             stereoseq(tmp_path, sample_id="sample", bin_sizes=(1,), square_counts_file=path)
+
+
+class TestStereoseqPathPolicy:
+    """Discovered products follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        fixture = write_dataset(tmp_path, family="outs", products=("square", "cells"))
+        expected = stereoseq(fixture.root, bin_sizes=(1,), cell_bins="unadjusted")
+        link_outside_root(fixture.square)
+        link_outside_root(fixture.cells)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            stereoseq(fixture.root, bin_sizes=(1,), cell_bins="unadjusted")
+
+        relaxed = stereoseq(fixture.root, bin_sizes=(1,), cell_bins="unadjusted", path_policy="relaxed")
+        assert_spatial_data_objects_are_identical(relaxed, expected)

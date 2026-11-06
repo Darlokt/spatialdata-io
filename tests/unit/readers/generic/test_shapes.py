@@ -143,18 +143,58 @@ class TestGeojson:
         with pytest.raises(ValueError, match="invalid_geometries"):
             geojson(tmp_path / "missing", "source", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
-    def test_source_failure_preserves_exception_and_context(self, tmp_path: Path) -> None:
-        path = tmp_path / "missing.geojson"
-        with pytest.raises(FileNotFoundError) as caught:
-            geojson(path, "source")
-        assert caught.value.filename == str(path)
-        assert any("generic" in note for note in caught.value.__notes__)
+    def test_rejects_missing_and_directory_sources(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.geojson"
+        directory = tmp_path / "shapes.geojson"
+        directory.mkdir()
 
-    def test_unsupported_utf8(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError, match=r"reader 'generic', artifact 'GeoJSON shapes'") as caught:
+            geojson(missing, "source")
+        with pytest.raises(IsADirectoryError, match="expected an existing regular file; found a directory"):
+            geojson(directory, "source")
+
+        assert caught.value.filename == str(missing)
+
+    def test_expands_user_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        write_geojson(tmp_path / "shapes.geojson", [Polygon([(0, 0), (2, 0), (0, 2)])])
+
+        result = geojson("~/shapes.geojson", "source")
+
+        assert result.index.tolist() == [0]
+
+    @pytest.mark.parametrize(
+        ("payload", "found"),
+        [
+            (b"\xff", "not valid UTF-8"),
+            (b'{"type":"GeometryCollection","type":"FeatureCollection","geometries":[]}', "duplicate object name"),
+            (
+                (
+                    b'{"type":"GeometryCollection","geometries":[{"type":"Polygon",'
+                    b'"coordinates":[[[0,0],[1,0],[1,1],[0,0]]],"coordinates":[[[0,0],[5,0],[5,5],[0,0]]]}]}'
+                ),
+                "duplicate object name",
+            ),
+            (
+                (
+                    b'{"type":"GeometryCollection","geometries":[{"type":"Polygon",'
+                    b'"coordinates":[[[0,0],[NaN,0],[1,1],[0,0]]]}]}'
+                ),
+                "nonstandard non-finite",
+            ),
+        ],
+        ids=["utf8", "duplicate-document-name", "duplicate-geometry-name", "nan-constant"],
+    )
+    def test_rejects_nonstrict_json(self, tmp_path: Path, payload: bytes, found: str) -> None:
         path = tmp_path / "shapes.geojson"
-        path.write_bytes(b"\xff")
-        with pytest.raises(ReaderFormatError, match="malformed JSON"):
+        path.write_bytes(payload)
+
+        with pytest.raises(ReaderFormatError, match=found) as caught:
             geojson(path, "source")
+
+        assert caught.value.context.reader == "generic"
+        assert caught.value.context.artifact == "GeoJSON shapes"
+        assert caught.value.path == path
 
     # The shared GeoJSON boundary owns the complete structural permutations.
     @pytest.mark.parametrize(

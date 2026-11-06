@@ -1,12 +1,17 @@
-"""Public orchestration for generic raster and GeoJSON inputs."""
+"""Route one caller-selected image or GeoJSON file to its element reader by suffix.
+
+Generic files have no dataset root, layout or format version: the suffix
+selects :func:`image` or :func:`geojson`, and options of the other kind must
+keep their defaults so that no argument is silently ignored.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
-from spatialdata_io.readers._utils.image import DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers.generic._images import VALID_IMAGE_TYPES, image
 from spatialdata_io.readers.generic._shapes import VALID_SHAPE_TYPES, geojson
 
@@ -25,100 +30,94 @@ def generic(  # noqa: PLR0913, RUF100
     *,
     data_axes: Sequence[str] | None = None,
     coordinate_system: str | None = None,
-    tiff_series: int = 0,
+    tiff_series: int | None = None,
     tiff_level: int = 0,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
     invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
 ) -> DataArray | DataTree | GeoDataFrame:
-    """Read a generic image or GeoJSON file as a SpatialData element.
+    """Read one image or GeoJSON file as a SpatialData element.
 
-    Image inputs require explicit axes and remain lazy when returned. TIFF,
-    BigTIFF/BTF, PNG, and JPEG rasters are supported, including 2D and 3D
-    grayscale or multichannel images. GeoJSON inputs support polygons and
-    multipolygons.
+    The case-insensitive suffix selects the element:
+
+    - ``.tif``, ``.tiff``, ``.btf``, ``.png``, ``.jpg``, ``.jpeg``: a lazy
+      image read by :func:`image`.
+    - ``.geojson``: eager polygon shapes read by :func:`geojson`.
+
+    No filename convention or software version is inferred.
 
     Parameters
     ----------
     path
-        Input image or GeoJSON file.
+        Image or GeoJSON file. ``~`` is expanded.
     data_axes
-        Explicit image axes. Required for images and invalid for GeoJSON.
+        Image only, required: the axes of the decoded array, a
+        case-insensitive permutation of ``yx``, ``cyx``, ``zyx`` or ``czyx``.
     coordinate_system
-        Coordinate system for the returned element. ``None`` selects
-        ``"global"``. Explicit names must contain a non-whitespace character
-        and are preserved literally.
-        Images use micrometres under complete applicable OME calibration,
-        otherwise pixels. GeoJSON retains source units without reprojection.
+        Name of the target coordinate system, preserved literally; it must
+        contain a non-whitespace character. ``None`` selects ``"global"``.
+        A calibrated image is in micrometres, other images in pixels and
+        GeoJSON in the units of its source.
     tiff_series
-        Zero-based TIFF series. Must remain zero for non-TIFF inputs.
+        Image only: zero-based TIFF series. ``None`` reads the only series and
+        fails for a TIFF with several.
     tiff_level
-        Zero-based TIFF pyramid level. Must remain zero for non-TIFF inputs.
+        Image only: zero-based stored TIFF pyramid level; zero for PNG and JPEG.
     scale_factors
-        Integer factors of at least two, one per generated image pyramid
-        level; empty for a single scale. Invalid for GeoJSON inputs.
+        Image only: integer factors of at least two, one per generated pyramid
+        level; empty for a single scale.
     chunks
-        One positive image chunk size per canonical axis, applied at every
-        pyramid level: an integer for every axis, a tuple in canonical
-        ``CYX``/``CZYX`` order, or a mapping keyed by exactly the canonical
-        axes. ``None`` selects ``(1, 1024, 1024)`` for ``CYX`` and
-        ``(1, 1, 1024, 1024)`` for ``CZYX``: one channel and one plane per
-        chunk with square 1024-pixel tiles. Invalid for GeoJSON inputs.
+        Image only: one positive chunk size per canonical axis, as an integer,
+        a tuple in canonical ``CYX``/``CZYX`` order or a mapping keyed by the
+        canonical axes. ``None`` selects ``(1, 1024, 1024)`` or
+        ``(1, 1, 1024, 1024)``.
     invalid_geometries
-        GeoJSON topology policy: preserve source polygons, drop invalid
-        features without renumbering, or raise. Structural errors always fail.
-        Nondefault policies are invalid for images.
+        GeoJSON only: ``"keep"`` preserves invalid polygons, ``"drop"`` removes
+        their rows without renumbering and ``"raise"`` fails.
 
     Returns
     -------
-    xarray.DataArray, xarray.DataTree, or geopandas.GeoDataFrame
-        Parsed SpatialData element with its source-to-target transformation. Images are
-        multiscale ``DataTree`` values only when ``scale_factors`` is not empty.
+    xarray.DataArray, xarray.DataTree or geopandas.GeoDataFrame
+        The element described in :func:`image` (multiscale when
+        ``scale_factors`` is not empty) or :func:`geojson`, with one
+        transformation to ``coordinate_system``.
 
     Raises
     ------
-    TypeError
-        If a frame name is not a string, or image scale factors or chunk sizes
-        are not integers.
     ValueError
-        If the frame name is blank, or the suffix or format-specific arguments are invalid.
+        If the suffix is unsupported, a required image option is missing, an
+        option of the other input kind is given, or :func:`image` or
+        :func:`geojson` rejects an option or the file.
+    TypeError, IndexError, FileNotFoundError, IsADirectoryError
+        As raised by :func:`image` or :func:`geojson`.
     """
-    target_coordinate_system = "global" if coordinate_system is None else coordinate_system
-    if not isinstance(target_coordinate_system, str):
-        message = "coordinate_system must be a string or None."
-        raise TypeError(message)
-    if not target_coordinate_system.strip():
-        message = "coordinate_system must contain a non-whitespace character."
-        raise ValueError(message)
-
-    normalized_path = Path(path)
-    suffix = normalized_path.suffix.lower()
+    source = Path(path)
+    suffix = source.suffix.lower()
+    frame = "global" if coordinate_system is None else coordinate_system
 
     if suffix in VALID_SHAPE_TYPES:
         if data_axes is not None:
             message = "data_axes cannot be used with GeoJSON inputs."
             raise ValueError(message)
-        if tiff_series != 0 or tiff_level != 0:
+        if tiff_series is not None or tiff_level != 0:
             message = "tiff_series and tiff_level cannot be used with GeoJSON inputs."
             raise ValueError(message)
         if scale_factors or chunks is not None:
             message = "scale_factors and chunks cannot be used with GeoJSON inputs."
             raise ValueError(message)
-        return geojson(
-            normalized_path, coordinate_system=target_coordinate_system, invalid_geometries=invalid_geometries
-        )
+        return geojson(source, coordinate_system=frame, invalid_geometries=invalid_geometries)
 
     if suffix in VALID_IMAGE_TYPES:
-        if validate_invalid_geometry_policy(invalid_geometries) != "keep":
-            message = "invalid_geometries is only applicable to GeoJSON inputs."
-            raise ValueError(message)
         if data_axes is None:
             message = "data_axes must be provided for image inputs."
             raise ValueError(message)
+        if validate_invalid_geometry_policy(invalid_geometries) != "keep":
+            message = "invalid_geometries is only applicable to GeoJSON inputs."
+            raise ValueError(message)
         return image(
-            normalized_path,
+            source,
             data_axes=data_axes,
-            coordinate_system=target_coordinate_system,
+            coordinate_system=frame,
             tiff_series=tiff_series,
             tiff_level=tiff_level,
             scale_factors=scale_factors,
@@ -126,5 +125,5 @@ def generic(  # noqa: PLR0913, RUF100
         )
 
     supported = VALID_IMAGE_TYPES + VALID_SHAPE_TYPES
-    message = f"Unsupported input suffix {normalized_path.suffix!r}. Expected one of {supported}."
+    message = f"Unsupported input suffix {source.suffix!r}. Expected one of {supported}."
     raise ValueError(message)

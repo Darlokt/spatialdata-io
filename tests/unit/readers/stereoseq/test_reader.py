@@ -102,7 +102,7 @@ class TestStereoseq:
     def test_raster_option_defaults(self) -> None:
         parameters = inspect.signature(stereoseq).parameters
 
-        assert list(parameters)[-2:] == ["scale_factors", "chunks"]
+        assert list(parameters)[-3:] == ["scale_factors", "chunks", "path_policy"]
         assert parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
         assert parameters["chunks"].default == DEFAULT_CHUNKS
 

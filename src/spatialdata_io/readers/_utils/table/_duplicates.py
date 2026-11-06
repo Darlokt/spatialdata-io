@@ -47,7 +47,21 @@ class SparseDuplicateSummary:
         return message
 
 
+def maximum_span(indptr: np.ndarray[tuple[int], np.dtype[np.integer]]) -> int:
+    """Return the most stored entries of one compressed row or column.
+
+    Differences are taken in bounded batches so the scan never allocates a
+    second pointer-sized array.
+    """
+    maximum = 0
+    for start in range(0, len(indptr) - 1, _BOUND_BATCH_SIZE):
+        spans = np.diff(indptr[start : start + _BOUND_BATCH_SIZE + 1])
+        maximum = max(maximum, int(spans.max(initial=0)))
+    return maximum
+
+
 def _integer_span(source: sparse.csr_array | sparse.csc_array, start: int, stop: int) -> dict[int, int]:
+    """Return the exact integer total of each minor index in the compressed span ``start:stop``."""
     totals: dict[int, int] = {}
     for index, value in zip(source.indices[start:stop], source.data[start:stop], strict=True):
         key = int(index)
@@ -172,10 +186,7 @@ def normalize_sparse_duplicates(
     if compressed.dtype.kind in "iu":
         limits = np.iinfo(compressed.dtype)
         values = compressed.data
-        maximum_records = 0
-        for start in range(0, len(compressed.indptr) - 1, _BOUND_BATCH_SIZE):
-            spans = np.diff(compressed.indptr[start : start + _BOUND_BATCH_SIZE + 1])
-            maximum_records = max(maximum_records, int(spans.max(initial=0)))
+        maximum_records = maximum_span(compressed.indptr)
         minimum, maximum = int(values.min(initial=0)), int(values.max(initial=0))
         if minimum * maximum_records < limits.min or maximum * maximum_records > limits.max:
             # Bounding sums of absolute contributions also bounds signed

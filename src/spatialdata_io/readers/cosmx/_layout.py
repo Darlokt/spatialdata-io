@@ -12,13 +12,15 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
-    optional_directory,
+    optional_metadata_directory,
     require_metadata_file,
     sorted_paths,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.paths import PathPolicy
 
 _COUNTS = "exprMat_file"
 _EXTENSIONS = (".csv", ".csv.gz")
@@ -59,7 +61,7 @@ def _infer_dataset_id(root: DatasetRoot, names: tuple[str, ...]) -> str:
     matches = [match for name in names if (match := _COUNTS_NAME.fullmatch(name)) is not None]
     if len(matches) != 1:
         raise _error(
-            root,
+            root.path,
             artifact="count matrix",
             found=f"{len(matches)} count matrices",
             expected="exactly one <dataset_id>_exprMat_file.csv[.gz]; pass dataset_id otherwise",
@@ -81,7 +83,7 @@ def _present(root: DatasetRoot, names: tuple[str, ...], dataset_id: str, suffix:
     """Return the one present plain or gzip-compressed spelling, rejecting both."""
     present = [name for extension in _EXTENSIONS if (name := f"{dataset_id}_{suffix}{extension}") in names]
     if len(present) > 1:
-        raise _error(root, artifact=suffix, found=f"files {present!r}", expected="one plain or compressed file")
+        raise _error(root.path, artifact=suffix, found=f"files {present!r}", expected="one plain or compressed file")
     return present[0] if present else None
 
 
@@ -100,7 +102,7 @@ def _optional(root: DatasetRoot, names: tuple[str, ...], dataset_id: str, suffix
 def _fov_files(root: DatasetRoot, name: str, suffixes: frozenset[str]) -> tuple[FovFile, ...]:
     """Return one raster per FOV in numeric order, rejecting unsupported or repeated files."""
     context = ReaderErrorContext("cosmx", name)
-    directory: ArtifactDirectory | None = optional_directory(root / name, context=context)
+    directory: ArtifactDirectory | None = optional_metadata_directory(root, name, context=context)
     if directory is None:
         return ()
     files: dict[int, ArtifactFile] = {}
@@ -124,13 +126,15 @@ def _fov_files(root: DatasetRoot, name: str, suffixes: frozenset[str]) -> tuple[
     return tuple(FovFile(fov, files[fov]) for fov in sorted(files))
 
 
-def discover_layout(path: str | Path, *, dataset_id: str | None, include_transcripts: bool) -> CosmxLayout:
+def discover_layout(
+    path: str | Path, *, dataset_id: str | None, include_transcripts: bool, path_policy: PathPolicy = "strict"
+) -> CosmxLayout:
     """Resolve every requested artifact once, without reading rows or pixels."""
     if dataset_id is not None:
         _validate_dataset_id(dataset_id)
-    root = normalize_dataset_root(path, context=ReaderErrorContext("cosmx", "dataset root"))
     context = ReaderErrorContext("cosmx", "dataset root")
-    names = tuple(entry.name for entry in sorted_paths(root.iterdir(), context=context, search_path=root))
+    root = normalize_dataset_root(path, context=context, path_policy=path_policy)
+    names = tuple(entry.name for entry in sorted_paths(root.path.iterdir(), context=context, search_path=root.path))
     prefix = _infer_dataset_id(root, names) if dataset_id is None else dataset_id
 
     return CosmxLayout(

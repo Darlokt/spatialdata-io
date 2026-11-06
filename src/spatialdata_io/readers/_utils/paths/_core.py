@@ -1,10 +1,36 @@
-"""Deterministic local-filesystem primitives for private reader layouts."""
+"""Deterministic local-filesystem primitives for private reader layouts.
+
+Every artifact that a reader resolves from, or discovers under, a dataset root
+obeys the root's path policy, chosen once per reader call:
+
+- ``"strict"``: the artifact must resolve, symlinks followed, to a target
+  inside the dataset root. Otherwise :class:`ReaderFormatError` is raised.
+- ``"relaxed"``: the artifact may be a symlink whose target lies anywhere, as in
+  git-annex and DVC datasets.
+
+Paths have three origins:
+
+- Dataset paths (a reader-owned name, a discovered entry, or a value read from
+  metadata) must be lexically inside the root in both modes: an absolute path
+  elsewhere or a ``..`` escape is rejected before any filesystem access. Their
+  targets then follow the policy. A strict root returns the canonical target.
+- Relative caller paths are joined to the root and follow the same rules,
+  except that ``~`` is expanded first.
+- Absolute caller paths may point anywhere under both policies.
+
+Caller paths keep the final name the caller gave under both policies, and
+every path of a relaxed root keeps its own final name: the validator returns
+the resolved parent directory joined with that name. Names and suffixes that
+identify samples or formats therefore come from the dataset or the caller,
+never from a hash-named target.
+"""
 
 from __future__ import annotations
 
 import errno
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NewType
 
@@ -15,27 +41,31 @@ if TYPE_CHECKING:
 
 ArtifactDirectory = NewType("ArtifactDirectory", Path)
 ArtifactFile = NewType("ArtifactFile", Path)
-DatasetRoot = NewType("DatasetRoot", ArtifactDirectory)
 
+type PathPolicy = Literal["strict", "relaxed"]
 type _PathKind = Literal["file", "directory"]
 type _PathOrigin = Literal["caller", "metadata"]
 
-
-def _failure_message(
-    context: ReaderErrorContext,
-    *,
-    found: str,
-    expected: str,
-    path: Path | None = None,
-) -> str:
-    return f"{context.describe(path=path)}: expected {expected}; found {found}."
+_EXPECTED_KIND: dict[_PathKind, str] = {"file": "an existing regular file", "directory": "an existing directory"}
 
 
-def _lexical_absolute(path: str | Path, *, expand_user: bool) -> Path:
-    lexical = Path(path)
-    if expand_user:
-        lexical = lexical.expanduser()
-    return lexical.absolute()
+@dataclass(frozen=True, slots=True)
+class DatasetRoot:
+    """A canonical dataset directory and the path policy of its artifacts.
+
+    Only :func:`normalize_dataset_root` constructs this value.
+
+    Attributes
+    ----------
+    path
+        Canonical absolute dataset directory.
+    path_policy
+        ``"strict"`` if every dataset artifact must resolve inside ``path``;
+        ``"relaxed"`` if dataset artifacts may be symlinks to targets elsewhere.
+    """
+
+    path: ArtifactDirectory
+    path_policy: PathPolicy
 
 
 def _missing_error(
@@ -45,49 +75,13 @@ def _missing_error(
     found: str,
     expected: str,
 ) -> FileNotFoundError:
-    message = _failure_message(context, found=found, expected=expected, path=path)
+    """Build a ``FileNotFoundError`` with ``ENOENT``, ``filename`` and the contextual message."""
+    message = context.describe_failure(found=found, expected=expected, path=path)
     return FileNotFoundError(errno.ENOENT, message, str(path))
 
 
-def _wrong_kind_error(
-    *,
-    context: ReaderErrorContext,
-    path: Path,
-    found: str,
-    expected: str,
-    error_type: type[IsADirectoryError | NotADirectoryError],
-) -> IsADirectoryError | NotADirectoryError:
-    code = errno.EISDIR if error_type is IsADirectoryError else errno.ENOTDIR
-    message = _failure_message(context, found=found, expected=expected, path=path)
-    return error_type(code, message, str(path))
-
-
-def _expected_kind(kind: _PathKind) -> str:
-    return "an existing regular file" if kind == "file" else "an existing directory"
-
-
-def _filesystem_kind(path: Path, *, context: ReaderErrorContext, lexical: Path) -> str:
-    try:
-        mode = path.stat().st_mode
-    except FileNotFoundError as error:
-        raise _missing_error(
-            context=context,
-            path=lexical,
-            found="a target that disappeared during validation",
-            expected="an existing filesystem entry",
-        ) from error
-    except OSError as error:
-        add_reader_context(error, context=context, path=lexical)
-        raise
-
-    if stat.S_ISREG(mode):
-        return "a regular file"
-    if stat.S_ISDIR(mode):
-        return "a directory"
-    return "a non-regular, non-directory filesystem entry"
-
-
 def _resolve_existing(path: Path, *, context: ReaderErrorContext, expected: str) -> Path:
+    """Resolve ``path`` strictly, reporting a missing component as a contextual error."""
     try:
         return path.resolve(strict=True)
     except FileNotFoundError as error:
@@ -97,6 +91,7 @@ def _resolve_existing(path: Path, *, context: ReaderErrorContext, expected: str)
             found="a missing path component or dangling symlink",
             expected=expected,
         ) from error
+    # Python 3.12 reports symlink loops as RuntimeError, later versions as OSError.
     except (OSError, RuntimeError) as error:
         add_reader_context(error, context=context, path=path)
         raise
@@ -109,39 +104,126 @@ def _require_resolved_kind(
     context: ReaderErrorContext,
     kind: _PathKind,
 ) -> Path:
-    expected = _expected_kind(kind)
-    found = _filesystem_kind(target, context=context, lexical=lexical)
-    if kind == "file" and found == "a regular file":
-        return target
-    if kind == "directory" and found == "a directory":
-        return target
-    if kind == "file" and found == "a directory":
-        raise _wrong_kind_error(
+    """Return ``target`` if it has ``kind``, reporting failures at ``lexical``."""
+    try:
+        mode = target.stat().st_mode
+    except FileNotFoundError as error:
+        raise _missing_error(
             context=context,
             path=lexical,
-            found=found,
-            expected=expected,
-            error_type=IsADirectoryError,
-        )
-    if kind == "directory" and found == "a regular file":
-        raise _wrong_kind_error(
-            context=context,
-            path=lexical,
-            found=found,
-            expected=expected,
-            error_type=NotADirectoryError,
-        )
-    raise ReaderFormatError(context=context, found=found, expected=expected, path=lexical)
+            found="a target that disappeared during validation",
+            expected="an existing filesystem entry",
+        ) from error
+    except OSError as error:
+        add_reader_context(error, context=context, path=lexical)
+        raise
+
+    if (kind == "file" and stat.S_ISREG(mode)) or (kind == "directory" and stat.S_ISDIR(mode)):
+        return target
+    expected = _EXPECTED_KIND[kind]
+    if kind == "file" and stat.S_ISDIR(mode):
+        message = context.describe_failure(found="a directory", expected=expected, path=lexical)
+        raise IsADirectoryError(errno.EISDIR, message, str(lexical))
+    if kind == "directory" and stat.S_ISREG(mode):
+        message = context.describe_failure(found="a regular file", expected=expected, path=lexical)
+        raise NotADirectoryError(errno.ENOTDIR, message, str(lexical))
+    raise ReaderFormatError(
+        context=context,
+        found="a non-regular, non-directory filesystem entry",
+        expected=expected,
+        path=lexical,
+    )
 
 
 def _require_kind(path: Path, *, context: ReaderErrorContext, kind: _PathKind) -> Path:
-    lexical = _lexical_absolute(path, expand_user=False)
-    target = _resolve_existing(lexical, context=context, expected=_expected_kind(kind))
+    """Return the resolved target of ``path`` after checking that it has ``kind``."""
+    lexical = path.absolute()
+    target = _resolve_existing(lexical, context=context, expected=_EXPECTED_KIND[kind])
     return _require_resolved_kind(lexical, target, context=context, kind=kind)
 
 
-def _optional_kind(path: Path, *, context: ReaderErrorContext, kind: _PathKind) -> Path | None:
-    lexical = _lexical_absolute(path, expand_user=False)
+def _validate_path_policy(value: object, *, context: ReaderErrorContext) -> PathPolicy:
+    """Return a public ``path_policy`` value after checking its type and spelling."""
+    if not isinstance(value, str):
+        message = f"{context.reader}: path_policy must be a string, not {type(value).__name__}."
+        raise TypeError(message)
+    if value == "strict":
+        return "strict"
+    if value == "relaxed":
+        return "relaxed"
+    message = f"{context.reader}: path_policy must be 'strict' or 'relaxed', not {value!r}."
+    raise ValueError(message)
+
+
+def _contained_lexical(root: DatasetRoot, supplied: Path, *, context: ReaderErrorContext) -> Path:
+    """Join ``supplied`` to ``root`` and reject a spelling that leaves it, without filesystem access."""
+    lexical = (root.path / supplied).absolute()
+    # Collapse ``.`` and ``..`` without resolving symlinks or requiring existence.
+    normalized = Path(os.path.normpath(lexical))
+    if not normalized.is_relative_to(root.path):
+        raise ReaderFormatError(
+            context=context,
+            found=f"a path lexically outside the dataset root at {str(normalized)!r}",
+            expected=f"a path contained by dataset root {str(root.path)!r}",
+            path=lexical,
+        )
+    return lexical
+
+
+def _require_origin_kind(
+    root: DatasetRoot,
+    path: str | Path,
+    *,
+    context: ReaderErrorContext,
+    origin: _PathOrigin,
+    kind: _PathKind,
+) -> Path:
+    """Resolve a caller or metadata path against ``root`` and require it to have ``kind``.
+
+    Metadata paths and relative caller paths must be lexically inside ``root``;
+    under a strict root their targets must also resolve inside it. Absolute
+    caller paths are permitted anywhere. Caller paths, and every path of a
+    relaxed root, keep their own final name; strict metadata paths return the
+    canonical target.
+    """
+    supplied = Path(path).expanduser() if origin == "caller" else Path(path)
+    must_be_contained = origin == "metadata" or not supplied.is_absolute()
+    lexical = (
+        _contained_lexical(root, supplied, context=context) if must_be_contained else (root.path / supplied).absolute()
+    )
+
+    target = _resolve_existing(lexical, context=context, expected=_EXPECTED_KIND[kind])
+    relaxed = root.path_policy == "relaxed"
+    if must_be_contained and not relaxed and not target.is_relative_to(root.path):
+        raise ReaderFormatError(
+            context=context,
+            found=f"a path resolving outside the dataset root to {str(target)!r}",
+            expected=(
+                f"a path contained by dataset root {str(root.path)!r} "
+                "(pass path_policy='relaxed' to accept symlinks to targets stored elsewhere)"
+            ),
+            path=lexical,
+        )
+    _require_resolved_kind(lexical, target, context=context, kind=kind)
+    if origin == "metadata" and not relaxed:
+        return target
+    # Annex and DVC targets are named by content hashes: keep the given name and suffix.
+    parent = _resolve_existing(lexical.parent, context=context, expected="an existing parent directory")
+    return parent / lexical.name
+
+
+def _optional_metadata_kind(
+    root: DatasetRoot,
+    path: str | Path,
+    *,
+    context: ReaderErrorContext,
+    kind: _PathKind,
+) -> Path | None:
+    """Return a validated metadata path, or ``None`` when only its final component is absent.
+
+    The parent directory must exist. A dangling symlink is not absent and raises.
+    """
+    lexical = _contained_lexical(root, Path(path), context=context)
     try:
         lexical.lstat()
     except FileNotFoundError:
@@ -156,71 +238,31 @@ def _optional_kind(path: Path, *, context: ReaderErrorContext, kind: _PathKind) 
     except OSError as error:
         add_reader_context(error, context=context, path=lexical)
         raise
-
-    target = _resolve_existing(lexical, context=context, expected=_expected_kind(kind))
-    return _require_resolved_kind(lexical, target, context=context, kind=kind)
+    return _require_origin_kind(root, lexical, context=context, origin="metadata", kind=kind)
 
 
-def _origin_candidate(root: DatasetRoot, path: str | Path, *, origin: _PathOrigin) -> tuple[Path, bool]:
-    supplied = Path(path)
-    if origin == "caller":
-        supplied = supplied.expanduser()
-    is_absolute = supplied.is_absolute()
-    candidate = supplied if is_absolute else Path(root) / supplied
-    return candidate.absolute(), is_absolute
-
-
-def _lexically_normalized(path: Path) -> Path:
-    """Collapse ``.`` and ``..`` without resolving symlinks or requiring existence."""
-    return Path(os.path.normpath(path))
-
-
-def _require_origin_kind(
-    root: DatasetRoot,
-    path: str | Path,
-    *,
-    context: ReaderErrorContext,
-    origin: _PathOrigin,
-    kind: _PathKind,
-) -> Path:
-    lexical, is_absolute = _origin_candidate(root, path, origin=origin)
-    must_be_contained = origin == "metadata" or not is_absolute
-    lexical_target = _lexically_normalized(lexical)
-    if must_be_contained and not lexical_target.is_relative_to(root):
-        raise ReaderFormatError(
-            context=context,
-            found=f"a path lexically outside the dataset root at {str(lexical_target)!r}",
-            expected=f"a path contained by dataset root {str(root)!r}",
-            path=lexical,
-        )
-
-    target = _resolve_existing(lexical, context=context, expected=_expected_kind(kind))
-    if must_be_contained and not target.is_relative_to(root):
-        raise ReaderFormatError(
-            context=context,
-            found=f"a path resolving outside the dataset root to {str(target)!r}",
-            expected=f"a path contained by dataset root {str(root)!r}",
-            path=lexical,
-        )
-    return _require_resolved_kind(lexical, target, context=context, kind=kind)
-
-
-def _materialize_paths(
+def _unique_candidate(
     paths: Iterable[Path],
     *,
     context: ReaderErrorContext,
     search_path: Path,
-) -> tuple[Path, ...]:
+    expected: str,
+) -> Path | None:
+    """Return the only candidate, ``None`` when there is none, and reject several."""
     try:
-        return tuple(paths)
+        candidates = tuple(paths)
     except OSError as error:
         add_reader_context(error, context=context, path=search_path)
         raise
-
-
-def _format_candidates(paths: tuple[Path, ...]) -> str:
-    rendered = ", ".join(repr(str(path)) for path in paths)
-    return f"{len(paths)} candidates ({rendered})"
+    if len(candidates) > 1:
+        rendered = ", ".join(repr(str(path)) for path in sorted(candidates, key=Path.as_posix))
+        raise ReaderFormatError(
+            context=context,
+            found=f"{len(candidates)} candidates ({rendered})",
+            expected=expected,
+            path=search_path,
+        )
+    return candidates[0] if candidates else None
 
 
 def normalize_dataset_root(
@@ -228,8 +270,9 @@ def normalize_dataset_root(
     /,
     *,
     context: ReaderErrorContext,
+    path_policy: PathPolicy,
 ) -> DatasetRoot:
-    """Return a canonical existing dataset directory.
+    """Return a canonical existing dataset directory and its path policy.
 
     Parameters
     ----------
@@ -238,16 +281,23 @@ def normalize_dataset_root(
         are applied before validating the directory kind.
     context
         Reader context included in failures.
+    path_policy
+        Public reader option deciding whether dataset artifacts must resolve
+        inside the root (``"strict"``) or may be symlinks to targets elsewhere
+        (``"relaxed"``). It is validated before any filesystem access.
 
     Returns
     -------
     DatasetRoot
-        Canonical absolute directory path. This allocation-free ``NewType`` is
-        also an :class:`ArtifactDirectory` and records successful root
-        normalization for downstream layout functions.
+        Canonical absolute directory with the validated policy. Every
+        root-relative validator below reads the policy from this value.
 
     Raises
     ------
+    TypeError
+        If ``path_policy`` is not a string.
+    ValueError
+        If ``path_policy`` is neither ``"strict"`` nor ``"relaxed"``.
     FileNotFoundError
         If the root or a symlink target is missing.
     NotADirectoryError
@@ -258,19 +308,22 @@ def normalize_dataset_root(
         If another filesystem operation fails. The original exception is
         retained with reader context.
     """
-    lexical = _lexical_absolute(path, expand_user=True)
-    target = _resolve_existing(lexical, context=context, expected="an existing directory")
-    directory = ArtifactDirectory(_require_resolved_kind(lexical, target, context=context, kind="directory"))
-    return DatasetRoot(directory)
+    policy = _validate_path_policy(path_policy, context=context)
+    directory = _require_kind(Path(path).expanduser(), context=context, kind="directory")
+    return DatasetRoot(ArtifactDirectory(directory), policy)
 
 
 def require_file(path: Path, /, *, context: ReaderErrorContext) -> ArtifactFile:
-    """Return the canonical target of a required regular file.
+    """Return the canonical target of a required regular file outside any dataset root.
+
+    Use it for a single caller-selected file without a dataset root or for a
+    file inside a reader-created directory. Artifacts under a dataset root use
+    the root-relative validators, which apply the root's path policy.
 
     Parameters
     ----------
     path
-        Reader-owned local artifact path. User expansion is not applied.
+        Local file path. User expansion is not applied.
     context
         Reader context included in failures.
 
@@ -293,49 +346,16 @@ def require_file(path: Path, /, *, context: ReaderErrorContext) -> ArtifactFile:
     return ArtifactFile(_require_kind(path, context=context, kind="file"))
 
 
-def optional_file(path: Path, /, *, context: ReaderErrorContext) -> ArtifactFile | None:
-    """Return a canonical regular file, or ``None`` for an absent leaf.
-
-    Parameters
-    ----------
-    path
-        Reader-owned local artifact path. User expansion is not applied. Only
-        the final path component is optional; its parent must be a valid
-        existing directory.
-    context
-        Reader context included in failures.
-
-    Returns
-    -------
-    ArtifactFile | None
-        Canonical absolute file target, or ``None`` when only the final path
-        component is absent.
-
-    Raises
-    ------
-    FileNotFoundError
-        If a parent is missing or dangling, or an existing leaf is a dangling
-        symlink.
-    NotADirectoryError
-        If the leaf's parent is not a directory.
-    IsADirectoryError
-        If the leaf resolves to a directory.
-    ReaderFormatError
-        If an existing path resolves to another unsupported filesystem kind.
-    OSError
-        If another filesystem operation fails.
-    """
-    result = _optional_kind(path, context=context, kind="file")
-    return None if result is None else ArtifactFile(result)
-
-
 def require_directory(path: Path, /, *, context: ReaderErrorContext) -> ArtifactDirectory:
-    """Return the canonical target of a required directory.
+    """Return the canonical target of a required directory outside any dataset root.
+
+    Use it for a reader-created directory such as an extraction target.
+    Directories under a dataset root use the root-relative validators.
 
     Parameters
     ----------
     path
-        Reader-owned local directory path. User expansion is not applied.
+        Local directory path. User expansion is not applied.
     context
         Reader context included in failures.
 
@@ -359,40 +379,6 @@ def require_directory(path: Path, /, *, context: ReaderErrorContext) -> Artifact
     return ArtifactDirectory(_require_kind(path, context=context, kind="directory"))
 
 
-def optional_directory(path: Path, /, *, context: ReaderErrorContext) -> ArtifactDirectory | None:
-    """Return a canonical directory, or ``None`` for an absent leaf.
-
-    Parameters
-    ----------
-    path
-        Reader-owned local directory path. User expansion is not applied. Only
-        the final path component is optional; its parent must be a valid
-        existing directory.
-    context
-        Reader context included in failures.
-
-    Returns
-    -------
-    ArtifactDirectory | None
-        Canonical absolute directory target, or ``None`` when only the final
-        path component is absent. Directory contents are not scanned.
-
-    Raises
-    ------
-    FileNotFoundError
-        If a parent is missing or dangling, or an existing leaf is a dangling
-        symlink.
-    NotADirectoryError
-        If the leaf or its parent resolves to a regular file.
-    ReaderFormatError
-        If an existing path resolves to another unsupported filesystem kind.
-    OSError
-        If another filesystem operation fails.
-    """
-    result = _optional_kind(path, context=context, kind="directory")
-    return None if result is None else ArtifactDirectory(result)
-
-
 def require_caller_file(
     root: DatasetRoot,
     path: str | Path,
@@ -405,18 +391,20 @@ def require_caller_file(
     Parameters
     ----------
     root
-        Canonical dataset root returned by :func:`normalize_dataset_root`.
+        Dataset root returned by :func:`normalize_dataset_root`.
     path
-        Caller-provided path. User expansion is applied. Relative paths resolve
-        against and must remain within ``root``; explicit absolute paths may
-        resolve outside it.
+        Caller-provided path. User expansion is applied. Relative paths join
+        ``root``, must be lexically inside it, and follow its path policy: a
+        strict root requires the target to resolve inside it. Absolute paths
+        may point anywhere under both policies.
     context
         Reader context included in failures.
 
     Returns
     -------
     ArtifactFile
-        Canonical absolute path to the validated regular file.
+        The resolved parent directory joined with the final name the caller
+        gave, so its name and suffix are the caller's, not a link target's.
 
     Raises
     ------
@@ -425,7 +413,9 @@ def require_caller_file(
     IsADirectoryError
         If the path resolves to a directory.
     ReaderFormatError
-        If a relative path escapes ``root`` or resolves to an unsupported kind.
+        If a relative path is lexically outside ``root``, a strict root's
+        relative path resolves outside it, or the target has an unsupported
+        filesystem kind.
     OSError
         If another filesystem operation fails.
     """
@@ -444,18 +434,20 @@ def require_caller_directory(
     Parameters
     ----------
     root
-        Canonical dataset root returned by :func:`normalize_dataset_root`.
+        Dataset root returned by :func:`normalize_dataset_root`.
     path
-        Caller-provided path. User expansion is applied. Relative paths resolve
-        against and must remain within ``root``; explicit absolute paths may
-        resolve outside it.
+        Caller-provided path. User expansion is applied. Relative paths join
+        ``root``, must be lexically inside it, and follow its path policy: a
+        strict root requires the target to resolve inside it. Absolute paths
+        may point anywhere under both policies.
     context
         Reader context included in failures.
 
     Returns
     -------
     ArtifactDirectory
-        Canonical absolute path to the validated directory. Its contents are
+        The resolved parent directory joined with the final name the caller
+        gave, so its name and suffix are the caller's, not a link target's. Its contents are
         not scanned.
 
     Raises
@@ -465,7 +457,9 @@ def require_caller_directory(
     NotADirectoryError
         If the path resolves to a regular file.
     ReaderFormatError
-        If a relative path escapes ``root`` or resolves to an unsupported kind.
+        If a relative path is lexically outside ``root``, a strict root's
+        relative path resolves outside it, or the target has an unsupported
+        filesystem kind.
     OSError
         If another filesystem operation fails.
     """
@@ -479,22 +473,25 @@ def require_metadata_file(
     *,
     context: ReaderErrorContext,
 ) -> ArtifactFile:
-    """Resolve a literal metadata-derived file path contained by ``root``.
+    """Resolve a dataset-determined file path under ``root`` with the root's path policy.
 
     Parameters
     ----------
     root
-        Canonical dataset root returned by :func:`normalize_dataset_root`.
+        Dataset root returned by :func:`normalize_dataset_root`.
     path
-        Path obtained from vendor or community metadata. User expansion is not
-        applied. Relative and absolute values must resolve within ``root``.
+        Reader-owned name, discovered entry, or literal value read from
+        metadata. User expansion is not applied. Relative values join
+        ``root``; relative and absolute values must be lexically inside it.
     context
         Reader context included in failures.
 
     Returns
     -------
     ArtifactFile
-        Canonical absolute path to the validated regular file.
+        For a strict root, the canonical target inside ``root``. For a relaxed
+        root, the canonical parent directory joined with the artifact's own
+        name, whose symlink target may lie anywhere.
 
     Raises
     ------
@@ -503,11 +500,55 @@ def require_metadata_file(
     IsADirectoryError
         If the path resolves to a directory.
     ReaderFormatError
-        If the target escapes ``root`` or has an unsupported filesystem kind.
+        If the path is lexically outside ``root``, a strict root's artifact
+        resolves outside it, or the target has an unsupported filesystem kind.
     OSError
         If another filesystem operation fails.
     """
     return ArtifactFile(_require_origin_kind(root, path, context=context, origin="metadata", kind="file"))
+
+
+def optional_metadata_file(
+    root: DatasetRoot,
+    path: str | Path,
+    /,
+    *,
+    context: ReaderErrorContext,
+) -> ArtifactFile | None:
+    """Resolve an optional dataset-determined file, or return ``None`` for an absent leaf.
+
+    Parameters
+    ----------
+    root
+        Dataset root returned by :func:`normalize_dataset_root`.
+    path
+        Path accepted by :func:`require_metadata_file`. Only the final path
+        component is optional; its parent must be an existing directory.
+    context
+        Reader context included in failures.
+
+    Returns
+    -------
+    ArtifactFile | None
+        The value :func:`require_metadata_file` returns, or ``None`` when only
+        the final path component is absent.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a parent is missing or dangling, or an existing leaf is a dangling
+        symlink.
+    NotADirectoryError
+        If the leaf's parent is not a directory.
+    IsADirectoryError
+        If the leaf resolves to a directory.
+    ReaderFormatError
+        Under the conditions of :func:`require_metadata_file`.
+    OSError
+        If another filesystem operation fails.
+    """
+    result = _optional_metadata_kind(root, path, context=context, kind="file")
+    return None if result is None else ArtifactFile(result)
 
 
 def require_metadata_directory(
@@ -517,23 +558,26 @@ def require_metadata_directory(
     *,
     context: ReaderErrorContext,
 ) -> ArtifactDirectory:
-    """Resolve a literal metadata-derived directory path contained by ``root``.
+    """Resolve a dataset-determined directory path under ``root`` with the root's path policy.
 
     Parameters
     ----------
     root
-        Canonical dataset root returned by :func:`normalize_dataset_root`.
+        Dataset root returned by :func:`normalize_dataset_root`.
     path
-        Path obtained from vendor or community metadata. User expansion is not
-        applied. Relative and absolute values must resolve within ``root``.
+        Reader-owned name, discovered entry, or literal value read from
+        metadata. User expansion is not applied. Relative values join
+        ``root``; relative and absolute values must be lexically inside it.
     context
         Reader context included in failures.
 
     Returns
     -------
     ArtifactDirectory
-        Canonical absolute path to the validated directory. Its contents are
-        not scanned.
+        For a strict root, the canonical target inside ``root``. For a relaxed
+        root, the canonical parent directory joined with the directory's own
+        name. Paths joined to the result stay lexically inside ``root`` in both
+        modes. Its contents are not scanned.
 
     Raises
     ------
@@ -542,11 +586,53 @@ def require_metadata_directory(
     NotADirectoryError
         If the path resolves to a regular file.
     ReaderFormatError
-        If the target escapes ``root`` or has an unsupported filesystem kind.
+        If the path is lexically outside ``root``, a strict root's artifact
+        resolves outside it, or the target has an unsupported filesystem kind.
     OSError
         If another filesystem operation fails.
     """
     return ArtifactDirectory(_require_origin_kind(root, path, context=context, origin="metadata", kind="directory"))
+
+
+def optional_metadata_directory(
+    root: DatasetRoot,
+    path: str | Path,
+    /,
+    *,
+    context: ReaderErrorContext,
+) -> ArtifactDirectory | None:
+    """Resolve an optional dataset-determined directory, or return ``None`` for an absent leaf.
+
+    Parameters
+    ----------
+    root
+        Dataset root returned by :func:`normalize_dataset_root`.
+    path
+        Path accepted by :func:`require_metadata_directory`. Only the final
+        path component is optional; its parent must be an existing directory.
+    context
+        Reader context included in failures.
+
+    Returns
+    -------
+    ArtifactDirectory | None
+        The value :func:`require_metadata_directory` returns, or ``None`` when
+        only the final path component is absent. Contents are not scanned.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a parent is missing or dangling, or an existing leaf is a dangling
+        symlink.
+    NotADirectoryError
+        If the leaf or its parent resolves to a regular file.
+    ReaderFormatError
+        Under the conditions of :func:`require_metadata_directory`.
+    OSError
+        If another filesystem operation fails.
+    """
+    result = _optional_metadata_kind(root, path, context=context, kind="directory")
+    return None if result is None else ArtifactDirectory(result)
 
 
 def sorted_paths(
@@ -624,23 +710,15 @@ def require_unique_path(
         If materializing a filesystem-backed iterable fails. The original
         exception is retained with reader and search-path context.
     """
-    candidates = _materialize_paths(paths, context=context, search_path=search_path)
-    if not candidates:
+    candidate = _unique_candidate(paths, context=context, search_path=search_path, expected="exactly one candidate")
+    if candidate is None:
         raise _missing_error(
             context=context,
             path=search_path,
             found="no candidates",
             expected="exactly one candidate",
         )
-    if len(candidates) > 1:
-        ordered = tuple(sorted(candidates, key=Path.as_posix))
-        raise ReaderFormatError(
-            context=context,
-            found=_format_candidates(ordered),
-            expected="exactly one candidate",
-            path=search_path,
-        )
-    return candidates[0]
+    return candidate
 
 
 def optional_unique_path(
@@ -678,27 +756,17 @@ def optional_unique_path(
         If materializing a filesystem-backed iterable fails. The original
         exception is retained with reader and search-path context.
     """
-    candidates = _materialize_paths(paths, context=context, search_path=search_path)
-    if not candidates:
-        return None
-    if len(candidates) > 1:
-        ordered = tuple(sorted(candidates, key=Path.as_posix))
-        raise ReaderFormatError(
-            context=context,
-            found=_format_candidates(ordered),
-            expected="zero or one candidate",
-            path=search_path,
-        )
-    return candidates[0]
+    return _unique_candidate(paths, context=context, search_path=search_path, expected="zero or one candidate")
 
 
 __all__ = [
     "ArtifactDirectory",
     "ArtifactFile",
     "DatasetRoot",
+    "PathPolicy",
     "normalize_dataset_root",
-    "optional_directory",
-    "optional_file",
+    "optional_metadata_directory",
+    "optional_metadata_file",
     "optional_unique_path",
     "require_caller_directory",
     "require_caller_file",

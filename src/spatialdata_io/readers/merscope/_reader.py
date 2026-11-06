@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from spatialdata import SpatialData
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.merscope._geometry import read_boundaries
 from spatialdata_io.readers.merscope._images import read_images
@@ -40,6 +41,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read the MERSCOPE instrument and Cellpose/Watershed VPT export layouts.
 
@@ -88,6 +90,15 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     chunks
         One positive size for every axis or three ``c, y, x`` sizes of the
         images. By default one channel per chunk and square 1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -158,7 +169,12 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     )
     options = make_raster_options(scale_factors, chunks)
     layout = discover_layout(
-        path, selection, vpt_directory=vpt_directory, region_name=region_name, slide_name=slide_name
+        path,
+        selection,
+        vpt_directory=vpt_directory,
+        region_name=region_name,
+        slide_name=slide_name,
+        path_policy=path_policy,
     )
     dataset_id = layout.names.dataset_id
 

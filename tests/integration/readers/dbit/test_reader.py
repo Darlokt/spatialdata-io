@@ -16,12 +16,15 @@ from anndata.tests.helpers import assert_equal
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Identity, get_transformation
 
 from spatialdata_io import __version__
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.dbit import dbit
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
     from typing import Literal
 
@@ -277,7 +280,7 @@ class TestDbit:
         assert image.shape == (3, 8, 10)
         assert image.dtype == np.uint8
         assert isinstance(image.data, da.Array)
-        np.testing.assert_array_equal(image.c, [0, 1, 2])
+        np.testing.assert_array_equal(image.c, ["r", "g", "b"])
         np.testing.assert_array_equal(image.data.compute(), pixels.transpose(2, 0, 1))
 
         assert get_transformation(image, get_all=True) == {"global": Identity()}
@@ -531,3 +534,51 @@ class TestDbit:
         pd.testing.assert_frame_equal(
             default_restored.obs.drop(columns="sample"), default_table.obs.drop(columns="sample"), check_exact=True
         )
+
+
+class TestDbitPathPolicy:
+    """Discovered artifacts follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        _write_layout(tmp_path)
+        _write_image(tmp_path / "tissue_lowres_image.png")
+        expected = dbit(tmp_path)
+        # The dataset ID comes from the table's own name, not from its hash-named target.
+        link_outside_root(tmp_path / "sample.h5ad")
+        link_outside_root(tmp_path / "tissue_lowres_image.png")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            dbit(tmp_path)
+
+        assert_spatial_data_objects_are_identical(dbit(tmp_path, path_policy="relaxed"), expected)
+
+    def test_relative_overrides_follow_the_path_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        _write_layout(tmp_path)
+        (tmp_path / "sample.h5ad").rename(tmp_path / "selected.h5ad")
+        (tmp_path / "barcode_list.txt").rename(tmp_path / "positions.txt")
+        _write_image(tmp_path / "histology.png")
+        expected = dbit(
+            tmp_path, table_file="selected.h5ad", barcode_positions_file="positions.txt", image_file="histology.png"
+        )
+        for name in ("selected.h5ad", "positions.txt", "histology.png"):
+            link_outside_root(tmp_path / name)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            dbit(
+                tmp_path, table_file="selected.h5ad", barcode_positions_file="positions.txt", image_file="histology.png"
+            )
+
+        relaxed = dbit(
+            tmp_path,
+            table_file="selected.h5ad",
+            barcode_positions_file="positions.txt",
+            image_file="histology.png",
+            path_policy="relaxed",
+        )
+        # The dataset ID still comes from the caller's table name.
+        assert set(relaxed.shapes) == set(expected.shapes)
+        assert_spatial_data_objects_are_identical(relaxed, expected)

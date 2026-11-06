@@ -16,11 +16,11 @@ if TYPE_CHECKING:
     class _GenericOptions(TypedDict):
         element_name: str | None
         data_axes: str | None
-        tiff_series: int
+        coordinate_system: str | None
+        tiff_series: int | None
         tiff_level: int
         scale_factors: tuple[int, ...]
         chunks: tuple[int, ...]
-        coordinate_system: str | None
         invalid_geometries: Literal["keep", "drop", "raise"]
 
 
@@ -44,11 +44,16 @@ if TYPE_CHECKING:
 @click.option("--name", "element_name", "-n", type=str, help="Name of the element to store.")
 @click.option("--data-axes", type=str, help="Image axes: a permutation of yx, cyx, zyx, or czyx.")
 @click.option(
+    "--coordinate-system",
+    "-c",
+    type=str,
+    help="Frame name containing a non-whitespace character; required when appending. No registration is inferred.",
+)
+@click.option(
     "--tiff-series",
     type=click.IntRange(min=0),
-    default=0,
-    show_default=True,
-    help="Zero-based TIFF series. Only valid for TIFF-family inputs.",
+    default=None,
+    help="Zero-based TIFF series; required when the TIFF has several. Only valid for TIFF-family inputs.",
 )
 @click.option(
     "--tiff-level",
@@ -68,12 +73,6 @@ if TYPE_CHECKING:
         f"Omitted: {DEFAULT_CHUNKS} for CYX and {(DEFAULT_CHUNKS[0], 1, *DEFAULT_CHUNKS[1:])} for CZYX images, "
         "one channel and one plane per chunk."
     ),
-)
-@click.option(
-    "--coordinate-system",
-    "-c",
-    type=str,
-    help="Frame name containing a non-whitespace character; required when appending. No registration is inferred.",
 )
 @click.option(
     "--invalid-geometries",

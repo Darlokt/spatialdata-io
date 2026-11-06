@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -29,6 +30,10 @@ def _require_owned_in_memory_anndata(adata: AnnData, /) -> None:
 def _normalized_expression(
     data: object, *, location: str, duplicate_sums: list[SparseDuplicateSummary] | None
 ) -> sparse.csr_array:
+    """Return one expression value as canonical CSR, naming ``location`` in any failure.
+
+    Combined duplicate entries of sparse input are recorded in ``duplicate_sums`` when given.
+    """
     if sparse.issparse(data) and not isinstance(
         data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)
     ):
@@ -50,15 +55,8 @@ def _normalized_expression(
 
 
 def _validate_expression_layers(adata: AnnData, expression_layers: tuple[str, ...]) -> None:
-    seen: set[str] = set()
-    duplicate_set: set[str] = set()
-    duplicate_names: list[str] = []
-    for name in expression_layers:
-        if name in seen and name not in duplicate_set:
-            duplicate_names.append(name)
-            duplicate_set.add(name)
-        seen.add(name)
-    duplicates = tuple(duplicate_names)
+    """Reject duplicate or missing expression layer names before any mutation."""
+    duplicates = tuple(name for name, count in Counter(expression_layers).items() if count > 1)
     if duplicates:
         message = f"expression_layers must not contain duplicates; found {duplicates!r}."
         raise ValueError(message)

@@ -22,10 +22,9 @@ import numpy as np
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Affine, Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
-    DEFAULT_CHUNKS,
-    DEFAULT_SCALE_FACTORS,
     RasterOptions,
     inspect_tiff,
     make_raster_options,
@@ -86,13 +85,9 @@ def read_aligned(
 ) -> DataArray | DataTree:
     """Return one aligned image as lazy CYX pixels in the micrometre frame."""
     context = ReaderErrorContext("xenium", "aligned image")
-    try:
-        metadata = inspect_tiff(image)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=context, path=image)
-        raise
+    metadata = inspect_tiff(image, context=context)
 
-    lazy = read_tiff(metadata, series=0, level=0)
+    lazy = read_tiff(metadata, series=0, level=0, context=context)
     axes = tuple(axis.lower() for axis in (lazy.axes if data_axes is None else data_axes))
     if len(axes) != lazy.data.ndim:
         raise ReaderFormatError(

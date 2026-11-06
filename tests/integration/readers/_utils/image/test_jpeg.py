@@ -8,11 +8,15 @@ import imagecodecs
 import numpy as np
 import pytest
 
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext
 from spatialdata_io.readers._utils.image import read_jpeg
+from spatialdata_io.readers._utils.paths import ArtifactFile
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 class TestReadJpeg:
@@ -26,26 +30,28 @@ class TestReadJpeg:
         path.write_bytes(imagecodecs.jpeg8_encode(source, level=90))
         expected = imagecodecs.jpeg8_decode(path.read_bytes())
 
-        result = read_jpeg(path)
+        result = read_jpeg(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert result.data.numblocks == (1,) * result.data.ndim
-        expected_axes = ("y", "x") if channels == 1 else ("y", "x", "c")
-        assert result.axes == expected_axes
+        assert result.axes == (("y", "x") if channels == 1 else ("y", "x", "s"))
+        assert result.color == (None if channels == 1 else "rgb")
         np.testing.assert_array_equal(result.data.compute(), expected)
 
     def test_rejects_png_content(self, tmp_path: Path) -> None:
         path = tmp_path / "png.jpg"
         path.write_bytes(imagecodecs.png_encode(np.zeros((3, 4), dtype=np.uint8)))
 
-        with pytest.raises(RasterFormatError, match="JPEG SOI"):
-            read_jpeg(path)
+        with pytest.raises(RasterFormatError, match="JPEG SOI") as caught:
+            read_jpeg(ArtifactFile(path), context=_RASTER_CONTEXT)
+
+        assert caught.value.__notes__ == [f"While handling {_RASTER_CONTEXT.describe(path=path)}."]
 
     def test_accepts_jpeg_content_without_jpeg_suffix(self, tmp_path: Path) -> None:
         path = tmp_path / "image.data"
         source = np.arange(99, dtype=np.uint8).reshape(9, 11)
         path.write_bytes(imagecodecs.jpeg8_encode(source))
 
-        result = read_jpeg(path)
+        result = read_jpeg(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         np.testing.assert_array_equal(
             result.data.compute(),

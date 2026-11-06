@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
-from anndata import AnnData, read_h5ad
+from anndata import AnnData
 from scipy import sparse
 
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
@@ -61,10 +61,10 @@ class TestRead10xH5:
             return_value=normalized,
         )
 
-        result = read_10x_h5(path, context=_CONTEXT, genome="GRCh38", gex_only=False)
+        result = read_10x_h5(path, context=_CONTEXT)
 
         assert result is normalized
-        source.assert_called_once_with(path, genome="GRCh38", gex_only=False, backup_url=None)
+        source.assert_called_once_with(path, gex_only=False, backup_url=None)
         normalizer.assert_called_once_with(source_table)
 
     def test_wraps_canonical_scanpy_csr_storage_without_copying_buffers(
@@ -141,37 +141,6 @@ class TestRead10xH5:
         assert caught.value.__notes__ == [f"While handling {_CONTEXT.describe(path=path)}."]
         normalizer.assert_called_once()
 
-    def test_real_normalizer_rejects_upstream_view_with_source_context(
-        self, tmp_path: Path, mocker: MockerFixture
-    ) -> None:
-        path = _artifact_file(tmp_path / "counts.h5")
-        view = _table()[:, :]
-        source = mocker.patch(
-            "spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_h5",
-            return_value=view,
-        )
-        expression = mocker.patch.object(AnnData, "X", new_callable=mocker.PropertyMock)
-
-        with pytest.raises(ValueError, match="owned AnnData, not a view") as caught:
-            read_10x_h5(path, context=_CONTEXT)
-
-        assert caught.value.__notes__ == [f"While handling {_CONTEXT.describe(path=path)}."]
-        source.assert_called_once()
-        expression.assert_not_called()
-
-    def test_backed_source_is_rejected_before_accessing_expression(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        source_file = tmp_path / "source.h5ad"
-        _table().write_h5ad(source_file)
-        table = read_h5ad(source_file, backed="r")
-        mocker.patch("spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_h5", return_value=table)
-        expression = mocker.patch.object(AnnData, "X", new_callable=mocker.PropertyMock)
-        try:
-            with pytest.raises(TypeError, match="in-memory"):
-                read_10x_h5(_artifact_file(source_file), context=_CONTEXT)
-            expression.assert_not_called()
-        finally:
-            table.file.close()
-
     def test_rejects_nonfinite_counts_with_source_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _artifact_file(tmp_path / "counts.h5")
         malformed = AnnData(sparse.csr_matrix(np.asarray([[np.inf]], dtype=np.float64)))
@@ -203,20 +172,12 @@ class TestRead10xMtx:
             return_value=normalized,
         )
 
-        result = read_10x_mtx(
-            path,
-            context=_CONTEXT,
-            var_names="gene_ids",
-            make_unique=False,
-            gex_only=False,
-            prefix="sample_",
-            compressed=False,
-        )
+        result = read_10x_mtx(path, context=_CONTEXT, make_unique=False, prefix="sample_", compressed=False)
 
         assert result is normalized
         source.assert_called_once_with(
             path,
-            var_names="gene_ids",
+            var_names="gene_symbols",
             make_unique=False,
             cache=False,
             gex_only=False,
@@ -224,70 +185,6 @@ class TestRead10xMtx:
             compressed=False,
         )
         normalizer.assert_called_once_with(source_table)
-
-    @pytest.mark.parametrize("prefix", [None, "", ".", "..", ".hidden_", "sample-1_", "sample name_", "样本_"])
-    def test_accepts_lexical_filename_prefixes(
-        self,
-        tmp_path: Path,
-        mocker: MockerFixture,
-        prefix: str | None,
-    ) -> None:
-        path = _artifact_directory(tmp_path)
-        source = mocker.patch(
-            "spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_mtx",
-            return_value=_table(),
-        )
-
-        read_10x_mtx(path, context=_CONTEXT, prefix=prefix)
-
-        assert source.call_args.kwargs["prefix"] == prefix
-
-    @pytest.mark.parametrize(
-        "prefix",
-        [
-            "bad\0prefix",
-            "bad\x1fprefix",
-            "/absolute/",
-            "folder/name_",
-            "folder\\name_",
-            "../escape_",
-            "..\\escape_",
-            "C:drive_",
-            "sample:stream_",
-            'bad"prefix',
-            "bad<prefix",
-            "bad>prefix",
-            "bad|prefix",
-            "bad?prefix",
-            "bad*prefix",
-            "CON.",
-            "prn.",
-            "AUX.",
-            "nul.",
-            "CONIN$.",
-            "conout$.",
-            "COM1.",
-            "com¹.",
-            "LPT9.",
-            "lpt³.",
-        ],
-    )
-    def test_rejects_path_syntax_before_source_or_normalization(
-        self,
-        tmp_path: Path,
-        mocker: MockerFixture,
-        prefix: str,
-    ) -> None:
-        path = _artifact_directory(tmp_path)
-        source = mocker.patch("spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_mtx")
-        normalizer = mocker.patch("spatialdata_io.readers._utils.counts._10x.normalize_owned_anndata")
-
-        with pytest.raises(ValueError, match="prefix must be portable filename text") as caught:
-            read_10x_mtx(path, context=_CONTEXT, prefix=prefix)
-
-        assert caught.value.__notes__ == [f"While handling {_CONTEXT.describe(path=path)}."]
-        source.assert_not_called()
-        normalizer.assert_not_called()
 
     def test_source_failure_preserves_identity_and_skips_normalization(
         self, tmp_path: Path, mocker: MockerFixture
@@ -385,7 +282,7 @@ class TestNormalizeCounts:
         source = sparse.csr_array(
             (np.array([1, 1, 2**24, 1], dtype=np.float32), np.zeros(4, dtype=np.int32), [0, 1, 2, 4]), shape=(3, 1)
         )
-        mocker.patch("spatialdata_io.readers._utils.counts._10x._VALIDATION_BATCH_SIZE", 1)
+        mocker.patch("spatialdata_io.readers._utils.table._duplicates._BOUND_BATCH_SIZE", 1)
 
         result = _normalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
 

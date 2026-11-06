@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import tifffile
 
+from spatialdata_io.readers._utils.paths import ArtifactFile
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -38,7 +40,7 @@ class TiffFactory(Protocol):
         self,
         data: NDArray[np.generic],
         options: TiffOptions = _DEFAULT_TIFF_OPTIONS,
-    ) -> Path: ...
+    ) -> ArtifactFile: ...
 
 
 @pytest.fixture
@@ -51,8 +53,8 @@ def write_tiff(tmp_path: Path) -> TiffFactory:
     def factory(
         data: NDArray[np.generic],
         options: TiffOptions = _DEFAULT_TIFF_OPTIONS,
-    ) -> Path:
-        path = tmp_path / options.name
+    ) -> ArtifactFile:
+        path = ArtifactFile(tmp_path / options.name)
         tifffile.imwrite(
             path,
             data,
@@ -70,11 +72,11 @@ def write_tiff(tmp_path: Path) -> TiffFactory:
 
 
 @pytest.fixture
-def linked_ome_tiff(tmp_path: Path) -> tuple[Path, NDArray[np.uint16]]:
+def linked_ome_tiff(tmp_path: Path) -> tuple[ArtifactFile, NDArray[np.uint16]]:
     """Write a deterministic two-file, two-plane linked OME-TIFF."""
     dataset = tmp_path / "dataset"
     dataset.mkdir()
-    first_path = dataset / "first.ome.tif"
+    first_path = ArtifactFile(dataset / "first.ome.tif")
     second_path = dataset / "second.ome.tif"
     first_uuid = "11111111-1111-4111-8111-111111111111"
     second_uuid = "22222222-2222-4222-8222-222222222222"

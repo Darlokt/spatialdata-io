@@ -27,7 +27,9 @@ class TestMcmicroCommand:
         output = tmp_path / "output.zarr"
         result = runner.invoke(mcmicro_command, ["--input", str(tmp_path), "--output", str(output)])
         assert result.exit_code == 0, result.output
-        reader.assert_called_once_with(tmp_path, scale_factors=DEFAULT_SCALE_FACTORS, chunks=DEFAULT_CHUNKS)
+        reader.assert_called_once_with(
+            tmp_path, scale_factors=DEFAULT_SCALE_FACTORS, chunks=DEFAULT_CHUNKS, path_policy="strict"
+        )
         reader_result.write.assert_called_once_with(output)
 
     def test_explicit_options_keep_order(
@@ -50,7 +52,7 @@ class TestMcmicroCommand:
             mcmicro_command, ["--input", str(tmp_path), "--output", str(tmp_path / "output.zarr"), *arguments]
         )
         assert result.exit_code == 0, result.output
-        reader.assert_called_once_with(tmp_path, scale_factors=(2, 3), chunks=(1, 16, 32))
+        reader.assert_called_once_with(tmp_path, scale_factors=(2, 3), chunks=(1, 16, 32), path_policy="strict")
 
     def test_scalar_chunks(
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture, reader_result: MagicMock

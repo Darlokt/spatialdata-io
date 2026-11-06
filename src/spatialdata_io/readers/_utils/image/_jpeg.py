@@ -1,17 +1,34 @@
+"""Inspect JPEG frame headers and read JPEG pixels as one delayed whole-frame task.
+
+A JPEG is a sequence of ``0xFF``-prefixed markers: ``SOI``, metadata segments
+(``APPn``, ``DQT``, ``DHT``, ...), one start-of-frame (``SOFn``) segment with
+precision, height, width and component count, then the scans. Inspection walks
+the segment lengths up to the first ``SOF`` without reading entropy-coded data.
+
+Only 8-bit baseline, extended sequential and progressive Huffman frames
+(``SOF0``-``SOF2``) with one (``y, x``) or three (``y, x, s``, an interleaved
+samples axis) components are supported; they decode to uint8. The decoder
+returns three components as R, G, B samples (JFIF stores them as YCbCr and the
+decoder converts them), so they declare ``color="rgb"``; one component is
+grayscale. EXIF orientation is never applied.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, add_reader_context
 from spatialdata_io.readers._utils.image._encoded import encoded_result, validate_decoded_size
-from spatialdata_io.readers._utils.image._path import normalize_file_path
 from spatialdata_io.readers._utils.image._types import LazyRaster, _EncodedHeader
 
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import BinaryIO
+
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
+    from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _SUPPORTED_SOF = frozenset({0xC0, 0xC1, 0xC2})
 _ALL_SOF = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
@@ -22,6 +39,7 @@ _SUPPORTED_PRECISION = 8
 
 
 def _read_exact(stream: BinaryIO, size: int, *, context: str) -> bytes:
+    """Read exactly ``size`` bytes, raising ``RasterFormatError`` on truncation."""
     data = stream.read(size)
     if len(data) != size:
         message = f"Truncated JPEG while reading {context}."
@@ -30,6 +48,7 @@ def _read_exact(stream: BinaryIO, size: int, *, context: str) -> bytes:
 
 
 def _next_marker(stream: BinaryIO) -> int:
+    """Return the next marker code, skipping ``0xFF`` fill bytes before it."""
     if _read_exact(stream, 1, context="marker prefix") != b"\xff":
         message = "JPEG contains non-marker data before the first scan."
         raise RasterFormatError(message)
@@ -43,6 +62,7 @@ def _next_marker(stream: BinaryIO) -> int:
 
 
 def _sof_metadata(path: Path, marker: int, payload: bytes) -> _EncodedHeader:
+    """Validate a start-of-frame segment and return the decoded shape, dtype, axes and colours."""
     if marker not in _SUPPORTED_SOF:
         message = f"JPEG {path} uses unsupported SOF marker 0xFF{marker:02X}."
         raise RasterFormatError(message)
@@ -62,9 +82,12 @@ def _sof_metadata(path: Path, marker: int, payload: bytes) -> _EncodedHeader:
     if len(payload) != _SOF_FIXED_BYTES + 3 * components:
         message = f"JPEG {path} has inconsistent SOF component metadata."
         raise RasterFormatError(message)
-    shape = (height, width) if components == 1 else (height, width, components)
-    axes = ("y", "x") if components == 1 else ("y", "x", "c")
-    metadata = _EncodedHeader(shape=shape, dtype=np.dtype(np.uint8), axes=axes)
+    if components == 1:
+        metadata = _EncodedHeader(shape=(height, width), dtype=np.dtype(np.uint8), axes=("y", "x"), color=None)
+    else:
+        metadata = _EncodedHeader(
+            shape=(height, width, components), dtype=np.dtype(np.uint8), axes=("y", "x", "s"), color="rgb"
+        )
     validate_decoded_size(metadata)
     return metadata
 
@@ -94,7 +117,7 @@ def inspect_jpeg_header(path: Path) -> _EncodedHeader:
             stream.seek(payload_size, 1)
 
 
-def read_jpeg(path: str | Path) -> LazyRaster:
+def read_jpeg(path: ArtifactFile, /, *, context: ReaderErrorContext) -> LazyRaster:
     """Read JPEG pixels as one delayed whole-frame task.
 
     Metadata inspection is eager and skips ancillary payloads; pixel decoding is lazy. Computing
@@ -104,18 +127,32 @@ def read_jpeg(path: str | Path) -> LazyRaster:
     Parameters
     ----------
     path
-        JPEG source. Its SOI marker and frame metadata are validated;
-        file names and extensions remain layout-reader concerns.
+        Validated regular JPEG file. Its byte signature and header are
+        validated here; file names and extensions remain reader concerns.
+    context
+        Reader and artifact identity added to inspection failures.
 
     Returns
     -------
     LazyRaster
-        One whole-frame Dask source chunk in exact decoder axis order.
+        One whole-frame Dask source chunk in exact decoder axis order; three
+        components declare RGB samples.
 
     Raises
     ------
     RasterFormatError
         If the header is malformed or describes an unsupported JPEG.
+    OSError
+        If the file cannot be read.
+
+    Notes
+    -----
+    Inspection failures keep their type and gain a note naming ``context``
+    and ``path``.
     """
-    normalized = normalize_file_path(path)
-    return encoded_result(normalized, "jpeg", inspect_jpeg_header(normalized))
+    try:
+        header = inspect_jpeg_header(path)
+    except (OSError, ValueError) as error:
+        add_reader_context(error, context=context, path=path)
+        raise
+    return encoded_result(path, "jpeg", header)

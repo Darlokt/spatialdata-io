@@ -16,6 +16,8 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from pytest_mock import MockerFixture
 
     from spatialdata_io.readers._utils.table import SparseDuplicateSummary
@@ -199,12 +201,13 @@ class TestParseLinkedTable:
         expression = adata.X
         parser = mocker.patch.object(TableModel, "parse")
 
-        with pytest.raises(ValueError, match="must be absent"):
+        with pytest.raises(ValueError, match="must be absent") as raised:
             parse_linked_table(
                 adata,
                 TableLinkage(("cells",), "region", "instance"),
                 context=_CONTEXT,
             )
+        assert raised.value.__notes__ == [f"While handling {_CONTEXT.describe()}."]
 
         assert adata.X is expression
         assert adata.uns[TableModel.ATTRS_KEY] is stale
@@ -334,6 +337,26 @@ class TestParseLinkedTable:
         assert "test_reader" in raised.value.__notes__[0]
         assert isinstance(adata.X, sparse.csr_array)
 
+    def test_normalization_failure_carries_context_and_path(self, tmp_path: Path) -> None:
+        source = tmp_path / "table.h5ad"
+        adata = _table(x=sparse.csr_array(np.asarray([[np.nan, 0.0], [0.0, 1.0]])))
+
+        with pytest.raises(ValueError, match="finite") as raised:
+            parse_linked_table(adata, TableLinkage(("cells",), "region", "instance"), context=_CONTEXT, path=source)
+
+        assert raised.value.__notes__ == [
+            "while normalizing adata.X",
+            f"While handling {_CONTEXT.describe(path=source)}.",
+        ]
+
+    def test_linkage_failure_records_path(self, tmp_path: Path) -> None:
+        source = tmp_path / "table.h5ad"
+
+        with pytest.raises(ReaderFormatError, match="observed regions") as raised:
+            parse_linked_table(_table(), TableLinkage(("nuclei",), "region", "instance"), context=_CONTEXT, path=source)
+
+        assert raised.value.path == source
+
 
 class TestExpectedInstanceIds:
     """Validate exact target comparison without semantic coercion."""
@@ -354,6 +377,15 @@ class TestExpectedInstanceIds:
             expected_instance_ids={"cells": target},
         )
         pd.testing.assert_index_equal(target, before, exact=True)
+
+    def test_empty_integer_target_reports_every_table_pair_as_unexpected(self) -> None:
+        with pytest.raises(ReaderFormatError, match="0 target pairs missing from the table and 2 unexpected"):
+            parse_linked_table(
+                _table(),
+                TableLinkage(("cells",), "region", "instance"),
+                context=_CONTEXT,
+                expected_instance_ids={"cells": pd.Index([], dtype=np.int64)},
+            )
 
     def test_accepts_partial_reordered_targets_without_mutation(self, mocker: MockerFixture) -> None:
         adata = _table(

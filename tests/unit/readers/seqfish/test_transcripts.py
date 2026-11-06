@@ -13,6 +13,7 @@ import pytest
 from dask.callbacks import Callback
 
 import spatialdata_io.readers.seqfish._transcripts as transcript_module
+from spatialdata_io.readers._utils.csv import _blocks as csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._transcripts import read_transcripts
@@ -48,7 +49,7 @@ class TestReadTranscripts:
             "name,x,y,cell\n" + "".join(f"GeneB,{row},2,{cell}\n" for row, cell in enumerate(assignments)),
             encoding="utf-8",
         )
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 96)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 96)
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
             points = read_transcripts(path, features=_FEATURES, roi="Roi1")
@@ -69,7 +70,7 @@ class TestReadTranscripts:
         path = _write_transcripts(tmp_path / "transcripts.csv")
         with path.open("a", encoding="utf-8") as output:
             output.write(f"annotation,2.5,GeneB,{invalid_cell},1,1.5\n")
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 128)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 128)
         points = read_transcripts(path, features=_FEATURES, roi="Roi1")
         assert not points.partitions[0].compute().empty
         with pytest.raises(ReaderFormatError, match="identifier"):
@@ -79,7 +80,7 @@ class TestReadTranscripts:
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
         path = _write_transcripts(tmp_path / "transcripts.csv")
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 128)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 128)
         tasks = mocker.Mock()
         filters = list(warnings.filters)
         with Callback(posttask=tasks):
@@ -117,7 +118,7 @@ class TestReadTranscripts:
         self, tmp_path: Path, mocker: MockerFixture, last_name: str, last_x: str, message: str
     ) -> None:
         path = _write_transcripts(tmp_path / "transcripts.csv", last_name=last_name, last_x=last_x)
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 128)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 128)
         points = read_transcripts(path, features=_FEATURES, roi="Roi1")
         assert points.npartitions > 1
         first = points.partitions[0].compute()
@@ -140,7 +141,7 @@ class TestReadTranscripts:
     ) -> None:
         path = ArtifactFile(tmp_path / "transcripts.csv")
         path.write_bytes(content)
-        parser = mocker.spy(transcript_module, "read_bytes")
+        parser = mocker.spy(csv_blocks, "read_bytes")
         with pytest.raises(ReaderFormatError, match=message):
             read_transcripts(path, features=_FEATURES, roi="Roi1")
         parser.assert_not_called()
@@ -160,8 +161,8 @@ class TestReadTranscripts:
     def test_large_first_record_is_not_sampled_at_construction(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = ArtifactFile(tmp_path / "transcripts.csv")
         path.write_text("name,x,y,annotation\nGeneB,1,2," + "a" * (128 * 1024) + "\n", encoding="utf-8")
-        storage = mocker.spy(transcript_module, "read_bytes")
-        parser = mocker.spy(transcript_module, "_read_partition")
+        storage = mocker.spy(csv_blocks, "read_bytes")
+        parser = mocker.spy(csv_blocks, "_read_block")
         points = read_transcripts(path, features=_FEATURES, roi="Roi1")
         parser.assert_not_called()
         assert storage.call_args.kwargs["sample"] is False
@@ -176,7 +177,7 @@ class TestReadTranscripts:
         path = _write_transcripts(tmp_path / "transcripts.csv")
         with path.open("a", encoding="utf-8") as output:
             output.write(record)
-        mocker.patch.object(transcript_module, "_BLOCK_BYTES", 128)
+        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 128)
         points = read_transcripts(path, features=_FEATURES, roi="Roi1")
         assert not points.partitions[0].compute().empty
         with pytest.raises(ValueError, match=r"CSV|columns|fields|malformed"):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, cast
 
 import imagecodecs
@@ -17,7 +16,7 @@ from xarray import DataArray, DataTree
 
 from spatialdata_io._cli.commands.generic import generic_command
 from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers.generic import generic, image
 from tests.integration.readers.generic._fixtures import write_geojson
@@ -29,6 +28,8 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 type AxisCase = tuple[str, tuple[int, ...], tuple[int, ...] | None, tuple[str, ...]]
+type ChannelCase = tuple[tuple[int, ...], str, list[str] | None, str, list[str]]
+type ReinterpretedCase = tuple[str, str, tuple[str, ...], list[int]]
 
 
 def _write_tiff(
@@ -50,23 +51,7 @@ def _write_tiff(
 
 
 def _write_geojson(path: Path) -> None:
-    feature_collection = {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "properties": {"instance": 1},
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]],
-                },
-            }
-        ],
-    }
-    path.write_text(
-        json.dumps(feature_collection),
-        encoding="utf-8",
-    )
+    write_geojson(path, [Polygon([(0, 0), (1, 0), (1, 1), (0, 0)])])
 
 
 class TestImage:
@@ -219,7 +204,8 @@ class TestImage:
                 assert level.shape == (3, 40 // factor, 48 // factor)
                 assert level.dtype == np.dtype(np.uint16)
                 assert level.chunksizes == {"c": (1, 1, 1), "y": y_chunks, "x": x_chunks}
-                np.testing.assert_array_equal(level.coords["c"], [0, 1, 2])
+                # Unnamed OME channels are identified by their OME IDs.
+                np.testing.assert_array_equal(level.coords["c"], ["Channel:0:0", "Channel:0:1", "Channel:0:2"])
                 transform = get_transformation(level, to_coordinate_system="global")
                 assert not isinstance(transform, dict)
                 affine = transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
@@ -335,6 +321,142 @@ class TestImage:
         # The requested region belongs to one 1024-pixel chunk spanning 4x4 tiles.
         assert selection_spy.call_count == 16
 
+    @pytest.mark.parametrize(
+        "case",
+        [
+            ((2, 16, 24), "CYX", ["DAPI", "CD3"], "cyx", ["DAPI", "CD3"]),
+            ((2, 16, 24), "CYX", None, "cyx", ["Channel:0:0", "Channel:0:1"]),
+            ((16, 24), "YX", ["DAPI"], "yx", ["DAPI"]),
+            ((2, 3, 16, 24), "ZCYX", ["a", "b", "c"], "zcyx", ["a", "b", "c"]),
+        ],
+        ids=["named", "unnamed", "grayscale", "volume"],
+    )
+    def test_ome_channel_axis_is_named(self, tmp_path: Path, case: ChannelCase) -> None:
+        shape, axes, names, data_axes, expected = case
+        path = tmp_path / "channels.ome.tif"
+        metadata: dict[str, object] = {"axes": axes}
+        if names is not None:
+            metadata["Channel"] = {"Name": names}
+        tifffile.imwrite(path, np.zeros(shape, dtype=np.uint8), photometric="minisblack", metadata=metadata)
+
+        result = image(path, data_axes, "global")
+
+        assert result.coords["c"].values.tolist() == expected
+
+    @pytest.mark.parametrize(
+        ("photometric", "expected"),
+        [("rgb", ["r", "g", "b"]), ("minisblack", [f"Channel:0:0:sample:{index}" for index in range(3)])],
+    )
+    @pytest.mark.parametrize("data_axes", ["yxc", "YXC"])
+    def test_ome_samples_are_named_by_colour_or_channel_record(
+        self, tmp_path: Path, data_axes: str, photometric: str, expected: list[str]
+    ) -> None:
+        path = tmp_path / "samples.ome.tif"
+        source = np.arange(16 * 24 * 3, dtype=np.uint8).reshape(16, 24, 3)
+        tifffile.imwrite(path, source, photometric=photometric, planarconfig="contig", metadata={"axes": "YXS"})
+        with tifffile.TiffFile(path) as tiff:
+            assert tiff.series[0].axes == "YXS"
+
+        result = image(path, data_axes, "global")
+
+        assert result.dims == ("c", "y", "x")
+        assert result.coords["c"].values.tolist() == expected
+        np.testing.assert_array_equal(result.data.compute(), source.transpose(2, 0, 1))
+
+    @pytest.mark.parametrize(
+        ("extrasamples", "expected"), [(["assocalpha"], ["r", "g", "b", "a"]), (["unspecified"], [0, 1, 2, 3])]
+    )
+    def test_plain_rgb_extra_sample_is_named_only_when_declared_alpha(
+        self, tmp_path: Path, extrasamples: list[str], expected: list[str | int]
+    ) -> None:
+        path = tmp_path / "rgba.tif"
+        tifffile.imwrite(path, np.zeros((16, 24, 4), dtype=np.uint8), photometric="rgb", extrasamples=extrasamples)
+
+        result = image(path, "yxc", "global")
+
+        assert result.coords["c"].values.tolist() == expected
+
+    def test_rgb_samples_next_to_a_channel_axis_keep_their_colour(self, tmp_path: Path) -> None:
+        # OME records describe the C axis read as Z, so only the declared colour names the samples.
+        path = tmp_path / "stack.ome.tif"
+        source = np.arange(2 * 16 * 24 * 3, dtype=np.uint8).reshape(2, 16, 24, 3)
+        tifffile.imwrite(path, source, photometric="rgb", metadata={"axes": "CYXS"})
+
+        result = image(path, "zyxc", "global")
+
+        assert result.dims == ("c", "z", "y", "x")
+        assert result.coords["c"].values.tolist() == ["r", "g", "b"]
+        np.testing.assert_array_equal(result.data.compute(), source.transpose(3, 0, 1, 2))
+
+    def test_non_ome_tiff_channels_are_positional(self, tmp_path: Path) -> None:
+        path = tmp_path / "plain.tif"
+        _write_tiff(path, np.zeros((3, 16, 16), dtype=np.uint8), "CYX")
+
+        result = image(path, "cyx", "global")
+
+        assert result.coords["c"].values.tolist() == [0, 1, 2]
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            # The OME channel axis is read as Z, so the added channel is positional.
+            ("CYX", "zyx", ("c", "z", "y", "x"), [0]),
+            # A declared Z axis read as channels is not described by OME channel records.
+            ("ZYX", "cyx", ("c", "y", "x"), [0, 1]),
+        ],
+        ids=["channel-as-z", "z-as-channel"],
+    )
+    def test_reinterpreted_channel_axis_is_positional(self, tmp_path: Path, case: ReinterpretedCase) -> None:
+        axes, data_axes, expected_dims, expected_channels = case
+        path = tmp_path / "reinterpreted.ome.tif"
+        tifffile.imwrite(path, np.zeros((2, 16, 24), dtype=np.uint8), photometric="minisblack", metadata={"axes": axes})
+
+        result = image(path, data_axes, "global")
+
+        assert result.dims == expected_dims
+        assert result.coords["c"].values.tolist() == expected_channels
+
+    @pytest.mark.parametrize(
+        ("old", "new", "found"),
+        [
+            ('ID="Channel:0:1"', 'ID="Channel:0:0"', "duplicate OME channel names and IDs"),
+            ('SizeC="2"', 'SizeC="2"', "1 OME channels for 2 raster channels"),
+        ],
+        ids=["duplicate-ids", "missing-record"],
+    )
+    def test_corrupt_ome_channels_on_the_channel_axis_raise(
+        self, tmp_path: Path, old: str, new: str, found: str
+    ) -> None:
+        path = tmp_path / "corrupt.ome.tif"
+        tifffile.imwrite(
+            path, np.zeros((2, 16, 24), dtype=np.uint8), photometric="minisblack", metadata={"axes": "CYX"}
+        )
+        description = tifffile.tiffcomment(path)
+        assert isinstance(description, str)
+        if old == new:
+            # Drop the second channel record while SizeC still declares two.
+            start = description.index('<Channel ID="Channel:0:1"')
+            end = description.index("</Channel>", start) + len("</Channel>")
+            description = description[:start] + description[end:]
+        tifffile.tiffcomment(path, description.replace(old, new))
+
+        with pytest.raises(ReaderFormatError, match=found) as error:
+            image(path, "cyx", "global")
+
+        assert error.value.context == ReaderErrorContext("generic", "image")
+
+    def test_multiple_series_require_an_explicit_selection(self, tmp_path: Path) -> None:
+        path = tmp_path / "series.tif"
+        with tifffile.TiffWriter(path) as writer:
+            writer.write(np.zeros((5, 7), dtype=np.uint8), photometric="minisblack", metadata={"axes": "YX"})
+            writer.write(np.ones((9, 11), dtype=np.uint8), photometric="minisblack", metadata={"axes": "YX"})
+
+        with pytest.raises(ReaderFormatError, match="found 2 series") as error:
+            image(path, "yx", "global")
+
+        assert error.value.expected == "a single series or an explicit tiff_series selection"
+        np.testing.assert_array_equal(image(path, "yx", "global", tiff_series=0).data.compute(), np.zeros((1, 5, 7)))
+
     def test_selects_tiff_series(self, tmp_path: Path) -> None:
         path = tmp_path / "series.tif"
         first = np.arange(35, dtype=np.uint8).reshape(5, 7)
@@ -434,7 +556,31 @@ class TestImage:
         assert not executed
         # The encoded frame is one source chunk; the default splits its channels.
         assert result.chunksizes == {"c": (1, 1, 1), "y": (9,), "x": (11,)}
+        assert result.coords["c"].values.tolist() == ["r", "g", "b"]
         np.testing.assert_array_equal(result.data.compute(), expected.transpose(2, 0, 1))
+
+    @pytest.mark.parametrize(
+        ("name", "samples", "data_axes", "expected"),
+        [
+            ("rgba.png", 4, "yxc", ["r", "g", "b", "a"]),
+            ("gray-alpha.png", 2, "yxc", [0, 1]),
+            ("gray.png", 1, "yx", [0]),
+            ("gray.jpg", 1, "yx", [0]),
+            ("rgb-as-volume.png", 3, "zyx", [0]),
+        ],
+    )
+    def test_encoded_channels_follow_the_declared_colour_type(
+        self, tmp_path: Path, name: str, samples: int, data_axes: str, expected: list[str | int]
+    ) -> None:
+        path = tmp_path / name
+        shape = (9, 11) if samples == 1 else (9, 11, samples)
+        source = np.arange(np.prod(shape), dtype=np.uint8).reshape(shape)
+        encode = imagecodecs.png_encode if path.suffix == ".png" else imagecodecs.jpeg8_encode
+        path.write_bytes(encode(source))
+
+        result = image(path, data_axes, "global")
+
+        assert result.coords["c"].values.tolist() == expected
 
     def test_rejects_suffix_signature_mismatch(self, tmp_path: Path) -> None:
         path = tmp_path / "wrong.png"
@@ -526,11 +672,12 @@ class TestGenericToZarr:
             image_transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")), np.diag([0.5, 2, 1])
         )
 
-    def test_invalid_frame_does_not_create_store(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(("frame", "error"), [("", ValueError), (1, TypeError)])
+    def test_invalid_frame_does_not_create_store(self, tmp_path: Path, frame: object, error: type[Exception]) -> None:
         output = tmp_path / "output.zarr"
 
-        with pytest.raises(ValueError, match="coordinate_system"):
-            generic_to_zarr(tmp_path / "missing.geojson", output, coordinate_system="")
+        with pytest.raises(error, match="coordinate_system"):
+            generic_to_zarr(tmp_path / "missing.geojson", output, coordinate_system=cast("str", frame))
 
         assert not output.exists()
 

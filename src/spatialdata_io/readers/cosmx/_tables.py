@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import gzip
 import zlib
 from dataclasses import dataclass
@@ -16,6 +15,7 @@ import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
+from spatialdata_io.readers._utils.csv import parse_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -70,10 +70,7 @@ def read_header(path: ArtifactFile) -> list[str]:
             line = handle.readline()
     except (gzip.BadGzipFile, EOFError, zlib.error) as error:
         raise schema_error(path, found=f"invalid gzip data: {error}", expected="a readable gzip stream") from error
-    try:
-        return next(csv.reader([line.decode("utf-8-sig")], strict=True), [])
-    except (UnicodeDecodeError, csv.Error) as error:
-        raise schema_error(path, found="malformed CSV header", expected="one UTF-8 header record") from error
+    return parse_csv_header(line, context=ReaderErrorContext("cosmx", path.name), path=path)
 
 
 def _batches(path: ArtifactFile, columns: list[str]) -> Iterator[pa.RecordBatch]:

@@ -6,31 +6,41 @@ dependency-free ``spatialdata_io._raster_defaults``, shared with the
 command-line interface; readers use them as visible signature defaults, so one
 edit there changes every reader and command. Model chunks are always passed
 explicitly: without them the multiscale image builder rechunks to its own
-256-pixel tiles and merges all channels into one chunk.
+256-pixel tiles and merges all channels into one chunk. Two guards reject
+generated levels that would shrink an element below one pixel or change label
+IDs wider than 32 bits.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import prod
+from typing import TYPE_CHECKING
 
-from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, DEFAULT_TILE_SIZE
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 
-__all__ = ["DEFAULT_CHUNKS", "DEFAULT_SCALE_FACTORS", "DEFAULT_TILE_SIZE", "RasterOptions", "make_raster_options"]
+if TYPE_CHECKING:
+    import dask.array as da
+
+__all__ = ["RasterOptions", "make_raster_options"]
 
 _IMAGE_AXES = ("c", "y", "x")
 _MIN_SCALE_FACTOR = 2
+# Generated label levels keep IDs of at most 32 bits exactly; SpatialData's
+# downsampling turns a uint64 ID of 2**53 + 1 into 2**53.
+_MAX_EXACT_LABEL_BYTES = 4
 
 
 @dataclass(frozen=True, slots=True)
 class RasterOptions:
-    """Validated pyramid factors and CYX chunks; labels use the y/x sizes.
+    """Validated pyramid factors and ``c, y, x`` chunks; labels use the y/x sizes.
 
     ``scale_factors`` is empty for a single scale.
     """
 
     scale_factors: tuple[int, ...]
-    chunks: int | tuple[int, int, int]
+    chunks: tuple[int, int, int]
 
     @property
     def model_scale_factors(self) -> list[int] | None:
@@ -39,14 +49,61 @@ class RasterOptions:
 
     def image_chunks(self) -> dict[str, int]:
         """Return explicit ``c, y, x`` chunk sizes of an image element."""
-        if isinstance(self.chunks, int):
-            return dict.fromkeys(_IMAGE_AXES, self.chunks)
         return dict(zip(_IMAGE_AXES, self.chunks, strict=True))
 
     def label_chunks(self) -> dict[str, int]:
         """Return explicit ``y, x`` chunk sizes of a labels element."""
-        sizes = self.image_chunks()
-        return {"y": sizes["y"], "x": sizes["x"]}
+        _, y, x = self.chunks
+        return {"y": y, "x": x}
+
+    def validate_image_pyramid(self, data: da.Array, /, *, element: str) -> None:
+        """Reject scale factors that would reduce an image below one pixel.
+
+        Parameters
+        ----------
+        data
+            Lazy image whose last two axes are ``y`` and ``x``. Only its shape
+            is inspected.
+        element
+            Reader description of the element for the error message.
+
+        Raises
+        ------
+        ValueError
+            If the product of the factors exceeds the smaller y/x extent.
+        """
+        extent = data.shape[-2:]
+        if self.scale_factors and min(extent) < prod(self.scale_factors):
+            message = (
+                f"Requested scale factors {self.scale_factors} exceed the spatial extent of {element} "
+                f"({extent[0]} x {extent[1]} pixels)."
+            )
+            raise ValueError(message)
+
+    def validate_label_pyramid(self, data: da.Array, /, *, element: str) -> None:
+        """Reject generated label levels that would change IDs or vanish.
+
+        Parameters
+        ----------
+        data
+            Lazy labels whose last two axes are ``y`` and ``x``. Only the shape
+            and dtype are inspected.
+        element
+            Reader description of the element for error messages.
+
+        Raises
+        ------
+        ValueError
+            If labels wider than 32 bits would be downsampled, which rounds
+            IDs above 2**53, or the factors exceed the spatial extent.
+        """
+        if self.scale_factors and data.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
+            message = (
+                f"Generated label pyramids require <=32-bit labels; {element} has {data.dtype} labels. "
+                "Use scale_factors=() to keep 64-bit IDs exact."
+            )
+            raise ValueError(message)
+        self.validate_image_pyramid(data, element=element)
 
 
 def make_raster_options(
@@ -54,6 +111,9 @@ def make_raster_options(
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> RasterOptions:
     """Validate public pyramid and chunk options once and own the caller's sequence.
+
+    An integer ``chunks`` value is expanded to the same size for ``c``, ``y``
+    and ``x``, so the result has one representation.
 
     Parameters
     ----------
@@ -93,4 +153,4 @@ def make_raster_options(
     if (isinstance(chunks, tuple) and len(integers) != len(_IMAGE_AXES)) or min(integers) <= 0:
         message = "chunks must be positive, with exactly three c, y, x sizes when a tuple is given."
         raise ValueError(message)
-    return RasterOptions(factors, chunks)
+    return RasterOptions(factors, chunks if isinstance(chunks, tuple) else (chunks, chunks, chunks))

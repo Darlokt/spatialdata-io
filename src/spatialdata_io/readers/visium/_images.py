@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity
 
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import (
     LazyRaster,
     RasterOptions,
@@ -87,9 +88,10 @@ def make_image_options(
 
 
 def _read_raster(path: ArtifactFile, *, options: ImageOptions) -> LazyRaster:
+    context = ReaderErrorContext("visium", "full-resolution image")
     suffix = path.suffix.lower()
     if suffix in TIFF_SUFFIXES:
-        metadata = inspect_tiff(path)
+        metadata = inspect_tiff(path, context=context)
         series = options.tiff_series
         if series is None:
             if len(metadata.series) != 1:
@@ -99,7 +101,7 @@ def _read_raster(path: ArtifactFile, *, options: ImageOptions) -> LazyRaster:
                 )
                 raise ValueError(message)
             series = 0
-        return read_tiff(metadata, series=series, level=0)
+        return read_tiff(metadata, series=series, level=0, context=context)
 
     if options.tiff_series is not None:
         message = "tiff_series can only select TIFF-family full-resolution images."
@@ -108,9 +110,9 @@ def _read_raster(path: ArtifactFile, *, options: ImageOptions) -> LazyRaster:
         message = "data_axes can only override TIFF-family full-resolution image axes."
         raise ValueError(message)
     if suffix in PNG_SUFFIXES:
-        return read_png(path)
+        return read_png(path, context=context)
     if suffix in JPEG_SUFFIXES:
-        return read_jpeg(path)
+        return read_jpeg(path, context=context)
 
     message = f"Unsupported image suffix {path.suffix!r}. Expected one of {tuple(sorted(VALID_IMAGE_SUFFIXES))}."
     raise ValueError(message)
@@ -171,7 +173,7 @@ def read_images(
 
     # Downsampled-image coordinates map back to full resolution by inverse scale.
     if layout.hires_image is not None:
-        raster = read_png(layout.hires_image)
+        raster = read_png(layout.hires_image, context=ReaderErrorContext("visium", "hires image"))
         images[f"{dataset_id}_hires_image"] = _parse_image(
             raster,
             source_axes=raster.axes,
@@ -183,7 +185,7 @@ def read_images(
         )
 
     if layout.lowres_image is not None:
-        raster = read_png(layout.lowres_image)
+        raster = read_png(layout.lowres_image, context=ReaderErrorContext("visium", "lowres image"))
         images[f"{dataset_id}_lowres_image"] = _parse_image(
             raster,
             source_axes=raster.axes,

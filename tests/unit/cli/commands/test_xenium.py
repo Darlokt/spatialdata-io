@@ -33,6 +33,7 @@ DEFAULTS: dict[str, object] = {
     "include_analysis": False,
     "scale_factors": DEFAULT_SCALE_FACTORS,
     "chunks": DEFAULT_CHUNKS,
+    "path_policy": "strict",
 }
 
 
@@ -113,6 +114,7 @@ class TestXeniumCommand:
             include_analysis=True,
             scale_factors=(2, 4),
             chunks=(1, 512, 256),
+            path_policy="strict",
         )
 
     @pytest.mark.parametrize(

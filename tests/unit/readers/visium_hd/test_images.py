@@ -16,7 +16,7 @@ from scipy.ndimage import map_coordinates
 from spatialdata.transformations import Affine, get_transformation
 from xarray import DataArray, DataTree
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import LazyRaster, inspect_tiff, make_raster_options, read_tiff
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers._utils.paths import ArtifactFile
@@ -44,6 +44,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pytest_mock import MockerFixture
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 def _options() -> ImageOptions:
@@ -144,7 +147,7 @@ class TestNormalize:
 
     def test_nonspatial_nonsingleton(self) -> None:
         raster = LazyRaster(da.zeros((2, 5, 7)), ("z", "y", "x"))
-        with pytest.raises(ValueError, match="explicit selector"):
+        with pytest.raises(ValueError, match=r"Axis 'z' has length 2 and is absent from target_axes"):
             _normalize(raster)
 
 
@@ -295,7 +298,9 @@ class TestWarpCytassist:
         source = np.arange(256 * 256, dtype=np.uint16).reshape(256, 256)
         tifffile.imwrite(path, source, tile=(16, 16), compression="deflate")
         spy = mocker.spy(tiff_dask, "_read_tiff_selection")
-        raster = _normalize(read_tiff(inspect_tiff(path), series=0, level=0))
+        raster = _normalize(
+            read_tiff(inspect_tiff(path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT)
+        )
         # This registration makes CytAssist pixels equal global micrometres.
         h = np.array([[2, 0, 1], [0, 2, 1], [0, 0, 1]], dtype=float)
         warped, _ = warp_cytassist(raster, _identity_frame(), h, make_raster_options(chunks=(1, 16, 16)))

@@ -10,11 +10,15 @@ import imagecodecs
 import numpy as np
 import pytest
 
-from spatialdata_io.readers._utils.errors import RasterFormatError
+from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext
 from spatialdata_io.readers._utils.image import read_png
+from spatialdata_io.readers._utils.paths import ArtifactFile
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+_RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 
 
 def _write_packed_png(path: Path, pixels: np.ndarray, *, bits: int, palette: bool, transparent: bool = False) -> None:
@@ -62,8 +66,11 @@ class TestReadPng:
         path.write_bytes(imagecodecs.png_encode(source))
         expected = imagecodecs.png_decode(path.read_bytes())
 
-        result = read_png(path)
+        result = read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
 
+        # The encoder writes colour types 0 (gray), 4 (gray+alpha), 2 (RGB) and 6 (RGBA).
+        assert result.axes == (("y", "x") if channels == 1 else ("y", "x", "s"))
+        assert result.color == {1: None, 2: None, 3: "rgb", 4: "rgba"}[channels]
         assert result.data.numblocks == (1,) * result.data.ndim
         assert result.data.shape == expected.shape
         assert result.data.dtype == expected.dtype
@@ -74,7 +81,7 @@ class TestReadPng:
         expected = np.arange(12, dtype=np.uint16).reshape(3, 4)
         path.write_bytes(imagecodecs.png_encode(expected))
 
-        result = read_png(path)
+        result = read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert result.data.dtype == np.dtype(np.uint16)
         np.testing.assert_array_equal(result.data.compute(), expected)
@@ -85,9 +92,10 @@ class TestReadPng:
         _write_packed_png(path, indices, bits=8, palette=True, transparent=True)
         expected = imagecodecs.png_decode(path.read_bytes())
 
-        result = read_png(path)
+        result = read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
 
-        assert result.axes == ("y", "x", "c")
+        assert result.axes == ("y", "x", "s")
+        assert result.color == "rgba"
         assert result.data.shape == (3, 4, 4)
         np.testing.assert_array_equal(result.data.compute(), expected)
 
@@ -98,7 +106,7 @@ class TestReadPng:
         _write_packed_png(path, indices, bits=bit_depth, palette=True)
         expected = imagecodecs.png_decode(path.read_bytes())
 
-        result = read_png(path)
+        result = read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert result.data.dtype == np.dtype(np.uint8)
         assert result.data.shape == (3, 4, 3)
@@ -109,7 +117,7 @@ class TestReadPng:
         source = np.array([[False, True, False], [True, False, True]])
         _write_packed_png(path, source, bits=1, palette=False)
 
-        result = read_png(path)
+        result = read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert result.data.dtype == np.dtype(np.uint8)
         np.testing.assert_array_equal(
@@ -121,14 +129,16 @@ class TestReadPng:
         path = tmp_path / "jpeg.png"
         path.write_bytes(imagecodecs.jpeg8_encode(np.zeros((3, 4), dtype=np.uint8)))
 
-        with pytest.raises(RasterFormatError, match="PNG signature"):
-            read_png(path)
+        with pytest.raises(RasterFormatError, match="PNG signature") as caught:
+            read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
+
+        assert caught.value.__notes__ == [f"While handling {_RASTER_CONTEXT.describe(path=path)}."]
 
     def test_accepts_png_content_without_png_suffix(self, tmp_path: Path) -> None:
         path = tmp_path / "image.data"
         expected = np.arange(12, dtype=np.uint8).reshape(3, 4)
         path.write_bytes(imagecodecs.png_encode(expected))
 
-        result = read_png(path)
+        result = read_png(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         np.testing.assert_array_equal(result.data.compute(), expected)

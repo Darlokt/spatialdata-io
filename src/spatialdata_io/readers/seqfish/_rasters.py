@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose, prod
+from math import isclose
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from spatialdata.models import Image2DModel, Labels2DModel
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_channel_names, read_tiff
 from spatialdata_io.readers.seqfish._transforms import pixel_scale
 
 if TYPE_CHECKING:
     from dask.array import Array
-    from ome_types.model import OME
     from spatialdata.transformations import Scale
     from xarray import DataArray, DataTree
 
@@ -24,16 +23,11 @@ if TYPE_CHECKING:
 
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
-_MAX_EXACT_LABEL_BYTES = 4
 
 
 def _inspect(path: ArtifactFile, artifact: str) -> TiffMetadata:
     """Add source context while preserving precise TIFF failure types."""
-    try:
-        metadata = inspect_tiff(path)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=ReaderErrorContext("seqfish", artifact), path=path)
-        raise
+    metadata = inspect_tiff(path, context=ReaderErrorContext("seqfish", artifact))
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=ReaderErrorContext("seqfish", artifact),
@@ -52,7 +46,7 @@ def read_calibration(path: ArtifactFile) -> Scale:
 def _array(metadata: TiffMetadata, target_axes: tuple[str, ...]) -> Array:
     """Normalize full-resolution named axes without reading pixels."""
     context = ReaderErrorContext("seqfish", "raster axes")
-    raster = read_tiff(metadata, series=0, level=0)
+    raster = read_tiff(metadata, series=0, level=0, context=context)
     try:
         return normalize_raster_axes(
             raster.data,
@@ -83,43 +77,23 @@ def read_dapi(path: ArtifactFile) -> DapiRaster:
     metadata = _inspect(path, "DAPI")
     image = _array(metadata, _IMAGE_AXES)
     scale = pixel_scale(metadata)
-    # pixel_scale establishes exactly one OME image before this private use.
-    ome = cast("OME", metadata.ome)
-    channels = ome.images[0].pixels.channels
-    if len(channels) != image.shape[0]:
-        raise ReaderFormatError(
-            context=ReaderErrorContext("seqfish", "DAPI channels"),
-            path=metadata.path,
-            found=f"{len(channels)} OME channels for {image.shape[0]} raster channels",
-            expected="one OME record per raster channel",
-        )
-    names = [channel.name for channel in channels]
-    channel_names = (
-        tuple(str(name) for name in names)
-        if all(names) and len(set(names)) == len(names)
-        else tuple(channel.id for channel in channels)
+    # Axis normalization already rejected a non-singleton samples axis.
+    names = ome_channel_names(
+        metadata,
+        series=0,
+        count=int(image.shape[0]),
+        samples=False,
+        context=ReaderErrorContext("seqfish", "DAPI channels"),
     )
-    if len(set(channel_names)) != len(channel_names):
-        raise ReaderFormatError(
-            context=ReaderErrorContext("seqfish", "DAPI channels"),
-            path=metadata.path,
-            found=f"duplicate OME channel identifiers {channel_names!r}",
-            expected="unique OME names or IDs",
-        )
+    # pixel_scale establishes exactly one OME image before this private use.
+    channel_names = tuple(cast("list[str]", names))
     return DapiRaster(image, scale, channel_names)
-
-
-def _check_pyramid(array: Array, options: RasterOptions) -> None:
-    """Reject pyramid factors that would eliminate a spatial dimension."""
-    if options.scale_factors and min(array.shape[-2:]) < prod(options.scale_factors):
-        message = f"Requested scale factors {options.scale_factors} exceed the spatial extent of the seqFISH raster."
-        raise ValueError(message)
 
 
 def read_image(dapi: DapiRaster, *, roi: str, options: RasterOptions) -> DataArray | DataTree:
     """Model the prepared CYX graph without rebuilding its source tasks."""
     image = dapi.data
-    _check_pyramid(image, options)
+    options.validate_image_pyramid(image, element="the seqFISH DAPI image")
     return Image2DModel.parse(
         image,
         dims=_IMAGE_AXES,
@@ -177,10 +151,7 @@ def read_labels(
             found="cell IDs exceeding the label dtype",
             expected=f"IDs representable by {labels.dtype}",
         )
-    if options.scale_factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
-        message = "Generated label pyramids require <=32-bit labels; use scale_factors=() for exact 64-bit IDs."
-        raise ValueError(message)
-    _check_pyramid(labels, options)
+    options.validate_label_pyramid(labels, element="the seqFISH segmentation")
     return Labels2DModel.parse(
         labels,
         dims=_LABEL_AXES,

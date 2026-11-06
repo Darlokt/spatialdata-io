@@ -18,6 +18,7 @@ from scanpy import read_10x_h5
 from scipy.sparse import csr_array, csr_matrix, spmatrix
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import get_transformation
 from xarray import DataArray
 
@@ -27,6 +28,7 @@ from spatialdata_io.readers.visium_hd import _metadata, _reader
 from tests.integration.readers.visium_hd._fixtures import CELL_IDS, write_bundle
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -580,3 +582,30 @@ class TestVisiumHD:
         result = visium_hd(tmp_path, bin_sizes=(), include_images=False, include_nucleus_boundaries=False)
         assert set(result.tables) == {"cell_table"}
         assert "spatial" not in result.tables["cell_table"].obsm
+
+
+class TestVisiumHDPathPolicy:
+    """Every discovered artifact follows the dataset root's symlink policy.
+
+    Earlier releases accepted these out-of-root symlinks without a policy.
+    """
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2, 8), images=True)
+        expected = visium_hd(bundle.root)
+        bins = bundle.root / "binned_outputs"
+        linked = [
+            bins / "square_002um" / "filtered_feature_bc_matrix.h5",
+            bins / "square_008um" / "spatial" / "tissue_positions.parquet",
+            bundle.root / "segmented_outputs" / "cell_segmentations.geojson",
+            *sorted(bundle.root.rglob("tissue_hires_image.png")),
+        ]
+        for artifact in linked:
+            link_outside_root(artifact)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            visium_hd(bundle.root)
+
+        assert_spatial_data_objects_are_identical(visium_hd(bundle.root, path_policy="relaxed"), expected)

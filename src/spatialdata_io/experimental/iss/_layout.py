@@ -15,6 +15,8 @@ from spatialdata_io.readers._utils.paths import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from spatialdata_io.readers._utils.paths import PathPolicy
+
 _TIFF_SUFFIXES = frozenset({".tif", ".tiff", ".btf"})
 
 
@@ -28,10 +30,15 @@ class _IssLayout:
 
 
 def _discover_layout(
-    path: str | Path, *, raw_image_file: str | Path, labels_file: str | Path, table_file: str | Path
+    path: str | Path,
+    *,
+    raw_image_file: str | Path,
+    labels_file: str | Path,
+    table_file: str | Path,
+    path_policy: PathPolicy = "strict",
 ) -> _IssLayout:
     """Resolve root-relative or absolute caller files into one immutable layout."""
-    root = normalize_dataset_root(path, context=ReaderErrorContext("iss", "dataset layout"))
+    root = normalize_dataset_root(path, context=ReaderErrorContext("iss", "dataset layout"), path_policy=path_policy)
     raw_image = require_caller_file(root, raw_image_file, context=ReaderErrorContext("iss", "raw image"))
     labels = require_caller_file(root, labels_file, context=ReaderErrorContext("iss", "labels"))
     table = require_caller_file(root, table_file, context=ReaderErrorContext("iss", "counts"))

@@ -178,7 +178,7 @@ class TestInventory:
     ) -> None:
         file = _file(tmp_path / directory / "sample.gef")
 
-        family, files = _inventory(DatasetRoot(ArtifactDirectory(tmp_path)))
+        family, files = _inventory(DatasetRoot(ArtifactDirectory(tmp_path), "strict"))
 
         assert family == expected
         assert files == (file,)
@@ -189,7 +189,7 @@ class TestInventory:
         _file(tmp_path / "unrelated" / "nested" / "different.gef")
 
         spy = mocker.spy(Path, "iterdir")
-        _, files = _inventory(DatasetRoot(ArtifactDirectory(tmp_path)))
+        _, files = _inventory(DatasetRoot(ArtifactDirectory(tmp_path), "strict"))
 
         assert len(files) == 1
         assert [call.args[0] for call in spy.call_args_list] == [tmp_path, tmp_path / directory]

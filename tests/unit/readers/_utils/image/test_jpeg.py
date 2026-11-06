@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
     from pytest_mock import MockerFixture
 
+    from spatialdata_io.readers._utils.image._types import SampleColor
+
 
 def _jpeg_segment(marker: int, payload: bytes) -> bytes:
     return b"\xff" + bytes([marker]) + (len(payload) + 2).to_bytes(2, "big") + payload
@@ -32,20 +34,21 @@ class TestInspectJpegHeader:
     """Validate supported SOF metadata and bounded marker traversal."""
 
     @pytest.mark.parametrize(
-        ("marker", "components", "shape"),
+        ("marker", "components", "expected"),
         [
-            (0xC0, 1, (3, 5)),
-            (0xC1, 3, (3, 5, 3)),
-            (0xC2, 3, (3, 5, 3)),
+            (0xC0, 1, ((3, 5), ("y", "x"), None)),
+            (0xC1, 3, ((3, 5, 3), ("y", "x", "s"), "rgb")),
+            (0xC2, 3, ((3, 5, 3), ("y", "x", "s"), "rgb")),
         ],
     )
-    def test_predicts_decoder_shape(
+    def test_predicts_decoder_shape_and_declared_color(
         self,
         tmp_path: Path,
         marker: int,
         components: int,
-        shape: tuple[int, ...],
+        expected: tuple[tuple[int, ...], tuple[str, ...], SampleColor | None],
     ) -> None:
+        shape, axes, color = expected
         path = tmp_path / "image.jpg"
         path.write_bytes(
             b"\xff\xd8" + _jpeg_segment(0xE0, b"metadata") + _jpeg_sof(marker=marker, components=components)[2:]
@@ -54,7 +57,9 @@ class TestInspectJpegHeader:
         metadata = inspect_jpeg_header(path)
 
         assert metadata.shape == shape
+        assert metadata.axes == axes
         assert metadata.dtype == np.dtype(np.uint8)
+        assert metadata.color == color
 
     @pytest.mark.parametrize(
         ("payload", "match"),

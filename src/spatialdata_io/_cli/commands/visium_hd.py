@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
     from typing import TypedDict, Unpack
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         make_var_names_unique: bool
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        path_policy: Literal["strict", "relaxed"]
 
 
 def _bin_sizes(
@@ -134,6 +135,7 @@ def _axes(_context: click.Context, _parameter: click.Parameter, values: tuple[st
 )
 @scale_factors_option
 @chunks_option
+@path_policy_option
 def visium_hd_command(input_path: Path, output_path: Path, **options: Unpack[_VisiumHDOptions]) -> None:
     """Read Space Ranger HD outputs and write a SpatialData Zarr store."""
     from spatialdata_io.readers.visium_hd import visium_hd  # noqa: PLC0415, RUF100 - Keep command help lightweight.
@@ -156,5 +158,6 @@ def visium_hd_command(input_path: Path, output_path: Path, **options: Unpack[_Vi
         make_var_names_unique=options["make_var_names_unique"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
+        path_policy=options["path_policy"],
     )
     result.write(output_path)

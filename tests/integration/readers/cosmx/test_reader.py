@@ -16,6 +16,7 @@ from dask.callbacks import Callback
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import BaseTransformation, get_transformation
 from xarray import DataArray
 
@@ -34,6 +35,7 @@ from tests.integration.readers.cosmx._fixtures import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from anndata import AnnData
@@ -567,3 +569,20 @@ class TestCosmxCalibration:
         ):
             cosmx(fixture.root, pixel_size_um=2)
         assert not tasks
+
+
+class TestCosmxPathPolicy:
+    """Discovered artifacts follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        fixture = write_cosmx_dataset(tmp_path)
+        expected = cosmx(fixture.root)
+        link_outside_root(fixture.root / f"{fixture.dataset_id}_exprMat_file.csv")
+        link_outside_root(fixture.root / "CellComposite" / "CellComposite_F002.png")
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            cosmx(fixture.root)
+
+        assert_spatial_data_objects_are_identical(cosmx(fixture.root, path_policy="relaxed"), expected)

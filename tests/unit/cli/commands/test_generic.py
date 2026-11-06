@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 
 import pytest
 
 from spatialdata_io._cli.commands.generic import generic_command
 from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
+from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -19,6 +21,12 @@ if TYPE_CHECKING:
 @pytest.mark.generic
 class TestGenericCommand:
     """Verify Click conversion to the Generic converter contract."""
+
+    def test_option_order_follows_the_converter_signature(self) -> None:
+        options = [parameter.name for parameter in generic_command.params]
+        _path, _output, _name, *reader_options = inspect.signature(generic_to_zarr).parameters
+
+        assert options == ["input_path", "output_path", "element_name", *reader_options]
 
     def test_forwards_options_and_reports_new_output(
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture
@@ -95,3 +103,4 @@ class TestGenericCommand:
         # Omitted chunks reach the reader, whose default depends on the canonical axes.
         assert converter.call_args.kwargs["chunks"] == expected
         assert converter.call_args.kwargs["scale_factors"] == DEFAULT_SCALE_FACTORS
+        assert converter.call_args.kwargs["tiff_series"] is None

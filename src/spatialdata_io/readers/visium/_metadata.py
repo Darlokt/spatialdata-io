@@ -55,15 +55,8 @@ def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile)
             path=path,
         )
 
-    try:
-        result = float(value)
-    except OverflowError as error:
-        raise ReaderFormatError(
-            context=_context("scale factors"),
-            found=f"{key!r}={value!r}",
-            expected=f"a finite positive numeric {key!r}",
-            path=path,
-        ) from error
+    # The strict JSON reader rejects integers beyond the float range.
+    result = float(value)
 
     if not isfinite(result) or result <= 0:
         raise ReaderFormatError(

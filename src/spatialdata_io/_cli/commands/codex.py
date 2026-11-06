@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
 
 if TYPE_CHECKING:
-    from typing import TypedDict, Unpack
+    from typing import Literal, TypedDict, Unpack
 
     from spatialdata.transformations import Affine
 
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         tiff_series: int | None
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        path_policy: Literal["strict", "relaxed"]
 
 
 _AFFINE_SIZE = 3
@@ -97,6 +98,7 @@ def _image_to_table(_context: click.Context, _parameter: click.Parameter, value:
 @click.option("--tiff-series", type=click.IntRange(min=0), default=None, help="Zero-based TIFF series selection.")
 @scale_factors_option
 @chunks_option
+@path_policy_option
 def codex_command(input_path: Path, output_path: Path, **options: Unpack[_CodexOptions]) -> None:
     """Read a CODEX region and write it to a SpatialData store."""
     from spatialdata_io.readers.codex import codex  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
@@ -112,5 +114,6 @@ def codex_command(input_path: Path, output_path: Path, **options: Unpack[_CodexO
         tiff_series=options["tiff_series"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
+        path_policy=options["path_policy"],
     )
     result.write(output_path)

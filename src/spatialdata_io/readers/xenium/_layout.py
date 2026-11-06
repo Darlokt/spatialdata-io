@@ -18,9 +18,8 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
-    optional_directory,
-    optional_file,
-    require_file,
+    optional_metadata_directory,
+    optional_metadata_file,
     require_metadata_file,
     sorted_paths,
 )
@@ -28,6 +27,8 @@ from spatialdata_io.readers.xenium._metadata import Experiment, read_experiment
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.paths import PathPolicy
 
 type TabularKind = Literal["parquet", "csv", "csv_gz"]
 type TableTarget = Literal["cell_labels", "cell_boundaries", "cell_circles"]
@@ -157,23 +158,23 @@ def _context(experiment: Experiment, artifact: str) -> ReaderErrorContext:
 
 def _tabular(root: DatasetRoot, stem: str, context: ReaderErrorContext) -> TabularSource:
     """Prefer ``<stem>.parquet``; otherwise require exactly one CSV twin."""
-    parquet = optional_file(root / f"{stem}.parquet", context=context)
+    parquet = optional_metadata_file(root, f"{stem}.parquet", context=context)
     if parquet is not None:
         return TabularSource(parquet, "parquet")
     twins = [
         TabularSource(file, kind)
         for suffix, kind in _CSV_TWINS
-        if (file := optional_file(root / f"{stem}{suffix}", context=context)) is not None
+        if (file := optional_metadata_file(root, f"{stem}{suffix}", context=context)) is not None
     ]
     if len(twins) > 1:
         raise ReaderFormatError(
             context=context,
-            path=root,
+            path=root.path,
             found=f"both {stem}.csv and {stem}.csv.gz without {stem}.parquet",
             expected=f"{stem}.parquet or exactly one CSV twin",
         )
     if not twins:
-        require_file(root / f"{stem}.parquet", context=context)
+        require_metadata_file(root, f"{stem}.parquet", context=context)
     return twins[0]
 
 
@@ -191,18 +192,18 @@ def _transcripts(root: DatasetRoot, context: ReaderErrorContext) -> TabularSourc
 
 
 def _counts(root: DatasetRoot, context: ReaderErrorContext) -> CountSource:
-    h5 = optional_file(root / "cell_feature_matrix.h5", context=context)
+    h5 = optional_metadata_file(root, "cell_feature_matrix.h5", context=context)
     if h5 is not None:
         return H5Counts(h5)
-    directory = optional_directory(root / "cell_feature_matrix", context=context)
+    directory = optional_metadata_directory(root, "cell_feature_matrix", context=context)
     if directory is not None:
         for member in _MTX_MEMBERS:
-            require_file(directory / member, context=context)
+            require_metadata_file(root, directory / member, context=context)
         return MtxDirectory(directory)
-    archive = optional_file(root / "cell_feature_matrix.tar.gz", context=context)
+    archive = optional_metadata_file(root, "cell_feature_matrix.tar.gz", context=context)
     if archive is not None:
         return MtxArchive(archive)
-    return H5Counts(require_file(root / "cell_feature_matrix.h5", context=context))
+    return H5Counts(require_metadata_file(root, "cell_feature_matrix.h5", context=context))
 
 
 def _image_entry(root: DatasetRoot, experiment: Experiment, key: str, purpose: str) -> ArtifactFile:
@@ -211,7 +212,7 @@ def _image_entry(root: DatasetRoot, experiment: Experiment, key: str, purpose: s
     if entry is None:
         raise ReaderFormatError(
             context=context,
-            path=root / "experiment.xenium",
+            path=root.path / "experiment.xenium",
             found=f"no images.{key} entry",
             expected=f"images.{key}; XOA 2.0+ bundles have no maximum-intensity projection"
             if key == "morphology_mip_filepath"
@@ -223,7 +224,7 @@ def _image_entry(root: DatasetRoot, experiment: Experiment, key: str, purpose: s
 def _focus(root: DatasetRoot, experiment: Experiment) -> FocusImages:
     """Resolve the focus entry; a dedicated focus directory must hold only its linked set."""
     entry = _image_entry(root, experiment, "morphology_focus_filepath", "morphology focus image")
-    if entry.parent == root:
+    if entry.parent == root.path:
         return FocusImages(entry, (entry,))
     context = _context(experiment, "morphology_focus")
     # macOS AppleDouble companions ("._name") are not images.
@@ -231,40 +232,43 @@ def _focus(root: DatasetRoot, experiment: Experiment) -> FocusImages:
         path for path in entry.parent.iterdir() if path.name.endswith(".ome.tif") and not path.name.startswith("._")
     )
     paths = sorted_paths(candidates, context=context, search_path=entry.parent)
-    files = tuple(require_file(path, context=context) for path in paths)
+    files = tuple(require_metadata_file(root, path, context=context) for path in paths)
     return FocusImages(entry, files)
 
 
 def _aligned(root: DatasetRoot, experiment: Experiment) -> tuple[AlignedImage, ...]:
     """Find 10x-named aligned H&E/IF images at the root; their alignment CSVs are optional."""
     context = _context(experiment, "aligned images")
-    entries = sorted_paths(root.iterdir(), context=context, search_path=root)
+    entries = sorted_paths(root.path.iterdir(), context=context, search_path=root.path)
     images: list[AlignedImage] = []
     for suffix, kind in _ALIGNED_SUFFIXES:
         matches = [path for path in entries if path.name.endswith(suffix) and not path.name.startswith("._")]
         if len(matches) > 1:
             raise ReaderFormatError(
                 context=context,
-                path=root,
+                path=root.path,
                 found=f"{len(matches)} {kind.upper()} images {[path.name for path in matches]}",
                 expected=f"at most one *{suffix}; read others with xenium_aligned_image",
             )
         if matches:
-            image = require_file(matches[0], context=context)
+            image = require_metadata_file(root, matches[0], context=context)
             name = matches[0].name.removesuffix(".ome.tif") + "alignment.csv"
-            alignment = optional_file(root / name, context=context)
+            alignment = optional_metadata_file(root, name, context=context)
             images.append(AlignedImage(image, kind, alignment))
     return tuple(images)
 
 
 def _analysis(root: DatasetRoot, context: ReaderErrorContext) -> AnalysisSource:
-    directory = optional_directory(root / "analysis", context=context)
+    directory = optional_metadata_directory(root, "analysis", context=context)
     if directory is not None:
+        # The analysis reader opens every CSV below the directory.
+        for file in sorted_paths(directory.rglob("*.csv"), context=context, search_path=directory):
+            require_metadata_file(root, file, context=context)
         return AnalysisDirectory(directory)
-    return AnalysisArchive(require_file(root / "analysis.tar.gz", context=context))
+    return AnalysisArchive(require_metadata_file(root, "analysis.tar.gz", context=context))
 
 
-def discover_layout(path: str | Path, selection: Selection) -> XeniumLayout:
+def discover_layout(path: str | Path, selection: Selection, *, path_policy: PathPolicy = "strict") -> XeniumLayout:
     """Resolve the artifacts of one read without touching unselected products.
 
     Raises
@@ -276,9 +280,9 @@ def discover_layout(path: str | Path, selection: Selection) -> XeniumLayout:
         ambiguous, transcripts exist only as gzip CSV, a requested image entry is
         absent, or aligned images are ambiguous.
     """
-    root = normalize_dataset_root(path, context=ReaderErrorContext("xenium", "dataset root"))
+    root = normalize_dataset_root(path, context=ReaderErrorContext("xenium", "dataset root"), path_policy=path_policy)
     experiment = read_experiment(
-        require_file(root / "experiment.xenium", context=ReaderErrorContext("xenium", "experiment.xenium"))
+        require_metadata_file(root, "experiment.xenium", context=ReaderErrorContext("xenium", "experiment.xenium"))
     )
 
     def context(artifact: str) -> ReaderErrorContext:
@@ -288,9 +292,9 @@ def discover_layout(path: str | Path, selection: Selection) -> XeniumLayout:
     labels = selection.cell_labels or selection.nucleus_labels
     uses_store = labels or selection.table or selection.cell_polygons or selection.nucleus_polygons
     cells_store = (
-        require_file(root / "cells.zarr.zip", context=context("cells.zarr.zip (labels and their table link)"))
+        require_metadata_file(root, "cells.zarr.zip", context=context("cells.zarr.zip (labels and their table link)"))
         if labels
-        else optional_file(root / "cells.zarr.zip", context=context("cells.zarr.zip"))
+        else optional_metadata_file(root, "cells.zarr.zip", context=context("cells.zarr.zip"))
         if uses_store
         else None
     )
@@ -314,7 +318,7 @@ def discover_layout(path: str | Path, selection: Selection) -> XeniumLayout:
         else None,
         aligned=_aligned(root, experiment) if selection.aligned_images else (),
         analysis=_analysis(root, context("analysis")) if selection.analysis else None,
-        metrics=optional_file(root / "metrics_summary.csv", context=context("metrics_summary.csv")),
-        gene_panel=optional_file(root / "gene_panel.json", context=context("gene_panel.json")),
-        protein_panel=optional_file(root / "protein_panel.json", context=context("protein_panel.json")),
+        metrics=optional_metadata_file(root, "metrics_summary.csv", context=context("metrics_summary.csv")),
+        gene_panel=optional_metadata_file(root, "gene_panel.json", context=context("gene_panel.json")),
+        protein_panel=optional_metadata_file(root, "protein_panel.json", context=context("protein_panel.json")),
     )

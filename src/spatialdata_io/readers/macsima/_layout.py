@@ -16,13 +16,15 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
-    require_directory,
-    require_file,
+    require_metadata_directory,
+    require_metadata_file,
     sorted_paths,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.paths import PathPolicy
 
 type ParsingStyle = Literal["processed_single_folder", "processed_multiple_folders"]
 
@@ -86,11 +88,11 @@ def _is_candidate(path: Path, directory: ArtifactDirectory) -> bool:
     )
 
 
-def _candidate_files(directory: ArtifactDirectory) -> tuple[ArtifactFile, ...]:
-    """Return the candidate TIFFs below a folder in lexical path order."""
+def _candidate_files(root: DatasetRoot, directory: ArtifactDirectory) -> tuple[ArtifactFile, ...]:
+    """Return the candidate TIFFs below a folder of ``root`` in lexical path order."""
     candidates = (path for path in directory.rglob("*") if _is_candidate(path, directory))
     paths = sorted_paths(candidates, context=_CONTEXT, search_path=directory)
-    return tuple(require_file(path, context=_CONTEXT) for path in paths)
+    return tuple(require_metadata_file(root, path, context=_CONTEXT) for path in paths)
 
 
 def _require_unique_names(stacks: Sequence[StackFiles], root: DatasetRoot) -> None:
@@ -101,38 +103,38 @@ def _require_unique_names(stacks: Sequence[StackFiles], root: DatasetRoot) -> No
     if colliding:
         raise ReaderFormatError(
             context=_CONTEXT,
-            path=root,
+            path=root.path,
             found=f"folders that become the colliding element names {colliding}",
             expected="folder names that remain distinct as SpatialData element names",
         )
 
 
 def _single_folder(root: DatasetRoot) -> tuple[StackFiles, ...]:
-    files = _candidate_files(root)
+    files = _candidate_files(root, root.path)
     if not files:
         raise ReaderFormatError(
-            context=_CONTEXT, path=root, found="no .tif or .tiff files", expected="processed MACSima channel TIFFs"
+            context=_CONTEXT, path=root.path, found="no .tif or .tiff files", expected="processed MACSima channel TIFFs"
         )
-    return (StackFiles(sanitize_name(root.name), root, files),)
+    return (StackFiles(sanitize_name(root.path.name), root.path, files),)
 
 
 def _multiple_folders(root: DatasetRoot, exclude_folder_names: frozenset[str]) -> tuple[StackFiles, ...]:
     folders = sorted_paths(
-        (entry for entry in root.iterdir() if _visible(entry.name) and entry.is_dir()),
+        (entry for entry in root.path.iterdir() if _visible(entry.name) and entry.is_dir()),
         context=_CONTEXT,
-        search_path=root,
+        search_path=root.path,
     )
     unknown = exclude_folder_names - {folder.name for folder in folders}
     if unknown:
-        message = f"exclude_folder_names {sorted(unknown)} match no folder in {str(root)!r}."
+        message = f"exclude_folder_names {sorted(unknown)} match no folder in {str(root.path)!r}."
         raise ValueError(message)
 
     stacks: list[StackFiles] = []
     for folder in folders:
         if folder.name in exclude_folder_names:
             continue
-        directory = require_directory(folder, context=_CONTEXT)
-        files = _candidate_files(directory)
+        directory = require_metadata_directory(root, folder, context=_CONTEXT)
+        files = _candidate_files(root, directory)
         if not files:
             warnings.warn(f"No TIFF files found in {str(folder)!r}; skipping this folder.", UserWarning, stacklevel=4)
             continue
@@ -141,7 +143,7 @@ def _multiple_folders(root: DatasetRoot, exclude_folder_names: frozenset[str]) -
     if not stacks:
         raise ReaderFormatError(
             context=_CONTEXT,
-            path=root,
+            path=root.path,
             found="no included subfolder with .tif or .tiff files",
             expected="at least one processed MACSima folder",
         )
@@ -150,7 +152,11 @@ def _multiple_folders(root: DatasetRoot, exclude_folder_names: frozenset[str]) -
 
 
 def discover_layout(
-    path: str | Path, *, parsing_style: ParsingStyle, exclude_folder_names: frozenset[str]
+    path: str | Path,
+    *,
+    parsing_style: ParsingStyle,
+    exclude_folder_names: frozenset[str],
+    path_policy: PathPolicy = "strict",
 ) -> MacsimaLayout:
     """Resolve the root once and collect the candidate files of every stack.
 
@@ -158,8 +164,9 @@ def discover_layout(
     layout makes one stack per immediate subfolder; folders named exactly in
     ``exclude_folder_names`` are omitted and folders without TIFFs are skipped
     with a warning. Paths beginning with ``.`` and ``__MACOSX`` are ignored.
+    Every folder and file follows the root's path policy.
     """
-    root = normalize_dataset_root(path, context=_CONTEXT)
+    root = normalize_dataset_root(path, context=_CONTEXT, path_policy=path_policy)
     if parsing_style == "processed_single_folder":
         return MacsimaLayout(_single_folder(root))
     return MacsimaLayout(_multiple_folders(root, exclude_folder_names))

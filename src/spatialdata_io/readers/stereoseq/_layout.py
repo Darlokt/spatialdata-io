@@ -22,6 +22,8 @@ from spatialdata_io.readers._utils.paths import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from spatialdata_io.readers._utils.paths import PathPolicy
+
 type Family = Literal["compact_numbered", "numbered", "outs", "flat"]
 type ImageRole = Literal["registered", "mask", "tissue_cut", "distance_mask", "expression"]
 
@@ -119,16 +121,16 @@ def _error(path: Path, found: str, expected: str) -> ReaderFormatError:
 
 def _inventory(root: DatasetRoot) -> tuple[Family, tuple[Path, ...]]:
     """Scan each relevant immediate directory once and reject mixed structural families."""
-    entries: dict[str, Path] = {entry.name: entry for entry in root.iterdir()}
+    entries: dict[str, Path] = {entry.name: entry for entry in root.path.iterdir()}
     families = [family for family, names in _DIRECTORIES.items() if entries.keys() & set(names)]
 
     if "outs" in entries:
         families.append("outs")
     if len(families) > 1:
-        raise _error(root, f"conflicting families {families}", "one SAW layout family")
+        raise _error(root.path, f"conflicting families {families}", "one SAW layout family")
 
     family: Family = families[0] if families else "flat"
-    base: ArtifactDirectory = root
+    base: ArtifactDirectory = root.path
     if "outs" in entries:
         base = require_metadata_directory(root, "outs", context=ReaderErrorContext("stereoseq", "outs"))
         entries = {entry.name: entry for entry in base.iterdir()}
@@ -259,7 +261,7 @@ def _select_sample(
     if requested is not None:
         return requested
     if len(samples) > 1:
-        raise _error(root, f"samples {sorted(samples)}", "sample_id when more than one sample is present")
+        raise _error(root.path, f"samples {sorted(samples)}", "sample_id when more than one sample is present")
     return next(iter(samples), None)
 
 
@@ -288,12 +290,12 @@ def _count_file(  # noqa: PLR0913, RUF100 - one resolver for every count role ke
     if override is not None:
         return override
     if family == "flat":
-        raise _error(root, f"flat {artifact} without explicit path", f"an explicit {artifact} source override")
+        raise _error(root.path, f"flat {artifact} without explicit path", f"an explicit {artifact} source override")
 
     directories = _SQUARE_DIRECTORIES[family] if artifact == "square_counts_file" else _CELL_DIRECTORIES[family]
     candidates = _count_paths(files, sample, suffixes, directories)
 
-    selected = require_unique_path(candidates, context=context, search_path=root)
+    selected = require_unique_path(candidates, context=context, search_path=root.path)
     return require_metadata_file(root, selected, context=context)
 
 
@@ -313,7 +315,7 @@ def _calibration_sources(
         candidates = _count_paths(files, sample, suffixes, directories)
         if candidates:
             file = require_metadata_file(
-                root, require_unique_path(candidates, context=context, search_path=root), context=context
+                root, require_unique_path(candidates, context=context, search_path=root.path), context=context
             )
             sources.append(SquareSource(file, "all") if kind == "square" else CellSource(file, kind))
     return tuple(sources)
@@ -369,7 +371,7 @@ def _images(
         found_roles.add(role)
 
     if missing := set(roles) - found_roles:
-        raise _error(root, f"missing image roles {sorted(missing)}", "every selected image role")
+        raise _error(root.path, f"missing image roles {sorted(missing)}", "every selected image role")
 
     return tuple(selected[name] for name in sorted(selected))
 
@@ -386,7 +388,7 @@ def _validate_override_samples(
             identity = _count_sample(file, sample_id=requested if position == 0 else None)
             if identity is not None and identity != sample:
                 raise _error(
-                    root, "count override/sample disagreement", "selected count artifacts from the selected sample"
+                    root.path, "count override/sample disagreement", "selected count artifacts from the selected sample"
                 )
 
 
@@ -401,10 +403,11 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selec
     adjusted_cell_counts_file: str | Path | None,
     analysis_files: tuple[str | Path, ...],
     image_roles: tuple[ImageRole, ...],
+    path_policy: PathPolicy = "strict",
 ) -> StereoseqLayout:
     """Resolve selected products once, allowing caller overrides outside the root."""
     context = ReaderErrorContext("stereoseq", "dataset layout")
-    root = normalize_dataset_root(path, context=context)
+    root = normalize_dataset_root(path, context=context, path_policy=path_policy)
 
     family, files = _inventory(root)
     analyses = tuple(_analysis_source(require_caller_file(root, file, context=context)) for file in analysis_files)
@@ -428,9 +431,9 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selec
             identities.add(key)
 
     if len({source.file for source in analyses}) != len(analyses):
-        raise _error(root, "duplicate analysis artifact", "distinct selected analysis files")
+        raise _error(root.path, "duplicate analysis artifact", "distinct selected analysis files")
     if any(source.sample_id != sample for source in analyses):
-        raise _error(root, "analysis/sample disagreement", "selected analyses from the selected sample")
+        raise _error(root.path, "analysis/sample disagreement", "selected analyses from the selected sample")
 
     # Resolve only requested count populations; missing unselected products are
     # irrelevant to this invocation.

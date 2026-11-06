@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from math import prod
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -10,7 +9,7 @@ from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Scale
 from spatialdata.transformations import Sequence as TransformSequence
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_jpeg, read_png, read_tiff
 from spatialdata_io.readers.cosmx._transforms import raster_to_local
 
@@ -26,27 +25,22 @@ if TYPE_CHECKING:
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
 _COLOR_CHANNELS = {3: ["r", "g", "b"], 4: ["r", "g", "b", "a"]}
-_MAX_EXACT_LABEL_BYTES = 4
 
 
 def _source(path: ArtifactFile, artifact: str) -> LazyRaster:
     """Read one full-resolution raster through the shared suffix-specific boundary."""
     context = ReaderErrorContext("cosmx", artifact)
     suffix = path.suffix.lower()
-    try:
-        if suffix in {".jpg", ".jpeg"}:
-            return read_jpeg(path)
-        if suffix == ".png":
-            return read_png(path)
-        metadata = inspect_tiff(path)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=context, path=path)
-        raise
+    if suffix in {".jpg", ".jpeg"}:
+        return read_jpeg(path, context=context)
+    if suffix == ".png":
+        return read_png(path, context=context)
+    metadata = inspect_tiff(path, context=context)
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=context, path=path, found=f"{len(metadata.series)} TIFF series", expected="one series"
         )
-    return read_tiff(metadata, series=0, level=0)
+    return read_tiff(metadata, series=0, level=0, context=context)
 
 
 def _normalize(raster: LazyRaster, path: ArtifactFile, artifact: str, target: tuple[str, ...]) -> Array:
@@ -87,19 +81,12 @@ def _frames(
     return {str(fov): local, "global": global_}
 
 
-def _check_pyramid(array: Array, options: RasterOptions) -> None:
-    """Reject pyramid factors that would eliminate a spatial dimension."""
-    if options.scale_factors and min(array.shape[-2:]) < prod(options.scale_factors):
-        message = f"Requested scale factors {options.scale_factors} exceed the spatial extent of a CosMx FOV raster."
-        raise ValueError(message)
-
-
 def read_image(
     path: ArtifactFile, *, fov: int, placement: Placement, options: RasterOptions, pixel_size_um: float | None = None
 ) -> tuple[DataArray | DataTree, tuple[int, int]]:
     """Return a lazy CYX FOV image and its trusted YX grid."""
     image = _normalize(_source(path, "image"), path, "image", _IMAGE_AXES)
-    _check_pyramid(image, options)
+    options.validate_image_pyramid(image, element="a CosMx FOV raster")
     # Raster inspection provides finite integer dimensions; Dask also permits NaN dimensions.
     grid = cast("tuple[int, int]", image.shape[-2:])
     element = Image2DModel.parse(
@@ -134,10 +121,7 @@ def read_labels(  # noqa: PLR0913, RUF100 - Independent raster/grid/placement st
         raise ReaderFormatError(
             context=context, path=path, found=str(labels.dtype), expected="integer labels with background zero"
         )
-    if options.scale_factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
-        message = "Generated label pyramids require <=32-bit labels; use scale_factors=() for exact 64-bit IDs."
-        raise ValueError(message)
-    _check_pyramid(labels, options)
+    options.validate_label_pyramid(labels, element="a CosMx FOV mask")
 
     element = Labels2DModel.parse(
         labels,

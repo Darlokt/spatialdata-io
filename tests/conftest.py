@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import sys
@@ -52,6 +53,24 @@ _READER_MARKS = {
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture
+def link_outside_root(tmp_path_factory: pytest.TempPathFactory) -> Callable[[Path], Path]:
+    """Return a function that moves a dataset file to an external store and links it back.
+
+    The moved file is named by a content hash without a suffix, as in a DVC
+    cache or git-annex object store, so readers must keep the link's own name.
+    """
+    store = tmp_path_factory.mktemp("object-store")
+
+    def _link_outside_root(artifact: Path) -> Path:
+        target = store / hashlib.sha256(artifact.read_bytes()).hexdigest()
+        artifact.rename(target)
+        artifact.symlink_to(target)
+        return target
+
+    return _link_outside_root
 
 
 @pytest.fixture(scope="session")

@@ -14,6 +14,7 @@ import tifffile
 from dask.callbacks import Callback
 from spatialdata import read_zarr
 from spatialdata.models import get_channel_names
+from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Scale, get_transformation
 from xarray import DataTree
 
@@ -31,6 +32,7 @@ from tests.integration.readers.macsima._fixtures import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from click.testing import CliRunner
@@ -310,3 +312,23 @@ class TestMacsimaRejects:
     def test_removed_raw_style(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="parsing_style must be one of"):
             macsima(tmp_path, parsing_style="raw")  # pyrefly: ignore[bad-argument-type] - Removed legacy value.
+
+
+class TestMacsimaPathPolicy:
+    """Discovered folders and channel files follow the dataset root's symlink policy."""
+
+    def test_out_of_root_symlinks_require_the_relaxed_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        root = tmp_path / "root"
+        write_stack(root / "first", V1_CHANNELS, version=1)
+        write_stack(root / "second", V0_CHANNELS, version=0)
+        expected = macsima(root, parsing_style="processed_multiple_folders")
+        for channel in sorted((root / "first").glob("*.tif*")):
+            link_outside_root(channel)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            macsima(root, parsing_style="processed_multiple_folders")
+
+        relaxed = macsima(root, parsing_style="processed_multiple_folders", path_policy="relaxed")
+        assert_spatial_data_objects_are_identical(relaxed, expected)

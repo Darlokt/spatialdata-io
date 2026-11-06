@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
     from pytest_mock import MockerFixture
 
+    from spatialdata_io.readers._utils.image._types import SampleColor
+
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -39,36 +41,39 @@ class TestInspectPngHeader:
     """Validate exact decoder metadata from bounded pre-IDAT bytes."""
 
     @pytest.mark.parametrize(
-        ("bit_depth", "color_type", "extra", "shape"),
+        ("bit_depth", "color_type", "extra", "expected"),
         [
-            (1, 0, b"", (3, 5)),
-            (16, 4, b"", (3, 5, 2)),
-            (8, 2, b"", (3, 5, 3)),
-            (16, 6, b"", (3, 5, 4)),
-            (8, 3, _png_chunk(b"PLTE", b"\x00\x00\x00"), (3, 5, 3)),
+            (1, 0, b"", ((3, 5), None)),
+            (16, 4, b"", ((3, 5, 2), None)),
+            (8, 2, b"", ((3, 5, 3), "rgb")),
+            (16, 6, b"", ((3, 5, 4), "rgba")),
+            (8, 3, _png_chunk(b"PLTE", b"\x00\x00\x00"), ((3, 5, 3), "rgb")),
             (
                 8,
                 3,
                 _png_chunk(b"PLTE", b"\x00\x00\x00") + _png_chunk(b"tRNS", b"\x00"),
-                (3, 5, 4),
+                ((3, 5, 4), "rgba"),
             ),
         ],
     )
-    def test_predicts_decoder_shape_and_dtype(
+    def test_predicts_decoder_shape_dtype_and_declared_color(
         self,
         tmp_path: Path,
         bit_depth: int,
         color_type: int,
         extra: bytes,
-        shape: tuple[int, ...],
+        expected: tuple[tuple[int, ...], SampleColor | None],
     ) -> None:
+        shape, color = expected
         path = tmp_path / "image.png"
         _write_png_header(path, bit_depth=bit_depth, color_type=color_type, before_idat=extra)
 
         metadata = inspect_png_header(path)
 
         assert metadata.shape == shape
+        assert metadata.axes == ("y", "x", "s")[: len(shape)]
         assert metadata.dtype == np.dtype(np.uint16 if bit_depth == 16 else np.uint8)
+        assert metadata.color == color
 
     @pytest.mark.parametrize(
         "payload",
@@ -149,13 +154,16 @@ class TestInspectPngHeader:
         with pytest.raises(RasterFormatError, match="ended before"):
             inspect_png_header(path)
 
-    @pytest.mark.parametrize(("color_type", "length", "shape"), [(0, 2, (3, 5, 2)), (2, 6, (3, 5, 4))])
+    @pytest.mark.parametrize(
+        ("color_type", "length", "shape", "color"), [(0, 2, (3, 5, 2), None), (2, 6, (3, 5, 4), "rgba")]
+    )
     def test_predicts_alpha_channel_from_valid_transparency(
         self,
         tmp_path: Path,
         color_type: int,
         length: int,
         shape: tuple[int, ...],
+        color: SampleColor | None,
     ) -> None:
         path = tmp_path / "transparent.png"
         _write_png_header(
@@ -164,7 +172,10 @@ class TestInspectPngHeader:
             before_idat=_png_chunk(b"tRNS", bytes(length)),
         )
 
-        assert inspect_png_header(path).shape == shape
+        metadata = inspect_png_header(path)
+
+        assert metadata.shape == shape
+        assert metadata.color == color
 
     def test_skips_ancillary_payloads(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "metadata.png"

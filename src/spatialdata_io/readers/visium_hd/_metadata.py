@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Never, cast
+from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.metadata import read_json_object
+from spatialdata_io.readers._utils.metadata import parse_json_object, read_json_object
 from spatialdata_io.readers.visium_hd._transforms import SPOT_PITCH_UM
 
 if TYPE_CHECKING:
@@ -72,46 +71,8 @@ def _text(value: object, *, path: ArtifactFile, context: ReaderErrorContext | No
     return value
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            msg = f"duplicate key {key!r}"
-            raise ValueError(msg)
-        result[key] = value
-
-    return result
-
-
-def _reject_constant(value: str) -> Never:
-    msg = f"nonfinite JSON constant {value}"
-    raise ValueError(msg)
-
-
-def _finite_float(value: str) -> float:
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        msg = "nonfinite JSON number"
-        raise ValueError(msg)
-
-    return parsed
-
-
 def _json_object(value: object, *, path: ArtifactFile) -> dict[str, object]:
-    try:
-        parsed: object = json.loads(
-            _text(value, path=path),
-            object_pairs_hook=_unique_object,
-            parse_constant=_reject_constant,
-            parse_float=_finite_float,
-        )
-    except (ValueError, RecursionError) as error:
-        raise _error(path, "malformed metadata JSON", "a JSON object with unique keys") from error
-
-    if not isinstance(parsed, dict):
-        raise _error(path, "non-object metadata JSON", "a JSON object")
-
-    return cast("dict[str, object]", parsed)
+    return parse_json_object(_text(value, path=path), context=_context("metadata"), path=path)
 
 
 def _positive(values: dict[str, object], name: str, *, path: ArtifactFile) -> float:

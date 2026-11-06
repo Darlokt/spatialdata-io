@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.curio._layout import _discover_layout
+from spatialdata_io.readers.curio._layout import discover_layout
 from tests.integration.readers.curio._fixtures import write_curio
 
 if TYPE_CHECKING:
@@ -21,41 +21,49 @@ class TestDiscoverLayout:
         write_curio(tmp_path)
         (tmp_path / "old_anndata.h5ad.backup").touch()
 
-        layout = _discover_layout(tmp_path)
+        layout = discover_layout(tmp_path)
 
         assert layout.counts == (tmp_path / "sample_anndata.h5ad").resolve()
         assert not hasattr(layout, "__dict__")
 
     @pytest.mark.parametrize(
-        "suffix",
+        ("suffix", "artifact"),
         [
-            "anndata.h5ad",
-            "cluster_assignment.txt",
-            "Metrics.csv",
-            "variable_features_clusters.txt",
-            "variable_features_spatial_moransi.txt",
+            ("anndata.h5ad", "counts"),
+            ("cluster_assignment.txt", "cluster assignments"),
+            ("Metrics.csv", "metrics"),
+            ("variable_features_clusters.txt", "cluster features"),
+            ("variable_features_spatial_moransi.txt", "Moran features"),
         ],
     )
-    def test_missing_artifact(self, tmp_path: Path, suffix: str) -> None:
+    def test_missing_artifact(self, tmp_path: Path, suffix: str, artifact: str) -> None:
+        """Name the missing artifact and the file pattern that was searched for."""
         write_curio(tmp_path)
         (tmp_path / f"sample_{suffix}").unlink()
 
-        with pytest.raises(FileNotFoundError, match="curio"):
-            _discover_layout(tmp_path)
+        with pytest.raises(FileNotFoundError, match="curio") as raised:
+            discover_layout(tmp_path)
+
+        assert f"{artifact} (*_{suffix})" in str(raised.value)
 
     def test_ambiguity(self, tmp_path: Path) -> None:
         write_curio(tmp_path)
         (tmp_path / "second_anndata.h5ad").touch()
 
-        with pytest.raises(ReaderFormatError, match="2 candidates"):
-            _discover_layout(tmp_path)
+        with pytest.raises(ReaderFormatError, match="2 candidates") as raised:
+            discover_layout(tmp_path)
+
+        assert raised.value.context.artifact == "counts (*_anndata.h5ad)"
 
     def test_conflicting_prefix(self, tmp_path: Path) -> None:
         write_curio(tmp_path)
         (tmp_path / "sample_Metrics.csv").rename(tmp_path / "other_Metrics.csv")
 
-        with pytest.raises(ReaderFormatError, match="prefix"):
-            _discover_layout(tmp_path)
+        with pytest.raises(ReaderFormatError, match="prefix") as raised:
+            discover_layout(tmp_path)
+
+        assert raised.value.context.artifact == "dataset layout"
+        assert raised.value.path == tmp_path.resolve()
 
     def test_empty_prefix(self, tmp_path: Path) -> None:
         write_curio(tmp_path)
@@ -63,7 +71,7 @@ class TestDiscoverLayout:
             path.rename(tmp_path / path.name.removeprefix("sample"))
 
         with pytest.raises(ReaderFormatError, match="prefix"):
-            _discover_layout(tmp_path)
+            discover_layout(tmp_path)
 
     def test_artifact_directory(self, tmp_path: Path) -> None:
         write_curio(tmp_path)
@@ -72,7 +80,7 @@ class TestDiscoverLayout:
         path.mkdir()
 
         with pytest.raises(IsADirectoryError):
-            _discover_layout(tmp_path)
+            discover_layout(tmp_path)
 
     def test_artifact_escape(self, tmp_path: Path) -> None:
         dataset = tmp_path / "dataset"
@@ -84,4 +92,4 @@ class TestDiscoverLayout:
         artifact.symlink_to(outside)
 
         with pytest.raises(ReaderFormatError, match="outside"):
-            _discover_layout(dataset)
+            discover_layout(dataset)

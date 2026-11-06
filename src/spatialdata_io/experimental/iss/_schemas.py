@@ -6,11 +6,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.table import validate_compressed_sparse
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -59,19 +57,6 @@ def _validate_table(table: ad.AnnData, *, path: ArtifactFile, instance_key: str 
         raise _schema_error(
             path, f"missing observation column {instance_key!r}", "the requested integer instance column"
         )
-
-    _validate_expression(table, path=path)
-
-
-def _validate_expression(table: ad.AnnData, *, path: ArtifactFile) -> None:
-    """Validate declared compressed expression storage without reducing its entries."""
-    for slot, expression in (("X", table.X), ("counts", table.layers.get("counts"))):
-        if isinstance(expression, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
-            try:
-                validate_compressed_sparse(expression)
-            except (TypeError, ValueError) as error:
-                add_reader_context(error, context=ReaderErrorContext("iss", f"counts {slot}"), path=path)
-                raise
 
 
 def _validate_index_ids(values: list[int], *, label_dtype: np.dtype[np.generic], path: ArtifactFile) -> None:

@@ -35,11 +35,13 @@ class TestValidateHeader:
     def test_invalid_names(self, tmp_path: Path, columns: list[str]) -> None:
         """Reject ambiguous annotation headers before parser name repair."""
         with pytest.raises(ReaderFormatError, match="header"):
-            validate_header(columns, ArtifactFile(tmp_path / "enrichment.tsv"))
+            validate_header(columns, "features", ArtifactFile(tmp_path / "enrichment.tsv"))
 
     def test_moran_row_name_header_is_positional(self, tmp_path: Path) -> None:
         """Accept the empty first field emitted for R row names."""
-        validate_header(["", "arbitrary_statistic"], ArtifactFile(tmp_path / "moran.tsv"), feature_ids=True)
+        validate_header(
+            ["", "arbitrary_statistic"], "Moran features", ArtifactFile(tmp_path / "moran.tsv"), feature_ids=True
+        )
 
 
 class TestValidateText:
@@ -49,17 +51,20 @@ class TestValidateText:
         frame = pd.DataFrame({"note": ["0007", "TRUE", "1e999", "NA", "", None]}, dtype=STRING_DTYPE)
         expected = frame.copy()
 
-        assert validate_text(frame, ArtifactFile(tmp_path / "features.tsv")) is None
+        assert validate_text(frame, "features", ArtifactFile(tmp_path / "features.tsv")) is None
 
         pd.testing.assert_frame_equal(frame, expected)
 
     def test_nul_identifier_is_rejected(self, tmp_path: Path) -> None:
         """Reject embedded NUL before it can change identifier meaning."""
-        with pytest.raises(ReaderFormatError, match="NUL"):
+        with pytest.raises(ReaderFormatError, match="NUL") as raised:
             validate_text(
                 pd.DataFrame({"gene": ["gene\x00suffix"]}, dtype=STRING_DTYPE),
+                "features",
                 ArtifactFile(tmp_path / "features.tsv"),
             )
+
+        assert raised.value.context.artifact == "features"
 
 
 class TestNormalizeMoran:
@@ -138,13 +143,24 @@ class TestValidateCounts:
 
 
 class TestValidateClusters:
-    """Headerless cluster rows have exactly two nonmissing positional fields."""
+    """One nonempty cluster label per H5AD observation."""
 
-    def test_null_cluster(self, tmp_path: Path) -> None:
-        """Require a nonmissing cluster assignment for each observation."""
-        with pytest.raises(ReaderFormatError, match="cluster"):
+    @pytest.mark.parametrize(("bead", "cluster"), [("", "1"), ("bead", "")])
+    def test_empty_field(self, tmp_path: Path, bead: str, cluster: str) -> None:
+        with pytest.raises(ReaderFormatError, match="empty bead ID or cluster label") as raised:
             validate_clusters(
-                pd.DataFrame({0: ["bead"], 1: [None]}, dtype=STRING_DTYPE),
+                pd.DataFrame({"bead_id": [bead], "cluster": [cluster]}, dtype=STRING_DTYPE),
+                pd.Index(["bead"]),
+                ArtifactFile(tmp_path / "clusters.tsv"),
+            )
+
+        assert raised.value.context.artifact == "cluster assignments"
+
+    @pytest.mark.parametrize("beads", [["bead", "bead"], ["other"], []])
+    def test_bead_population_must_match(self, tmp_path: Path, beads: list[str]) -> None:
+        with pytest.raises(ReaderFormatError, match="mismatched bead IDs"):
+            validate_clusters(
+                pd.DataFrame({"bead_id": beads, "cluster": ["1"] * len(beads)}, dtype=STRING_DTYPE),
                 pd.Index(["bead"]),
                 ArtifactFile(tmp_path / "clusters.tsv"),
             )
@@ -153,7 +169,9 @@ class TestValidateClusters:
 class TestValidateMetrics:
     """Metric categories cannot replace preserved H5AD uns or generated metadata."""
 
-    @pytest.mark.parametrize("category", ["existing", DEFINING_FEATURES_KEY])
+    @pytest.mark.parametrize(
+        "category", ["existing", DEFINING_FEATURES_KEY, "spatialdata_io_positions", "spatialdata_attrs"]
+    )
     def test_category_collision(self, tmp_path: Path, category: str) -> None:
         """Prevent metric categories from overwriting imported or generated uns annotations."""
         frame = pd.DataFrame({"arbitrary": ["Reads"], "result": ["1"], "Category": [category]}, dtype=STRING_DTYPE)

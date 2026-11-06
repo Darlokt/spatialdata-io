@@ -18,7 +18,6 @@ per-cell data and stay unread.
 
 from __future__ import annotations
 
-import csv
 import re
 import tarfile
 from contextlib import closing
@@ -31,6 +30,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
 
+from spatialdata_io.readers._utils.csv import parse_csv_header
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers.xenium._layout import AnalysisDirectory
 from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, schema_error, text_series, validate_analysis_header
 
@@ -100,11 +101,7 @@ def _members(source: AnalysisSource) -> Generator[tuple[str, str, IO[bytes], Pat
 
 
 def _header(handle: IO[bytes], path: Path) -> list[str]:
-    try:
-        line = handle.readline()
-        header = next(csv.reader([line.decode("utf-8-sig")], strict=True), [])
-    except (UnicodeDecodeError, csv.Error) as error:
-        raise schema_error(path, "analysis", found="a malformed header", expected="one UTF-8 CSV header") from error
+    header = parse_csv_header(handle.readline(), context=ReaderErrorContext("xenium", "analysis"), path=path)
     # Arrow reads the header itself; no encoded body buffer is retained.
     handle.seek(0)
     return header

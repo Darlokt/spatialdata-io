@@ -35,6 +35,7 @@ class TestCodex:
             "tiff_series",
             "scale_factors",
             "chunks",
+            "path_policy",
         ]
         assert parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
         assert parameters["chunks"].default == DEFAULT_CHUNKS

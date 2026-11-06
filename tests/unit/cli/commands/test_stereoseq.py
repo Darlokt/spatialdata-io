@@ -82,6 +82,7 @@ class TestStereoseqCommand:
             image_roles=("registered", "mask"),
             scale_factors=(2,),
             chunks=(1, 64, 32),
+            path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
 
@@ -109,6 +110,7 @@ class TestStereoseqCommand:
             image_roles=(),
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=128 if sizes else DEFAULT_CHUNKS,
+            path_policy="strict",
         )
 
     @pytest.mark.parametrize(

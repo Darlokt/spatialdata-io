@@ -11,9 +11,10 @@ import pandas as pd
 from spatialdata import SpatialData
 from xarray import DataTree
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
 from spatialdata_io.readers.dbit._barcodes import _read_barcodes
@@ -82,6 +83,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     tiff_level: int = 0,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read an unversioned DBiT H5AD export and its barcode-position grid.
 
@@ -104,7 +106,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     Parameters
     ----------
     path
-        Required dataset directory. Discovered symlinks must remain inside it.
+        Required dataset directory. Discovered symlinks follow ``path_policy``.
     table_file, barcode_positions_file
         Optional artifact overrides. Relative paths resolve against the dataset
         root. Absolute overrides may point outside it.
@@ -142,6 +144,15 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
 
         Image options other than their defaults require an image; axis and
         TIFF selections require a TIFF image.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -177,9 +188,14 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         anisotropic stretching, registration or origin shift are inferred.
 
         Optional ``images['<dataset_id>_image']`` is lazy CYX, preserving source
-        dtype and channel order, positional RGB labels, and available OME
-        channel names or IDs. It is a single scale unless ``scale_factors``
-        requests pyramid levels; the grid step uses its full-resolution extent.
+        dtype and channel order. Samples the file declares RGB are named
+        ``r, g, b`` (``r, g, b, a`` with declared alpha): TIFF
+        ``PhotometricInterpretation`` RGB or JPEG-compressed YCbCr, PNG
+        colour types 2, 3 and 6, and three-component JPEG. Otherwise OME
+        channel names or IDs are kept, and OME channels with several samples
+        name them ``<name or ID>:sample:<index>``; other images use positional
+        indexes. It is a single scale unless ``scale_factors`` requests
+        pyramid levels; the grid step uses its full-resolution extent.
         Grid and image use identity transforms to ``global``. Construction
         executes zero pixel tasks. TIFF partial computations decode only the
         tiles or strips they overlap. PNG/JPEG computations decode a whole
@@ -212,7 +228,11 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
 
     duplicate_sums: list[SparseDuplicateSummary] = []
     layout = _discover_layout(
-        path, table_file=table_file, barcode_positions_file=barcode_positions_file, image_file=image_file
+        path,
+        table_file=table_file,
+        barcode_positions_file=barcode_positions_file,
+        image_file=image_file,
+        path_policy=path_policy,
     )
     if dataset_id is None:
         dataset_id = layout.table.stem
@@ -263,17 +283,14 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     prepare_anndata_dataframe(obs, context=context)
     prepare_anndata_dataframe(var, context=context)
 
-    try:
-        table = parse_linked_table(
-            table,
-            TableLinkage((dataset_id,), "region", "pixel_id"),
-            context=context,
-            expression_layers=("counts",) if "counts" in table.layers else (),
-            expected_instance_ids={dataset_id: grid.index},
-        )
-    except (TypeError, ValueError) as error:
-        add_reader_context(error, context=context, path=layout.table)
-        raise
+    table = parse_linked_table(
+        table,
+        TableLinkage((dataset_id,), "region", "pixel_id"),
+        context=context,
+        path=layout.table,
+        expression_layers=("counts",) if "counts" in table.layers else (),
+        expected_instance_ids={dataset_id: grid.index},
+    )
 
     result = SpatialData(images=images, shapes={dataset_id: grid}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="dbit")

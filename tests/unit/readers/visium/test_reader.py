@@ -30,6 +30,7 @@ class TestVisium:
             "tiff_series",
             "scale_factors",
             "chunks",
+            "path_policy",
         ]
         assert all(
             parameter.kind is inspect.Parameter.KEYWORD_ONLY

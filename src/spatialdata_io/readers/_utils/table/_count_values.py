@@ -8,7 +8,6 @@ import numpy as np
 from scipy.sparse import csr_array
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table._arrays import validate_compressed_sparse
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -17,6 +16,8 @@ if TYPE_CHECKING:
 
 _VALIDATION_BATCH_SIZE = 1_048_576
 _UINT64_STOP = 2**64
+_FLOAT32_EXACT_INTEGERS = 2**24
+_FLOAT64_EXACT_INTEGERS = 2**53
 
 
 def count_accumulation_dtype(maximum_sum: int, /) -> np.dtype[np.float32 | np.float64] | None:
@@ -55,9 +56,9 @@ def count_accumulation_dtype(maximum_sum: int, /) -> np.dtype[np.float32 | np.fl
     if maximum_sum < 0:
         message = "maximum_sum must be nonnegative."
         raise ValueError(message)
-    if maximum_sum <= 2**24:
+    if maximum_sum <= _FLOAT32_EXACT_INTEGERS:
         return np.dtype(np.float32)
-    if maximum_sum <= 2**53:
+    if maximum_sum <= _FLOAT64_EXACT_INTEGERS:
         return np.dtype(np.float64)
     return None
 
@@ -82,10 +83,7 @@ def _exact_float_cast(values: npt.NDArray[np.generic], dtype: np.dtype[np.float3
 
 
 def _validate_count_storage(array: csr_array) -> None:
-    if not isinstance(array, csr_array):
-        message = "Completed counts must be CSR sparse arrays."
-        raise TypeError(message)
-    validate_compressed_sparse(array)
+    """Require canonical CSR storage with boolean, integer or real floating values."""
     if not array.has_canonical_format:
         message = "Complete duplicate aggregation before count finalization."
         raise ValueError(message)
@@ -125,9 +123,9 @@ def finalize_count_arrays(
     Raises
     ------
     TypeError
-        If an input is not a CSR sparse array or uses unsupported values.
+        If an input uses non-numerical values.
     ValueError
-        If the family is empty, sparse storage is malformed or not canonical.
+        If the family is empty or an array is not canonical.
     ReaderFormatError
         If counts are invalid or neither floating dtype preserves all values.
 
@@ -148,20 +146,22 @@ def finalize_count_arrays(
         _validate_count_storage(array)
         for start in range(0, array.nnz, _VALIDATION_BATCH_SIZE):
             values = array.data[start : start + _VALIDATION_BATCH_SIZE]
-            if (
-                not np.isfinite(values).all()
-                or np.any(values < 0)
-                or (values.dtype.kind == "f" and np.any(values != np.floor(values)))
-            ):
+            invalid = values.dtype.kind == "f" and (
+                not np.isfinite(values).all() or bool(np.any(values != np.floor(values)))
+            )
+            if invalid or np.any(values < 0):
                 raise ReaderFormatError(
                     context=context,
                     path=path,
                     found="nonfinite, negative or fractional counts",
                     expected="finite nonnegative integer counts",
                 )
-            if fits_float32:
+            # Every integer up to 2**24 (2**53) is exact in float32 (float64),
+            # so only batches with larger values need an element-wise check.
+            maximum = values.max(initial=0)
+            if fits_float32 and maximum > _FLOAT32_EXACT_INTEGERS:
                 fits_float32 = _exact_float_cast(values, np.dtype(np.float32))
-            if fits_float64:
+            if fits_float64 and maximum > _FLOAT64_EXACT_INTEGERS:
                 fits_float64 = _exact_float_cast(values, np.dtype(np.float64))
     if not fits_float64:
         raise ReaderFormatError(

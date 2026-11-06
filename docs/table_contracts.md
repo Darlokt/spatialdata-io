@@ -249,8 +249,9 @@ an additional exactly agreeing real numeric `spatial` embedding. Both embeddings
 must be losslessly representable in float64. Exact native XY is retained in
 `obsm["spatial_pixels"]`; canonical float64 `spatial` uses the manufacturer
 approximate 0.647 µm/pixel calibration without reversing stored orientation.
-The circles use the same scale; their radius 10 is a display radius in source
-pixels, rather than a measured bead footprint. Reprocessed, merged and Trekker
+The circles use the same scale; their radius is half the nominal 10 µm bead
+diameter from Takara's Seeker FAQ, stored in source pixels (about 7.73), rather
+than a measured per-bead footprint. Reprocessed, merged and Trekker
 coordinate profiles require separate evidence. Only `X` is converted to
 canonical CSR. Duplicate entries are combined, promoting overflowing integer storage
 directly to exact float32/f64 only when necessary, with one warning after successful assembly.

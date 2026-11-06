@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
 
+from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS, make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.macsima._channels import make_channel_options, plan_stack
 from spatialdata_io.readers.macsima._images import make_image
@@ -83,6 +84,7 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     split_threshold_nuclei_channel: int | None = 2,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read processed MACSima (MACSiQView) single-channel OME-TIFF exports.
 
@@ -133,6 +135,15 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     chunks
         One positive size for every axis or three ``c, y, x`` sizes of the
         images. By default one channel per chunk and square 1024-pixel tiles.
+    path_policy
+        How symlinks inside the dataset directory are treated. ``"strict"``
+        requires every discovered artifact and relative file option to resolve
+        inside the directory. ``"relaxed"`` also accepts symlinks to targets
+        stored elsewhere, as in git-annex or DVC datasets. Relative paths may
+        not leave the directory with ``..`` in either mode, and absolute file
+        options may point anywhere. File options keep the name the caller
+        gave, and relaxed reads keep each artifact's own name rather than that
+        of its link target.
 
     Returns
     -------
@@ -206,7 +217,9 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
         split_threshold_nuclei_channel=split_threshold_nuclei_channel,
     )
     excluded_folders = validate_layout_options(parsing_style, exclude_folder_names)
-    layout = discover_layout(path, parsing_style=parsing_style, exclude_folder_names=excluded_folders)
+    layout = discover_layout(
+        path, parsing_style=parsing_style, exclude_folder_names=excluded_folders, path_policy=path_policy
+    )
 
     images: dict[str, DataArray | DataTree] = {}
     tables: dict[str, AnnData] = {}

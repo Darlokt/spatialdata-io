@@ -1,8 +1,8 @@
 """Central pyramid and chunk defaults of every reader that returns images or labels.
 
-This module has no dependencies, so readers (through
-``readers._utils.image``) and the lightweight command-line interface share one
-source. Changing a value here changes every reader signature and command.
+This module has no dependencies. Readers, converters, raster option validation
+and the lightweight command-line interface import defaults directly from here.
+Changing a value here changes every reader signature and command.
 """
 
 from __future__ import annotations

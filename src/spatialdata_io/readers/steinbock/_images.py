@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose, prod
+from math import isclose
 from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_pixel_sizes_um, read_tiff
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.image import (
+    inspect_tiff,
+    normalize_raster_axes,
+    ome_channel_names,
+    ome_pixel_sizes_um,
+    read_tiff,
+)
 from spatialdata_io.readers.steinbock._schemas import LabelGrid
 
 if TYPE_CHECKING:
@@ -28,7 +34,6 @@ if TYPE_CHECKING:
 _IMAGE_AXES = ("c", "y", "x")
 _CALIBRATION = ReaderErrorContext("steinbock", "sample calibration")
 _LABEL_AXES = ("y", "x")
-_MAX_EXACT_LABEL_BYTES = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,18 +51,14 @@ class _SampleRasters:
 def _read_raster(path: ArtifactFile, *, target_axes: tuple[str, ...]) -> tuple[Array, TiffMetadata]:
     """Inspect one full-resolution series and retain semantic spatial axes lazily."""
     context = ReaderErrorContext("steinbock", path.name)
-    try:
-        metadata = inspect_tiff(path)
-    except (OSError, ValueError) as error:
-        add_reader_context(error, context=context, path=path)
-        raise
+    metadata = inspect_tiff(path, context=context)
 
     if len(metadata.series) != 1:
         raise ReaderFormatError(
             context=context, path=path, found=f"{len(metadata.series)} series", expected="exactly one TIFF series"
         )
 
-    raster = read_tiff(metadata, series=0, level=0)
+    raster = read_tiff(metadata, series=0, level=0, context=context)
     try:
         array = normalize_raster_axes(
             raster.data,
@@ -143,41 +144,16 @@ def _read_rasters(
         raise ReaderFormatError(
             context=context, path=sample.labels, found=f"dtype {labels.dtype}", expected="integer mask pixels"
         )
-    factors = raster.scale_factors
-    if factors and labels.dtype.itemsize > _MAX_EXACT_LABEL_BYTES:
-        message = (
-            "Generated label pyramids require <=32-bit integer labels. Upstream downsampling rounds 64-bit IDs. "
-            "Use scale_factors=() for exact 64-bit masks."
-        )
-        raise ValueError(message)
-    if factors and min(labels.shape) < prod(factors):
-        message = f"Requested scale factors {factors} exceed the spatial extent of sample {sample.name!r}."
-        raise ValueError(message)
+    raster.validate_label_pyramid(labels, element=f"the mask of sample {sample.name!r}")
 
     # OME channel identity is independent of both marker-table feature names and RGB.
-    ome = image_metadata.ome
-    if ome is None:
+    # Axis normalization already rejected a non-singleton samples axis.
+    channel_names = ome_channel_names(
+        image_metadata, series=0, count=int(image.shape[0]), samples=False, context=context
+    )
+    if channel_names is None:
         raise ReaderFormatError(
             context=context, path=sample.image, found="no OME metadata", expected="a Steinbock OME-TIFF export"
-        )
-    channels = ome.images[0].pixels.channels
-    if len(channels) != image.shape[0]:
-        raise ReaderFormatError(
-            context=context,
-            path=sample.image,
-            found=f"{len(channels)} OME channels and {image.shape[0]} raster channels",
-            expected="one OME channel record per scientific channel",
-        )
-
-    names = [channel.name for channel in channels]
-    channel_names = (
-        [str(name) for name in names]
-        if all(names) and len(set(names)) == len(names)
-        else [channel.id for channel in channels]
-    )
-    if len(set(channel_names)) != len(channel_names):
-        raise ReaderFormatError(
-            context=context, path=sample.image, found="duplicate OME channel IDs", expected="unique channel identifiers"
         )
 
     spacing = _spacing(image_metadata, label_metadata, metadata, (int(labels.shape[0]), int(labels.shape[1])))

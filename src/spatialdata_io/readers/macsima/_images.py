@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from math import prod
 from typing import TYPE_CHECKING
 
 import dask.array as da
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Scale
 
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import normalize_raster_axes, read_tiff
 from spatialdata_io.readers.macsima._channels import NO_PADDING
 
@@ -25,7 +25,8 @@ _IMAGE_AXES = ("c", "y", "x")
 
 def _channel_array(channel: PlannedChannel) -> da.Array:
     """Read one channel lazily and zero-pad it onto the stack canvas."""
-    raster = read_tiff(channel.source.tiff, series=0, level=0)
+    context = ReaderErrorContext("macsima", "channel image", detected_version=channel.source.software_version)
+    raster = read_tiff(channel.source.tiff, series=0, level=0, context=context)
     plane = normalize_raster_axes(raster.data, raster.axes, target_axes=("y", "x"))
     if channel.padding == NO_PADDING:
         return plane
@@ -45,11 +46,7 @@ def make_image(
     pixels; channels shared with another stack reuse the same graph keys.
     """
     stack = da.stack([_channel_array(channel) for channel in channels])
-    if raster.scale_factors and min(stack.shape[-2:]) < prod(raster.scale_factors):
-        message = (
-            f"Requested scale factors {raster.scale_factors} exceed the spatial extent of MACSima stack {frame!r}."
-        )
-        raise ValueError(message)
+    raster.validate_image_pyramid(stack, element=f"MACSima stack {frame!r}")
 
     transformation = Scale([pixel_size_um, pixel_size_um], axes=("x", "y"))
     return Image2DModel.parse(

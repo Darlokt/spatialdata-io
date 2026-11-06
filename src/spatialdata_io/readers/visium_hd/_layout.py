@@ -11,17 +11,19 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
     normalize_dataset_root,
-    optional_directory,
-    optional_file,
+    optional_metadata_directory,
+    optional_metadata_file,
     optional_unique_path,
     require_caller_file,
-    require_directory,
-    require_file,
+    require_metadata_directory,
+    require_metadata_file,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from spatialdata_io.readers._utils.paths import ArtifactDirectory, PathPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,13 +87,15 @@ def _loose_file(
     candidates: list[Path] = [
         entry for entry in entries if any(entry.name == name or entry.name.endswith(f"_{name}") for name in names)
     ]
-    candidate = optional_unique_path(candidates, context=_context(names[0]), search_path=root)
+    candidate = optional_unique_path(candidates, context=_context(names[0]), search_path=root.path)
     if candidate is None:
-        return require_file(root / names[0], context=_context(names[0])) if required else None
-    return require_file(candidate, context=_context(names[0]))
+        return require_metadata_file(root, names[0], context=_context(names[0])) if required else None
+    return require_metadata_file(root, candidate, context=_context(names[0]))
 
 
-def _boundary(directory: Path | None, name: str, *, requested: bool | None) -> ArtifactFile | None:
+def _boundary(
+    root: DatasetRoot, directory: ArtifactDirectory | None, name: str, *, requested: bool | None
+) -> ArtifactFile | None:
     if requested is False:
         return None
     if directory is None:
@@ -101,11 +105,14 @@ def _boundary(directory: Path | None, name: str, *, requested: bool | None) -> A
         return None
 
     path = directory / name
-    return require_file(path, context=_context(name)) if requested else optional_file(path, context=_context(name))
+    if requested:
+        return require_metadata_file(root, path, context=_context(name))
+    return optional_metadata_file(root, path, context=_context(name))
 
 
-def _image_file(
-    spatial: Path | None,
+def _image_file(  # noqa: PLR0913, RUF100 - each image prefers its own root entry.
+    root: DatasetRoot,
+    spatial: ArtifactDirectory | None,
     base_spatial: Path,
     name: str,
     *,
@@ -115,11 +122,13 @@ def _image_file(
     """Prefer each root image independently, rejecting malformed entries."""
     context = _context(artifact)
     if spatial is not None:
-        image = optional_file(spatial / name, context=context)
+        image = optional_metadata_file(root, spatial / name, context=context)
         if image is not None:
             return image
     path = base_spatial / name
-    return require_file(path, context=context) if required else optional_file(path, context=context)
+    if required:
+        return require_metadata_file(root, path, context=context)
+    return optional_metadata_file(root, path, context=context)
 
 
 def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path, ...]) -> ArtifactFile | None:
@@ -132,7 +141,7 @@ def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path
         if re.fullmatch(r"(?:.+_)?tissue_image\.(?:btf|tif|tiff)", entry.name, flags=re.IGNORECASE)
     ]
 
-    folder = optional_directory(root / "microscope_image", context=_context("microscope_image"))
+    folder = optional_metadata_directory(root, "microscope_image", context=_context("microscope_image"))
     if folder is not None:
         candidates.extend(
             entry
@@ -140,14 +149,14 @@ def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path
             if entry.suffix.lower() in {".btf", ".tif", ".tiff", ".png", ".jpg", ".jpeg"}
         )
 
-    path = optional_unique_path(candidates, context=_context("full-resolution image"), search_path=root)
-    return None if path is None else require_file(path, context=_context("full-resolution image"))
+    path = optional_unique_path(candidates, context=_context("full-resolution image"), search_path=root.path)
+    return None if path is None else require_metadata_file(root, path, context=_context("full-resolution image"))
 
 
-def _bin_directories(root: DatasetRoot) -> dict[int, Path]:
+def _bin_directories(root: DatasetRoot) -> dict[int, ArtifactDirectory]:
     """Discover only directly nested vendor bin directories."""
-    binned = optional_directory(root / "binned_outputs", context=_context("binned outputs"))
-    directories: dict[int, Path] = {}
+    binned = optional_metadata_directory(root, "binned_outputs", context=_context("binned outputs"))
+    directories: dict[int, ArtifactDirectory] = {}
     if binned is not None:
         for entry in sorted(binned.iterdir()):
             match = re.fullmatch(r"square_(\d{3,})um", entry.name)
@@ -161,7 +170,7 @@ def _bin_directories(root: DatasetRoot) -> dict[int, Path]:
                         path=binned,
                     )
 
-                directories[size] = require_directory(entry, context=_context("bin directory"))
+                directories[size] = require_metadata_directory(root, entry, context=_context("bin directory"))
 
     return directories
 
@@ -178,10 +187,11 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
     include_images: bool = True,
     include_cytassist_image: bool = False,
     fullres_image_file: str | Path | None = None,
+    path_policy: PathPolicy = "strict",
 ) -> VisiumHDLayout:
     """Resolve selected standard and loose-download artifacts without recursion."""
-    root = normalize_dataset_root(path, context=_context("dataset root"))
-    entries: tuple[Path, ...] = tuple(sorted(root.iterdir()))
+    root = normalize_dataset_root(path, context=_context("dataset root"), path_policy=path_policy)
+    entries: tuple[Path, ...] = tuple(sorted(root.path.iterdir()))
     directories = _bin_directories(root)
     selected = tuple(sorted(directories)) if bin_sizes == "all" else tuple(bin_sizes)
     absent = set(selected).difference(directories)
@@ -190,31 +200,42 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
             context=_context("bin selection"),
             found=f"missing sizes {sorted(absent)}",
             expected=f"available sizes {sorted(directories)}",
-            path=root,
+            path=root.path,
         )
 
     # Every product shares the physical frame calibrated from the native 2 micrometre grid.
     base = directories.get(2)
     if base is None:
-        msg = f"visium_hd: missing square_002um calibration artifacts in {root}"
+        msg = f"visium_hd: missing square_002um calibration artifacts in {root.path}"
         raise FileNotFoundError(msg)
 
-    base_positions = require_file(base / "spatial/tissue_positions.parquet", context=_context("base positions"))
-    base_scale = require_file(base / "spatial/scalefactors_json.json", context=_context("base scale factors"))
+    base_positions = require_metadata_file(
+        root, base / "spatial/tissue_positions.parquet", context=_context("base positions")
+    )
+    base_scale = require_metadata_file(
+        root, base / "spatial/scalefactors_json.json", context=_context("base scale factors")
+    )
 
     bins = tuple(
         BinLayout(
             size,
-            require_file(directories[size] / f"{bin_counts_kind}_feature_bc_matrix.h5", context=_context("bin counts")),
-            require_file(directories[size] / "spatial/tissue_positions.parquet", context=_context("bin positions")),
-            require_file(directories[size] / "spatial/scalefactors_json.json", context=_context("bin scale factors")),
+            require_metadata_file(
+                root, directories[size] / f"{bin_counts_kind}_feature_bc_matrix.h5", context=_context("bin counts")
+            ),
+            require_metadata_file(
+                root, directories[size] / "spatial/tissue_positions.parquet", context=_context("bin positions")
+            ),
+            require_metadata_file(
+                root, directories[size] / "spatial/scalefactors_json.json", context=_context("bin scale factors")
+            ),
         )
         for size in selected
     )
 
-    segmented = optional_directory(root / "segmented_outputs", context=_context("segmented outputs"))
-    cell = _boundary(segmented, "cell_segmentations.geojson", requested=include_cell_boundaries)
+    segmented = optional_metadata_directory(root, "segmented_outputs", context=_context("segmented outputs"))
+    cell = _boundary(root, segmented, "cell_segmentations.geojson", requested=include_cell_boundaries)
     nucleus = _boundary(
+        root,
         segmented,
         "nucleus_segmentations.geojson",
         requested=True if include_nucleus_table else include_nucleus_boundaries,
@@ -225,8 +246,8 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
         if segmented is None:
             msg = "visium_hd: missing requested segmented_outputs"
             raise FileNotFoundError(msg)
-        cell_counts = require_file(
-            segmented / f"{cell_counts_kind}_feature_cell_matrix.h5", context=_context("cell counts")
+        cell_counts = require_metadata_file(
+            root, segmented / f"{cell_counts_kind}_feature_cell_matrix.h5", context=_context("cell counts")
         )
     segmentation = SegmentationLayout(cell_counts, cell, nucleus) if cell is not None or nucleus is not None else None
 
@@ -234,7 +255,7 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
     if include_nucleus_table:
         loose = _loose_file(root, ("barcode_mappings.parquet",), entries, required=False)
         nested = (
-            optional_file(segmented / "barcode_mappings.parquet", context=_context("barcode mappings"))
+            optional_metadata_file(root, segmented / "barcode_mappings.parquet", context=_context("barcode mappings"))
             if segmented is not None
             else None
         )
@@ -243,14 +264,15 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
                 context=_context("barcode mappings"),
                 found="root and segmented mappings",
                 expected="exactly one barcode_mappings.parquet",
-                path=root,
+                path=root.path,
             )
         mappings = loose if loose is not None else nested
         if mappings is None:
-            mappings = require_file(root / "barcode_mappings.parquet", context=_context("barcode mappings"))
+            mappings = require_metadata_file(root, "barcode_mappings.parquet", context=_context("barcode mappings"))
 
         nucleus_counts = NucleusCountSource(
-            require_file(base / "raw_feature_bc_matrix.h5", context=_context("raw two-micron counts")), mappings
+            require_metadata_file(root, base / "raw_feature_bc_matrix.h5", context=_context("raw two-micron counts")),
+            mappings,
         )
 
     feature = _loose_file(
@@ -262,15 +284,17 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
 
     images = None
     if include_images or include_cytassist_image:
-        spatial = optional_directory(root / "spatial", context=_context("image directory"))
+        spatial = optional_metadata_directory(root, "spatial", context=_context("image directory"))
         images = ImageLayout(
-            _image_file(spatial, base / "spatial", "tissue_hires_image.png", artifact="hires image")
+            _image_file(root, spatial, base / "spatial", "tissue_hires_image.png", artifact="hires image")
             if include_images
             else None,
-            _image_file(spatial, base / "spatial", "tissue_lowres_image.png", artifact="lowres image")
+            _image_file(root, spatial, base / "spatial", "tissue_lowres_image.png", artifact="lowres image")
             if include_images
             else None,
-            _image_file(spatial, base / "spatial", "cytassist_image.tiff", artifact="CytAssist image", required=True)
+            _image_file(
+                root, spatial, base / "spatial", "cytassist_image.tiff", artifact="CytAssist image", required=True
+            )
             if include_cytassist_image
             else None,
             _fullres(root, fullres_image_file, entries) if include_images else None,

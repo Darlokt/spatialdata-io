@@ -38,6 +38,7 @@ class TestPackage:
             "tiff_level",
             "scale_factors",
             "chunks",
+            "path_policy",
         ]
         assert parameters["path"].default is inspect.Parameter.empty
         assert parameters["path"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
@@ -59,6 +60,7 @@ class TestPackage:
             "tiff_level": 0,
             "scale_factors": DEFAULT_SCALE_FACTORS,
             "chunks": DEFAULT_CHUNKS,
+            "path_policy": "strict",
         }
 
     def test_path_is_required_at_runtime(self) -> None:

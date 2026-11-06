@@ -8,7 +8,12 @@ import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.metadata import read_json_object
-from spatialdata_io.readers._utils.paths import ArtifactFile, normalize_dataset_root, require_file
+from spatialdata_io.readers._utils.paths import (
+    ArtifactFile,
+    normalize_dataset_root,
+    require_file,
+    require_metadata_file,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,18 +25,18 @@ class TestReadJsonObject:
         tmp_path: Path,
     ) -> None:
         context = ReaderErrorContext(reader="xenium", artifact="experiment.xenium", detected_version="3.0")
-        root = normalize_dataset_root(tmp_path, context=context)
+        root = normalize_dataset_root(tmp_path, context=context, path_policy="strict")
         target = tmp_path / "metadata-target.json"
         target.write_text('{"analysis":{"version":"3.0"}}', encoding="utf-8")
         alias = tmp_path / "experiment.xenium"
         alias.symlink_to(target)
-        artifact = require_file(alias, context=context)
+        artifact = require_metadata_file(root, alias, context=context)
         assert_type(artifact, ArtifactFile)
 
         result = read_json_object(artifact, context=context)
         assert_type(result, dict[str, object])
 
-        assert root == tmp_path.resolve()
+        assert root.path == tmp_path.resolve()
         assert artifact == target.resolve()
         target.unlink()
         assert result == {"analysis": {"version": "3.0"}}
