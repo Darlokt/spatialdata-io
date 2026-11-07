@@ -35,6 +35,13 @@ Rules that hold in both modes:
   identify samples, channels or file formats always come from the dataset or
   from you, never from the target.
 - Missing files, dangling symlinks and files of the wrong kind fail as before.
+- Every reader ignores macOS AppleDouble files, whose names start with `._`
+  (for example `._Roi1_CellxGene.csv`). macOS writes one beside each file it
+  copies to a volume without extended attributes; they hold Finder metadata,
+  never data. Other hidden files are treated like any other file.
+- A directory that cannot be listed, also a subdirectory of a recursively
+  searched directory (Xenium `analysis/`, MACSima folders), fails with the
+  reader and directory named in the error instead of being skipped.
 
 ## Known limitation: multi-file OME-TIFF sets
 

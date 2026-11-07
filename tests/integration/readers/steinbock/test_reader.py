@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from tests.integration.readers.steinbock.conftest import SteinbockDataset
 
 
-def _write_layout(path: Path) -> tuple[np.ndarray, np.ndarray]:
+def _write_layout(path: Path, name: str = "sample") -> tuple[np.ndarray, np.ndarray]:
     image_directory = path / "ome"
     mask_directory = path / "masks"
     image_directory.mkdir()
@@ -44,18 +44,18 @@ def _write_layout(path: Path) -> tuple[np.ndarray, np.ndarray]:
         dtype=np.uint16,
     )
     tifffile.imwrite(
-        image_directory / "sample.ome.tiff", image, photometric="minisblack", ome=True, metadata={"axes": "CYX"}
+        image_directory / f"{name}.ome.tiff", image, photometric="minisblack", ome=True, metadata={"axes": "CYX"}
     )
-    tifffile.imwrite(mask_directory / "sample.tiff", labels, photometric="minisblack")
+    tifffile.imwrite(mask_directory / f"{name}.tiff", labels, photometric="minisblack")
 
     obs = pd.DataFrame(
         {
-            "image": ["sample.tiff", "sample.tiff"],
-            "Image": ["sample.tiff", "sample.tiff"],
+            "image": [f"{name}.tiff", f"{name}.tiff"],
+            "Image": [f"{name}.tiff", f"{name}.tiff"],
             "centroid-0": [1.0, 3.0],
             "centroid-1": [1.5, 2.5],
         },
-        index=["Object 1 in sample.tiff", "Object 2 in sample.tiff"],
+        index=[f"Object 1 in {name}.tiff", f"Object 2 in {name}.tiff"],
     )
     var = pd.DataFrame({"Channel Name": ["A", "B"]}, index=["marker-a", "marker-b"])
     table = ad.AnnData(
@@ -68,6 +68,77 @@ def _write_layout(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 class TestSteinbock:
+    def test_h5ad_observation_column_names_are_sanitized(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        source = ad.read_h5ad(tmp_path / "cells.h5ad")
+        source.obs["my note"] = ["x", "y"]
+        source.obs["Cell_ID"] = ["c", "d"]
+        source.write_h5ad(tmp_path / "cells.h5ad")
+
+        with pytest.warns(UserWarning, match="observation metadata") as caught:
+            result = steinbock(tmp_path)
+
+        messages = [str(warning.message) for warning in caught]
+        assert (
+            "steinbock: the observation metadata of the cell table has column names that a SpatialData table does "
+            "not accept; using 'my note' -> 'my_note', 'Cell_ID' -> 'Cell_ID_1'. Rename the source columns to "
+            "choose the names explicitly."
+        ) in messages
+        table = result.tables["table"]
+        assert table.obs.columns.tolist() == [
+            "image",
+            "centroid-0",
+            "centroid-1",
+            "my_note",
+            "Cell_ID_1",
+            "cell_id",
+            "region",
+        ]
+        assert table.obs["my_note"].tolist() == ["x", "y"]
+        assert table.obs["cell_id"].tolist() == [1, 2]
+        result.write(tmp_path / "result.zarr")
+        assert read_zarr(tmp_path / "result.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
+
+    def test_file_derived_sample_and_feature_column_names_are_sanitized(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path, name="sample 1")
+        source = ad.read_h5ad(tmp_path / "cells.h5ad")
+        source.var["CD45 RO"] = ["x", "y"]
+        source.write_h5ad(tmp_path / "cells.h5ad")
+        # A macOS AppleDouble companion is not a sample.
+        (tmp_path / "ome" / "._sample 1.ome.tiff").write_bytes(b"\x00\x05\x16\x07")
+
+        with pytest.warns(UserWarning, match="sample_1") as caught:
+            result = steinbock(tmp_path)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "steinbock: the sample file name 'sample 1' is not a usable SpatialData element name; using "
+                "'sample_1'. Rename the source files to choose the name explicitly."
+            ),
+            (
+                "steinbock: the feature metadata of the cell table has column names that a SpatialData table does not "
+                "accept; using 'Channel Name' -> 'Channel_Name', 'CD45 RO' -> 'CD45_RO'. Rename the source columns to "
+                "choose the names explicitly."
+            ),
+        ]
+        assert list(result.images) == ["sample_1_image"]
+        assert list(result.labels) == ["sample_1_labels"]
+        assert result.coordinate_systems == ["sample_1_pixels"]
+        table = result.tables["table"]
+        assert table.obs["image"].tolist() == ["sample 1.tiff", "sample 1.tiff"]
+        assert table.obs["region"].tolist() == ["sample_1_labels", "sample_1_labels"]
+        assert table.obs["cell_id"].tolist() == [1, 2]
+        assert table.var.columns.tolist() == ["Channel_Name", "CD45_RO"]
+        assert table.var["CD45_RO"].tolist() == ["x", "y"]
+        assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial_pixels"]["frame"] == (
+            "sample_1_regionprops_indices"
+        )
+
+        result.write(tmp_path / "result.zarr")
+        restored = read_zarr(tmp_path / "result.zarr")
+        assert sorted(restored.images) == ["sample_1_image"]
+        assert restored.tables["table"].var.columns.tolist() == ["Channel_Name", "CD45_RO"]
+
     """Characterize sample pairing, lazy rasters, cleanup, and linkage."""
 
     @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
@@ -623,9 +694,10 @@ class TestSteinbock:
         assert isinstance(actual, sparse.csr_array)
         assert actual.dtype == np.dtype(np.float32)
         np.testing.assert_array_equal(actual.data, [2 * value, 7])
-        assert len(reported) == 1
-        assert slot in str(reported[0].message)
-        assert path.name in str(reported[0].message)
+        # The fixture's "Channel Name" feature column adds the column-name warning.
+        (summed,) = (warning for warning in reported if "combined" in str(warning.message))
+        assert slot in str(summed.message)
+        assert path.name in str(summed.message)
         assert path.read_bytes() == before
 
     @pytest.mark.parametrize("slot", ["X", "counts"])

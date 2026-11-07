@@ -92,10 +92,13 @@ class Calibration:
 class SampleGrid:
     """The pixel grid one sample's image, mask and table rows share.
 
-    ``shape`` is the mask's ``(height, width)`` and ``dtype`` its integer dtype;
-    ``frame`` is the coordinate system the rasters are registered to.
+    ``image_name`` is the sample's source file name ``<sample>.tiff``, which
+    its table rows carry in ``obs["image"]``; ``shape`` is the mask's
+    ``(height, width)`` and ``dtype`` its integer dtype; ``frame`` is the
+    coordinate system the rasters are registered to.
     """
 
+    image_name: str
     shape: tuple[int, int]
     dtype: np.dtype[np.integer]
     frame: str
@@ -163,7 +166,7 @@ def read_rasters(
             scale_factors=raster.model_scale_factors,
             transformations={frame: transform},
         ),
-        grid=SampleGrid(shape, labels.dtype, frame, calibration),
+        grid=SampleGrid(sample.image_name, shape, labels.dtype, frame, calibration),
     )
 
 

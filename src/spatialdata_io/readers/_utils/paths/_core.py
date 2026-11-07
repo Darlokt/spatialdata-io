@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Literal, NewType
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
 ArtifactDirectory = NewType("ArtifactDirectory", Path)
 ArtifactFile = NewType("ArtifactFile", Path)
@@ -46,6 +46,8 @@ type PathPolicy = Literal["strict", "relaxed"]
 type _PathKind = Literal["file", "directory"]
 type _PathOrigin = Literal["caller", "metadata"]
 
+# macOS writes "._<name>" AppleDouble metadata companions on foreign volumes.
+_APPLE_DOUBLE_PREFIX = "._"
 _EXPECTED_KIND: dict[_PathKind, str] = {"file": "an existing regular file", "directory": "an existing directory"}
 
 
@@ -635,41 +637,64 @@ def optional_metadata_directory(
     return None if result is None else ArtifactDirectory(result)
 
 
-def sorted_paths(
-    paths: Iterable[Path],
-    /,
-    *,
-    context: ReaderErrorContext,
-    search_path: Path,
-) -> tuple[Path, ...]:
-    """Materialize one path iterable in deterministic lexical order.
+def _raise(error: OSError) -> None:
+    """Let :func:`os.walk` propagate a listing failure instead of skipping the directory."""
+    raise error
+
+
+def _is_apple_double(path: Path) -> bool:
+    """Return whether ``path`` names a macOS AppleDouble companion (``._<name>``)."""
+    return path.name.startswith(_APPLE_DOUBLE_PREFIX)
+
+
+def _walk(directory: Path) -> Iterator[Path]:
+    """Yield every entry below ``directory``, without following directory symlinks."""
+    for parent, directories, files in os.walk(directory, onerror=_raise):
+        # Pruning in place stops the walk from descending into AppleDouble entries.
+        directories[:] = [name for name in directories if not name.startswith(_APPLE_DOUBLE_PREFIX)]
+        base = Path(parent)
+        yield from (base / name for name in directories)
+        yield from (base / name for name in files)
+
+
+def list_directory(directory: Path, /, *, context: ReaderErrorContext, recursive: bool = False) -> tuple[Path, ...]:
+    """List the entries of one directory in deterministic lexical order.
+
+    macOS AppleDouble companions, entries whose name starts with ``._``, are
+    left out: macOS writes one beside every file it copies to a volume
+    without extended attributes, and they hold metadata, never data. Other
+    hidden entries are listed.
 
     Parameters
     ----------
-    paths
-        Reader-discovered paths. The iterable is consumed exactly once.
+    directory
+        Directory to list. Readers pass a validated artifact directory.
     context
-        Reader context added to filesystem iteration failures.
-    search_path
-        Directory or tree root from which the reader obtained ``paths``. It is
-        diagnostic context only and is not accessed or validated here.
+        Reader context added to listing failures.
+    recursive
+        Whether to list the entries of every subdirectory too. Symlinked
+        subdirectories are listed but not entered, and AppleDouble
+        directories are not entered.
 
     Returns
     -------
     tuple[Path, ...]
-        Immutable paths sorted by POSIX lexical spelling. Paths are not
-        resolved, deduplicated, accessed, or filtered by kind.
+        Entry paths (``directory / name``), files and directories alike,
+        sorted by POSIX lexical spelling. They are not resolved, accessed or
+        filtered by kind.
 
     Raises
     ------
     OSError
-        If materializing a filesystem-backed iterable fails. The original
-        exception is retained with reader and search-path context.
+        If ``directory`` or, with ``recursive``, a subdirectory cannot be
+        listed. The original exception is retained with reader and directory
+        context; no directory is skipped silently.
     """
     try:
-        return tuple(sorted(paths, key=Path.as_posix))
+        entries = _walk(directory) if recursive else directory.iterdir()
+        return tuple(sorted((path for path in entries if not _is_apple_double(path)), key=Path.as_posix))
     except OSError as error:
-        add_reader_context(error, context=context, path=search_path)
+        add_reader_context(error, context=context, path=directory)
         raise
 
 
@@ -764,6 +789,7 @@ __all__ = [
     "ArtifactFile",
     "DatasetRoot",
     "PathPolicy",
+    "list_directory",
     "normalize_dataset_root",
     "optional_metadata_directory",
     "optional_metadata_file",
@@ -775,5 +801,4 @@ __all__ = [
     "require_metadata_directory",
     "require_metadata_file",
     "require_unique_path",
-    "sorted_paths",
 ]

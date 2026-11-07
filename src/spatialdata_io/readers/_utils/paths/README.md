@@ -16,7 +16,8 @@ The package owns:
 - canonical existing dataset roots and their path policy;
 - required and optional regular-file and directory validation;
 - distinct caller and dataset (metadata) path-origin rules;
-- deterministic one-pass candidate materialization and unique selection;
+- deterministic directory listing, without macOS AppleDouble (`._*`)
+  companions, and unique selection;
 - precise standard path exceptions and contextual format failures; and
 - metadata-only filesystem work with no content loading.
 
@@ -242,25 +243,31 @@ or both, then apply their format meaning after deterministic selection:
 
 ```python
 from spatialdata_io.readers._utils.paths import (
+    list_directory,
     require_metadata_directory,
     require_unique_path,
 )
 
 candidate = require_unique_path(
-    (path for path in root.path.iterdir() if path.name.startswith("analysis-")),
+    (path for path in list_directory(root.path, context=layout_context) if path.name.startswith("analysis-")),
     context=layout_context,
     search_path=root.path,
 )
 analysis_directory = require_metadata_directory(root, candidate, context=layout_context)
 ```
 
-`sorted_paths()` consumes a filesystem iterable once and attaches reader and
-search-path context if iteration fails. Unique selectors consume their iterable
-once, do not resolve or filter candidates, and avoid sorting successful zero- or
-one-candidate cases. Pass a filtered discovery iterator directly to a unique
-selector; use `sorted_paths()` only when a reader needs to retain multiple
-ordered candidates. Ambiguities report every candidate in deterministic lexical
-order.
+`list_directory()` is the only way readers list a directory. It lists inside
+its own error handling, so a failure carries reader and directory context
+(since Python 3.13 `Path.iterdir()` lists eagerly, before a caller could wrap
+its iteration), returns the entries sorted by POSIX spelling, and leaves out
+macOS AppleDouble companions (`._<name>`) in every reader. Other hidden
+entries are listed; readers decide whether they matter. With
+`recursive=True` it walks subdirectories and raises if one cannot be listed,
+instead of skipping it silently like `Path.rglob()`.
+
+Unique selectors consume their reader-filtered iterable once, do not resolve
+or filter candidates, and avoid sorting successful zero- or one-candidate
+cases. Ambiguities report every candidate in deterministic lexical order.
 
 ## Errors
 
@@ -292,10 +299,9 @@ Creating an artifact marker is an identity call with no wrapper allocation.
 The type follow-up adds no filesystem access, file opening, content loading, or
 copying.
 
-Unique selectors necessarily snapshot candidate names once. `sorted_paths()`
-sorts its input directly and returns one immutable tuple, without first creating
-an additional tuple snapshot. These operations never store file contents, open
-handles, or reader state. The package opens no artifact and has no NumPy, SciPy,
+Unique selectors necessarily snapshot candidate names once. `list_directory()`
+sorts the listing directly and returns one immutable tuple. These operations
+never store file contents, open handles, or reader state. The package opens no artifact and has no NumPy, SciPy,
 AnnData, Dask, Arrow, Scanpy, SpatialData, or raster-library dependency.
 
 ## Extension policy

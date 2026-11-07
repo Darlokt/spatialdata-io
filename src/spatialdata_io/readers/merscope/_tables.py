@@ -1,4 +1,22 @@
-"""Bounded MERSCOPE counts, aligned owned annotations, and final table linkage."""
+"""Build the cell table from ``cell_by_gene.csv`` and ``cell_metadata.csv``.
+
+Counts are streamed in bounded row batches: each batch is decoded exactly as
+integers into a small dense block, converted to CSR and given its count dtype
+right away, so only sparse float storage accumulates. Rows keep the count file
+order and features its column order. Metadata is aligned to the count rows by
+exact cell identity; both files must describe the same cells.
+
+``Blank-<positive integer>`` controls move from ``X`` to CSR ``obsm["blank"]``
+with their names in ``uns["blank_names"]``. Expression and controls share one
+dtype: float32 when every count is exactly representable, else float64.
+Centroids ``center_x``/``center_y`` become ``obsm["spatial"]`` (float64
+micrometres, ``global`` frame). Metadata column names that a SpatialData table
+does not accept are sanitized with one warning.
+
+With boundaries returned, the table links to them through ``cells_region``
+and ``EntityID``; cells whose boundaries the invalid-geometry policy dropped
+are removed from the table first. Without boundaries the table is unlinked.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +32,7 @@ from scipy import sparse
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.csv import read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     as_csr_array,
@@ -23,6 +42,9 @@ from spatialdata_io.readers._utils.table import (
     prepare_anndata_dataframe,
 )
 from spatialdata_io.readers.merscope._schemas import (
+    COUNTS,
+    METADATA,
+    OUTPUT_ANNOTATIONS,
     STRING_DTYPE,
     blank_columns,
     count_columns,
@@ -37,21 +59,26 @@ from spatialdata_io.readers.merscope._schemas import (
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.merscope._geometry import CellBoundaries
-    from spatialdata_io.readers.merscope._layout import Names
+    from spatialdata_io.readers.merscope._layout import Names, TableFiles
 
+_COUNTS_CONTEXT = ReaderErrorContext("merscope", COUNTS)
+_METADATA_CONTEXT = ReaderErrorContext("merscope", METADATA)
+_TABLE_CONTEXT = ReaderErrorContext("merscope", "cell table")
 _CSV_BLOCK_BYTES = 1024 * 1024
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
-_MAX_BATCH_ROWS = 10_000
+# Columns whose names the reader relies on or generates; source columns that
+# equal one ignoring case are renamed rather than these.
+_READER_OBS_COLUMNS = ("EntityID", "center_x", "center_y", *OUTPUT_ANNOTATIONS)
 
 
 def read_feature_names(path: ArtifactFile) -> tuple[str, ...]:
     """Read only the count header, including blanks in exact source order."""
-    return count_columns(read_csv_header(path, context=ReaderErrorContext("merscope", path.name)), path)
+    return count_columns(read_csv_header(path, context=_COUNTS_CONTEXT), path)
 
 
 def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
-    """Decode a bounded lexical count block without float promotion or dense accumulation."""
-    columns = [integer_values(column, path) for column in batch.columns[1:]]
+    """Decode one bounded row batch exactly into an integer CSR block."""
+    columns = [integer_values(column, path, COUNTS) for column in batch.columns[1:]]
     dtype = np.uint64 if any(column.dtype.kind == "u" for column in columns) else np.int64
     dense = np.empty((batch.num_rows, len(columns)), dtype=dtype)
     for index, column in enumerate(columns):
@@ -60,10 +87,10 @@ def _count_block(batch: pa.RecordBatch, path: ArtifactFile) -> sparse.csr_array:
 
 
 def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[str, ...]]:
-    """Stream exact counts, retaining only sparse blocks and required row identities."""
-    columns = read_csv_header(path, context=ReaderErrorContext("merscope", path.name))
+    """Stream exact counts in bounded batches, retaining only sparse blocks and row identities."""
+    columns = read_csv_header(path, context=_COUNTS_CONTEXT)
     features = count_columns(columns, path)
-    rows_per_batch = max(1, min(_MAX_BATCH_ROWS, _BATCH_MEMORY_BYTES // (16 * len(features))))
+    rows_per_batch = max(1, _BATCH_MEMORY_BYTES // (16 * len(features)))
     blocks: list[sparse.csr_array] = []
     identifiers: list[str] = []
     # Arrow checks full record widths but can accept malformed CSV quoting.
@@ -83,29 +110,30 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
                 for offset in range(0, batch.num_rows, rows_per_batch):
                     block = batch.slice(offset, rows_per_batch)
                     identifiers.extend(block.column(0).to_pylist())
+                    # Converting each block at once keeps only float storage.
+                    # Stacking promotes float32 blocks exactly to float64 when
+                    # any block needs it, which equals one final conversion.
                     blocks.extend(
-                        finalize_count_arrays(
-                            (_count_block(block, path),),
-                            context=ReaderErrorContext("merscope", "counts and blanks"),
-                            path=path,
-                        )
+                        finalize_count_arrays((_count_block(block, path),), context=_COUNTS_CONTEXT, path=path)
                     )
     except pa.ArrowInvalid as error:
         raise schema_error(
-            path, found=f"malformed count CSV: {error}", expected="one field per header column"
+            path, COUNTS, found=f"malformed count CSV: {error}", expected="one field per header column"
         ) from error
     else:
         if not blocks:
-            raise schema_error(path, found="no cells", expected="a nonempty count population")
-        ids = normalize_cell_ids(pd.Series(identifiers, dtype=STRING_DTYPE), path)
+            raise schema_error(path, COUNTS, found="no cells", expected="a nonempty count population")
+        ids = normalize_cell_ids(pd.Series(identifiers, dtype=STRING_DTYPE), path, COUNTS)
         if not ids.is_unique:
-            raise schema_error(path, found="duplicate count identities", expected="one count row per exact cell ID")
+            raise schema_error(
+                path, COUNTS, found="duplicate count identities", expected="one count row per exact cell ID"
+            )
         return sparse.vstack(blocks, format="csr"), pd.Index(ids.to_numpy(), name=None), features
 
 
 def _read_metadata(path: ArtifactFile) -> pd.DataFrame:
     """Read finite eager annotations once, preserving extra source fields as text."""
-    columns = metadata_columns(read_csv_header(path, context=ReaderErrorContext("merscope", path.name)), path)
+    columns = metadata_columns(read_csv_header(path, context=_METADATA_CONTEXT), path)
     try:
         with path.open("rb") as handle:
             source = pacsv.read_csv(
@@ -118,20 +146,23 @@ def _read_metadata(path: ArtifactFile) -> pd.DataFrame:
             )
     except pa.ArrowInvalid as error:
         raise schema_error(
-            path, found=f"malformed metadata CSV: {error}", expected="one field per header column"
+            path, METADATA, found=f"malformed metadata CSV: {error}", expected="one field per header column"
         ) from error
     else:
         return normalize_metadata(source.to_pandas(types_mapper=pd.ArrowDtype), path)
 
 
-def read_table(counts: ArtifactFile, metadata: ArtifactFile) -> tuple[ad.AnnData, tuple[str, ...]]:
+def read_table(files: TableFiles) -> tuple[ad.AnnData, tuple[str, ...]]:
     """Return an owned unlinked CSR table and its complete ordered source vocabulary."""
-    expression, identities, features = _read_counts(counts)
-    observations = _read_metadata(metadata)
+    expression, identities, features = _read_counts(files.counts)
+    observations = _read_metadata(files.metadata)
     if not observations.index.equals(identities):
         if set(observations.index) != set(identities):
             raise schema_error(
-                metadata, found="different cell populations", expected="identical count and metadata IDs"
+                files.metadata,
+                METADATA,
+                found="different cell populations",
+                expected="identical count and metadata IDs",
             )
         observations = observations.loc[identities]
 
@@ -147,6 +178,9 @@ def read_table(counts: ArtifactFile, metadata: ArtifactFile) -> tuple[ad.AnnData
         gene_counts = expression[:, ~is_blank]
         blank_counts = expression[:, is_blank]
 
+    observations.columns = sanitize_column_names(
+        list(observations.columns), source="merscope: the cell_metadata.csv header", reserved=_READER_OBS_COLUMNS
+    )
     table = ad.AnnData(X=gene_counts, obs=observations, var=pd.DataFrame(index=pd.Index(genes)))
     table.obsm["blank"] = blank_counts
     table.uns["blank_names"] = [name for name, blank in zip(features, is_blank, strict=True) if blank]
@@ -154,15 +188,8 @@ def read_table(counts: ArtifactFile, metadata: ArtifactFile) -> tuple[ad.AnnData
     return table, features
 
 
-def finalize_table(
-    table: ad.AnnData,
-    *,
-    frame: str,
-    names: Names,
-    boundaries: CellBoundaries | None,
-) -> ad.AnnData:
+def finalize_table(table: ad.AnnData, *, names: Names, boundaries: CellBoundaries | None) -> ad.AnnData:
     """Complete owned annotations and link once to an explicitly included cell footprint."""
-    context = ReaderErrorContext("merscope", "cell table")
     # The reader owns eager AnnData annotations; backed Dataset2D is not produced.
     observations = cast("pd.DataFrame", table.obs)
 
@@ -170,23 +197,23 @@ def finalize_table(
     target = f"{names.dataset_id}_polygons"
     if boundaries is not None:
         expected["cells_region"] = target
-    validate_output_annotations(observations, expected, context=context)
+    validate_output_annotations(observations, expected, context=_TABLE_CONTEXT)
 
     # Dropping invalid geometry must not conceal a mismatch between the sources.
     if boundaries is not None and len(boundaries.source_ids) != len(boundaries.shapes):
         if len(table.obs_names) != len(boundaries.source_ids) or not table.obs_names.isin(boundaries.source_ids).all():
             raise ReaderFormatError(
-                context=context,
+                context=_TABLE_CONTEXT,
                 found="different original count and boundary populations",
                 expected="identical count and original boundary IDs before geometry filtering",
             )
-        keep = table.obs_names.isin(boundaries.shapes.index)
-        if not keep.all():
-            table = table[keep].copy()
-            observations = cast("pd.DataFrame", table.obs)
-            table.X, table.obsm["blank"] = finalize_count_arrays(
-                (cast("sparse.csr_array", table.X), cast("sparse.csr_array", table.obsm["blank"])), context=context
-            )
+        table = table[table.obs_names.isin(boundaries.shapes.index)].copy()
+        observations = cast("pd.DataFrame", table.obs)
+        # Dropped rows may have held the only counts that needed float64.
+        table.X, table.obsm["blank"] = finalize_count_arrays(
+            (cast("sparse.csr_array", table.X), cast("sparse.csr_array", table.obsm["blank"])),
+            context=_TABLE_CONTEXT,
+        )
 
     positions: PositionsMetadata = {
         "schema_version": 1,
@@ -194,9 +221,9 @@ def finalize_table(
             "spatial": {
                 "axes": ["x", "y"],
                 "units": "micrometer",
-                "frame": frame,
+                "frame": "global",
                 "position": "vendor cell centroid",
-                "calibration": {frame: "Vizgen cell_metadata center_x/center_y in micrometres"},
+                "calibration": {"global": "Vizgen cell_metadata center_x/center_y in micrometres"},
             }
         },
     }
@@ -206,15 +233,15 @@ def finalize_table(
         observations[name] = pd.Series(value, index=observations.index, dtype="category")
     observations["EntityID"] = pd.Series(observations.index, index=observations.index, dtype=STRING_DTYPE)
 
-    table.obs = prepare_anndata_dataframe(observations, context=context)
-    table.var = prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
+    table.obs = prepare_anndata_dataframe(observations, context=_TABLE_CONTEXT)
+    table.var = prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=_TABLE_CONTEXT)
 
     if boundaries is not None:
         return parse_linked_table(
             table,
             TableLinkage((target,), "cells_region", "EntityID"),
             expected_instance_ids={target: boundaries.shapes.index},
-            context=context,
+            context=_TABLE_CONTEXT,
         )
 
     normalize_owned_anndata(table)

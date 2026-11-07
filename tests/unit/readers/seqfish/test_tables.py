@@ -6,14 +6,16 @@ from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pytest
 from scipy import sparse
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.seqfish import _tables as seqfish_tables
 from spatialdata_io.readers.seqfish._schemas import FLOAT_DTYPE
-from spatialdata_io.readers.seqfish._tables import _count_block, finalize_table, read_table
+from spatialdata_io.readers.seqfish._tables import _count_block, finalize_table, read_table, select_cells
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,7 +42,8 @@ class TestReadTable:
     def test_exact_mixed_count_columns_and_cross_batch_promotion(
         self, tmp_path: Path, mocker: MockerFixture, batch_rows: int
     ) -> None:
-        mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_BATCH_ROWS", batch_rows)
+        # 16 bytes per feature and row; three features.
+        mocker.patch("spatialdata_io.readers.seqfish._tables._BATCH_MEMORY_BYTES", 16 * 3 * batch_rows)
         counts = f",digits,decimal,exponent\n2,0,2.0,3e0\n1,{2**63},0.0,16777217e0\n"
         result = read_table(*_sources(tmp_path, counts))
         assert isinstance(result.X, sparse.csr_array)
@@ -82,7 +85,7 @@ class TestReadTable:
             read_table(*_sources(tmp_path, counts, cells))
 
     def test_sparse_order_and_alignment(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_BATCH_ROWS", 1)
+        mocker.patch("spatialdata_io.readers.seqfish._tables._BATCH_MEMORY_BYTES", 1)
         result = read_table(*_sources(tmp_path))
         assert isinstance(result.X, sparse.csr_array)
         assert not isinstance(result.X, sparse.spmatrix)
@@ -97,8 +100,33 @@ class TestReadTable:
         np.testing.assert_array_equal(result.obsm["spatial"], [[7, 5], [2, 3]])
         assert not result.uns
 
+    def test_row_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        """20,001 single-feature rows fit one 8 MiB block; 1,000-row blocks give the identical table."""
+        rows = 20_001
+        counts = ",A\n" + "".join(f"{row + 1},{row % 3}\n" for row in range(rows))
+        cells = "label,area,center_x,center_y\n" + "".join(f"{row + 1},1,{row},2\n" for row in range(rows))
+        sources = _sources(tmp_path, counts, cells)
+        blocks = mocker.spy(seqfish_tables, "_count_block")
+
+        table = read_table(*sources)
+
+        assert [call.args[0].num_rows for call in blocks.call_args_list] == [rows]
+        # 16 bytes per feature and row; one feature.
+        mocker.patch.object(seqfish_tables, "_BATCH_MEMORY_BYTES", 16 * 1000)
+        blocks.reset_mock()
+        small = read_table(*sources)
+        assert len(blocks.call_args_list) == 21
+        expected, actual = table.X, small.X
+        assert isinstance(expected, sparse.csr_array)
+        assert isinstance(actual, sparse.csr_array)
+        assert expected.nnz == actual.nnz == 13_334
+        assert expected.dtype == actual.dtype
+        np.testing.assert_array_equal(expected.data, actual.data)
+        np.testing.assert_array_equal(expected.indices, actual.indices)
+        np.testing.assert_array_equal(expected.indptr, actual.indptr)
+
     def test_unsigned_mixed_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.seqfish._tables._MAX_BATCH_ROWS", 1)
+        mocker.patch("spatialdata_io.readers.seqfish._tables._BATCH_MEMORY_BYTES", 1)
         large = 2**63
         counts = f",A\n65537,1\n{large},{large}\n"
         cells = f"label,area,center_x,center_y\n{large},1,2,3\n65537,4,5,6\n"
@@ -113,6 +141,7 @@ class TestReadTable:
         with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
             read_table(*_sources(tmp_path, f",A\n1,{value}\n2,0\n"))
         assert caught.value.path == tmp_path / "counts.csv"
+        assert caught.value.context.artifact == "CellxGene"
 
     @pytest.mark.parametrize(
         "counts",
@@ -131,8 +160,10 @@ class TestReadTable:
         ],
     )
     def test_invalid_counts(self, tmp_path: Path, counts: str) -> None:
-        with pytest.raises(ReaderFormatError):
+        with pytest.raises(ReaderFormatError) as caught:
             read_table(*_sources(tmp_path, counts))
+        assert caught.value.context.artifact == "CellxGene"
+        assert caught.value.path == tmp_path / "counts.csv"
 
     @pytest.mark.parametrize(
         "cells",
@@ -147,8 +178,10 @@ class TestReadTable:
         ],
     )
     def test_invalid_metadata(self, tmp_path: Path, cells: str) -> None:
-        with pytest.raises(ReaderFormatError):
+        with pytest.raises(ReaderFormatError) as caught:
             read_table(*_sources(tmp_path, cells=cells))
+        assert caught.value.context.artifact == "CellCoordinates"
+        assert caught.value.path == tmp_path / "cells.csv"
 
     def test_zero_area_and_quoted_records(self, tmp_path: Path) -> None:
         counts = ',"Gene,A"\n1,1e0\n'
@@ -203,6 +236,26 @@ class TestCountBlock:
             np.testing.assert_array_equal(result.indptr, [0, 3, 3])
 
 
+class TestSelectCells:
+    """Keep selected rows with their names and reselect the exact count dtype."""
+
+    @pytest.mark.parametrize(("kept", "dtype"), [([2], np.float32), ([1], np.float64), ([1, 2], np.float64)])
+    def test_rows_names_and_count_dtype(self, tmp_path: Path, kept: list[int], dtype: type[np.floating]) -> None:
+        table = read_table(*_sources(tmp_path, counts=f",B,A\n2,0,4\n1,{2**24 + 1},0\n"))
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.dtype == np.dtype(np.float64)
+
+        result = select_cells(table, pd.Index(kept), counts=ArtifactFile(tmp_path / "counts.csv"))
+
+        assert result is not table
+        assert result.obs["instance_id"].tolist() == [i for i in (2, 1) if i in kept]
+        assert result.obs_names.tolist() == [name for name, i in (("0", 2), ("1", 1)) if i in kept]
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.dtype == np.dtype(dtype)
+        np.testing.assert_array_equal(result.X.data, [v for v, i in ((4, 2), (2**24 + 1, 1)) if i in kept])
+        assert table.n_obs == 2
+
+
 class TestFinalizeTable:
     """Normalize final owned annotations and link only to the selected target."""
 
@@ -211,7 +264,7 @@ class TestFinalizeTable:
         table = read_table(*_sources(tmp_path))
         native = table.obsm["spatial"]
         expression = table.X
-        result = finalize_table(table, frame="global", region=region, context=ReaderErrorContext("seqfish", "table"))
+        result = finalize_table(table, frame="global", region=region, counts=ArtifactFile(tmp_path / "counts.csv"))
         assert result is table
         assert result.obsm["spatial"] is native
         assert result.X is expression

@@ -1,4 +1,4 @@
-"""Assemble explicitly calibrated, linked Spatial Genomics ROI elements."""
+"""Assemble the selected Spatial Genomics seqFISH ROIs into one SpatialData object."""
 
 from __future__ import annotations
 
@@ -8,15 +8,12 @@ import pandas as pd
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
-from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import finalize_count_arrays
 from spatialdata_io.readers.seqfish._geometry import make_circles, read_boundaries
 from spatialdata_io.readers.seqfish._layout import discover_layout, make_selection
 from spatialdata_io.readers.seqfish._rasters import read_calibration, read_dapi, read_image, read_labels
-from spatialdata_io.readers.seqfish._tables import finalize_table, read_table
+from spatialdata_io.readers.seqfish._tables import finalize_table, read_table, select_cells
 from spatialdata_io.readers.seqfish._transcripts import read_transcripts
 
 if TYPE_CHECKING:
@@ -26,7 +23,7 @@ if TYPE_CHECKING:
     from anndata import AnnData
     from dask.dataframe import DataFrame
     from geopandas import GeoDataFrame
-    from scipy.sparse import csr_array
+    from spatialdata.transformations import Scale
     from xarray import DataArray, DataTree
 
 
@@ -44,52 +41,57 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
-    """Read the repeated Spatial Genomics seqFISH ROI export layout.
+    """Read the regions of interest (ROIs) of a Spatial Genomics seqFISH export.
 
-    Each ROI requires ``<ROI>_CellxGene.csv`` and
-    ``<ROI>_CellCoordinates.csv``. Requested products additionally require
-    ``<ROI>_DAPI.tiff``, ``<ROI>_Segmentation.tiff``,
-    ``<ROI>_Boundaries.geojson`` or ``<ROI>_TranscriptList.csv``.
-    DAPI OME metadata calibrates every pixel-based product, even when the image
-    itself is excluded. Only a single full-resolution series is supported.
-    With images and labels excluded, polygons need only DAPI calibration
-    metadata; raster axis normalization and channel naming do not apply.
-    No instrument/software release is inferred from these filenames.
+    Supported layout (one flat directory; the export has no version marker)::
+
+        dataset/
+        ├── <ROI>_CellxGene.csv          # required: cell ID, then one count per feature
+        ├── <ROI>_CellCoordinates.csv    # required: label, area, center_x, center_y
+        ├── <ROI>_DAPI.tiff              # OME-TIFF with physical pixel sizes
+        ├── <ROI>_Segmentation.tiff      # integer cell labels on the DAPI grid
+        ├── <ROI>_TranscriptList.csv     # name, x, y, optional z and cell
+        └── <ROI>_Boundaries.geojson     # cell polygons in DAPI pixels, Feature id = cell ID
+
+    - ROIs are the prefixes of the ``CellxGene``/``CellCoordinates`` files.
+      Every selected ROI needs both; the other files are required only by the
+      products that read them. The DAPI file calibrates images, labels and
+      polygons, so it is inspected even when ``include_images=False``.
+    - The ROI prefix starts every element name. A prefix that is not a valid
+      SpatialData element name is repaired with a warning (``Roi 1`` becomes
+      ``Roi_1``); selected ROIs whose names then agree ignoring case fail.
 
     Parameters
     ----------
     path
-        Directory containing the ROI artifacts.
+        Export directory containing the ROI files.
     include_images
-        Return lazy DAPI images in CYX order, preserving dtype and OME channels.
+        Return the DAPI image of each ROI.
     include_labels
-        Return lazy YX integer segmentations and link tables to them. Excluding
-        labels returns normalized unlinked tables without a substitute target.
+        Return the segmentation of each ROI and link its table to it.
     include_transcripts
-        Return projected lazy transcript points. Values are validated when a
-        partition is computed; feature names must belong to its CellxGene header.
+        Return the transcripts of each ROI as points.
     include_shapes
-        Return the requested cell geometry representations.
+        Return the cell shapes chosen by ``shape_geometry``.
     shape_geometry
-        ``"polygons"`` uses explicit GeoJSON feature IDs in pixel coordinates;
-        ``"circles"`` uses cell centroids and ``sqrt(area/pi)`` physical radii;
-        ``"both"`` returns both. Ignored when shapes are excluded.
+        ``"polygons"`` (the GeoJSON boundaries), ``"circles"`` (centroid
+        circles with the cell's area) or ``"both"``. Ignored without shapes.
     invalid_geometries
-        Keep invalid polygon topology unchanged, drop its cell's polygon,
-        requested circle and table row, or raise. Source identity relationships
-        are validated before dropping. Labels and transcripts remain unchanged.
-        Circles-only or shapes-disabled reads never inspect polygons or drop cells.
+        Policy for polygons with invalid topology: ``"keep"`` them unchanged,
+        ``"drop"`` the cell's polygon, circle and table row, or ``"raise"``.
+        Boundary and table cell IDs must agree before anything is dropped.
+        Labels and transcripts are never changed. Circles-only reads do not
+        read the polygons.
     rois
-        Unique ROI filename prefixes in desired order. None selects all in
-        lexical order; an empty sequence is invalid.
+        Exact ROI file prefixes to read, in this order. ``None`` reads every
+        ROI in lexical prefix order; an empty sequence is invalid.
     scale_factors
-        Integer factors of at least two, one per generated pyramid level of the
-        images and labels; empty for a single scale. Label pyramids require at
-        most 32-bit labels to avoid upstream integer rounding.
+        Integer factors of at least two, one per generated pyramid level of
+        the images and labels; empty for a single scale. Label pyramids need
+        labels of at most 32 bits.
     chunks
-        One positive size for every axis or three ``c, y, x`` sizes of the
-        images; labels use the ``y`` and ``x`` sizes. By default one channel per
-        chunk and square 1024-pixel tiles.
+        Chunk size for every axis, or ``(c, y, x)`` sizes of the images;
+        labels use the ``y`` and ``x`` sizes.
     path_policy
         How symlinks inside the dataset directory are treated. ``"strict"``
         requires every discovered artifact and relative file option to resolve
@@ -103,87 +105,108 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     Returns
     -------
     spatialdata.SpatialData
-        Per-ROI elements ``table_<ROI>``, ``<ROI>_DAPI``,
-        ``<ROI>_Segmentation``, ``<ROI>_TranscriptList``,
-        ``<ROI>_Boundaries`` and/or ``<ROI>_CellCoordinates`` when requested.
-        Tables contain eager finite canonical CSR count arrays, float32 when
-        exact and otherwise float64, in source feature
-        and observation order; cells and boundaries align by exact top-level
-        feature identifiers. GeoJSON properties are independent annotations.
-        Polygon drops retain surviving positional row names, including gaps.
+        Per selected ROI, with ``<ROI>`` its (repaired) name:
+
+        - ``tables["table_<ROI>"]``: eager AnnData in count-row and
+          feature-header order. ``X`` is a canonical CSR sparse array of the
+          exact counts, float32 when every value fits exactly, else float64.
+          ``obs`` holds ``area`` (µm²) and the integer cell ID
+          ``instance_id``; ``obsm["spatial"]`` the float64 centroids (µm).
+          Observation names are positional strings from ``"0"``; dropped
+          cells leave gaps. With labels, categorical ``region`` links the
+          table to ``<ROI>_Segmentation``; otherwise it is unlinked.
+        - ``images["<ROI>_DAPI"]``: lazy ``(c, y, x)`` image in the source
+          dtype, channels named by OME channel names or IDs.
+        - ``labels["<ROI>_Segmentation"]``: lazy ``(y, x)`` integer labels in
+          the source dtype.
+        - ``points["<ROI>_TranscriptList"]``: lazy two-dimensional points
+          ``x``, ``y`` with categorical ``name`` (categories in feature-header
+          order), optional ``cell`` (``uint64[pyarrow]``, ``0`` unassigned)
+          and optional integer plane index ``z_raw``.
+        - ``shapes["<ROI>_Boundaries"]``: polygons indexed by cell ID in
+          table order, with the GeoJSON properties as columns.
+        - ``shapes["<ROI>_CellCoordinates"]``: circles at the centroids with
+          radius ``sqrt(area / pi)``, indexed by cell ID.
+
+        ``attrs`` record the reader and package version.
 
     Raises
     ------
-    FileNotFoundError, NotADirectoryError, IsADirectoryError
-        Required artifacts are absent or have the wrong filesystem kind.
-    ValueError
-        Layout, schema, identities, geometry, calibration or numerical values
-        violate the supported export contract.
     TypeError
-        Public option types are invalid.
+        If an option has the wrong type.
+    ValueError
+        If an option has an invalid value.
+    FileNotFoundError, NotADirectoryError, IsADirectoryError
+        If the directory or a required file is missing or has the wrong kind.
+    ValueError
+        A contextual ``ReaderFormatError`` naming the artifact and path if the
+        layout, a schema or a value is malformed or files disagree: unknown
+        ROIs, colliding ROI names, duplicate or mismatching cell IDs,
+        inexact counts or coordinates, missing DAPI calibration, a
+        segmentation off the DAPI grid or too narrow for the cell IDs.
+        Transcript records are validated when their partition is computed.
+
+    Warns
+    -----
+    UserWarning
+        Once per ROI prefix that had to be repaired into an element name.
 
     Notes
     -----
-    Position descriptions in ``uns["spatialdata_io_positions"]`` retain unchanged
-    float64 vendor cell-centroid XY micrometres in ``global`` for one ROI and
-    each independent ROI name for multiple ROIs.
+    Coordinates: with one ROI every element is in ``global``, in
+    micrometres; with several, each ROI keeps its own micrometre frame named
+    after it, because ROIs are not registered to each other. Centroids,
+    areas and transcript ``x``/``y`` are micrometres and use the identity.
+    DAPI, segmentation and polygons are in DAPI pixels and use
+    ``Scale([PhysicalSizeY, PhysicalSizeX])`` from the DAPI OME metadata
+    (µm, nm or mm, converted to µm). Transcript ``z`` has no physical
+    calibration. ``uns["spatialdata_io_positions"]`` describes the
+    ``obsm["spatial"]`` frame.
 
-    One selected ROI uses ``global`` in micrometers. Multiple independent ROIs
-    retain their distinct ROI frame names. OME X/Y physical
-    sizes calibrate pixels without exchanging axes. Cell and transcript XY
-    coordinates are already physical; cell area is square micrometers. Source
-    transcript z has no established physical calibration and is retained as
-    ``z_raw`` slice annotation; points are spatially two-dimensional. Optional
-    ``cell`` assignments use ``uint64[pyarrow]`` in every partition, retaining
-    exact nonnegative IDs through ``2**64 - 1`` and zero for unassigned events.
-    Point indexes are partition-local storage indexes, not globally unique event IDs.
-
-    CSV inputs must be valid. Arrow checks record widths but does not enforce
-    strict quoting; some malformed quote forms may be accepted. Numerical
-    precision and exact integer-identifier checks apply to parsed values.
-
-    Counts, cell metadata and shapes are eager and owned. CSV working batches
-    are bounded; raster pixels and transcript partitions remain path-backed and
-    lazy after return. Keep sources available for later computation. Caller
-    selections are never mutated. See the seqFISH guide for the complete
-    schemas, identifier policy and deliberate API changes.
+    Laziness: tables and shapes are read eagerly; counts are parsed in
+    bounded batches without a dense matrix. Pixels and transcript records
+    are not read until computed, so keep the files available until the data
+    are computed or written. The points' index is local to each partition.
+    CSV records must be well formed: Arrow checks the field count of each
+    record but accepts some malformed quoting.
     """
-    policy = validate_invalid_geometry_policy(invalid_geometries)
     selection = make_selection(
         include_images=include_images,
         include_labels=include_labels,
         include_transcripts=include_transcripts,
         include_shapes=include_shapes,
         shape_geometry=shape_geometry,
+        invalid_geometries=invalid_geometries,
         rois=rois,
     )
     options = make_raster_options(scale_factors=scale_factors, chunks=chunks)
-    roi_layouts = discover_layout(path, selection, path_policy=path_policy)
+    layouts = discover_layout(path, selection, path_policy=path_policy)
+
     images: dict[str, DataArray | DataTree] = {}
     labels: dict[str, DataArray | DataTree] = {}
     points: dict[str, DataFrame] = {}
     shapes: dict[str, GeoDataFrame] = {}
     tables: dict[str, AnnData] = {}
-
-    for roi in roi_layouts:
-        frame = "global" if len(roi_layouts) == 1 else roi.name
+    for roi in layouts:
+        frame = "global" if len(layouts) == 1 else roi.name
         table = read_table(roi.counts, roi.cells)
-        # read_table owns an eager AnnData; Dataset2D is only a backed alternative.
-        obs = cast("pd.DataFrame", table.obs)
+        # read_table returns an eager AnnData; Dataset2D is only a backed alternative.
+        instance_ids = pd.Index(cast("pd.DataFrame", table.obs)["instance_id"])
 
         if roi.pixels is not None:
+            scale: Scale
             if selection.images or selection.labels:
                 dapi = read_dapi(roi.pixels.dapi)
                 scale = dapi.scale
                 if selection.images:
-                    images[f"{roi.name}_DAPI"] = read_image(dapi, roi=frame, options=options)
+                    images[f"{roi.name}_DAPI"] = read_image(dapi, frame=frame, options=options)
                 if roi.pixels.labels is not None:
                     labels[f"{roi.name}_Segmentation"] = read_labels(
                         roi.pixels.labels,
                         reference=dapi,
-                        roi=frame,
+                        frame=frame,
                         options=options,
-                        max_instance_id=int(obs["instance_id"].max()),
+                        max_instance_id=int(instance_ids.max()),
                     )
             else:
                 scale = read_calibration(roi.pixels.dapi)
@@ -191,31 +214,26 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
             if roi.pixels.boundaries is not None:
                 boundaries = read_boundaries(
                     roi.pixels.boundaries,
-                    instance_ids=pd.Index(obs["instance_id"]),
-                    roi=frame,
+                    instance_ids=instance_ids,
+                    frame=frame,
                     scale=scale,
-                    policy=policy,
+                    policy=selection.invalid_geometries,
                 )
                 shapes[f"{roi.name}_Boundaries"] = boundaries
                 if len(boundaries) != table.n_obs:
-                    table = table[obs["instance_id"].isin(boundaries.index).to_numpy()].copy()
-                    table.X = finalize_count_arrays(
-                        (cast("csr_array", table.X),), context=ReaderErrorContext("seqfish", f"{roi.name} counts")
-                    )[0]
+                    table = select_cells(table, boundaries.index, counts=roi.counts)
 
         if selection.shapes in {"circles", "both"}:
-            shapes[f"{roi.name}_CellCoordinates"] = make_circles(table, roi=frame)
-
+            shapes[f"{roi.name}_CellCoordinates"] = make_circles(table, frame=frame, cells=roi.cells)
         if roi.transcripts is not None:
             points[f"{roi.name}_TranscriptList"] = read_transcripts(
-                roi.transcripts, features=tuple(table.var_names), roi=frame
+                roi.transcripts, features=tuple(table.var_names), frame=frame
             )
-
         tables[f"table_{roi.name}"] = finalize_table(
             table,
             frame=frame,
             region=f"{roi.name}_Segmentation" if selection.labels else None,
-            context=ReaderErrorContext("seqfish", f"{roi.name} table"),
+            counts=roi.counts,
         )
 
     result = SpatialData(images=images, labels=labels, points=points, shapes=shapes, tables=tables)

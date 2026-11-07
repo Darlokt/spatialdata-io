@@ -43,7 +43,7 @@ def _write_boundaries(path: Path, geometries: list[BaseGeometry | None], ids: li
 
 
 def _read(path: ArtifactFile) -> gpd.GeoDataFrame:
-    return read_boundaries(path, policy="keep", frame="global").shapes
+    return read_boundaries(path, policy="keep").shapes
 
 
 class TestReadBoundaries:
@@ -60,7 +60,7 @@ class TestReadBoundaries:
             ["bad", "good", "bad", "bad"],
         )
 
-        result = read_boundaries(path, policy="keep", frame="global")
+        result = read_boundaries(path, policy="keep")
 
         assert result.source_ids.tolist() == ["bad", "good"]
         assert result.shapes.index.tolist() == ["bad", "good"]
@@ -84,21 +84,21 @@ class TestReadBoundaries:
         )
         if policy == "raise":
             with pytest.raises(ReaderFormatError, match=r"1 invalid geometries.*bad"):
-                read_boundaries(path, policy=policy, frame="global")
+                read_boundaries(path, policy=policy)
         else:
-            result = read_boundaries(path, policy=policy, frame="global")
+            result = read_boundaries(path, policy=policy)
             assert result.shapes.index.tolist() == ["good"]
             assert result.source_ids.tolist() == ["bad", "good"]
 
     def test_only_invalid_cells_keep_literal_components(self, tmp_path: Path) -> None:
         invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
         path = _write_boundaries(tmp_path / "boundaries.parquet", [invalid, invalid], ["first", "second"])
-        result = read_boundaries(path, policy="keep", frame="global")
+        result = read_boundaries(path, policy="keep")
         assert result.shapes["geometry_representation"].tolist() == ["source_components", "source_components"]
         # The index representation does not depend on which cells are invalid.
         assert result.shapes.index.dtype == STRING_DTYPE
         with pytest.raises(ReaderFormatError, match="all cell boundaries dropped"):
-            read_boundaries(path, policy="drop", frame="global")
+            read_boundaries(path, policy="drop")
 
     @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
     def test_empty_occupancy_slices_remain_explicitly_unsupported(
@@ -107,7 +107,7 @@ class TestReadBoundaries:
         valid = Polygon([(0, 0), (2, 0), (0, 2)])
         path = _write_boundaries(tmp_path / "boundaries.parquet", [MultiPolygon(), valid], ["cell", "cell"])
         with pytest.raises(ReaderFormatError, match="empty"):
-            read_boundaries(path, policy=policy, frame="global")
+            read_boundaries(path, policy=policy)
 
     def test_invalid_union_from_valid_slices_fails_without_representation_fallback(
         self, tmp_path: Path, mocker: MockerFixture
@@ -121,7 +121,7 @@ class TestReadBoundaries:
             return_value=gpd.GeoDataFrame(geometry=[invalid], index=pd.Index(["cell"])),
         )
         with pytest.raises(ReaderFormatError, match="invalid projected footprints"):
-            read_boundaries(path, policy="keep", frame="global")
+            read_boundaries(path, policy="keep")
 
     def test_all_slices_and_same_plane_parts_preserve_holes_multipart_and_source_order(
         self, tmp_path: Path, mocker: MockerFixture

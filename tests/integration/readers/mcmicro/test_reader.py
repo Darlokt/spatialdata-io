@@ -20,6 +20,7 @@ from xarray import DataTree
 
 from spatialdata_io import __version__
 from spatialdata_io._cli.commands.mcmicro import mcmicro_command
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.mcmicro import mcmicro
 from tests.integration.readers.mcmicro._fixtures import write_mcmicro_dataset
@@ -102,8 +103,16 @@ class TestMcmicro:
                 (result.images["core_1_image"], "core_1", [0.4, 0.8]),
                 (result.labels["core_1_method_a_cells"], "core_1", [0.4, 0.8]),
             ]
-            assert get_transformation(result.images["core_2_image"], to_coordinate_system="core_2") == Identity()
-            assert get_transformation(result.labels["core_1_mask"], to_coordinate_system="core_1_mask") == Identity()
+            # Uncalibrated grids keep their pixel frames; the micrometre names are never reused for pixels.
+            assert get_transformation(result.images["core_2_image"], get_all=True) == {"core_2_pixels": Identity()}
+            assert get_transformation(result.labels["core_1_mask"], get_all=True) == {"core_1_mask_pixels": Identity()}
+            assert sorted(result.coordinate_systems) == [
+                "core_1",
+                "core_1_mask_pixels",
+                "core_2_mask_pixels",
+                "core_2_pixels",
+                "global",
+            ]
         for element, frame, expected in selected:
             transform = get_transformation(element, to_coordinate_system=frame)
             assert isinstance(transform, Scale)
@@ -112,6 +121,136 @@ class TestMcmicro:
             result.tables["table"].obsm["spatial_pixels"][:2],
             [[3.5, 3], [35.5, 26]] if mode == "tma" else [[3.5, 3], [75.5, 60]],
         )
+
+    @pytest.mark.parametrize(
+        ("mode", "calibrated", "systems", "spatial_frames"),
+        [
+            ("wsi", False, ["image_pixels"], None),
+            ("wsi", True, ["global"], ["global"]),
+            (
+                "tma",
+                False,
+                ["core_1_mask_pixels", "core_1_pixels", "core_2_mask_pixels", "core_2_pixels", "tma_map_pixels"],
+                None,
+            ),
+            (
+                "tma",
+                True,
+                ["core_1", "core_1_mask_pixels", "core_2", "core_2_mask_pixels", "global"],
+                ["core_1", "core_2"],
+            ),
+        ],
+    )
+    def test_frames_follow_calibration_and_table_names_the_same_frames(
+        self,
+        tmp_path: Path,
+        mode: Literal["wsi", "tma"],
+        *,
+        calibrated: bool,
+        systems: list[str],
+        spatial_frames: list[str] | None,
+    ) -> None:
+        write_mcmicro_dataset(tmp_path, mode=mode)
+        if calibrated:
+            images = ["registration/sample_part_7.ome.tif"]
+            if mode == "tma":
+                images += ["dearray/1.ome.tif", "dearray/2.ome.tif"]
+            for image in images:
+                _calibrate(tmp_path / image, (0.5, 0.25))
+        result = mcmicro(tmp_path)
+        assert sorted(result.coordinate_systems) == systems
+
+        table = result.tables["table"]
+        coordinates = table.uns[POSITIONS_KEY]["coordinates"]
+        if mode == "wsi":
+            assert coordinates["spatial_pixels"]["frame"] == "image_regionprops_indices"
+        else:
+            assert table.obs["spatial_pixel_frame"].cat.categories.tolist() == [
+                "core_1_regionprops_indices",
+                "core_2_regionprops_indices",
+            ]
+        if spatial_frames is None:
+            assert "spatial" not in coordinates
+            return
+        # Physical positions name the micrometre frames the rasters use.
+        frames = [coordinates["spatial"]["frame"]] if mode == "wsi" else table.obs["spatial_frame"].cat.categories
+        assert list(frames) == spatial_frames
+        assert set(coordinates["spatial"]["calibration"]) == set(spatial_frames)
+        for region in table.obs["region"].cat.categories:
+            transform = get_transformation(result.labels[str(region)], get_all=True)
+            assert isinstance(transform, dict)
+            assert set(transform) <= set(spatial_frames)
+
+    def test_file_derived_names_are_sanitized(self, tmp_path: Path) -> None:
+        write_mcmicro_dataset(tmp_path / "input")
+        root = tmp_path / "input"
+        (root / "registration" / "sample_part_7.ome.tif").rename(root / "registration" / "my slide.ome.tif")
+        (root / "segmentation" / "method_a-sample_part_7").rename(root / "segmentation" / "method_a-my slide")
+        (root / "quantification" / "sample_part_7--method_a_cells.csv").rename(
+            root / "quantification" / "my slide--method_a_cells.csv"
+        )
+        with pytest.warns(UserWarning, match=r"registered image ID 'my slide' .* using 'my_slide'"):
+            result = mcmicro(root)
+        assert list(result.images) == ["my_slide_image"]
+        assert list(result.labels) == ["my_slide_method_a_cells"]
+        assert get_table_keys(result.tables["table"]) == ("my_slide_method_a_cells", "region", "CellID")
+        result.write(tmp_path / "output.zarr")
+        assert list(read_zarr(tmp_path / "output.zarr").labels) == ["my_slide_method_a_cells"]
+
+    def test_header_column_names_are_sanitized(self, tmp_path: Path) -> None:
+        fixture = write_mcmicro_dataset(tmp_path / "input")
+        table_path = fixture.root / "quantification" / "sample_part_7--method_a_cells.csv"
+        source = pd.read_csv(table_path, dtype=str)
+        source["CD45 RO_intensity_max"] = ["5", "6"]
+        source["Area"] = ["12", "13"]
+        source.to_csv(table_path, index=False)
+        markers = pd.read_csv(fixture.root / "markers.csv", dtype=str)
+        markers["cy cle note"] = ["a", "b"]
+        markers.to_csv(fixture.root / "markers.csv", index=False)
+
+        with pytest.warns(UserWarning, match="column names") as caught:
+            result = mcmicro(fixture.root)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "mcmicro: the quantification CSV header has column names that a SpatialData table does not accept; "
+                "using 'area' -> 'area_1', 'CD45 RO_intensity_max' -> 'CD45_RO_intensity_max'. Rename the source "
+                "columns to choose the names explicitly."
+            ),
+            (
+                "mcmicro: the markers.csv header has column names that a SpatialData table does not accept; using "
+                "'cy cle note' -> 'cy_cle_note'. Rename the source columns to choose the names explicitly."
+            ),
+        ]
+        table = result.tables["table"]
+        assert table.obs.columns.tolist() == [
+            "region",
+            "CellID",
+            "Area",
+            "area_1",
+            "custom_note",
+            "CD3_intensity_max",
+            "CD45_RO_intensity_max",
+        ]
+        assert table.obs["Area"].tolist() == [12.0, 13.0]
+        assert table.obs["area_1"].tolist() == ["12.0", "12.0"]
+        assert table.obs["CD45_RO_intensity_max"].tolist() == ["5", "6"]
+        assert table.var.columns.tolist() == ["marker_name", "cycle", "channel_number", "cy_cle_note"]
+        assert table.var["cy_cle_note"].tolist() == ["a", "b"]
+        result.write(tmp_path / "output.zarr")
+        restored = read_zarr(tmp_path / "output.zarr").tables["table"]
+        assert restored.obs.columns.tolist() == table.obs.columns.tolist()
+        assert restored.var.columns.tolist() == table.var.columns.tolist()
+
+    def test_case_colliding_labels_fail_before_rasters(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        write_mcmicro_dataset(tmp_path)
+        directory = tmp_path / "segmentation" / "method_a-sample_part_7"
+        (directory / "Cells.ome.tif").write_bytes((directory / "cells.ome.tif").read_bytes())
+        inspect = mocker.spy(tifffile.TiffFile, "__init__")
+        with pytest.raises(ReaderFormatError, match="colliding keys") as caught:
+            mcmicro(tmp_path)
+        assert "sample_part_7_method_a_Cells" in caught.value.found
+        inspect.assert_not_called()
 
     def test_conflicting_same_grid_labels_fail(self, tmp_path: Path) -> None:
         write_mcmicro_dataset(tmp_path)
@@ -180,9 +319,22 @@ class TestMcmicro:
         assert "sample_seg_cells" in caught.value.found
         assert "1" in caught.value.found
 
-    def test_invalid_raster_option_fails_before_io(self, tmp_path: Path) -> None:
-        with pytest.raises(ValueError, match="scale_factors"):
-            mcmicro(tmp_path / "missing", scale_factors=(1,))
+    @pytest.mark.parametrize(
+        ("options", "error", "match"),
+        [
+            ({"scale_factors": "2", "chunks": 0, "path_policy": 1}, TypeError, "scale_factors"),
+            ({"scale_factors": (1,), "chunks": 0, "path_policy": 1}, ValueError, "scale_factors"),
+            ({"chunks": "a", "path_policy": 1}, TypeError, "chunks"),
+            ({"chunks": (1, 2), "path_policy": 1}, ValueError, "chunks"),
+            ({"path_policy": 1}, TypeError, "path_policy"),
+            ({"path_policy": "lenient"}, ValueError, "path_policy"),
+        ],
+    )
+    def test_options_fail_in_signature_order_before_io(
+        self, tmp_path: Path, options: dict[str, object], error: type[Exception], match: str
+    ) -> None:
+        with pytest.raises(error, match=match):
+            mcmicro(tmp_path / "missing", **options)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
     def test_construction_reads_no_pixels_and_partial_reads_open_one_source(
         self, tmp_path: Path, mocker: MockerFixture

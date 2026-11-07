@@ -46,7 +46,7 @@ class TestReadBoundaries:
         path = _write_boundaries(tmp_path / "boundaries.geojson", [invalid], ("9",))
 
         result = read_boundaries(
-            path, instance_ids=pd.Index([9]), roi="global", scale=Scale([0.25, 0.5], axes=("y", "x")), policy="keep"
+            path, instance_ids=pd.Index([9]), frame="global", scale=Scale([0.25, 0.5], axes=("y", "x")), policy="keep"
         )
 
         assert result.index.tolist() == [9]
@@ -60,7 +60,7 @@ class TestReadBoundaries:
         polygon = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
         path = _write_boundaries(tmp_path / "boundaries.geojson", [polygon], ("1",))
         result = read_boundaries(
-            path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy=policy
+            path, instance_ids=pd.Index([1]), frame="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy=policy
         )
         assert result.index.tolist() == [1]
         assert result.geometry.iloc[0].equals(polygon)
@@ -71,7 +71,7 @@ class TestReadBoundaries:
         path = _write_boundaries(tmp_path / "boundaries.geojson", [multipart, polygon], ("2", "70001"))
         scale = Scale([0.25, 0.5], axes=("y", "x"))
 
-        result = read_boundaries(path, instance_ids=pd.Index([70001, 2]), roi="Roi1", scale=scale, policy="keep")
+        result = read_boundaries(path, instance_ids=pd.Index([70001, 2]), frame="Roi1", scale=scale, policy="keep")
 
         assert result.index.tolist() == [70001, 2]
         assert result.geometry.iloc[0].equals(polygon)
@@ -84,7 +84,7 @@ class TestReadBoundaries:
         path = _write_boundaries(tmp_path / "boundaries.geojson", [polygon, polygon], ids)
         with pytest.raises(ReaderFormatError):
             read_boundaries(
-                path, instance_ids=pd.Index([1, 2]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+                path, instance_ids=pd.Index([1, 2]), frame="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
             )
 
     @pytest.mark.parametrize("invalid", ["null", "empty", "crossing", "line", "z", "nonfinite", "population"])
@@ -109,7 +109,7 @@ class TestReadBoundaries:
             read_boundaries(
                 path,
                 instance_ids=pd.Index([1, 2] if invalid == "population" else [1]),
-                roi="Roi1",
+                frame="Roi1",
                 scale=Scale([1, 1], axes=("y", "x")),
                 policy="raise",
             )
@@ -118,7 +118,7 @@ class TestReadBoundaries:
         path = _write_boundaries(tmp_path / "boundaries.geojson", [], ())
         with pytest.raises(ReaderFormatError, match="empty"):
             read_boundaries(
-                path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+                path, instance_ids=pd.Index([1]), frame="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
             )
 
     def test_source_failure_keeps_error_identity_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -127,7 +127,7 @@ class TestReadBoundaries:
         mocker.patch("pathlib.Path.open", side_effect=error)
         with pytest.raises(OSError, match="injected") as caught:
             read_boundaries(
-                path, instance_ids=pd.Index([1]), roi="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
+                path, instance_ids=pd.Index([1]), frame="Roi1", scale=Scale([1, 1], axes=("y", "x")), policy="keep"
             )
         assert caught.value is error
         assert any("seqfish" in note and str(path) in note for note in error.__notes__)
@@ -147,7 +147,7 @@ class TestReadBoundaries:
             read_boundaries(
                 ArtifactFile(path),
                 instance_ids=pd.Index([2]),
-                roi="Roi1",
+                frame="Roi1",
                 scale=Scale([1, 1], axes=("y", "x")),
                 policy="keep",
             )
@@ -156,12 +156,12 @@ class TestReadBoundaries:
 class TestMakeCircles:
     """Use owned physical centroids and positive square-micrometer areas."""
 
-    def test_exact_ids_centers_and_radii_without_table_mutation(self) -> None:
+    def test_exact_ids_centers_and_radii_without_table_mutation(self, tmp_path: Path) -> None:
         table = ad.AnnData(obs=pd.DataFrame({"instance_id": [70001, 2], "area": [np.pi, 4 * np.pi]}))
         table.obsm["spatial"] = np.asarray([[1.5, 2.5], [4.5, 6.5]])
         original = table.copy()
 
-        result = make_circles(table, roi="Roi1")
+        result = make_circles(table, frame="Roi1", cells=ArtifactFile(tmp_path / "cells.csv"))
 
         assert result.index.tolist() == [70001, 2]
         np.testing.assert_array_equal(result.geometry.x, [1.5, 4.5])
@@ -172,8 +172,10 @@ class TestMakeCircles:
         np.testing.assert_array_equal(table.obsm["spatial"], original.obsm["spatial"])
 
     @pytest.mark.parametrize("area", [0.0, -1.0])
-    def test_nonpositive_circle_area_fails(self, area: float) -> None:
+    def test_nonpositive_circle_area_fails(self, tmp_path: Path, area: float) -> None:
         table = ad.AnnData(obs=pd.DataFrame({"instance_id": [1], "area": [area]}))
         table.obsm["spatial"] = np.asarray([[1.5, 2.5]])
-        with pytest.raises(ValueError, match="positive"):
-            make_circles(table, roi="Roi1")
+        with pytest.raises(ReaderFormatError, match="nonpositive cell area") as caught:
+            make_circles(table, frame="Roi1", cells=ArtifactFile(tmp_path / "cells.csv"))
+        assert caught.value.context.artifact == "CellCoordinates"
+        assert caught.value.path == tmp_path / "cells.csv"

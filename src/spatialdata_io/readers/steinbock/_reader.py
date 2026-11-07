@@ -53,10 +53,12 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
     - Images and masks pair by sample name (the file name without
       ``.ome.tiff`` or ``.tiff``); every image needs exactly one mask and the
       reverse, and at least one pair is required. Unmatched files fail.
-    - Sample names name elements and coordinate systems, so they may contain
-      only letters, digits, ``_``, ``-`` and ``.``, may not be ``.``, ``..``
-      or start with ``__``, and must be distinct ignoring case. A sample may
-      not be named like another sample's derived frame
+    - Sample names name elements and coordinate systems. A sample name that
+      is not a valid SpatialData name (only letters, digits, ``_``, ``-`` and
+      ``.``; not ``.``, ``..`` or starting with ``__``) is sanitized with a
+      warning, for example ``sample 1`` becomes ``sample_1``; the table still
+      refers to the file name. The sanitized names must be distinct ignoring
+      case, and a sample may not be named like another sample's derived frame
       (``<other>_pixels`` or ``<other>_regionprops_indices``).
     - The table must describe exactly these samples and the selected masks: ``obs["image"]`` is
       ``<sample>.tiff`` and every observation is named
@@ -139,10 +141,14 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
               imported ``obsm["spatial"]`` moves unchanged to
               ``obsm["spatial_source"]``.
             - The redundant ``obs["Image"]`` column is dropped (it must equal
-              ``obs["image"]``). Feature column names replace spaces with
-              underscores, and ``Final Concentration / Dilution`` becomes
-              ``Final_Concentration``. Everything else, including other
-              layers, mappings and ``raw``, is kept unchanged.
+              ``obs["image"]``). ``Final Concentration / Dilution`` becomes
+              ``Final_Concentration``, and other imported ``obs`` and ``var``
+              column names that a SpatialData table does not accept are
+              sanitized with a warning (``Channel Name`` becomes
+              ``Channel_Name``; a name that then collides, ignoring letter
+              case, with another column or a reader-owned one such as
+              ``region`` gets a ``_1``, ``_2``, ... suffix). Everything else,
+              including other layers, mappings and ``raw``, is kept unchanged.
 
         Coordinate systems: a sample's image and mask share one frame with
         its native pixel origin. A calibrated sample is scaled to
@@ -164,7 +170,9 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
     -----
     UserWarning
         Once per call if duplicate sparse entries of ``X`` or ``counts`` were
-        summed, naming the affected slots and dtype changes.
+        summed, naming the affected slots and dtype changes; once per
+        sanitized sample name; once per frame if ``obs`` or ``var`` column
+        names were sanitized.
 
     Raises
     ------
@@ -195,7 +203,7 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
     layout = discover_layout(path, masks_dir=masks_dir, table_file=table_file, path_policy=path_policy)
 
     metadata = (
-        read_image_metadata(layout.image_metadata, {f"{sample.name}.tiff" for sample in layout.samples})
+        read_image_metadata(layout.image_metadata, {sample.image_name for sample in layout.samples})
         if layout.image_metadata is not None
         else {}
     )
@@ -203,7 +211,7 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
         sample.name: read_rasters(
             sample,
             raster,
-            metadata=metadata.get(f"{sample.name}.tiff"),
+            metadata=metadata.get(sample.image_name),
             calibrated_frame="global" if len(layout.samples) == 1 else sample.name,
         )
         for sample in layout.samples

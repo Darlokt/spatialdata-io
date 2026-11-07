@@ -24,10 +24,10 @@ from typing import TYPE_CHECKING
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
+    list_directory,
     normalize_dataset_root,
     require_metadata_file,
     require_unique_path,
-    sorted_paths,
 )
 
 if TYPE_CHECKING:
@@ -67,7 +67,7 @@ def discover_layout(path: str | Path, *, path_policy: PathPolicy = "strict") -> 
     """Resolve exactly one file per suffix, all sharing one sample prefix."""
     context = ReaderErrorContext("curio", "dataset layout")
     root = normalize_dataset_root(path, context=context, path_policy=path_policy)
-    candidates = sorted_paths(root.path.iterdir(), context=context, search_path=root.path)
+    candidates = list_directory(root.path, context=context)
 
     artifacts: list[ArtifactFile] = []
     prefixes: set[str] = set()

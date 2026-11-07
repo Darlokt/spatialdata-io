@@ -12,6 +12,7 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
+    list_directory,
     normalize_dataset_root,
     require_caller_file,
     require_metadata_directory,
@@ -121,7 +122,8 @@ def _error(path: Path, found: str, expected: str) -> ReaderFormatError:
 
 def _inventory(root: DatasetRoot) -> tuple[Family, tuple[Path, ...]]:
     """Scan each relevant immediate directory once and reject mixed structural families."""
-    entries: dict[str, Path] = {entry.name: entry for entry in root.path.iterdir()}
+    context = ReaderErrorContext("stereoseq", "dataset layout")
+    entries: dict[str, Path] = {entry.name: entry for entry in list_directory(root.path, context=context)}
     families = [family for family, names in _DIRECTORIES.items() if entries.keys() & set(names)]
 
     if "outs" in entries:
@@ -133,7 +135,7 @@ def _inventory(root: DatasetRoot) -> tuple[Family, tuple[Path, ...]]:
     base: ArtifactDirectory = root.path
     if "outs" in entries:
         base = require_metadata_directory(root, "outs", context=ReaderErrorContext("stereoseq", "outs"))
-        entries = {entry.name: entry for entry in base.iterdir()}
+        entries = {entry.name: entry for entry in list_directory(base, context=context)}
 
     if family == "flat":
         return family, tuple(sorted(entries.values()))
@@ -142,7 +144,7 @@ def _inventory(root: DatasetRoot) -> tuple[Family, tuple[Path, ...]]:
     for name in _DIRECTORIES[family]:
         if name in entries:
             directory = require_metadata_directory(root, base / name, context=ReaderErrorContext("stereoseq", name))
-            files.extend(sorted(directory.iterdir()))
+            files.extend(list_directory(directory, context=ReaderErrorContext("stereoseq", name)))
 
     return family, tuple(files)
 

@@ -24,6 +24,7 @@ from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Scale, get_transformation
 
 import spatialdata_io.readers.seqfish._rasters as raster_module
+import spatialdata_io.readers.seqfish._reader as reader_module
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers.seqfish import seqfish
@@ -230,6 +231,60 @@ class TestSeqfish:
         with pytest.raises(ValueError, match="invalid_geometries"):
             seqfish(tmp_path / "absent", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
+    def test_options_are_validated_in_signature_order_before_io(self, tmp_path: Path) -> None:
+        absent = tmp_path / "absent"
+        with pytest.raises(ValueError, match="shape_geometry"):
+            seqfish(absent, shape_geometry="all", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+        with pytest.raises(ValueError, match="rois"):
+            seqfish(absent, rois=[], scale_factors=2)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+        with pytest.raises(TypeError, match="scale_factors"):
+            seqfish(absent, scale_factors=2, path_policy="lenient")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+        with pytest.raises(ValueError, match="path_policy"):
+            seqfish(absent, path_policy="lenient")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+
+    def test_file_derived_roi_names_are_repaired_once_and_persist(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path / "source", rois=("Roi 1", "Roi2"))
+        with pytest.warns(UserWarning, match="ROI file prefix") as caught:
+            result = seqfish(root, shape_geometry="both")
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "seqfish: the ROI file prefix 'Roi 1' is not a usable SpatialData element name; using 'Roi_1'. "
+                "Rename the source files to choose the name explicitly."
+            )
+        ]
+        assert caught[0].filename == __file__
+        assert list(result.tables) == ["table_Roi_1", "table_Roi2"]
+        assert set(result.images) == {"Roi_1_DAPI", "Roi2_DAPI"}
+        assert set(result.shapes) == {
+            "Roi_1_Boundaries",
+            "Roi_1_CellCoordinates",
+            "Roi2_Boundaries",
+            "Roi2_CellCoordinates",
+        }
+        table = result.tables["table_Roi_1"]
+        assert get_table_keys(table) == ("Roi_1_Segmentation", "region", "instance_id")
+        assert table.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["frame"] == "Roi_1"
+        for element in (result.images["Roi_1_DAPI"], result.points["Roi_1_TranscriptList"]):
+            frames = get_transformation(element, get_all=True)
+            assert isinstance(frames, dict)
+            assert set(frames) == {"Roi_1"}
+
+        output = tmp_path / "output.zarr"
+        result.write(output)
+        restored = read_zarr(output)
+        assert set(restored.tables) == {"table_Roi_1", "table_Roi2"}
+        assert get_table_keys(restored.tables["table_Roi_1"]) == ("Roi_1_Segmentation", "region", "instance_id")
+
+    def test_roi_names_equal_ignoring_case_fail_before_reading_tables(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        root = write_seqfish_dataset(tmp_path, rois=("Roi1", "roi1"))
+        tables = mocker.spy(reader_module, "read_table")
+        with pytest.raises(ReaderFormatError, match="equal ignoring case"):
+            seqfish(root)
+        tables.assert_not_called()
+        assert list(seqfish(root, rois=["roi1"]).tables) == ["table_roi1"]
+
     def test_sorted_discovery_and_explicit_roi_order(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path)
         discovered = seqfish(root)
@@ -237,6 +292,18 @@ class TestSeqfish:
         assert list(discovered.tables) == ["table_Roi1", "table_Roi2"]
         assert list(selected.tables) == ["table_Roi2", "table_Roi1"]
         assert list(seqfish(root, rois=("Roi2",)).tables) == ["table_Roi2"]
+
+    def test_macos_apple_double_companions_are_ignored(self, tmp_path: Path) -> None:
+        root = write_seqfish_dataset(tmp_path)
+        expected = seqfish(root)
+        # macOS writes these metadata companions when copying to non-HFS volumes.
+        for name in ("._Roi1_CellxGene.csv", "._Roi1_DAPI.tiff", "._Roi2_CellCoordinates.csv"):
+            (root / name).write_bytes(b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X")
+
+        result = seqfish(root)
+
+        assert list(result.tables) == ["table_Roi1", "table_Roi2"]
+        assert_spatial_data_objects_are_identical(result, expected)
 
     def test_cell_ids_exceeding_label_dtype_fail_without_pixel_tasks(
         self, tmp_path: Path, mocker: MockerFixture

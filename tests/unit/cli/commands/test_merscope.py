@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ import pytest
 
 from spatialdata_io._cli.commands.merscope import merscope_command
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers.merscope import merscope
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -138,6 +140,10 @@ class TestMerscopeCommand:
         )
         assert result.exit_code == 2, result.output
         reader.assert_not_called()
+
+    def test_option_order_matches_the_reader_signature(self) -> None:
+        options = [parameter.name for parameter in merscope_command.params]
+        assert options == ["input_path", "output_path", *list(inspect.signature(merscope).parameters)[1:]]
 
     def test_help(self, runner: CliRunner) -> None:
         result = runner.invoke(merscope_command, ["--help"])

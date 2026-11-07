@@ -55,7 +55,9 @@ class TestMcmicroCharacterization:
         assert image.dtype == np.dtype(np.uint16)
         assert image.coords["c"].to_numpy().tolist() == ["CD3", "DAPI"]
         np.testing.assert_array_equal(image.data[:, :1, :2].compute(), [[[0, 1]], [[5120, 5121]]])
-        assert isinstance(_frames(result, "sample_part_7_image")["global"], Identity)
+        # Without OME sizes the image is in pixels, so it is not placed in the micrometre frame "global".
+        assert _frames(result, "sample_part_7_image") == {"image_pixels": Identity()}
+        assert _frames(result, "sample_part_7_method_a_cells") == {"image_pixels": Identity()}
 
         labels = result.labels["sample_part_7_method_a_cells"]
         assert labels.dims == ("y", "x")
@@ -101,17 +103,15 @@ class TestMcmicroCharacterization:
 class TestMcmicroCorrections:
     """Each legacy defect is replaced by an independently specified contract."""
 
-    def test_cores_and_masks_keep_exact_local_frames(self, tmp_path: Path) -> None:
+    def test_cores_and_masks_keep_exact_local_pixel_frames(self, tmp_path: Path) -> None:
         fixture = write_mcmicro_dataset(tmp_path, mode="tma")
         result = mcmicro(fixture.root)
-        assert set(_frames(result, "tma_map")) == {"global"}
+        assert _frames(result, "tma_map") == {"tma_map_pixels": Identity()}
         for core in ("core_1", "core_2"):
-            assert set(_frames(result, f"{core}_image")) == {core}
-            assert set(_frames(result, f"{core}_method_a_cells")) == {core}
-            assert isinstance(_frames(result, f"{core}_image")[core], Identity)
-            mask_frames = _frames(result, f"{core}_mask")
-            assert set(mask_frames) == {f"{core}_mask"}
-            assert isinstance(mask_frames[f"{core}_mask"], Identity)
+            assert _frames(result, f"{core}_image") == {f"{core}_pixels": Identity()}
+            assert _frames(result, f"{core}_method_a_cells") == {f"{core}_pixels": Identity()}
+            assert _frames(result, f"{core}_mask") == {f"{core}_mask_pixels": Identity()}
+        assert "global" not in result.coordinate_systems
 
     def test_pipeline_inputs_and_qc_artifacts_are_not_read(self, tmp_path: Path) -> None:
         fixture = write_mcmicro_dataset(tmp_path, mode="tma")

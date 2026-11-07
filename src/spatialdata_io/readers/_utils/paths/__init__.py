@@ -12,6 +12,7 @@ from spatialdata_io.readers._utils.paths._core import (
     ArtifactFile,
     DatasetRoot,
     PathPolicy,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     optional_metadata_file,
@@ -23,7 +24,6 @@ from spatialdata_io.readers._utils.paths._core import (
     require_metadata_directory,
     require_metadata_file,
     require_unique_path,
-    sorted_paths,
 )
 
 __all__ = [
@@ -31,6 +31,7 @@ __all__ = [
     "ArtifactFile",
     "DatasetRoot",
     "PathPolicy",
+    "list_directory",
     "normalize_dataset_root",
     "optional_metadata_directory",
     "optional_metadata_file",
@@ -42,5 +43,4 @@ __all__ = [
     "require_metadata_directory",
     "require_metadata_file",
     "require_unique_path",
-    "sorted_paths",
 ]

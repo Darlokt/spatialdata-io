@@ -606,6 +606,51 @@ class TestIss:
         assert result.tables["table"].obs_names.tolist() == ["cell-b", "cell-a"]
         assert result.tables["table"].obs["segmentation_id"].tolist() == [7, 2]
 
+    @pytest.mark.parametrize("instance_key", [None, "segmentation_id"])
+    def test_h5ad_column_names_are_sanitized(
+        self, iss_dataset: IssDataset, tmp_path: Path, instance_key: str | None
+    ) -> None:
+        table_file = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(table_file)
+        source.obs["my note"] = ["b", "a"]
+        source.obs["Region"] = ["r", "r"]
+        source.obs["Instance_ID"] = ["i", "j"]
+        source.var["my note"] = ["x", "y", "z"]
+        source.write_h5ad(table_file)
+
+        with pytest.warns(UserWarning, match="column names") as caught:
+            result = iss(
+                iss_dataset.root,
+                raw_image_file="raw.tiff",
+                labels_file="labels.tiff",
+                table_file="cells.h5ad",
+                instance_key=instance_key,
+            )
+
+        # Without instance_key, the generated instance_id is reserved, so its case variant is renamed.
+        renamed_id = "Instance_ID_1" if instance_key is None else "Instance_ID"
+        pairs = "'my note' -> 'my_note', 'Region' -> 'Region_1'"
+        if instance_key is None:
+            pairs += ", 'Instance_ID' -> 'Instance_ID_1'"
+        assert [str(warning.message) for warning in caught] == [
+            (
+                f"iss: the H5AD obs has column names that a SpatialData table does not accept; using {pairs}. Rename "
+                "the source columns to choose the names explicitly."
+            ),
+            (
+                "iss: the H5AD var has column names that a SpatialData table does not accept; using 'my note' -> "
+                "'my_note'. Rename the source columns to choose the names explicitly."
+            ),
+        ]
+        table = result.tables["table"]
+        assert table.obs["my_note"].tolist() == ["b", "a"]
+        assert table.obs["Region_1"].tolist() == ["r", "r"]
+        assert table.obs[renamed_id].tolist() == ["i", "j"]
+        assert table.var["my_note"].tolist() == ["x", "y", "z"]
+        assert get_table_keys(table) == ("region_labels_image", "region", instance_key or "instance_id")
+        result.write(tmp_path / "output.zarr")
+        assert read_zarr(tmp_path / "output.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
+
     def test_write_roundtrip(self, iss_dataset: IssDataset, tmp_path: Path) -> None:
         result = iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
         output = tmp_path / "out.zarr"

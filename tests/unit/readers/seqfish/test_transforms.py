@@ -8,13 +8,15 @@ import numpy as np
 import pytest
 from ome_types.model import OME, Image, Pixels, Pixels_DimensionOrder, PixelType, UnitsLength
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import TiffMetadata
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._transforms import pixel_scale
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_CONTEXT = ReaderErrorContext("seqfish", "DAPI")
 
 
 def _metadata(path: Path) -> TiffMetadata:
@@ -55,7 +57,7 @@ class TestPixelScale:
         pixels.physical_size_x_unit = unit
         pixels.physical_size_y_unit = unit
 
-        scale = pixel_scale(metadata)
+        scale = pixel_scale(metadata, context=_CONTEXT)
 
         assert scale.axes == ("y", "x")
         np.testing.assert_allclose(scale.to_scale_vector(("y", "x")), [0.5, 0.2], rtol=1e-15)
@@ -68,7 +70,7 @@ class TestPixelScale:
         assert metadata.ome is not None
         metadata.ome.images[0].pixels.physical_size_x = 200.0
         metadata.ome.images[0].pixels.physical_size_x_unit = UnitsLength.NANOMETER
-        np.testing.assert_array_equal(pixel_scale(metadata).to_scale_vector(("y", "x")), [0.5, 0.2])
+        np.testing.assert_array_equal(pixel_scale(metadata, context=_CONTEXT).to_scale_vector(("y", "x")), [0.5, 0.2])
 
     @pytest.mark.parametrize("missing", ["ome", "images", "multiple"])
     def test_missing_or_ambiguous_image_metadata(self, tmp_path: Path, missing: str) -> None:
@@ -79,8 +81,9 @@ class TestPixelScale:
         else:
             assert ome is not None
             ome.images = [] if missing == "images" else [ome.images[0], ome.images[0]]
-        with pytest.raises(ReaderFormatError, match="one OME image"):
-            pixel_scale(metadata)
+        with pytest.raises(ReaderFormatError, match="one OME image") as caught:
+            pixel_scale(metadata, context=_CONTEXT)
+        assert caught.value.context is _CONTEXT
 
     @pytest.mark.parametrize("axis", ["x", "y"])
     @pytest.mark.parametrize("value", [None, 0.0, -1.0, float("nan"), float("inf")])
@@ -91,16 +94,18 @@ class TestPixelScale:
         # without asking the OME constructor to reject them before our boundary.
         pixels = metadata.ome.images[0].pixels.model_copy(update={f"physical_size_{axis}": value})
         metadata.ome.images[0].pixels = pixels
-        with pytest.raises(ReaderFormatError, match="finite positive physical"):
-            pixel_scale(metadata)
+        with pytest.raises(ReaderFormatError, match="finite positive physical") as caught:
+            pixel_scale(metadata, context=_CONTEXT)
+        assert caught.value.context is _CONTEXT
 
     @pytest.mark.parametrize("unit", [UnitsLength.PIXEL, UnitsLength.METER, UnitsLength.REFERENCEFRAME])
     def test_unsupported_units(self, tmp_path: Path, unit: UnitsLength) -> None:
         metadata = _metadata(tmp_path / "DAPI.tiff")
         assert metadata.ome is not None
         metadata.ome.images[0].pixels.physical_size_x_unit = unit
-        with pytest.raises(ReaderFormatError, match="µm, nm or mm"):
-            pixel_scale(metadata)
+        with pytest.raises(ReaderFormatError, match="µm, nm or mm") as caught:
+            pixel_scale(metadata, context=_CONTEXT)
+        assert caught.value.context is _CONTEXT
 
     @pytest.mark.parametrize(("value", "unit"), [(1e308, UnitsLength.MILLIMETER), (5e-324, UnitsLength.NANOMETER)])
     def test_conversion_must_remain_finite_and_positive(self, tmp_path: Path, value: float, unit: UnitsLength) -> None:
@@ -108,5 +113,6 @@ class TestPixelScale:
         assert metadata.ome is not None
         metadata.ome.images[0].pixels.physical_size_x = value
         metadata.ome.images[0].pixels.physical_size_x_unit = unit
-        with pytest.raises(ReaderFormatError, match="representable in µm"):
-            pixel_scale(metadata)
+        with pytest.raises(ReaderFormatError, match="representable in µm") as caught:
+            pixel_scale(metadata, context=_CONTEXT)
+        assert caught.value.context is _CONTEXT

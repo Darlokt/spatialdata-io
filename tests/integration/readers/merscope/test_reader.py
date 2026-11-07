@@ -176,9 +176,8 @@ class TestMerscope:
         if not with_affine:
             (fixture.root / "images" / "micron_to_mosaic_pixel_transform.csv").unlink()
         result = merscope(fixture.root, include_transcripts=False, include_cell_boundaries=False)
-        frame = "global" if with_affine else "microns"
         description = result.tables["table"].uns["spatialdata_io_positions"]["coordinates"]["spatial"]
-        assert description["frame"] == frame
+        assert description["frame"] == "global"
         assert description["units"] == "micrometer"
         image_frames = get_transformation(result.images["slide_region_z0"], get_all=True)
         assert isinstance(image_frames, dict)
@@ -193,20 +192,56 @@ class TestMerscope:
         inverse = transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
         np.testing.assert_allclose(inverse @ [14.5, -1, 1], [2, 2, 1], rtol=1e-15, atol=1e-15)
 
-    def test_uncalibrated_images_and_native_vectors_use_distinct_frames(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("vectors", [False, True])
+    def test_uncalibrated_images_stay_in_mosaic_pixels_and_vectors_in_global(
+        self, tmp_path: Path, *, vectors: bool
+    ) -> None:
         fixture = write_merscope_dataset(tmp_path)
         (fixture.root / "images" / "micron_to_mosaic_pixel_transform.csv").unlink()
-        result = merscope(fixture.root)
-        image_frames = get_transformation(result.images["slide_region_z0"], get_all=True)
-        vector_frames = get_transformation(result.shapes["slide_region_polygons"], get_all=True)
-        assert isinstance(image_frames, dict)
-        assert isinstance(vector_frames, dict)
-        assert set(image_frames) == {"mosaic_pixels"}
-        assert set(vector_frames) == {"microns"}
+        result = merscope(
+            fixture.root, include_transcripts=vectors, include_cell_boundaries=vectors, include_table=vectors
+        )
+        for image in result.images.values():
+            assert get_transformation(image, get_all=True) == {"mosaic_pixels": Identity()}
+        if vectors:
+            for element in (result.shapes["slide_region_polygons"], result.points["slide_region_transcripts"]):
+                assert get_transformation(element, get_all=True) == {"global": Identity()}
+            positions = result.tables["table"].uns["spatialdata_io_positions"]["coordinates"]["spatial"]
+            assert positions["frame"] == "global"
 
     def test_invalid_polygon_policy_precedes_io(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="invalid_geometries"):
             merscope(tmp_path / "missing", invalid_geometries="repair")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+
+    def test_options_are_validated_in_signature_order_before_io(self, tmp_path: Path) -> None:
+        invalid: list[tuple[str, object, str]] = [
+            ("z_layers", [-1], "z_layers"),
+            ("include_images", 1, "include_images"),
+            ("invalid_geometries", "repair", "invalid_geometries"),
+            ("chunks", (1, 0, 16), "chunks"),
+            ("path_policy", "lenient", "path_policy"),
+        ]
+        for index, (_, _, message) in enumerate(invalid):
+            options = {name: value for name, value, _ in invalid[index:]}
+            with pytest.raises((TypeError, ValueError), match=message):
+                merscope(tmp_path / "missing", **options)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+
+    @pytest.mark.parametrize("parameter", ["region_name", "slide_name"])
+    def test_invalid_explicit_names_fail_before_io(self, tmp_path: Path, parameter: str) -> None:
+        with pytest.raises(ValueError, match=f"{parameter} must be a valid SpatialData element name"):
+            merscope(tmp_path / "missing", **{parameter: "my region"})  # pyrefly: ignore[bad-argument-type] - Keyword expansion.
+
+    def test_directory_names_are_repaired_into_element_names(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        root = fixture.root.rename(fixture.root.parent / "region 1")
+        with pytest.warns(UserWarning, match="'region 1' is not a usable SpatialData element name; using 'region_1'"):
+            result = merscope(root, include_images=False)
+        assert list(result.shapes) == ["slide_region_1_polygons"]
+        assert list(result.points) == ["slide_region_1_transcripts"]
+        table = result.tables["table"]
+        assert table.obs["region"].tolist() == ["region_1"] * 3
+        assert table.obs["dataset_id"].tolist() == ["slide_region_1"] * 3
+        assert get_table_keys(table) == ("slide_region_1_polygons", "cells_region", "EntityID")
 
     def test_provenance_and_default_image_order(self, tmp_path: Path) -> None:
         fixture = write_merscope_dataset(tmp_path)
@@ -237,6 +272,8 @@ class TestMerscope:
             include_table=False,
         )
         assert list(result.images) == ["slide_region_z0", "slide_region_z2"]
+        for image in result.images.values():
+            assert get_transformation(image, get_all=True) == {"mosaic_pixels": Identity()}
         assert not result.points
         assert not result.shapes
         assert not result.tables
@@ -268,6 +305,41 @@ class TestMerscope:
         assert not result.images
         assert not result.points
         assert not result.shapes
+
+    def test_metadata_column_names_are_sanitized(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        metadata = pd.read_csv(fixture.root / "cell_metadata.csv", dtype=str)
+        metadata["CD45 RO"] = ["x", "y", "z"]
+        metadata["Region"] = ["r", "r", "r"]
+        metadata.to_csv(fixture.root / "cell_metadata.csv", index=False)
+
+        with pytest.warns(UserWarning, match="column names") as caught:
+            result = merscope(fixture.root, include_transcripts=False, include_images=False)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "merscope: the cell_metadata.csv header has column names that a SpatialData table does not accept; "
+                "using 'CD45 RO' -> 'CD45_RO', 'Region' -> 'Region_1'. Rename the source columns to choose the names "
+                "explicitly."
+            )
+        ]
+        table = result.tables["table"]
+        assert table.obs.columns.tolist() == [
+            "center_x",
+            "center_y",
+            "volume",
+            "annotation",
+            "CD45_RO",
+            "Region_1",
+            "region",
+            "slide",
+            "dataset_id",
+            "cells_region",
+            "EntityID",
+        ]
+        assert table.obs["CD45_RO"].tolist() == ["x", "y", "z"]
+        result.write(tmp_path / "output.zarr")
+        assert read_zarr(tmp_path / "output.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
 
     @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
     def test_boundaries_only_needs_no_count_header_or_cell_metadata(

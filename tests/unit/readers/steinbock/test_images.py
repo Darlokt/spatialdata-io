@@ -49,7 +49,7 @@ def _write_sample(root: Path) -> tuple[SampleLayout, NDArray[np.uint16], NDArray
         metadata={"axes": "CYX", "Channel": {"Name": ["DNA", "CD3"]}},
     )
     tifffile.imwrite(label_path, labels, photometric="minisblack", tile=(16, 16))
-    return SampleLayout("sample", ArtifactFile(image_path), ArtifactFile(label_path)), image, labels
+    return SampleLayout("sample", "sample.tiff", ArtifactFile(image_path), ArtifactFile(label_path)), image, labels
 
 
 class TestReadRaster:

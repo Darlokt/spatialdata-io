@@ -1,4 +1,19 @@
-"""Construct union footprints or marked, literal source components per cell."""
+"""Build one 2D footprint per cell from the per-slice boundary Parquet.
+
+Instrument ``cell_boundaries.parquet`` and VPT ``*_micron_space.parquet`` list
+one WKB Polygon or MultiPolygon per cell and z slice, in micrometres. A cell's
+footprint is the union of all its slices, so cells absent from z0, holes and
+disconnected components survive; it is an XY projection, not a 3D
+segmentation, and does not depend on the selected image planes.
+
+Invalid slices follow the invalid-geometry policy per cell: ``"keep"`` returns
+the literal components of every slice of that cell as one MultiPolygon
+(``geometry_representation == "source_components"``) instead of a union, which
+could repair or change it; ``"drop"`` removes the cell; ``"raise"`` fails.
+Vertices are never changed. Missing, empty, nonfinite or non-polygonal slices
+fail under every policy. Footprints are in the micrometre ``global`` frame
+(identity).
+"""
 
 from __future__ import annotations
 
@@ -17,6 +32,7 @@ from spatialdata.transformations import Identity
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
 from spatialdata_io.readers.merscope._schemas import (
+    BOUNDARIES,
     GEOMETRY_REPRESENTATION_DTYPE,
     STRING_DTYPE,
     boundary_columns,
@@ -30,18 +46,19 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _SPATIAL_DIMENSIONS = 2
-_CONTEXT = ReaderErrorContext("merscope", "cell boundaries")
+_CONTEXT = ReaderErrorContext("merscope", BOUNDARIES)
 
 
 @dataclass(frozen=True, slots=True)
 class CellBoundaries:
-    """Own returned geometry and its complete original identity population."""
+    """Returned footprints and the complete source population, including dropped cells."""
 
     shapes: gpd.GeoDataFrame
     source_ids: pd.Index
 
 
 def _read_slices(path: ArtifactFile) -> tuple[pd.Index, NDArray[np.object_]]:
+    """Return slice identities and validated polygonal geometries in source row order."""
     try:
         with pq.ParquetFile(path) as source:
             columns = boundary_columns(source.schema_arrow.names, path)
@@ -75,6 +92,7 @@ def _read_slices(path: ArtifactFile) -> tuple[pd.Index, NDArray[np.object_]]:
 
 
 def _union_footprints(frame: gpd.GeoDataFrame, path: ArtifactFile) -> gpd.GeoDataFrame:
+    """Union the slices of each cell in first-appearance order; the union must be valid."""
     try:
         footprints = frame.dissolve(by="EntityID", sort=False)
     except shapely.errors.GEOSException as error:
@@ -102,6 +120,7 @@ def _union_footprints(frame: gpd.GeoDataFrame, path: ArtifactFile) -> gpd.GeoDat
 
 
 def _source_components(frame: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Collect every polygon of each cell's slices into one MultiPolygon."""
     # Construct collections, never a topology operation: preserve every source
     # row/component, including overlapping or invalid rings, in source order.
     groups = frame.groupby("EntityID", sort=False).indices
@@ -114,7 +133,7 @@ def _source_components(frame: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return result
 
 
-def read_boundaries(path: ArtifactFile, *, policy: InvalidGeometryPolicy, frame: str) -> CellBoundaries:
+def read_boundaries(path: ArtifactFile, *, policy: InvalidGeometryPolicy) -> CellBoundaries:
     """Union valid-cell slices and apply whole-cell invalid-geometry semantics."""
     identifiers, geometry = _read_slices(path)
     source_ids = identifiers.unique()
@@ -141,4 +160,4 @@ def read_boundaries(path: ArtifactFile, *, policy: InvalidGeometryPolicy, frame:
     footprints = parts[0] if len(parts) == 1 else gpd.GeoDataFrame(pd.concat(parts), geometry="geometry")
     if not footprints.index.equals(retained_ids):
         footprints = footprints.loc[retained_ids]
-    return CellBoundaries(ShapesModel.parse(footprints, transformations={frame: Identity()}), source_ids)
+    return CellBoundaries(ShapesModel.parse(footprints, transformations={"global": Identity()}), source_ids)

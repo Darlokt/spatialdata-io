@@ -1,8 +1,14 @@
-"""Assemble calibrated Vizgen elements from one instrument or VPT layout."""
+"""Read one Vizgen MERSCOPE region, optionally with a VPT re-segmentation, into SpatialData.
+
+Boundaries, transcripts and cell centroids are natively in micrometres and
+always use ``global`` with identity. Mosaics join ``global`` only through the
+region's micron-to-mosaic calibration; without it they stay in
+``mosaic_pixels``, so no registration is claimed that the data do not give.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
 
@@ -12,19 +18,20 @@ from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.merscope._geometry import read_boundaries
 from spatialdata_io.readers.merscope._images import read_images
-from spatialdata_io.readers.merscope._layout import discover_layout, make_selection
+from spatialdata_io.readers.merscope._layout import discover_layout, validate_options
 from spatialdata_io.readers.merscope._tables import finalize_table, read_feature_names, read_table
 from spatialdata_io.readers.merscope._transcripts import read_transcripts
-from spatialdata_io.readers.merscope._transforms import read_transform
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    import pandas as pd
     from anndata import AnnData
     from dask.dataframe import DataFrame
     from geopandas import GeoDataFrame
-    from xarray import DataArray, DataTree
+
+    from spatialdata_io.readers.merscope._geometry import CellBoundaries
 
 
 def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public boundary typed.
@@ -43,53 +50,60 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
-    """Read the MERSCOPE instrument and Cellpose/Watershed VPT export layouts.
+    """Read a Vizgen MERSCOPE region and, optionally, its VPT re-segmentation.
 
-    Instrument artifacts are ``cell_by_gene.csv``, ``cell_metadata.csv``,
-    ``cell_boundaries.parquet`` and ``detected_transcripts.csv``. Mosaic TIFFs
-    and ``micron_to_mosaic_pixel_transform.csv`` live in ``images/``.
-    VPT replaces cell artifacts with its count/metadata CSVs and exactly one
-    ``cellpose_micron_space.parquet`` or ``watershed_micron_space.parquet``.
-    Only requested products and their dependencies are required. Filenames do
-    not establish a software release, so no release version is inferred.
+    Supported layouts (trees in the MERSCOPE guide):
+
+    - instrument output of one region: ``cell_by_gene.csv``,
+      ``cell_metadata.csv``, ``cell_boundaries.parquet``,
+      ``detected_transcripts.csv`` and ``images/`` with
+      ``mosaic_<stain>_z<index>.tif`` and an optional
+      ``micron_to_mosaic_pixel_transform.csv``;
+    - Vizgen Post-processing Tool (VPT) output with Cellpose or Watershed
+      segmentation in ``vpt_directory``: ``cell_by_gene.csv``,
+      ``cell_metadata.csv``, exactly one ``cellpose_micron_space.parquet`` or
+      ``watershed_micron_space.parquet``, and optionally reassigned
+      ``detected_transcripts.csv``. Mosaics still come from the region.
+
+    Only the artifacts of selected products are required. File names establish
+    no software release, so no format version is detected.
 
     Parameters
     ----------
     path
-        Instrument region directory.
+        Region directory of the instrument output.
     vpt_directory
-        Optional VPT analysis directory. Relative overrides resolve against
-        the region root; absolute overrides are permitted.
+        VPT output directory whose cells replace the instrument cells. A
+        relative path resolves against ``path``; an absolute path may be
+        anywhere.
     z_layers
-        Unique nonnegative image-stack indices in desired order. None selects
-        all discovered layers in ascending order. Every selected layer must
-        contain the same lexically ordered stains. A scalar is not accepted.
+        Mosaic z indices in output order: unique nonnegative integers. ``None``
+        reads every plane in ascending order. A scalar is not accepted.
     region_name, slide_name
-        Element naming components, defaulting to the root directory name and
-        its parent name. Their joined form is ``<slide>_<region>``.
+        Parts of the element-name prefix ``<slide_name>_<region_name>``. They
+        must be valid SpatialData element names. By default they are the
+        region directory name and its parent directory name, repaired with a
+        warning when they are not valid element names.
     include_transcripts
-        Return projected lazy transcript points with known feature categories.
+        Return the transcript points.
     include_cell_boundaries
-        Return each cell's eager XY geometry. Valid source slices form a union
-        footprint; kept invalid cells retain marked literal components. Holes
-        and disconnected components survive.
+        Return the cell footprints. The table links to them only when they
+        are returned.
     include_table
-        Return eager canonical CSR expression and sparse blank measurements.
-        Tables link to returned boundaries; excluding boundaries yields an
-        explicitly unlinked table.
+        Return the cell table.
     include_images
-        Return one lazy CYX image per selected z index, preserving source dtype.
+        Return one image per selected z plane.
     invalid_geometries
-        Keep invalid cells as marked literal source components, drop all
-        their slices and table rows, or raise. Cells with valid slices retain
-        their ordinary union footprint. Missing/empty or malformed slices fail
-        in every mode; requested all-dropped boundaries fail.
+        Cells with an invalid boundary slice: ``"keep"`` returns all their
+        source polygons unchanged as one MultiPolygon; ``"drop"`` removes the
+        cell from the footprints and its row from the table (transcript
+        assignments are not rewritten); ``"raise"`` fails. Dropping every
+        cell fails.
     scale_factors
-        Integer factors of at least two, one per generated pyramid level of the
-        images; empty for a single scale.
+        Integer factors of at least two, one per generated image pyramid
+        level; empty for a single scale.
     chunks
-        One positive size for every axis or three ``c, y, x`` sizes of the
-        images. By default one channel per chunk and square 1024-pixel tiles.
+        One positive size for every image axis, or ``(c, y, x)`` sizes.
     path_policy
         How symlinks inside the dataset directory are treated. ``"strict"``
         requires every discovered artifact and relative file option to resolve
@@ -103,70 +117,82 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     Returns
     -------
     spatialdata.SpatialData
-        Requested ``<slide>_<region>_z<index>`` images,
-        ``<slide>_<region>_transcripts`` points,
-        ``<slide>_<region>_polygons`` shapes and ``table``.
-        Table observations follow count rows, features follow count columns,
-        and metadata align by exact cell identity. Controls named
-        ``Blank-<positive integer>`` reside in CSR ``obsm['blank']`` with names
-        in ``uns['blank_names']``; other features remain expression.
-        Expression and blank controls share float32 when every count is exact,
-        otherwise float64. Unrepresentable floating counts raise.
+        The selected elements, with ``<prefix>`` = ``<slide_name>_<region_name>``:
+
+        - ``images["<prefix>_z<index>"]``: lazy ``(c, y, x)`` mosaic per
+          selected plane in the source dtype; channels are the stains in
+          lexical order. In ``global`` through the inverse of the
+          micron-to-mosaic affine when that file exists, otherwise only in
+          ``mosaic_pixels`` (identity).
+        - ``points["<prefix>_transcripts"]``: lazy events with float64 ``x``,
+          ``y`` (micrometres) and categorical ``gene`` in count-header order,
+          plus, when present, int64 ``z_raw`` (stack index, not a physical
+          depth), ``fov`` and ``barcode_id``, text ``transcript_id``, and the
+          text assignment ``cell_id`` (instance key; ``-1`` unassigned) or
+          ``original_cell_id`` (instrument events read beside VPT cells).
+        - ``shapes["<prefix>_polygons"]``: one XY footprint per cell, the
+          union of its z slices, indexed by text ``EntityID``, with a
+          categorical ``geometry_representation`` (``union_footprint`` or
+          ``source_components``). Not repaired.
+        - ``tables["table"]``: rows in count-file order, features in
+          count-header order. ``X`` is a CSR sparse array of gene counts,
+          ``obsm["blank"]`` a CSR array of ``Blank-<n>`` controls named by
+          ``uns["blank_names"]``; both float32 when every count is exact in
+          float32, otherwise float64. ``obsm["spatial"]`` holds float64
+          micrometre centroids; ``obs`` holds the cell metadata, text
+          ``EntityID`` and categorical ``region``, ``slide`` and
+          ``dataset_id``. Metadata column names that a SpatialData table
+          does not accept (``cell type``) are sanitized with a warning
+          (``cell_type``; a name that then collides, ignoring letter case,
+          gets a ``_1``, ``_2``, ... suffix). Linked to the polygons through ``cells_region`` and
+          ``EntityID`` when they are returned, otherwise unlinked.
+
+        Points and shapes use ``global`` (micrometres) with identity; table
+        centroids are in the same frame.
 
     Raises
     ------
-    FileNotFoundError, NotADirectoryError, IsADirectoryError
-        Requested artifacts are missing or have the wrong filesystem kind.
-    ValueError
-        Layouts, schemas, identities, geometry, calibration or values violate
-        the supported export contract.
     TypeError
-        Public options have invalid types.
+        If an option has the wrong type.
+    ValueError
+        If an option has an invalid value, including names that are not valid
+        element names.
+    FileNotFoundError, NotADirectoryError, IsADirectoryError
+        If a required artifact is missing or has the wrong kind.
+    ReaderFormatError
+        If an artifact is ambiguous or malformed, the count, metadata and
+        boundary cell populations disagree, or a value is invalid (for
+        example a count that is not exact in float64). Malformed transcript
+        rows and unknown genes or assigned cells raise when their partition is
+        computed.
+
+    Warns
+    -----
+    UserWarning
+        If a default name part taken from a directory name is repaired, or
+        cell metadata column names are sanitized.
 
     Notes
     -----
-    The calibrated ``global`` coordinate system uses source micrometres.
-    Shapes and points use identity; mosaics carry the full inverse of their
-    micron-to-mosaic affine. Physical-only reads need no images or affine.
-    With absent calibration, images alone retain global mosaic pixels; mixed
-    images/vectors use distinct ``mosaic_pixels`` and ``microns`` frames.
-    Table ``obsm['spatial']`` retains float64 micron XY vendor cell centroids,
-    described in ``uns['spatialdata_io_positions']`` in the resolved vector frame.
-    Tables also require separation from unregistered mosaic images.
-    Image layers and transcript ``z_raw`` are stack indices, not
-    physical Z coordinates. Footprints discard z occupancy and are independent
-    of image-layer selection; they are not a 3D segmentation.
-
-    ``geometry_representation`` is categorical: ``union_footprint`` promises a
-    projected union, while ``source_components`` preserves every component of
-    cells with invalid slices. Overlaps may remain invalid and summed component
-    area does not represent projected cell area. No topology repair is applied.
-    Boundary ``ZIndex`` annotations may be null; populated values must be
-    nonnegative int64 plane indexes. Every slice contributes to the XY footprint
-    independently of this optional stack annotation.
-
-    VPT's reassigned transcript CSV, when present, uses its count header and
-    ``cell_id`` annotations. Otherwise the original instrument transcript CSV
-    and original count header are required, and assignments are named
-    ``original_cell_id`` without claiming correspondence to VPT boundaries.
-    Unassigned ``-1`` events are retained. Unknown features and malformed rows
-    fail when their partition is computed. Current cell assignments are checked
-    against returned cell populations when those are already materialized.
-
-    Source artifacts remain necessary for later raster and transcript
-    computation. Counts use bounded CSV working batches; shapes and cell
-    metadata are eager. Returned containers are owned, caller options are not
-    mutated, and construction executes no raster or transcript tasks. See the
-    MERSCOPE guide for complete schemas and deliberate API changes.
+    Building the result runs no pixel or transcript task, and the lazy
+    elements keep reading the source files: keep them available until the
+    data are computed or written. Counts, cell metadata and boundaries are
+    read eagerly; counts in bounded batches. Current transcript assignments
+    are checked against the boundary population (before ``"drop"``) or,
+    without boundaries, the table. The returned containers are owned by the
+    caller. See the MERSCOPE guide for the complete source schemas.
     """
-    policy = validate_invalid_geometry_policy(invalid_geometries)
-    selection = make_selection(
-        include_images=include_images,
+    selection = validate_options(
+        vpt_directory=vpt_directory,
+        z_layers=z_layers,
+        region_name=region_name,
+        slide_name=slide_name,
+        include_transcripts=include_transcripts,
         include_cell_boundaries=include_cell_boundaries,
         include_table=include_table,
-        include_transcripts=include_transcripts,
-        z_layers=z_layers,
+        include_images=include_images,
     )
+    policy = validate_invalid_geometry_policy(invalid_geometries)
     options = make_raster_options(scale_factors, chunks)
     layout = discover_layout(
         path,
@@ -176,65 +202,37 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
         slide_name=slide_name,
         path_policy=path_policy,
     )
-    dataset_id = layout.names.dataset_id
+    prefix = layout.names.dataset_id
 
-    # Native vectors are micrometres. Mosaics join them in ``global`` only through
-    # the vendor calibration; otherwise both keep explicitly distinct frames.
-    images: dict[str, DataArray | DataTree] = {}
-    vector_frame = "global"
-    if layout.images is not None:
-        transform = None if layout.images.transform is None else read_transform(layout.images.transform)
-        unregistered = transform is None and (
-            layout.boundaries is not None or layout.transcripts is not None or layout.tables is not None
-        )
-        vector_frame = "microns" if unregistered else "global"
-        images = read_images(
-            layout.images.layers,
-            dataset_id=dataset_id,
-            options=options,
-            transform=transform,
-            frame="mosaic_pixels" if unregistered else "global",
-        )
+    images = {} if layout.images is None else read_images(layout.images, dataset_id=prefix, options=options)
+    table = None
+    table_features: tuple[str, ...] = ()
+    if layout.tables is not None:
+        table, table_features = read_table(layout.tables)
+    boundaries = None if layout.boundaries is None else read_boundaries(layout.boundaries, policy=policy)
 
-    table_data = None if layout.tables is None else read_table(layout.tables.counts, layout.tables.metadata)
-
-    shapes: dict[str, GeoDataFrame] = {}
     points: dict[str, DataFrame] = {}
-    tables: dict[str, AnnData] = {}
-    boundaries = None
-
-    if layout.boundaries is not None:
-        boundaries = read_boundaries(layout.boundaries, policy=policy, frame=vector_frame)
-        shapes[f"{dataset_id}_polygons"] = boundaries.shapes
-
     if layout.transcripts is not None:
         source = layout.transcripts
-        if table_data is not None and layout.tables is not None and layout.tables.counts == source.vocabulary:
-            features = table_data[1]
-        else:
-            features = read_feature_names(source.vocabulary)
-
-        # Both private producers establish exact textual identities. Freeze
-        # the available population once for deferred assignment validation.
-        allowed_ids: tuple[str, ...] | None = None
-        if source.assignment == "current":
-            if boundaries is not None:
-                allowed_ids = cast("tuple[str, ...]", tuple(boundaries.source_ids))
-            elif table_data is not None:
-                allowed_ids = tuple(table_data[0].obs_names)
-
-        points[f"{dataset_id}_transcripts"] = read_transcripts(
-            source, features=features, frame=vector_frame, allowed_cell_ids=allowed_ids
+        shared_header = layout.tables is not None and layout.tables.counts == source.vocabulary
+        points[f"{prefix}_transcripts"] = read_transcripts(
+            source,
+            features=table_features if shared_header else read_feature_names(source.vocabulary),
+            cell_population=_current_cells(boundaries, table) if source.assignment == "current" else None,
         )
 
-    if table_data is not None:
-        tables["table"] = finalize_table(
-            table_data[0],
-            frame=vector_frame,
-            names=layout.names,
-            boundaries=boundaries,
-        )
+    shapes: dict[str, GeoDataFrame] = {} if boundaries is None else {f"{prefix}_polygons": boundaries.shapes}
+    tables: dict[str, AnnData] = {}
+    if table is not None:
+        tables["table"] = finalize_table(table, names=layout.names, boundaries=boundaries)
 
     result = SpatialData(images=images, points=points, shapes=shapes, tables=tables)
     set_reader_provenance(result.attrs, reader="merscope")
     return result
+
+
+def _current_cells(boundaries: CellBoundaries | None, table: AnnData | None) -> pd.Index | None:
+    """Return the complete current cell population, before geometry filtering, when one is read."""
+    if boundaries is not None:
+        return boundaries.source_ids
+    return None if table is None else table.obs_names

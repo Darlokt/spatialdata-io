@@ -19,6 +19,7 @@ class TestPathsPackage:
             "ArtifactFile",
             "DatasetRoot",
             "PathPolicy",
+            "list_directory",
             "normalize_dataset_root",
             "optional_metadata_directory",
             "optional_metadata_file",
@@ -30,12 +31,12 @@ class TestPathsPackage:
             "require_metadata_directory",
             "require_metadata_file",
             "require_unique_path",
-            "sorted_paths",
         ]
         assert not hasattr(paths, "ReaderFormatError")
         assert not hasattr(paths, "resolve_caller_path")
         assert not hasattr(paths, "optional_file")
         assert not hasattr(paths, "optional_directory")
+        assert not hasattr(paths, "sorted_paths")
 
     def test_artifact_types_are_allocation_free_path_markers(self) -> None:
         path = Path("artifact")
@@ -80,3 +81,19 @@ class TestPathsPackage:
                 if name in constructors:
                     calls.add(name)
             assert not calls, f"{path} constructs validated path markers directly: {sorted(calls)}"
+
+    def test_only_path_core_lists_directories(self) -> None:
+        """Readers list through list_directory, which adds context and skips AppleDouble files."""
+        repository_root = Path(__file__).resolve().parents[5]
+        readers = repository_root / "src" / "spatialdata_io" / "readers"
+        listing = {"iterdir", "glob", "rglob", "walk", "scandir", "listdir"}
+
+        for path in readers.rglob("*.py"):
+            if path == readers / "_utils" / "paths" / "_core.py":
+                continue
+            calls = {
+                node.func.attr
+                for node in ast.walk(ast.parse(path.read_text()))
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in listing
+            }
+            assert not calls, f"{path} lists a directory directly: {sorted(calls)}"

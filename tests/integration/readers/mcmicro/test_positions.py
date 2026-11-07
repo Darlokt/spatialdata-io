@@ -135,7 +135,7 @@ class TestMcmicroPositions:
         assert table.obs["CellID"].tolist() == [1, 2, 11, 12] * len(image_paths)
         declaration = table.uns[POSITIONS_KEY]["coordinates"]
         if mode == "wsi":
-            assert declaration["spatial_pixels"]["frame"] == "global_regionprops_indices"
+            assert declaration["spatial_pixels"]["frame"] == "image_regionprops_indices"
             assert "spatial_pixel_frame" not in table.obs
         else:
             assert (

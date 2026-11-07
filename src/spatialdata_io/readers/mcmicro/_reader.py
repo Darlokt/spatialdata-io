@@ -1,4 +1,10 @@
-"""Assemble one MCMICRO run into lazy rasters and one linked cell table."""
+"""Assemble one MCMICRO run into lazy images and labels and one linked cell table.
+
+The public function only orchestrates: validate the raster options, discover
+the layout (``_layout``), read the marker panel (``_metadata``), build the
+rasters and their grids (``_rasters``), stream and link the quantification
+tables (``_tables``) and attach provenance.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +15,9 @@ from spatialdata import SpatialData
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers.mcmicro._layout import TABLE_KEY, WsiLayout, discover_layout
+from spatialdata_io.readers.mcmicro._layout import TABLE_KEY, TMA_MAP_KEY, WsiLayout, discover_layout
 from spatialdata_io.readers.mcmicro._metadata import read_markers
-from spatialdata_io.readers.mcmicro._rasters import ImageGrid, read_image, read_labels
+from spatialdata_io.readers.mcmicro._rasters import ImageGrid, read_image, read_labels, read_mask
 from spatialdata_io.readers.mcmicro._tables import read_table
 
 if TYPE_CHECKING:
@@ -31,10 +37,10 @@ def mcmicro(
 ) -> SpatialData:
     """Read the outputs of one MCMICRO whole-slide or tissue-microarray run.
 
-    The reader converts pipeline results, not pipeline inputs: ``raw/``,
+    The reader converts pipeline results, not inputs: ``raw/``,
     ``illumination/``, Coreograph QC files and segmentation puncta tables are
-    never read. ``qc/params.yml`` is MCMICRO's complete parameter dump; its
-    boolean ``workflow.tma`` selects the layout. Whole-slide runs contain::
+    never read. The YAML boolean ``workflow.tma`` in ``qc/params.yml`` (MCMICRO's
+    complete parameter dump) selects the layout. A whole-slide run::
 
         run/
         ├── markers.csv
@@ -43,24 +49,28 @@ def mcmicro(
         ├── segmentation/<method>-<image>/<mask>.ome.tif
         └── quantification/<image>--<method>_<mask>.csv
 
-    Tissue-microarray runs add Coreograph cores, each with a tissue mask::
+    A tissue-microarray (TMA) run adds Coreograph cores, each with a tissue
+    mask, and segments and quantifies the cores::
 
         run/
         ├── markers.csv
         ├── qc/params.yml
         ├── registration/<tma>.ome.tif
-        ├── dearray/<core>.ome.tif
-        ├── dearray/masks/<core>_mask.tif
-        ├── segmentation/<method>-<core>/<mask>.ome.tif
-        └── quantification/<core>--<method>_<mask>.csv
+        ├── dearray/<n>.ome.tif
+        ├── dearray/masks/<n>_mask.tif
+        ├── segmentation/<method>-<n>/<mask>.ome.tif
+        └── quantification/<n>--<method>_<mask>.csv
 
-    A historical ``segmentation/<image>/`` directory is accepted when exactly
-    one quantification table identifies the method of each of its masks.
-    Segmentation and quantification are optional, but every quantification
-    table must name exactly one discovered label image. Registration must
-    contain exactly one TIFF-family image, and cores are positive integers.
-    Discovered artifacts, including present optional output directories, must
-    resolve within the dataset root.
+    - Registration must hold exactly one TIFF-family image; its ID drops the
+      extension and an ``.ome`` suffix. Cores are positive integers.
+    - Segmentation and quantification are optional. Every quantification table
+      must name exactly one discovered label; ``<method>`` and ``<mask>`` are
+      compared as whole names. A historical ``segmentation/<image>/``
+      directory is accepted when exactly one quantification table names the
+      method of each of its masks.
+    - Image IDs, methods and mask names that are not valid SpatialData element
+      names are sanitized with a warning; element names that collide, ignoring
+      letter case, fail before any raster is opened.
 
     Parameters
     ----------
@@ -68,7 +78,8 @@ def mcmicro(
         MCMICRO project directory.
     scale_factors
         Integer factors of at least two, one per generated pyramid level of the
-        images and labels; empty for a single scale.
+        images and labels; empty for a single scale. Generated label levels
+        require labels of at most 32 bits.
     chunks
         One positive size for every axis or three ``c, y, x`` sizes of the
         images; labels use the ``y`` and ``x`` sizes. By default one channel per
@@ -85,88 +96,93 @@ def mcmicro(
 
     Returns
     -------
-    spatialdata.SpatialData
-        Images are lazy ``(c, y, x)`` arrays in source dtype whose channels are
-        the canonical MCQuant marker IDs in ``markers.csv`` row order. Every
-        occurrence of a repeated marker is suffixed (``DAPI, CD3, DAPI``
-        becomes ``DAPI_1, CD3, DAPI_2``); generated collisions fail. Labels are
-        lazy integer ``(y, x)`` arrays on their source image grid.
+    SpatialData
+        Images, labels and, when quantification exists, one linked table:
 
-        Whole-slide element names are ``<image>_image`` and
-        ``<image>_<method>_<mask>`` in coordinate system ``global``.
-        Tissue-microarray runs return the registered map ``tma_map`` in
-        ``global``, ``core_<n>_image`` and ``core_<n>_<method>_<mask>`` in the
-        local frame ``core_<n>``, and Coreograph tissue masks
-        ``core_<n>_mask`` in their own frame ``core_<n>_mask``. Coreograph
-        records no authoritative crop origins and masks may be downsampled, so
-        no transform between these frames is invented. Each image uses its
-        complete base OME XY spacing in µm, nm or mm when present, otherwise
-        source pixels. Same-grid segmentations inherit that calibration;
-        conflicting declarations fail. Independent tissue masks use only their
-        own complete OME calibration. Anisotropic spacing is preserved and the
-        native origin is unchanged. ASHLAR may itself write a default spacing;
-        declared output metadata cannot verify acquisition accuracy.
+        ``images["<image>_image"]`` (whole slide), ``images["tma_map"]`` and ``images["core_<n>_image"]`` (TMA)
+            Lazy ``c, y, x`` arrays in the source dtype. Channels are the
+            canonical MCQuant marker IDs in ``markers.csv`` row order: every
+            occurrence of a repeated marker is suffixed (``DAPI, CD3, DAPI``
+            becomes ``DAPI_1, CD3, DAPI_2``); generated collisions fail.
+        ``labels["<image>_<method>_<mask>"]`` (``core_<n>_<method>_<mask>`` for a TMA)
+            Lazy integer ``y, x`` segmentation on the grid of its image.
+        ``labels["core_<n>_mask"]``
+            Lazy Coreograph tissue mask on its own, possibly downsampled, grid.
+        ``tables["table"]``
+            Every quantification table in label order, then source row order,
+            linked by categorical ``obs["region"]`` (the label element) and
+            ``obs["CellID"]`` (its exact int64 label value; unique within a
+            region and representable in the label dtype; label pixels are
+            never read to check membership).
 
-        ``tables['table']`` concatenates every quantification table in label
-        order. ``X`` is an eager finite canonical CSR float64 array of mean
-        marker intensities with ``var_names`` equal to the canonical marker
-        IDs; ``var`` keeps every ``markers.csv`` column, including the original
-        ``marker_name``, as text. Observation names are row positions
-        ``"0"``, ``"1"``, ...; ``region`` names the label image and ``CellID``
-        holds its exact int64 label value. ``obsm['spatial_pixels']`` retains
-        float64 source ``X_centroid``/``Y_centroid`` XY in zero-based regionprops
-        pixel-index centres, with native frames
-        ``<source-image-frame>_regionprops_indices``. If every image represented
-        by measured rows has complete calibration, ``obsm['spatial']`` contains
-        float64 micrometre XY, calculated as ``(native_xy + 0.5) * spacing_xy_um``
-        in the unchanged source raster frame. Nonfinite physical values and
-        nonzero shifted pixel coordinates becoming zero during multiplication
-        fail. Multiple segmentations share their image frame; TMA cores remain
-        independent. Multiple native/physical
-        frames use categorical ``spatial_pixel_frame``/``spatial_frame`` columns.
-        Missing, partial or mixed calibration omits physical ``spatial`` for
-        the entire aggregate. Unmeasured images and independent tissue masks
-        do not decide table calibration. The version-1
-        ``uns['spatialdata_io_positions']`` declaration records units, position
-        meaning, frames and bounded source calibration evidence. Occupied
-        generated frame columns fail. These arrays are snapshots: ordinary
-        AnnData concatenation and later registration do not update them.
-        MCQuant morphology columns are nullable float64 and all other columns
-        remain exact text. Area retains pixel squared units, axis lengths and
-        centroid annotations retain pixels, and Eccentricity/Solidity/Extent are
-        dimensionless. Orientation is in radians, counter-clockwise from the
-        row axis to the major axis, between -pi/2 and pi/2. No table is returned
-        without quantification.
+            - ``X``: canonical CSR float64 mean marker intensities, finite;
+              nonzero decimals that would round to zero fail.
+              ``var_names`` are the canonical marker IDs and ``var`` keeps
+              every ``markers.csv`` column as text.
+            - ``obs_names`` are row positions ``"0"``, ``"1"``, ...; MCQuant
+              morphology columns are nullable float64 (empty fields missing)
+              and every other column is exact text.
+            - ``obs`` and ``var`` column names that a SpatialData table does
+              not accept (``CD45 RO_intensity_max``, or ``area`` beside
+              ``Area``) are sanitized with a warning: invalid characters
+              become ``_`` and a name that collides, ignoring letter case,
+              gets a ``_1``, ``_2``, ... suffix. ``region``, ``CellID`` and
+              valid names keep their spelling.
+            - ``obsm["spatial_pixels"]``: the float64 ``X_centroid``,
+              ``Y_centroid`` regionprops centroids, zero-based pixel indices
+              in frame ``<grid>_regionprops_indices`` (``image``, ``core_<n>``).
+            - ``obsm["spatial"]`` (only when every measured image is
+              calibrated): float64 micrometres ``(spatial_pixels + 0.5) *
+              spacing`` in the image's coordinate system. Nonfinite results,
+              and nonzero coordinates that would become zero, fail.
+            - With several frames (TMA cores), categorical
+              ``obs["spatial_pixel_frame"]`` and ``obs["spatial_frame"]``
+              name each row's frames; such source columns then fail.
+            - ``uns["spatialdata_io_positions"]`` declares both arrays, their
+              units, frames and calibration evidence. They are snapshots that
+              later registration or concatenation do not update.
 
-        Canonical marker IDs in a quantified run must differ from ``CellID``,
-        ``X_centroid`` and ``Y_centroid`` so expression and required observation
-        fields have unambiguous roles. Image-only marker panels have no such
-        restriction.
+        Coordinate systems: every raster keeps its native origin, and no
+        transform between the TMA map, cores and tissue masks is invented,
+        because Coreograph records no authoritative crop origins. A raster
+        with complete base OME ``PhysicalSizeX``/``PhysicalSizeY`` (µm, nm or
+        mm) is scaled into a micrometre frame: ``global`` for the whole-slide
+        image or the TMA map, ``core_<n>`` for a core and ``core_<n>_mask``
+        for its tissue mask. Otherwise it uses the identity into a pixel frame:
+        ``image_pixels``, ``tma_map_pixels``, ``core_<n>_pixels`` or
+        ``core_<n>_mask_pixels``. So ``global`` always means micrometres.
+        Segmentations share their image's frame; their own present sizes must
+        agree with it. Tissue masks use only their own sizes.
+
+        ``attrs`` record the reader and package version. Pixels are not read
+        until computed, and a partial computation decodes only the TIFF tiles
+        or strips it overlaps; the source files must stay available. The
+        quantification tables are streamed in bounded blocks and expression is
+        never densified as a whole. Files are closed on return.
+
+    Warns
+    -----
+    UserWarning
+        If an image ID, method or mask name was sanitized into an element name,
+        or a quantification or ``markers.csv`` column name into a table
+        column name.
 
     Raises
     ------
-    FileNotFoundError, NotADirectoryError, IsADirectoryError
-        Required artifacts are missing or have the wrong filesystem kind.
-    ValueError
-        Layouts, YAML, schemas, identifiers, values, shapes or options violate
-        the supported contract, or element names would collide.
     TypeError
-        Public options have invalid types.
-
-    Notes
-    -----
-    Construction executes no pixel tasks and never reads label pixels; table
-    IDs are checked for exact positive int64 values, label dtype capacity and
-    uniqueness within each region; membership in label pixels is not checked.
-    Quantification uses an approximately 1 MiB Arrow CSV block target, then
-    numerical blocks of at most 10,000 rows with an 8 MiB target and at least
-    one row. Parser/text buffers, eager annotations, retained CSR blocks and
-    final sparse assembly use additional memory; one wide row can exceed the
-    numerical target. Arrow checks record widths but accepts some malformed
-    quoting. Expression is never densified as a whole. TIFF source bands target
-    16 MiB, with a native-strip exception; output rechunking can fetch adjacent
-    bands. Source files remain necessary for later raster computation. Caller
-    options are not mutated.
+        If an option has the wrong type.
+    ValueError
+        If an option has an invalid value, or a requested pyramid level would
+        downsample 64-bit labels or shrink a raster below one pixel.
+    FileNotFoundError, NotADirectoryError, IsADirectoryError
+        If a required artifact is missing or has the wrong kind.
+    ValueError
+        A contextual ``ReaderFormatError`` naming the artifact and path if the
+        layout, ``qc/params.yml``, ``markers.csv``, a raster or a
+        quantification table is malformed or they disagree, for example an
+        ambiguous registration, unpaired tables, colliding element names, a
+        channel count other than the panel's, labels off their image grid,
+        conflicting calibrations, nonfinite values or out-of-range IDs.
     """
     options = make_raster_options(scale_factors, chunks)
     layout = discover_layout(path, path_policy=path_policy)
@@ -177,26 +193,23 @@ def mcmicro(
     grids: dict[str, ImageGrid] = {}
 
     if isinstance(layout, WsiLayout):
-        images[f"{layout.image_id}_image"], grids[layout.image_id] = read_image(
-            layout.image, channels=panel.features, frame="global", options=options
+        images[layout.image_key], grids[layout.image_id] = read_image(
+            layout.image, name="image", calibrated_frame="global", channels=panel.features, options=options
         )
     else:
-        images["tma_map"], _ = read_image(layout.tma_map, channels=panel.features, frame="global", options=options)
+        images[TMA_MAP_KEY], _ = read_image(
+            layout.tma_map, name=TMA_MAP_KEY, calibrated_frame="global", channels=panel.features, options=options
+        )
         for core in layout.cores:
-            images[f"{core.image_id}_image"], grids[core.image_id] = read_image(
-                core.image, channels=panel.features, frame=core.image_id, options=options
+            images[core.image_key], grids[core.image_id] = read_image(
+                core.image, name=core.image_id, calibrated_frame=core.image_id, channels=panel.features, options=options
             )
-            labels[f"{core.image_id}_mask"], _ = read_labels(
-                core.mask, grid=None, frame=f"{core.image_id}_mask", options=options
-            )
+            labels[core.mask_key] = read_mask(core.mask, name=core.mask_key, options=options)
 
-    label_dtypes: dict[str, np.dtype[np.generic]] = {}
+    label_dtypes: dict[str, np.dtype[np.integer]] = {}
     for segmentation in layout.segmentations:
         labels[segmentation.key], label_dtypes[segmentation.key] = read_labels(
-            segmentation.path,
-            grid=grids[segmentation.image_id],
-            frame=grids[segmentation.image_id].frame,
-            options=options,
+            segmentation.path, grid=grids[segmentation.image_id], options=options
         )
 
     tables = {}

@@ -103,6 +103,37 @@ class TestReadCellTable:
         expected = frame[["cyc002_ch001", "cyc001_ch002"]].to_numpy().ravel()
         np.testing.assert_array_equal(result.X.data, expected[expected != 0])
 
+    def test_csv_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        """20,001 rows fit one 32 MiB block; 1,000-row blocks give the identical table."""
+        rows = 20_001
+        path = tmp_path / "cells.csv"
+        path.write_text(
+            "cell_id,region,x,y,cyc001_ch001,cyc001_ch002\n"
+            + "".join(f"{row + 1},1,{row},2,{row % 3},{-(row % 5)}\n" for row in range(rows)),
+            encoding="utf-8",
+        )
+        blocks = mocker.spy(_tables, "_split_cells")
+
+        whole = read_cell_table(ArtifactFile(path)).table
+
+        assert [len(call.args[0]) for call in blocks.call_args_list] == [rows]
+        # Eight bytes per feature and row; two features.
+        mocker.patch.object(_tables, "_CSV_MAX_DENSE_BYTES", 8 * 2 * 1000)
+        blocks.reset_mock()
+        small = read_cell_table(ArtifactFile(path)).table
+        assert len(blocks.call_args_list) == 21
+        expected, actual = whole.X, small.X
+        assert isinstance(expected, sparse.csr_array)
+        assert isinstance(actual, sparse.csr_array)
+        assert expected.nnz == actual.nnz
+        assert expected.dtype == actual.dtype
+        np.testing.assert_array_equal(expected.data, actual.data)
+        np.testing.assert_array_equal(expected.indices, actual.indices)
+        np.testing.assert_array_equal(expected.indptr, actual.indptr)
+        assert isinstance(whole.obs, pd.DataFrame)
+        assert isinstance(small.obs, pd.DataFrame)
+        pd.testing.assert_frame_equal(whole.obs, small.obs)
+
     def test_dense_csv_batches_are_bounded_by_feature_width(self, tmp_path: Path, mocker: MockerFixture) -> None:
         """Cap each numerical materialization by bytes while preserving final sparse buffers."""
         frame = cell_frame()
@@ -309,7 +340,7 @@ class TestReadCellTable:
         """Reject inexact signed and unsigned intensity promotion across CSV blocks."""
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,9223372036854775809\n2,1,0,0,-1\n", encoding="utf-8")
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", 1)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", 1)
 
         with pytest.raises(ReaderFormatError, match="precision"):
             read_cell_table(ArtifactFile(path))
@@ -360,30 +391,30 @@ class TestReadCellTable:
         with pytest.raises(ReaderFormatError, match="precision"):
             read_cell_table(ArtifactFile(path))
 
-    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
     def test_exact_signed_unsigned_expression_is_batch_independent(
-        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
     ) -> None:
         """Compatible signed and unsigned intensities may share exact float64 storage."""
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,-1\n2,1,0,0,9223372036854775808\n", encoding="utf-8")
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
 
         result = read_cell_table(ArtifactFile(path)).table
 
         assert isinstance(result.X, sparse.csr_array)
         np.testing.assert_array_equal(result.X.data, [-1.0, float(2**63)])
 
-    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
     @pytest.mark.parametrize("all_zero", [False, True])
     def test_single_and_multiple_blocks_preserve_canonical_sparse_values(
-        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, *, all_zero: bool
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, *, all_zero: bool
     ) -> None:
         """Retain CSR shape, values, dtype and row order even when all signals are zero."""
         frame = cell_frame()
         frame[["cyc002_ch001", "cyc001_ch002"]] = 0 if all_zero else [[0, 2], [-3, 0], [4, 5]]
         write_csv(tmp_path / "cells.csv", frame)
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
 
         result = read_cell_table(ArtifactFile(tmp_path / "cells.csv")).table
 
@@ -397,9 +428,9 @@ class TestReadCellTable:
         np.testing.assert_array_equal(result.X.indptr, [0, 0, 0, 0] if all_zero else [0, 1, 2, 4])
         assert result.obs["cell_id"].tolist() == [7, 2, 11]
 
-    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
     def test_defined_scientific_fields_normalize_population_wide(
-        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
     ) -> None:
         """Region meaning and coordinate dtypes do not depend on a lexical batch boundary."""
         path = tmp_path / "cells.csv"
@@ -407,7 +438,7 @@ class TestReadCellTable:
             "cell_id,region,x,y,cyc001_ch001\n7,001,1,-2,0\n2,+1,2.5,0,-3\n11,1.0,-4,3.5,4\n",
             encoding="utf-8",
         )
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
 
         cells = read_cell_table(ArtifactFile(path))
         result, coordinates = cells.table, cells.coordinates

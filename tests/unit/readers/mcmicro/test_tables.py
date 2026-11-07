@@ -13,7 +13,8 @@ import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io._positions import POSITIONS_KEY
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro._layout import Quantification, Segmentation
 from spatialdata_io.readers.mcmicro._rasters import ImageGrid
@@ -39,26 +40,37 @@ def _panel() -> MarkerPanel:
 def _quantification(tmp_path: Path, name: str, text: str) -> Quantification:
     path = tmp_path / f"{name}.csv"
     path.write_text(text, encoding="utf-8")
-    label = Segmentation(name, "seg", "cell", ArtifactFile(tmp_path / f"{name}.ome.tif"))
+    label = Segmentation(name, "seg", "cell", ArtifactFile(tmp_path / f"{name}.ome.tif"), f"{name}_seg_cell")
     return Quantification(ArtifactFile(path), label)
 
 
-def _dtypes(*quantifications: Quantification, dtype: type[np.integer] = np.uint32) -> dict[str, np.dtype[np.generic]]:
+def _dtypes(*quantifications: Quantification, dtype: type[np.integer] = np.uint32) -> dict[str, np.dtype[np.integer]]:
     return {table.target.key: np.dtype(dtype) for table in quantifications}
 
 
-def _grids(*quantifications: Quantification) -> dict[str, ImageGrid]:
+def _grids(
+    *quantifications: Quantification, sizes: tuple[float | None, float | None] = (None, None)
+) -> dict[str, ImageGrid]:
     return {
-        table.target.image_id: ImageGrid((10, 10), (None, None), table.target.image_id, "uncalibrated")
+        table.target.image_id: ImageGrid(table.target.image_id, (10, 10), sizes, table.target.image_id)
         for table in quantifications
     }
+
+
+def _grid(sizes: tuple[float | None, float | None], name: str = "image", frame: str = "global") -> ImageGrid:
+    return ImageGrid(name, (10, 10), sizes, frame)
+
+
+def _source(tmp_path: Path, name: str = "source") -> ArtifactFile:
+    return ArtifactFile(tmp_path / f"{name}.csv")
 
 
 class TestReadTable:
     """Rows, features, IDs, annotations, and coordinates keep their exact source meaning."""
 
     def test_concatenation_sparsity_types_and_linkage(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._MAX_BATCH_ROWS", 1)
+        # Two float64 markers per row: one row per numerical block.
+        mocker.patch("spatialdata_io.readers.mcmicro._tables._BATCH_MEMORY_BYTES", 16)
         first = _quantification(tmp_path, "s1", _HEADER + "7,0,1.25,1.5,2,4,x\n3,0.5,0,3.5,4,,\n")
         second = _quantification(tmp_path, "s2", "B,CellID,A,note,Area,Y_centroid,X_centroid\n0,7,2,y,1,6,5.5\n")
         table = read_table((first, second), _panel(), _dtypes(first, second), _grids(first, second))
@@ -78,6 +90,32 @@ class TestReadTable:
         np.testing.assert_array_equal(table.obs["Area"].to_numpy(), [4, np.nan, 1])
         assert table.obs["note"].tolist() == ["x", "", "y"]
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[1.5, 2], [3.5, 4], [5.5, 6]])
+        assert table.obs["spatial_pixel_frame"].tolist() == ["s1_regionprops_indices"] * 2 + ["s2_regionprops_indices"]
+        assert "spatial" not in table.obsm
+        assert get_table_keys(table) == (["s1_seg_cell", "s2_seg_cell"], "region", "CellID")
+
+    def test_source_columns_yield_to_reader_owned_names(self, tmp_path: Path) -> None:
+        """Generated and linkage columns keep their names; case variants from the header are renamed."""
+        header = "CellID,A,B,X_centroid,Y_centroid,Region,cellid,Spatial_Frame\n"
+        first = _quantification(tmp_path, "s1", header + "7,0,1,1.5,2,r,c,f\n")
+        second = _quantification(tmp_path, "s2", header + "3,1,0,3.5,4,r,c,f\n")
+        grids = {"s1": _grid((None, None), "s1", "s1"), "s2": _grid((None, None), "s2", "s2")}
+
+        with pytest.warns(UserWarning, match="quantification CSV header") as caught:
+            table = read_table((first, second), _panel(), _dtypes(first, second), grids)
+
+        assert len(caught) == 1
+        assert "'Region' -> 'Region_1', 'cellid' -> 'cellid_1', 'Spatial_Frame' -> 'Spatial_Frame_1'" in str(
+            caught[0].message
+        )
+        assert table.obs.columns.tolist() == [
+            "region",
+            "CellID",
+            "Region_1",
+            "cellid_1",
+            "Spatial_Frame_1",
+            "spatial_pixel_frame",
+        ]
         assert get_table_keys(table) == (["s1_seg_cell", "s2_seg_cell"], "region", "CellID")
 
     def test_label_without_cells_is_not_a_region(self, tmp_path: Path) -> None:
@@ -116,14 +154,16 @@ class TestReadTable:
     )
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:
         source = _quantification(tmp_path, "s", text)
-        with pytest.raises(ReaderFormatError, match=match):
+        with pytest.raises(ReaderFormatError, match=match) as caught:
             read_table((source,), _panel(), _dtypes(source, dtype=np.uint8), _grids(source))
+        assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")
+        assert caught.value.path == source.path
 
     @pytest.mark.parametrize("parser_batches", [False, True])
     def test_duplicate_ids_across_batches_fail_at_final_linkage(
         self, tmp_path: Path, mocker: MockerFixture, *, parser_batches: bool
     ) -> None:
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._MAX_BATCH_ROWS", 2)
+        mocker.patch("spatialdata_io.readers.mcmicro._tables._BATCH_MEMORY_BYTES", 32)
         mocker.patch("spatialdata_io.readers.mcmicro._tables._CSV_BLOCK_BYTES", 128 if parser_batches else 1024 * 1024)
         text = _HEADER + "".join(f"{identifier},1,0,0,0,1,note\n" for identifier in [*range(1, 31), 7])
         source = _quantification(tmp_path, "s", text)
@@ -203,6 +243,8 @@ class TestReadMeasurements:
 
 
 class TestSetPositions:
+    """Native centroids keep their pixel-index frame; physical ones need every grid calibrated."""
+
     @pytest.mark.parametrize("sizes", [(None, None), (2.0, None), (2.0, 3.0)])
     def test_complete_source_grid_required_and_native_buffer_preserved(
         self, tmp_path: Path, sizes: tuple[float | None, float | None]
@@ -210,16 +252,56 @@ class TestSetPositions:
         native = np.asarray([[2.0, 1.0], [5.0, 3.5]], dtype=np.float64)
         table = ad.AnnData(sparse.csr_array([[1], [2]]))
         expression = table.X
-        grid = ImageGrid((10, 10), sizes, "global", "source OME spacing")
-        _set_positions(table, native, [grid], [2], ArtifactFile(tmp_path / "source.csv"))
+        _set_positions(table, native, [_grid(sizes)], [2], [_source(tmp_path)])
         assert table.obsm["spatial_pixels"] is native
         np.testing.assert_array_equal(native, [[2, 1], [5, 3.5]])
         assert table.X is expression
+        coordinates = table.uns[POSITIONS_KEY]["coordinates"]
+        assert coordinates["spatial_pixels"] == {
+            "axes": ["x", "y"],
+            "units": "pixel",
+            "frame": "image_regionprops_indices",
+            "position": "source_regionprops_centroid_zero_based_pixel_index_centres",
+        }
         if sizes == (2.0, 3.0):
             np.testing.assert_array_equal(table.obsm["spatial"], [[5, 4.5], [11, 12]])
             assert not np.shares_memory(table.obsm["spatial"], native)
+            assert coordinates["spatial"] == {
+                "axes": ["x", "y"],
+                "units": "micrometer",
+                "frame": "global",
+                "position": "source_regionprops_centroid_in_raster_corner_frame",
+                "calibration": {"global": _grid(sizes).calibration},
+            }
         else:
             assert "spatial" not in table.obsm
+            assert set(coordinates) == {"spatial_pixels"}
+
+    def test_several_grids_use_row_frames(self, tmp_path: Path) -> None:
+        native = np.asarray([[0.5, 0.5], [1.5, 1.5], [2.5, 2.5]], dtype=np.float64)
+        table = ad.AnnData(sparse.csr_array([[1], [2], [3]]))
+        grids = [_grid((2.0, 3.0), "core_1", "core_1"), _grid((5.0, 7.0), "core_2", "core_2")]
+        _set_positions(table, native, grids, [1, 2], [_source(tmp_path, "a"), _source(tmp_path, "b")])
+        np.testing.assert_array_equal(table.obsm["spatial"], [[2, 3], [10, 14], [15, 21]])
+        assert table.obs["spatial_frame"].tolist() == ["core_1", "core_2", "core_2"]
+        assert table.obs["spatial_frame"].cat.categories.tolist() == ["core_1", "core_2"]
+        assert table.obs["spatial_pixel_frame"].tolist() == [
+            "core_1_regionprops_indices",
+            "core_2_regionprops_indices",
+            "core_2_regionprops_indices",
+        ]
+        coordinates = table.uns[POSITIONS_KEY]["coordinates"]
+        assert coordinates["spatial"]["frame_key"] == "spatial_frame"
+        assert set(coordinates["spatial"]["calibration"]) == {"core_1", "core_2"}
+        assert coordinates["spatial_pixels"]["frame_key"] == "spatial_pixel_frame"
+
+    def test_mixed_calibration_has_no_physical_positions(self, tmp_path: Path) -> None:
+        table = ad.AnnData(sparse.csr_array([[1], [2]]))
+        grids = [_grid((2.0, 3.0), "core_1", "core_1"), _grid((None, None), "core_2", "core_2")]
+        _set_positions(table, np.zeros((2, 2)), grids, [1, 1], [_source(tmp_path, "a"), _source(tmp_path, "b")])
+        assert "spatial" not in table.obsm
+        assert "spatial_frame" not in table.obs
+        assert set(table.uns[POSITIONS_KEY]["coordinates"]) == {"spatial_pixels"}
 
     @pytest.mark.parametrize(("native_x", "physical_x"), [(-0.5, 0.0), (0.5, 5e-324), (-1.5, -5e-324)])
     def test_shifted_zero_and_representable_subnormal_are_valid(
@@ -227,13 +309,7 @@ class TestSetPositions:
     ) -> None:
         native = np.asarray([[native_x, 0.5]], dtype=np.float64)
         table = ad.AnnData(sparse.csr_array([[1]]))
-        _set_positions(
-            table,
-            native,
-            [ImageGrid((10, 10), (5e-324, 3.0), "global", "source OME spacing")],
-            [1],
-            ArtifactFile(tmp_path / "source.csv"),
-        )
+        _set_positions(table, native, [_grid((5e-324, 3.0))], [1], [_source(tmp_path)])
         np.testing.assert_array_equal(table.obsm["spatial"], [[physical_x, 3]])
         np.testing.assert_array_equal(native, [[native_x, 0.5]])
         assert table.obsm["spatial_pixels"] is native
@@ -242,21 +318,13 @@ class TestSetPositions:
     def test_nonzero_shifted_coordinate_cannot_collapse_to_zero(self, tmp_path: Path) -> None:
         table = ad.AnnData(sparse.csr_array([[1]]))
         with pytest.raises(ReaderFormatError, match="nonzero"):
-            _set_positions(
-                table,
-                np.asarray([[0.0, 1.0]]),
-                [ImageGrid((10, 10), (5e-324, 3.0), "global", "source OME spacing")],
-                [1],
-                ArtifactFile(tmp_path / "source.csv"),
-            )
+            _set_positions(table, np.asarray([[0.0, 1.0]]), [_grid((5e-324, 3.0))], [1], [_source(tmp_path)])
 
-    def test_nonfinite_physical_output_fails(self, tmp_path: Path) -> None:
-        table = ad.AnnData(sparse.csr_array([[1]]))
-        with pytest.raises(ReaderFormatError, match="nonfinite physical positions"):
-            _set_positions(
-                table,
-                np.asarray([[2.0, 1.0]]),
-                [ImageGrid((10, 10), (1e308, 3.0), "global", "source OME spacing")],
-                [1],
-                ArtifactFile(tmp_path / "source.csv"),
-            )
+    def test_failure_names_the_offending_table(self, tmp_path: Path) -> None:
+        table = ad.AnnData(sparse.csr_array([[1], [2]]))
+        grids = [_grid((2.0, 3.0), "core_1", "core_1"), _grid((1e308, 3.0), "core_2", "core_2")]
+        paths = [_source(tmp_path, "a"), _source(tmp_path, "b")]
+        with pytest.raises(ReaderFormatError, match="nonfinite physical positions in 'core_2'") as caught:
+            _set_positions(table, np.asarray([[2.0, 1.0], [2.0, 1.0]]), grids, [1, 1], paths)
+        assert caught.value.path == paths[1]
+        assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")

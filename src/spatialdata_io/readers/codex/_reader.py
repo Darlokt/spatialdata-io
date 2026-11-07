@@ -125,7 +125,10 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
               when an ID needs it; ``region`` is categorical; ``x`` and ``y``
               stay in native pixels. Other CSV fields keep their exact text
               (including ``NA``, ``NULL``, leading zeros and empty strings);
-              FCS fields keep their numeric dtypes.
+              FCS fields keep their numeric dtypes. Field names that a
+              SpatialData table does not accept (``tile num``) are sanitized
+              with a warning (``tile_num``; a name that then collides,
+              ignoring letter case, gets a ``_1``, ``_2``, ... suffix).
             - ``obsm["spatial"]`` (only with a calibration): float64 ``x, y``
               in micrometres, described in ``uns["spatialdata_io_positions"]``.
 
@@ -161,6 +164,11 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         Image pixels are not read until computed, and a partial computation
         decodes only the TIFF tiles or strips it overlaps. All files are
         closed on return; caller-owned objects are not modified.
+
+    Warns
+    -----
+    UserWarning
+        If metadata field names were sanitized into table column names.
 
     Raises
     ------

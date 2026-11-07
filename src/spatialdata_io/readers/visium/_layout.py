@@ -12,6 +12,7 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     optional_metadata_file,
@@ -77,11 +78,7 @@ def _context(artifact: str) -> ReaderErrorContext:
 def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | None) -> MtxCounts:
     """Resolve one complete consistently compressed MEX triplet."""
     context = _context("count matrix")
-    try:
-        names = frozenset(entry.name for entry in path.iterdir())
-    except OSError as error:
-        add_reader_context(error, context=context, path=path)
-        raise
+    names = frozenset(entry.name for entry in list_directory(path, context=context))
 
     variants: list[tuple[str | None, bool]] = []
     for compressed, suffixes in (
@@ -159,13 +156,14 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
     if standard_mtx is not None:
         return _require_mtx_members(root, _inspect_mtx_directory(standard_mtx, filename_prefix=None))
 
+    entries = list_directory(root.path, context=_context("count matrix"))
     h5_candidate = optional_unique_path(
-        root.path.glob(f"*_{FILTERED_H5}"),
+        (entry for entry in entries if entry.name.endswith(f"_{FILTERED_H5}")),
         context=_context("legacy prefixed HDF5 count matrix"),
         search_path=root.path,
     )
     mtx_candidate = optional_unique_path(
-        root.path.glob(f"*_{FILTERED_MTX}"),
+        (entry for entry in entries if entry.name.endswith(f"_{FILTERED_MTX}")),
         context=_context("legacy prefixed MEX count matrix"),
         search_path=root.path,
     )

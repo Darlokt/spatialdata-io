@@ -48,9 +48,9 @@ _INTEGER_DTYPES = {"i": pd.ArrowDtype(pa.int64()), "u": pd.ArrowDtype(pa.uint64(
 _FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 _BOOLEAN_DTYPE = pd.ArrowDtype(pa.bool_())
 _BOOLEANS = {"TRUE": True, "FALSE": False, "True": True, "False": False, "true": True, "false": False}
-_RESERVED_OBS = ("cluster", "region", "instance_id")
+RESERVED_OBS = ("cluster", "region", "instance_id")
 # uns keys the reader writes; metric categories become uns keys too.
-_RESERVED_UNS = frozenset({DEFINING_FEATURES_KEY, POSITIONS_KEY, TableModel.ATTRS_KEY})
+RESERVED_UNS = frozenset({DEFINING_FEATURES_KEY, POSITIONS_KEY, TableModel.ATTRS_KEY})
 _MIN_METRIC_FIELDS = 3
 
 
@@ -88,7 +88,7 @@ def validate_counts(table: ad.AnnData, path: ArtifactFile) -> None:
             expected="unique non-null H5AD annotation names",
         )
 
-    conflicts = sorted(set(_RESERVED_OBS).intersection(table.obs.columns))
+    conflicts = sorted(set(RESERVED_OBS).intersection(table.obs.columns))
     if conflicts or DEFINING_FEATURES_KEY in table.uns:
         raise schema_error(
             COUNTS,
@@ -161,7 +161,7 @@ def validate_metrics(metrics: pd.DataFrame, path: ArtifactFile, uns_keys: set[st
             expected="nonempty categories and unique metric names within each category",
         )
 
-    conflicts = sorted(set(metrics["Category"]).intersection(uns_keys | _RESERVED_UNS))
+    conflicts = sorted(set(metrics["Category"]).intersection(uns_keys | RESERVED_UNS))
     if conflicts:
         raise schema_error(
             METRICS,

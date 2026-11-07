@@ -12,6 +12,7 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._schemas import (
+    CELLS_CONTEXT,
     FLOAT_DTYPE,
     STRING_DTYPE,
     boundary_features,
@@ -39,8 +40,9 @@ class TestValidateCountColumns:
 
     @pytest.mark.parametrize("columns", [[], [""], ["", ""], ["", "A", "A"], ["", "A\x00"]])
     def test_ambiguous_headers(self, tmp_path: Path, columns: list[str]) -> None:
-        with pytest.raises(ReaderFormatError):
+        with pytest.raises(ReaderFormatError) as caught:
             validate_count_columns(columns, ArtifactFile(tmp_path / "counts.csv"))
+        assert caught.value.context.artifact == "CellxGene"
 
 
 class TestValidateCellColumns:
@@ -52,34 +54,40 @@ class TestValidateCellColumns:
         ) == ("label", "area", "center_x", "center_y")
 
     def test_missing_fields(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="cell fields"):
+        with pytest.raises(ReaderFormatError, match="cell fields") as caught:
             validate_cell_columns(["label", "area"], ArtifactFile(tmp_path / "cells.csv"))
+        assert caught.value.context.artifact == "CellCoordinates"
 
 
 class TestNormalizeIds:
     """Retain exact identity across accepted lexical integer representations."""
 
     def test_exact_large_and_decimal_ids(self, tmp_path: Path) -> None:
-        result = normalize_ids(pd.Series([str(2**53 + 1), "02.0", "3e0"]), ArtifactFile(tmp_path / "cells.csv"))
+        result = normalize_ids(
+            pd.Series([str(2**53 + 1), "02.0", "3e0"]), ArtifactFile(tmp_path / "cells.csv"), context=CELLS_CONTEXT
+        )
         np.testing.assert_array_equal(result, [2**53 + 1, 2, 3])
         assert result.dtype == np.dtype(np.int64)
 
     def test_unsigned_and_empty(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "cells.csv")
-        assert normalize_ids(pd.Series([str(2**64 - 1)]), path).dtype == np.dtype(np.uint64)
-        assert normalize_ids(pd.Series([], dtype=STRING_DTYPE), path).dtype == np.dtype(np.int64)
-        assert normalize_ids(pd.Series([str(2**63)]), path).tolist() == [2**63]
-        assert normalize_ids(pd.Series(["0"]), path, allow_zero=True).tolist() == [0]
+        assert normalize_ids(pd.Series([str(2**64 - 1)]), path, context=CELLS_CONTEXT).dtype == np.dtype(np.uint64)
+        assert normalize_ids(pd.Series([], dtype=STRING_DTYPE), path, context=CELLS_CONTEXT).dtype == np.dtype(np.int64)
+        assert normalize_ids(pd.Series([str(2**63)]), path, context=CELLS_CONTEXT).tolist() == [2**63]
+        assert normalize_ids(pd.Series(["0"]), path, context=CELLS_CONTEXT, allow_zero=True).tolist() == [0]
 
     def test_arrow_zero_identifier(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="positive cell"):
-            normalize_ids(pd.Series(["0"], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "cells.csv"))
+            normalize_ids(
+                pd.Series(["0"], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "cells.csv"), context=CELLS_CONTEXT
+            )
 
     @pytest.mark.parametrize("storage", ["pyarrow", "python"])
     def test_pandas_string_identifiers(self, tmp_path: Path, storage: Literal["pyarrow", "python"]) -> None:
         result = normalize_ids(
             pd.Series(["0", str(2**63 + 1)], dtype=pd.StringDtype(storage=storage)),
             ArtifactFile(tmp_path / "tx.csv"),
+            context=CELLS_CONTEXT,
             allow_zero=True,
         )
         assert result.dtype == np.dtype(np.uint64)
@@ -89,8 +97,9 @@ class TestNormalizeIds:
         "value", [None, "True", "", "NaN", "inf", "0", "-1", "1.00000000000000001", "1e10000", str(2**64), "1" * 129]
     )
     def test_invalid_identifiers(self, tmp_path: Path, *, value: str | None) -> None:
-        with pytest.raises(ReaderFormatError, match="identifier"):
-            normalize_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"))
+        with pytest.raises(ReaderFormatError, match="identifier") as caught:
+            normalize_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), context=CELLS_CONTEXT)
+        assert caught.value.context is CELLS_CONTEXT
 
 
 class TestNormalizeFloats:
@@ -101,6 +110,7 @@ class TestNormalizeFloats:
             pd.Series(["0.10000000000000002", "-0.00e1000", "9007199254740992"], index=[2, 4, 8]),
             ArtifactFile(tmp_path / "cells.csv"),
             "x",
+            context=CELLS_CONTEXT,
         )
         assert result.dtype == FLOAT_DTYPE
         assert result.index.tolist() == [2, 4, 8]
@@ -108,8 +118,9 @@ class TestNormalizeFloats:
 
     @pytest.mark.parametrize("value", [None, True, "", "nan", "inf", "1e-400", "1e400", "9007199254740993", "1" * 129])
     def test_invalid_coordinates(self, tmp_path: Path, *, value: str | bool | None) -> None:
-        with pytest.raises(ReaderFormatError, match="float64"):
-            normalize_floats(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), "x")
+        with pytest.raises(ReaderFormatError, match="float64") as caught:
+            normalize_floats(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), "x", context=CELLS_CONTEXT)
+        assert caught.value.context is CELLS_CONTEXT
 
 
 class TestValidateTranscriptColumns:
@@ -121,8 +132,9 @@ class TestValidateTranscriptColumns:
         ) == ("name", "x", "y", "z", "cell")
 
     def test_required(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="transcript fields"):
+        with pytest.raises(ReaderFormatError, match="transcript fields") as caught:
             validate_transcript_columns(["x", "y"], ArtifactFile(tmp_path / "tx.csv"))
+        assert caught.value.context.artifact == "TranscriptList"
 
 
 class TestNormalizeTranscriptPartition:
@@ -169,8 +181,9 @@ class TestNormalizeTranscriptPartition:
 
     def test_plane_overflow(self, tmp_path: Path) -> None:
         frame = pd.DataFrame({"name": ["A"], "x": ["1"], "y": ["1"], "z": [str(2**63)]})
-        with pytest.raises(ReaderFormatError, match="plane overflow"):
+        with pytest.raises(ReaderFormatError, match="plane overflow") as caught:
             normalize_transcript_partition(frame, features=("A",), path=ArtifactFile(tmp_path / "tx.csv"))
+        assert caught.value.context.artifact == "TranscriptList"
 
 
 class TestBoundaryFeatures:
@@ -240,8 +253,9 @@ class TestBoundaryFeatures:
         duplicate = features[0].copy()
         duplicate["id"] = 1
         features.append(duplicate)
-        with pytest.raises(ReaderFormatError, match="duplicate boundary IDs"):
+        with pytest.raises(ReaderFormatError, match="duplicate boundary IDs") as caught:
             boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))
+        assert caught.value.context.artifact == "Boundaries"
 
     def test_multipart_null_properties_and_numeric_equivalent_id(self, tmp_path: Path) -> None:
         document = _boundary_document()

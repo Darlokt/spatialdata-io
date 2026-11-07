@@ -182,6 +182,11 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
             - An imported ``obsm["spatial"]`` moves unchanged to
               ``obsm["spatial_source"]``; no physical ``spatial`` is produced.
               Other imported fields keep their dtypes and missing values.
+              Imported ``obs`` and ``var`` column names that a SpatialData
+              table does not accept (``my note``) are sanitized with a warning
+              (``my_note``; a name that then collides, ignoring letter case,
+              with another column or one of the five reader columns gets a
+              ``_1``, ``_2``, ... suffix).
 
         ``shapes[dataset_id]``
             One square per observation, indexed by ``pixel_id``, with vertices
@@ -221,7 +226,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     UserWarning
         Once per call if duplicate sparse entries of the imported expression
         were summed, naming the slots and any dtype change; once if the H5AD
-        filename stem had to be repaired, naming both names.
+        filename stem had to be repaired, naming both names; once each if
+        ``obs`` or ``var`` column names were sanitized.
 
     Raises
     ------

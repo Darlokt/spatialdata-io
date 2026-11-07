@@ -26,12 +26,12 @@ from typing import TYPE_CHECKING
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
+    list_directory,
     normalize_dataset_root,
     optional_unique_path,
     require_caller_file,
     require_metadata_file,
     require_unique_path,
-    sorted_paths,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ def discover_layout(
 ) -> DbitLayout:
     """Resolve one expression table, one barcode map and zero or one image."""
     root = normalize_dataset_root(path, context=_LAYOUT_CONTEXT, path_policy=path_policy)
-    candidates = sorted_paths(root.path.iterdir(), context=_LAYOUT_CONTEXT, search_path=root.path)
+    candidates = list_directory(root.path, context=_LAYOUT_CONTEXT)
 
     if table_file is None:
         table_candidate = require_unique_path(

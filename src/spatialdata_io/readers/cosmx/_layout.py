@@ -11,10 +11,10 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     require_metadata_file,
-    sorted_paths,
 )
 
 if TYPE_CHECKING:
@@ -106,7 +106,7 @@ def _fov_files(root: DatasetRoot, name: str, suffixes: frozenset[str]) -> tuple[
     if directory is None:
         return ()
     files: dict[int, ArtifactFile] = {}
-    for entry in sorted_paths(directory.iterdir(), context=context, search_path=directory):
+    for entry in list_directory(directory, context=context):
         if entry.name.startswith("."):
             continue
         match = _FOV_FILE.fullmatch(entry.name)
@@ -134,7 +134,7 @@ def discover_layout(
         _validate_dataset_id(dataset_id)
     context = ReaderErrorContext("cosmx", "dataset root")
     root = normalize_dataset_root(path, context=context, path_policy=path_policy)
-    names = tuple(entry.name for entry in sorted_paths(root.path.iterdir(), context=context, search_path=root.path))
+    names = tuple(entry.name for entry in list_directory(root.path, context=context))
     prefix = _infer_dataset_id(root, names) if dataset_id is None else dataset_id
 
     return CosmxLayout(

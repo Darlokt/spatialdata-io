@@ -17,11 +17,11 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     optional_metadata_file,
     require_metadata_file,
-    sorted_paths,
 )
 from spatialdata_io.readers.xenium._metadata import Experiment, read_experiment
 
@@ -227,11 +227,7 @@ def _focus(root: DatasetRoot, experiment: Experiment) -> FocusImages:
     if entry.parent == root.path:
         return FocusImages(entry, (entry,))
     context = _context(experiment, "morphology_focus")
-    # macOS AppleDouble companions ("._name") are not images.
-    candidates = (
-        path for path in entry.parent.iterdir() if path.name.endswith(".ome.tif") and not path.name.startswith("._")
-    )
-    paths = sorted_paths(candidates, context=context, search_path=entry.parent)
+    paths = [path for path in list_directory(entry.parent, context=context) if path.name.endswith(".ome.tif")]
     files = tuple(require_metadata_file(root, path, context=context) for path in paths)
     return FocusImages(entry, files)
 
@@ -239,10 +235,10 @@ def _focus(root: DatasetRoot, experiment: Experiment) -> FocusImages:
 def _aligned(root: DatasetRoot, experiment: Experiment) -> tuple[AlignedImage, ...]:
     """Find 10x-named aligned H&E/IF images at the root; their alignment CSVs are optional."""
     context = _context(experiment, "aligned images")
-    entries = sorted_paths(root.path.iterdir(), context=context, search_path=root.path)
+    entries = list_directory(root.path, context=context)
     images: list[AlignedImage] = []
     for suffix, kind in _ALIGNED_SUFFIXES:
-        matches = [path for path in entries if path.name.endswith(suffix) and not path.name.startswith("._")]
+        matches = [path for path in entries if path.name.endswith(suffix)]
         if len(matches) > 1:
             raise ReaderFormatError(
                 context=context,
@@ -262,8 +258,9 @@ def _analysis(root: DatasetRoot, context: ReaderErrorContext) -> AnalysisSource:
     directory = optional_metadata_directory(root, "analysis", context=context)
     if directory is not None:
         # The analysis reader opens every CSV below the directory.
-        for file in sorted_paths(directory.rglob("*.csv"), context=context, search_path=directory):
-            require_metadata_file(root, file, context=context)
+        for file in list_directory(directory, context=context, recursive=True):
+            if file.name.endswith(".csv"):
+                require_metadata_file(root, file, context=context)
         return AnalysisDirectory(directory)
     return AnalysisArchive(require_metadata_file(root, "analysis.tar.gz", context=context))
 

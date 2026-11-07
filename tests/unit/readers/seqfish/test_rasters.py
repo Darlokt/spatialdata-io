@@ -169,7 +169,7 @@ class TestReadDapi:
             metadata={"axes": "ZCYX", "PhysicalSizeX": 0.2, "PhysicalSizeY": 0.5},
         )
         dapi = read_dapi(ArtifactFile(path))
-        image = read_image(dapi, roi="Roi1", options=DEFAULT_OPTIONS)
+        image = read_image(dapi, frame="Roi1", options=DEFAULT_OPTIONS)
         assert isinstance(image, DataArray)
         assert image.shape == (1, 1, 16)
         np.testing.assert_array_equal(image.data.compute(), data.reshape(1, 1, 16))
@@ -202,7 +202,7 @@ class TestReadImage:
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
             dapi = read_dapi(ArtifactFile(path))
-            image = read_image(dapi, roi="Roi1", options=NATIVE_CHUNKS)
+            image = read_image(dapi, frame="Roi1", options=NATIVE_CHUNKS)
         assert isinstance(image, DataArray)
         tasks.assert_not_called()
         pixels.assert_not_called()
@@ -223,7 +223,7 @@ class TestReadImage:
         path = tmp_path / "DAPI.tiff"
         _write_dapi(path, names=names)
         dapi = read_dapi(ArtifactFile(path))
-        image = read_image(dapi, roi="Roi1", options=make_raster_options(chunks=(2, 12, 16)))
+        image = read_image(dapi, frame="Roi1", options=make_raster_options(chunks=(2, 12, 16)))
         assert isinstance(image, DataArray)
         assert image.coords["c"].values.tolist() == ["Channel:0:0", "Channel:0:1"]
         assert image.data.chunks[0] == (2,)
@@ -232,11 +232,11 @@ class TestReadImage:
         path = tmp_path / "DAPI.tiff"
         _write_dapi(path)
         dapi = read_dapi(ArtifactFile(path))
-        pyramid = read_image(dapi, roi="Roi1", options=make_raster_options([2, 2], 16))
+        pyramid = read_image(dapi, frame="Roi1", options=make_raster_options([2, 2], 16))
         assert isinstance(pyramid, DataTree)
         assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
         with pytest.raises(ValueError, match="extent"):
-            read_image(dapi, roi="Roi1", options=make_raster_options([64]))
+            read_image(dapi, frame="Roi1", options=make_raster_options([64]))
 
 
 class TestReadLabels:
@@ -257,7 +257,7 @@ class TestReadLabels:
                     ArtifactFile(path),
                     reference=reference,
                     max_instance_id=maximum,
-                    roi="Roi1",
+                    frame="Roi1",
                     options=DEFAULT_OPTIONS,
                 )
         else:
@@ -265,7 +265,7 @@ class TestReadLabels:
                 ArtifactFile(path),
                 reference=reference,
                 max_instance_id=maximum,
-                roi="Roi1",
+                frame="Roi1",
                 options=DEFAULT_OPTIONS,
             )
             assert isinstance(result, DataArray)
@@ -289,7 +289,7 @@ class TestReadLabels:
             ArtifactFile(path),
             reference=reference,
             max_instance_id=1,
-            roi="Roi1",
+            frame="Roi1",
             options=DEFAULT_OPTIONS,
         )
         assert isinstance(result, DataArray)
@@ -311,7 +311,7 @@ class TestReadLabels:
             ArtifactFile(path),
             reference=reference,
             max_instance_id=2**54 + 1,
-            roi="Roi1",
+            frame="Roi1",
             options=make_raster_options(chunks=chunks),
         )
         assert isinstance(result, DataArray)
@@ -341,9 +341,42 @@ class TestReadLabels:
                 ArtifactFile(path),
                 reference=reference,
                 max_instance_id=1,
-                roi="Roi1",
+                frame="Roi1",
                 options=make_raster_options((2,) if invalid == "uint64" else ()),
             )
+
+    @pytest.mark.parametrize(
+        ("invalid", "found"),
+        [
+            ("shape", "segmentation YX shape (47, 64) and DAPI shape (48, 64)"),
+            ("dtype", "float32"),
+            ("calibration", "segmentation OME physical sizes differ from DAPI"),
+            ("incomplete", "physical Y/X sizes (None, 0.3)"),
+        ],
+    )
+    def test_segmentation_errors_name_the_segmentation(self, tmp_path: Path, invalid: str, found: str) -> None:
+        dapi, path = tmp_path / "DAPI.tiff", tmp_path / "Segmentation.tiff"
+        _write_dapi(dapi)
+        calibration = (
+            {"PhysicalSizeX": 0.3} if invalid == "incomplete" else {"PhysicalSizeX": 0.3, "PhysicalSizeY": 0.5}
+        )
+        tifffile.imwrite(
+            path,
+            np.zeros(
+                (47, 64) if invalid == "shape" else (48, 64), dtype=np.float32 if invalid == "dtype" else np.uint32
+            ),
+            photometric="minisblack",
+            ome=invalid in {"calibration", "incomplete"},
+            metadata={"axes": "YX", **calibration},
+        )
+        reference = read_dapi(ArtifactFile(dapi))
+        with pytest.raises(ReaderFormatError) as caught:
+            read_labels(
+                ArtifactFile(path), reference=reference, max_instance_id=1, frame="Roi1", options=DEFAULT_OPTIONS
+            )
+        assert caught.value.context == ReaderErrorContext("seqfish", "Segmentation")
+        assert caught.value.found == found
+        assert caught.value.path == path.resolve()
 
     def test_label_pyramid_preserves_large_uint32_ids(self, tmp_path: Path) -> None:
         dapi, path = tmp_path / "DAPI.tiff", tmp_path / "Segmentation.tiff"
@@ -355,7 +388,7 @@ class TestReadLabels:
             ArtifactFile(path),
             reference=reference,
             max_instance_id=np.iinfo(np.uint32).max,
-            roi="Roi1",
+            frame="Roi1",
             options=make_raster_options([2, 2]),
         )
         assert isinstance(result, DataTree)
@@ -371,7 +404,7 @@ class TestReadLabels:
         path = tmp_path / "DAPI.tiff"
         _write_dapi(path)
         reference = read_dapi(ArtifactFile(path))
-        image = read_image(reference, roi="Roi1", options=NATIVE_CHUNKS)
+        image = read_image(reference, frame="Roi1", options=NATIVE_CHUNKS)
         assert isinstance(image, DataArray)
         with tifffile.TiffFile(path) as tiff:
             store = tiff.aszarr(series=0, level=0, squeeze=True)

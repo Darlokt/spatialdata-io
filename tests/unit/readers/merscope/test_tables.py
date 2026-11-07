@@ -13,11 +13,12 @@ from scipy import sparse
 from shapely.geometry import Polygon
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.merscope import _tables as merscope_tables
 from spatialdata_io.readers.merscope._geometry import CellBoundaries
-from spatialdata_io.readers.merscope._layout import Names
-from spatialdata_io.readers.merscope._schemas import FLOAT_DTYPE, STRING_DTYPE
+from spatialdata_io.readers.merscope._layout import Names, TableFiles
+from spatialdata_io.readers.merscope._schemas import _FLOAT_DTYPE, STRING_DTYPE
 from spatialdata_io.readers.merscope._tables import finalize_table, read_feature_names, read_table
 
 if TYPE_CHECKING:
@@ -30,35 +31,36 @@ def _sources(
     path: Path,
     counts: str = "cell,B,Blank-1,A,BlanketGene,blank-2,Blank-0\nb,0,2,4,7,10,1\na,7,5,0,8,11,0\n",
     metadata: str = "EntityID,center_x,annotation,center_y,volume\na,2,0001,3,4\nb,7,NA,5,6\n",
-) -> tuple[ArtifactFile, ArtifactFile]:
+) -> TableFiles:
     """Write exact lexical sources, independently ordered by default."""
     count_path = path / "counts.csv"
     metadata_path = path / "metadata.csv"
     count_path.write_text(counts, encoding="utf-8")
     metadata_path.write_text(metadata, encoding="utf-8")
-    return ArtifactFile(count_path), ArtifactFile(metadata_path)
+    return TableFiles(ArtifactFile(count_path), ArtifactFile(metadata_path))
 
 
 class TestReadFeatureNames:
     """Vocabulary discovery reads only the header without decoding count rows."""
 
     def test_header_only(self, tmp_path: Path) -> None:
-        counts, _ = _sources(tmp_path, "cell,B,Blank-1,A\nnot,a,valid,record,at,all\n")
+        counts = _sources(tmp_path, "cell,B,Blank-1,A\nnot,a,valid,record,at,all\n").counts
         assert read_feature_names(counts) == ("B", "Blank-1", "A")
 
     @pytest.mark.parametrize("header", ["cell,A,A\n", '"unterminated\n'])
     def test_bad_header(self, tmp_path: Path, header: str) -> None:
-        counts, _ = _sources(tmp_path, header)
-        with pytest.raises(ReaderFormatError):
+        counts = _sources(tmp_path, header).counts
+        with pytest.raises(ReaderFormatError) as caught:
             read_feature_names(counts)
+        assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
 
 
 class TestReadTable:
     """Keep count order, sparsity, annotations and a complete feature vocabulary."""
 
     def test_sparse_order_blank_names_and_metadata(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._MAX_BATCH_ROWS", 1)
-        table, vocabulary = read_table(*_sources(tmp_path))
+        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_MEMORY_BYTES", 1)
+        table, vocabulary = read_table(_sources(tmp_path))
         assert isinstance(table.X, sparse.csr_array)
         assert not isinstance(table.X, sparse.spmatrix)
         assert table.X.has_canonical_format
@@ -73,25 +75,50 @@ class TestReadTable:
         assert table.uns["blank_names"] == ["Blank-1"]
         assert table.obs["annotation"].tolist() == ["NA", "0001"]
         assert table.obs["annotation"].dtype == STRING_DTYPE
-        assert table.obs["volume"].dtype == FLOAT_DTYPE
+        assert table.obs["volume"].dtype == _FLOAT_DTYPE
         np.testing.assert_array_equal(table.obsm["spatial"], [[7, 5], [2, 3]])
         assert "spatialdata_attrs" not in table.uns
 
     def test_exact_unsigned_counts_across_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._MAX_BATCH_ROWS", 1)
+        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_MEMORY_BYTES", 1)
         large = 2**63
-        table, _ = read_table(*_sources(tmp_path, f"cell,A\na,1\nb,{large}\n"))
+        table, _ = read_table(_sources(tmp_path, f"cell,A\na,1\nb,{large}\n"))
         assert isinstance(table.X, sparse.csr_array)
         assert table.X.dtype == np.dtype(np.float32)
         assert table.X.data.tolist() == [1, large]
 
-    @pytest.mark.parametrize("rows_per_batch", [1, 10_000])
+    def test_row_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        """20,001 single-feature rows fit one 8 MiB block; 1,000-row blocks give the identical table."""
+        rows = 20_001
+        counts = "cell,A,Blank-1\n" + "".join(f"c{row},{row % 3},{row % 5 == 0:d}\n" for row in range(rows))
+        metadata = "EntityID,center_x,center_y\n" + "".join(f"c{row},{row},1\n" for row in range(rows))
+        sources = _sources(tmp_path, counts, metadata)
+        blocks = mocker.spy(merscope_tables, "_count_block")
+
+        table, _ = read_table(sources)
+
+        assert [call.args[0].num_rows for call in blocks.call_args_list] == [rows]
+        # 16 bytes per feature and row; two features.
+        mocker.patch.object(merscope_tables, "_BATCH_MEMORY_BYTES", 16 * 2 * 1000)
+        blocks.reset_mock()
+        small, _ = read_table(sources)
+        assert len(blocks.call_args_list) == 21
+        for expected, actual in ((table.X, small.X), (table.obsm["blank"], small.obsm["blank"])):
+            assert isinstance(expected, sparse.csr_array)
+            assert isinstance(actual, sparse.csr_array)
+            assert expected.nnz == actual.nnz
+            assert expected.dtype == actual.dtype
+            np.testing.assert_array_equal(expected.data, actual.data)
+            np.testing.assert_array_equal(expected.indices, actual.indices)
+            np.testing.assert_array_equal(expected.indptr, actual.indptr)
+
+    @pytest.mark.parametrize("batch_bytes", [1, 8 * 1024 * 1024])
     def test_exact_integer_boundaries_and_spellings(
-        self, tmp_path: Path, mocker: MockerFixture, rows_per_batch: int
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
     ) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._MAX_BATCH_ROWS", rows_per_batch)
+        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_MEMORY_BYTES", batch_bytes)
         table, _ = read_table(
-            *_sources(
+            _sources(
                 tmp_path,
                 f"cell,A,Blank-1,B\na,{2**24 + 1},2.0,3e0\nb,{2**63},{2**64 - 2048},0\n",
             )
@@ -107,8 +134,9 @@ class TestReadTable:
     @pytest.mark.parametrize("feature", ["A", "Blank-1"])
     def test_rejects_inexact_count_or_control(self, tmp_path: Path, feature: str) -> None:
         with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            read_table(*_sources(tmp_path, f"cell,{feature}\na,1\nb,{2**64 - 1}\n"))
+            read_table(_sources(tmp_path, f"cell,{feature}\na,1\nb,{2**64 - 1}\n"))
         assert caught.value.path == tmp_path / "counts.csv"
+        assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
 
     @pytest.mark.parametrize(
         "counts",
@@ -127,7 +155,7 @@ class TestReadTable:
     )
     def test_bad_counts(self, tmp_path: Path, counts: str) -> None:
         with pytest.raises(ReaderFormatError):
-            read_table(*_sources(tmp_path, counts))
+            read_table(_sources(tmp_path, counts))
 
     @pytest.mark.parametrize(
         "metadata",
@@ -141,11 +169,11 @@ class TestReadTable:
     )
     def test_bad_metadata(self, tmp_path: Path, metadata: str) -> None:
         with pytest.raises(ReaderFormatError):
-            read_table(*_sources(tmp_path, metadata=metadata))
+            read_table(_sources(tmp_path, metadata=metadata))
 
     @pytest.mark.parametrize("features", ["A", "Blank-1"])
     def test_empty_expression_or_blank_width(self, tmp_path: Path, features: str) -> None:
-        table, vocabulary = read_table(*_sources(tmp_path, f"cell,{features}\na,1\nb,0\n"))
+        table, vocabulary = read_table(_sources(tmp_path, f"cell,{features}\na,1\nb,0\n"))
         assert vocabulary == (features,)
         assert isinstance(table.X, sparse.csr_array)
         blanks = table.obsm["blank"]
@@ -155,7 +183,7 @@ class TestReadTable:
 
     def test_quoted_records_and_integral_exponents(self, tmp_path: Path) -> None:
         table, _ = read_table(
-            *_sources(
+            _sources(
                 tmp_path,
                 'cell,"Gene,A"\na,1e0\nb,2.0\n',
                 'EntityID,center_x,center_y,extra\na,.10000000000000002,2,"a multiline\nannotation"\nb,3,4,NA\n',
@@ -191,11 +219,9 @@ class TestFinalizeTable:
             f"cell,A,Blank-1\na,{a if wide_feature == 'A' else 1},{a if wide_feature == 'Blank-1' else 2}\n"
             f"b,{b if wide_feature == 'A' else 1},{b if wide_feature == 'Blank-1' else 2}\n"
         )
-        table, _ = read_table(*_sources(tmp_path, text))
+        table, _ = read_table(_sources(tmp_path, text))
         boundaries = CellBoundaries(_boundaries(("a",)).shapes, pd.Index(["a", "b"]))
-        result = finalize_table(
-            table, frame="global", names=Names(region="region", slide="slide"), boundaries=boundaries
-        )
+        result = finalize_table(table, names=Names(region="region", slide="slide"), boundaries=boundaries)
         assert result.obs_names.tolist() == ["a"]
         assert isinstance(result.X, sparse.csr_array)
         blanks = result.obsm["blank"]
@@ -207,12 +233,11 @@ class TestFinalizeTable:
 
     @pytest.mark.parametrize("linked", [False, True])
     def test_linkage_and_blank_roundtrip(self, tmp_path: Path, *, linked: bool) -> None:
-        table, _ = read_table(*_sources(tmp_path))
+        table, _ = read_table(_sources(tmp_path))
         native = table.obsm["spatial"]
         expression = table.X
         result = finalize_table(
             table,
-            frame="global",
             names=Names(region="region", slide="slide"),
             boundaries=_boundaries(("a", "b")) if linked else None,
         )
@@ -236,28 +261,26 @@ class TestFinalizeTable:
         np.testing.assert_array_equal(restored_blanks.data, [2, 5])
 
     def test_wrong_target_population(self, tmp_path: Path) -> None:
-        table, _ = read_table(*_sources(tmp_path))
+        table, _ = read_table(_sources(tmp_path))
         with pytest.raises(ReaderFormatError):
             finalize_table(
                 table,
-                frame="global",
                 names=Names(region="region", slide="slide"),
                 boundaries=_boundaries(("a", "different")),
             )
 
     def test_conflicting_source_annotations_fail(self, tmp_path: Path) -> None:
-        table, _ = read_table(*_sources(tmp_path))
+        table, _ = read_table(_sources(tmp_path))
         table.obs["region"] = pd.Series("conflicting source value", index=table.obs_names, dtype=STRING_DTYPE)
         with pytest.raises(ReaderFormatError, match="conflicting source"):
             finalize_table(
                 table,
-                frame="global",
                 names=Names(region="region", slide="slide"),
                 boundaries=_boundaries(("a", "b")),
             )
 
     def test_matching_annotations_are_preserved_as_declared_categories(self, tmp_path: Path) -> None:
-        table, _ = read_table(*_sources(tmp_path))
+        table, _ = read_table(_sources(tmp_path))
         expected = {
             "region": "region",
             "slide": "slide",
@@ -270,7 +293,6 @@ class TestFinalizeTable:
         expression = table.X
         result = finalize_table(
             table,
-            frame="global",
             names=Names(region="region", slide="slide"),
             boundaries=_boundaries(("a", "b")),
         )
@@ -281,12 +303,11 @@ class TestFinalizeTable:
             assert result.obs[column].dtype == pd.CategoricalDtype([value])
 
     def test_unlinked_source_target_annotation_fails(self, tmp_path: Path) -> None:
-        table, _ = read_table(*_sources(tmp_path))
+        table, _ = read_table(_sources(tmp_path))
         table.obs["cells_region"] = pd.Series("cells", index=table.obs_names, dtype=STRING_DTYPE)
         with pytest.raises(ReaderFormatError, match="unlinked table"):
             finalize_table(
                 table,
-                frame="global",
                 names=Names(region="region", slide="slide"),
                 boundaries=None,
             )

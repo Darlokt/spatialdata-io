@@ -12,9 +12,10 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.merscope._schemas import (
-    FLOAT_DTYPE,
+    _FLOAT_DTYPE,
     GEOMETRY_REPRESENTATION_DTYPE,
     STRING_DTYPE,
+    _normalize_floats,
     blank_columns,
     boundary_columns,
     count_columns,
@@ -22,7 +23,6 @@ from spatialdata_io.readers.merscope._schemas import (
     metadata_columns,
     normalize_boundary_ids,
     normalize_cell_ids,
-    normalize_floats,
     normalize_metadata,
     normalize_transcript_partition,
     validate_output_annotations,
@@ -78,16 +78,18 @@ class TestNormalizeCellIds:
 
     def test_lexical_and_integer(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "cells.csv")
-        result = normalize_cell_ids(pd.Series(["001", "cell-a", str(2**63 + 1)]), path)
+        result = normalize_cell_ids(pd.Series(["001", "cell-a", str(2**63 + 1)]), path, "cell metadata")
         assert result.tolist() == ["001", "cell-a", str(2**63 + 1)]
         assert result.dtype == STRING_DTYPE
-        assert normalize_cell_ids(pd.Series([2**63 + 1], dtype="uint64"), path).tolist() == [str(2**63 + 1)]
-        assert normalize_cell_ids(pd.Series(["-1"]), path, allow_unassigned=True).tolist() == ["-1"]
+        assert normalize_cell_ids(pd.Series([2**63 + 1], dtype="uint64"), path, "cell metadata").tolist() == [
+            str(2**63 + 1)
+        ]
+        assert normalize_cell_ids(pd.Series(["-1"]), path, "transcripts", allow_unassigned=True).tolist() == ["-1"]
 
     @pytest.mark.parametrize("value", [None, "", "a\x00", "-1", 1.0, True])
     def test_invalid(self, tmp_path: Path, *, value: str | float | bool | None) -> None:
         with pytest.raises(ReaderFormatError):
-            normalize_cell_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"))
+            normalize_cell_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), "cell metadata")
 
 
 class TestIntegerValues:
@@ -95,11 +97,11 @@ class TestIntegerValues:
 
     def test_normal_and_unsigned(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "count.csv")
-        assert integer_values(pd.Series(["0", "3"], dtype=STRING_DTYPE), path).tolist() == [0, 3]
-        result = integer_values(pd.Series([str(2**64 - 1), "2.0", "3e0"], dtype=STRING_DTYPE), path)
+        assert integer_values(pd.Series(["0", "3"], dtype=STRING_DTYPE), path, "count matrix").tolist() == [0, 3]
+        result = integer_values(pd.Series([str(2**64 - 1), "2.0", "3e0"], dtype=STRING_DTYPE), path, "count matrix")
         assert result.tolist() == [2**64 - 1, 2, 3]
         assert result.dtype == np.dtype(np.uint64)
-        assert integer_values(pd.Series([], dtype=STRING_DTYPE), path).dtype == np.dtype(np.int64)
+        assert integer_values(pd.Series([], dtype=STRING_DTYPE), path, "count matrix").dtype == np.dtype(np.int64)
 
     @pytest.mark.parametrize("chunked", [False, True])
     @pytest.mark.parametrize(
@@ -114,7 +116,7 @@ class TestIntegerValues:
     def test_arrow_counts(self, tmp_path: Path, *, chunked: bool, tokens: list[str], expected: list[int]) -> None:
         column = pa.array(tokens, type=pa.string())
         source = pa.chunked_array([column.slice(0, 1), column.slice(1)]) if chunked else column
-        result = integer_values(source, ArtifactFile(tmp_path / "count.csv"))
+        result = integer_values(source, ArtifactFile(tmp_path / "count.csv"), "count matrix")
         np.testing.assert_array_equal(result, np.asarray(expected, dtype=result.dtype))
         assert result.dtype == np.dtype(np.uint64 if expected and max(expected) >= 2**63 else np.int64)
 
@@ -127,8 +129,8 @@ class TestIntegerValues:
         column = pa.array([value], type=pa.string())
         source = pa.chunked_array([column]) if chunked else column
         with pytest.raises(ReaderFormatError, match=r"integral|integer") as caught:
-            integer_values(source, path)
-        assert caught.value.context == ReaderErrorContext("merscope", "count.csv")
+            integer_values(source, path, "count matrix")
+        assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
         assert caught.value.path == path
 
     @pytest.mark.parametrize(
@@ -136,26 +138,29 @@ class TestIntegerValues:
     )
     def test_invalid(self, tmp_path: Path, value: str | None) -> None:
         with pytest.raises(ReaderFormatError, match=r"integral|integer"):
-            integer_values(pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "count.csv"))
+            integer_values(pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "count.csv"), "count matrix")
 
 
 class TestNormalizeFloats:
     """Keep correctly rounded float64 coordinates and reject destructive decoding."""
 
     def test_precision(self, tmp_path: Path) -> None:
-        result = normalize_floats(
+        result = _normalize_floats(
             pd.Series(["0.10000000000000002", "-0.00e1000", str(2**53)], index=[2, 4, 6]),
             ArtifactFile(tmp_path / "tx.csv"),
+            "transcripts",
             "x",
         )
-        assert result.dtype == FLOAT_DTYPE
+        assert result.dtype == _FLOAT_DTYPE
         assert result.index.tolist() == [2, 4, 6]
         np.testing.assert_array_equal(result.to_numpy(dtype=np.float64), [0.10000000000000002, 0, 2**53])
 
     @pytest.mark.parametrize("value", [None, "", "nan", "inf", "1e400", "1e-400", str(2**53 + 1), "1" * 129])
     def test_invalid(self, tmp_path: Path, value: str | None) -> None:
         with pytest.raises(ReaderFormatError, match="float64"):
-            normalize_floats(pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "tx.csv"), "x")
+            _normalize_floats(
+                pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "tx.csv"), "transcripts", "x"
+            )
 
 
 class TestMetadataColumns:
@@ -189,7 +194,7 @@ class TestNormalizeMetadata:
         )
         result = normalize_metadata(frame, ArtifactFile(tmp_path / "metadata.csv"))
         assert result.index.tolist() == ["a", "b"]
-        assert result["center_x"].dtype == FLOAT_DTYPE
+        assert result["center_x"].dtype == _FLOAT_DTYPE
         assert result["extra"].tolist() == ["0001", "NA"]
         assert result["fov"].isna().tolist() == [True, False]
         assert result["transcript_count"].tolist() == [0, 2**63]
@@ -319,7 +324,7 @@ class TestNormalizeTranscriptPartition:
             features=("A", "B", "Blank-1"),
             path=ArtifactFile(tmp_path / "tx.csv"),
             assignment=assignment,
-            allowed_cell_ids=(str(2**63 + 1),),
+            cell_population=pd.Index([str(2**63 + 1)], dtype=STRING_DTYPE),
         )
         assert result["gene"].cat.categories.tolist() == ["A", "B", "Blank-1"]
         assert result["x"].dtype == np.dtype(np.float64)
@@ -340,7 +345,7 @@ class TestNormalizeTranscriptPartition:
                 features=("A",),
                 path=ArtifactFile(tmp_path / "tx.csv"),
                 assignment="current",
-                allowed_cell_ids=("a",),
+                cell_population=pd.Index(["a"], dtype=STRING_DTYPE),
             )
 
     def test_empty(self, tmp_path: Path) -> None:

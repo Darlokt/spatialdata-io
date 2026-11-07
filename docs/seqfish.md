@@ -11,13 +11,15 @@ dataset/
 ├── Roi1_DAPI.tiff              # OME physical size metadata; lazy image
 ├── Roi1_Segmentation.tiff      # lazy integer segmentation labels
 ├── Roi1_TranscriptList.csv     # name, x, y; optional z and cell
-├── Roi1_Boundaries.geojson     # Polygon features with explicit string id
+├── Roi1_Boundaries.geojson     # Polygon features with explicit top-level id
 ├── Roi2_CellxGene.csv
 ├── Roi2_CellCoordinates.csv
 └── ...
 ```
 
-ROI names are the prefixes before `_CellCoordinates.csv`. By default they are discovered in lexical order. A nonempty, unique `rois` sequence selects ROIs in the caller's order. Each selected ROI requires both the expression and cell-coordinate files. Requested products must exist; disabled products need not exist unless their bounded metadata calibrates another requested product. In particular, table-only loading and circles need no DAPI, segmentation, transcript or boundary file. Pixel-based images, labels and polygons require DAPI physical-size metadata. Discovered artifacts, including symlink targets, must remain within the dataset root.
+ROI names are the file-name prefixes before `_CellxGene.csv` or `_CellCoordinates.csv`; macOS AppleDouble files such as `._Roi1_CellxGene.csv` are ignored. By default every ROI is read, in lexical prefix order. A nonempty, unique `rois` sequence of exact prefixes selects ROIs in the caller's order; a prefix without files fails as an unknown ROI. Each selected ROI requires both the expression and cell-coordinate files. Requested products must exist; disabled products need not exist unless their bounded metadata calibrates another requested product. In particular, table-only loading and circles need no DAPI, segmentation, transcript or boundary file. Pixel-based images, labels and polygons require DAPI physical-size metadata. Under the default `path_policy="strict"`, discovered artifacts, including symlink targets, must remain within the dataset root; see [dataset paths](dataset_paths.md) for `"relaxed"`.
+
+The ROI name starts every element name and, with several ROIs, names the ROI's coordinate system. A prefix that is not a valid SpatialData element name is repaired once with a warning: characters other than letters, digits, `_`, `-` and `.` become `_`, a leading `__` becomes `_`, and an empty prefix becomes `unnamed` (`Roi 1` is read as `Roi_1`). The files keep their names; select such a ROI with its prefix, `rois=["Roi 1"]`. Selected ROIs whose names are equal ignoring letter case after this repair, such as `Roi1` and `roi1`, fail before any table is read, because SpatialData compares element names ignoring case; select one of them with `rois`.
 
 The first CellxGene field contains positive integer cell identifiers; the remaining nonempty, unique headers identify expression features in their source order. Counts must be finite nonnegative integers. CellCoordinates provides unique matching integer `label` values, finite `center_x` and `center_y`, and finite nonnegative `area`. Its rows may be reordered: alignment follows exact cell IDs, preserving the expression row order. IDs retain their integer values, including values above 65535. Zero area is accepted for the table and polygon output; centroid circles require strictly positive areas.
 
@@ -25,7 +27,7 @@ GeoJSON is an eagerly parsed UTF-8 FeatureCollection. It contains polygon featur
 
 ## Output and coordinates
 
-A single selected ROI uses `global` in micrometres. When multiple independent ROIs are selected, each retains its prefix as its frame name; matching units do not establish registration. Element names retain their ROI prefix in either case. The returned elements are:
+A single selected ROI uses `global` in micrometres. When multiple independent ROIs are selected, each retains its ROI name as its frame name, also in micrometres; matching units do not establish registration. Element names start with the ROI name in either case. Every element of a ROI is calibrated, so no pixel-only frame exists: the vendor centroids, areas and transcript coordinates are micrometres, and the pixel-based DAPI, segmentation and polygons require the DAPI OME physical pixel size. Without that calibration a read that requests them fails instead of returning pixels. The returned elements are:
 
 | Element | Contract |
 | --- | --- |
@@ -60,7 +62,7 @@ Provide valid CSV inputs. Arrow checks complete record widths but does not enfor
 
 Transcript CSVs require one physical header line and one physical line per record; quoted commas and quotes are supported, while embedded newlines in quoted fields are unsupported. Every record must contain exactly the header field count, including projected-out fields. Transcript graph construction reads only the CSV header. Validation of unread transcript rows is deferred: malformed coordinates, unknown features and invalid assignments raise with source context when the affected partition is computed. The Dask index is a storage index local to each partition and may repeat; it is not a biological event identifier. Source row order is preserved without a global shuffle. Unsupported compressed transcript variants are not advertised as a bounded source format.
 
-The reader owns newly created tables and annotations and does not mutate caller containers or source files. Provenance records the reader and package version without absolute input paths. Missing or wrong-kind paths raise the corresponding filesystem exception. Malformed schemas, ambiguous layouts and inconsistent scientific relationships raise `ReaderFormatError`, a `ValueError` subclass. Invalid option values raise `ValueError`; invalid types raise `TypeError`. Validation errors do not return partial results.
+The reader owns newly created tables and annotations and does not mutate caller containers or source files. Provenance records the reader and package version without absolute input paths; the export has no version marker, so no format version is recorded. Missing or wrong-kind paths raise the corresponding filesystem exception. Malformed schemas, ambiguous layouts and inconsistent scientific relationships raise `ReaderFormatError`, a `ValueError` subclass naming the artifact (`CellxGene`, `CellCoordinates`, `DAPI`, `Segmentation`, `TranscriptList`, `Boundaries`) and its path. All options are validated in signature order before the directory is read: invalid option values raise `ValueError`; invalid types raise `TypeError`. Validation errors do not return partial results.
 
 ## Python and command line
 
@@ -76,7 +78,7 @@ sdata = seqfish(
 sdata.write("sample.zarr")
 ```
 
-The CLI uses paired inclusion flags and repeatable ROI, chunk and pyramid options:
+The CLI uses paired inclusion flags and repeatable ROI, chunk and pyramid options, in the order of the reader's parameters:
 
 ```bash
 python -m spatialdata_io seqfish --input dataset --output sample.zarr \
@@ -88,7 +90,7 @@ python -m spatialdata_io seqfish --input dataset --output counts.zarr \
   --no-include-transcripts --no-include-shapes
 ```
 
-The former `load_*`, `load_points`, `cells_as_circles`, `imread_kwargs` and `raster_models_scale_factors` options have been removed. Use the explicit inclusion flags, geometry choice, `chunks` and `scale_factors`. Automatic pyramids based on image size have been removed; request a pyramid explicitly when needed. The default chunks are `(1, 1024, 1024)` for images and `(1024, 1024)` for labels instead of storage-aligned chunks, and `scale_factors=()` replaces `None` for a single scale.
+`rois` accepts any exact file prefix, including prefixes such as `Roi 1` that the reader repairs into element names; previously such prefixes produced element names that SpatialData rejected after all files had been read. The former `load_*`, `load_points`, `cells_as_circles`, `imread_kwargs` and `raster_models_scale_factors` options have been removed. Use the explicit inclusion flags, geometry choice, `chunks` and `scale_factors`. Automatic pyramids based on image size have been removed; request a pyramid explicitly when needed. The default chunks are `(1, 1024, 1024)` for images and `(1024, 1024)` for labels instead of storage-aligned chunks, and `scale_factors=()` replaces `None` for a single scale.
 
 Completed counts use float32 when every value is exactly representable, otherwise
 float64. Exact integer CSV decoding, including accepted integral decimal and

@@ -49,11 +49,11 @@ class TestMerscopeConsumer:
         assert np.flatnonzero(mask).tolist() == list(invalid)
         if invalid:
             with pytest.raises(ReaderFormatError, match="invalid"):
-                read_boundaries(path, policy="raise", frame="global")
+                read_boundaries(path, policy="raise")
             with pytest.raises(ReaderFormatError, match=r"2 invalid geometries.*cell-1.*cell-2"):
                 raise_invalid_geometries(mask, ids, context=ReaderErrorContext("merscope", "cell boundaries"))
         else:
-            assert len(read_boundaries(path, policy="raise", frame="global").shapes) == len(ids)
+            assert len(read_boundaries(path, policy="raise").shapes) == len(ids)
 
 
 def _borders(rings: tuple[list[tuple[int, int]], ...]) -> NDArray[np.int16]:

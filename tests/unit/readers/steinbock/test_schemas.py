@@ -30,9 +30,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _grid(shape: tuple[int, int], dtype: np.dtype[np.integer]) -> SampleGrid:
+def _grid(name: str, shape: tuple[int, int], dtype: np.dtype[np.integer]) -> SampleGrid:
     """Describe an uncalibrated mask grid without reading rasters."""
-    return SampleGrid(shape, dtype, "sample", None)
+    return SampleGrid(f"{name}.tiff", shape, dtype, "sample", None)
 
 
 class TestValidateTable:
@@ -111,7 +111,7 @@ class TestInstanceIdentifiers:
 
         with pytest.raises(ReaderFormatError):
             instance_identifiers(
-                obs, {"sample": _grid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
+                obs, {"sample": _grid("sample", (8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
             )
 
     def test_dtype_bounds_are_sample_local(self, tmp_path: Path) -> None:
@@ -123,7 +123,10 @@ class TestInstanceIdentifiers:
         with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
             instance_identifiers(
                 obs,
-                {"small": _grid((8, 12), np.dtype("uint8")), "large": _grid((8, 12), np.dtype("uint64"))},
+                {
+                    "small": _grid("small", (8, 12), np.dtype("uint8")),
+                    "large": _grid("large", (8, 12), np.dtype("uint64")),
+                },
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -136,7 +139,7 @@ class TestInstanceIdentifiers:
 
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
             instance_identifiers(
-                obs, {"sample": _grid((8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
+                obs, {"sample": _grid("sample", (8, 12), np.dtype("uint16"))}, ArtifactFile(tmp_path / "cells.h5ad")
             )
 
     def test_missing_discovered_sample(self, tmp_path: Path) -> None:
@@ -146,7 +149,10 @@ class TestInstanceIdentifiers:
         with pytest.raises(ReaderFormatError, match="sample disagreement"):
             instance_identifiers(
                 obs,
-                {"sample": _grid((8, 12), np.dtype("uint16")), "other": _grid((8, 12), np.dtype("uint16"))},
+                {
+                    "sample": _grid("sample", (8, 12), np.dtype("uint16")),
+                    "other": _grid("other", (8, 12), np.dtype("uint16")),
+                },
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -163,7 +169,7 @@ class TestValidateCentroids:
             validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"sample": _grid((8, 12), np.dtype("uint16"))},
+                {"sample": _grid("sample", (8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -176,7 +182,7 @@ class TestValidateCentroids:
             validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"sample": _grid((8, 12), np.dtype("uint16"))},
+                {"sample": _grid("sample", (8, 12), np.dtype("uint16"))},
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -188,7 +194,10 @@ class TestValidateCentroids:
             validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
                 obs,
-                {"small": _grid((4, 4), np.dtype("uint16")), "large": _grid((8, 12), np.dtype("uint16"))},
+                {
+                    "small": _grid("small", (4, 4), np.dtype("uint16")),
+                    "large": _grid("large", (8, 12), np.dtype("uint16")),
+                },
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -204,15 +213,22 @@ class TestMetadataColumns:
         with pytest.raises(ReaderFormatError, match="conflicting"):
             metadata_columns(obs, pd.DataFrame(), ArtifactFile(tmp_path / "cells.h5ad"))
 
-    @pytest.mark.parametrize(
-        "columns", [[""], [1], ["A B", "A_B"], ["Final Concentration / Dilution", "Final Concentration"]]
-    )
+    @pytest.mark.parametrize("columns", [[""], [1], ["Final Concentration / Dilution", "Final_Concentration"]])
     def test_invalid_or_colliding_feature_keys(self, tmp_path: Path, columns: list[str] | list[int]) -> None:
         """Invalid or colliding feature keys."""
         var = pd.DataFrame([[1] * len(columns)], columns=columns)
 
         with pytest.raises(ReaderFormatError):
             metadata_columns(pd.DataFrame({"image": ["sample.tiff"]}), var, ArtifactFile(tmp_path / "cells.h5ad"))
+
+    def test_only_the_legacy_dilution_name_is_renamed(self, tmp_path: Path) -> None:
+        """Other names reach the shared column-name sanitizer unchanged."""
+        columns = ["Channel Name", "Final Concentration / Dilution", "A B", "A_B"]
+        var = pd.DataFrame([[1] * len(columns)], columns=columns)
+
+        result = metadata_columns(pd.DataFrame({"image": ["sample.tiff"]}), var, ArtifactFile(tmp_path / "cells.h5ad"))
+
+        assert result == ["Channel Name", "Final_Concentration", "A B", "A_B"]
 
 
 class TestCentroidColumns:

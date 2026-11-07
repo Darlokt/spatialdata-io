@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, assert_type
 
@@ -16,6 +17,7 @@ from spatialdata_io.readers._utils.paths import (
     DatasetRoot,
     PathPolicy,
     _core,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     optional_metadata_file,
@@ -27,7 +29,6 @@ from spatialdata_io.readers._utils.paths import (
     require_metadata_directory,
     require_metadata_file,
     require_unique_path,
-    sorted_paths,
 )
 
 if TYPE_CHECKING:
@@ -605,24 +606,115 @@ class TestOptionalMetadataDirectory:
             optional_metadata_directory(root, "dangling", context=_CONTEXT)
 
 
-class TestSortedPaths:
-    def test_sorts_without_resolving_or_deduplicating(self, tmp_path: Path) -> None:
-        values = _OneShotPaths((Path("z/missing"), Path("a/missing"), Path("a/missing")))
+_UNREADABLE_SKIP = pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="directory permissions do not restrict root"
+)
 
-        result = sorted_paths(values, context=_CONTEXT, search_path=tmp_path)
 
-        assert result == (Path("a/missing"), Path("a/missing"), Path("z/missing"))
-        assert values.iterations == 1
+@pytest.fixture
+def unreadable(tmp_path: Path) -> Iterator[Path]:
+    """Yield a directory that cannot be listed, restoring its permissions afterwards."""
+    directory = tmp_path / "unreadable"
+    directory.mkdir()
+    (directory / "file").touch()
+    directory.chmod(0o000)
+    try:
+        yield directory
+    finally:
+        directory.chmod(0o755)
 
-    def test_contextualizes_iteration_error(self, tmp_path: Path) -> None:
-        error = PermissionError("scan denied")
-        values = _OneShotPaths((Path("a"),), error=error)
+
+class TestListDirectory:
+    def test_lists_files_and_directories_in_lexical_order(self, tmp_path: Path) -> None:
+        for name in ("b.csv", "a-b", ".hidden", "B.csv", "a.csv"):
+            (tmp_path / name).touch()
+        (tmp_path / "a").mkdir()
+
+        result = list_directory(tmp_path, context=_CONTEXT)
+
+        assert result == tuple(tmp_path / name for name in (".hidden", "B.csv", "a", "a-b", "a.csv", "b.csv"))
+
+    def test_skips_apple_double_companions_only(self, tmp_path: Path) -> None:
+        for name in ("._Roi1_CellxGene.csv", "Roi1_CellxGene.csv", ".DS_Store", "._", "_._x", "x._y", "._.__"):
+            (tmp_path / name).touch()
+        (tmp_path / "._directory").mkdir()
+
+        result = list_directory(tmp_path, context=_CONTEXT)
+
+        assert [path.name for path in result] == [".DS_Store", "Roi1_CellxGene.csv", "_._x", "x._y"]
+
+    def test_lists_an_empty_directory(self, tmp_path: Path) -> None:
+        assert list_directory(tmp_path, context=_CONTEXT) == ()
+
+    def test_does_not_resolve_symlinks(self, tmp_path: Path) -> None:
+        (tmp_path / "target").mkdir()
+        (tmp_path / "link").symlink_to(tmp_path / "target", target_is_directory=True)
+        (tmp_path / "dangling").symlink_to(tmp_path / "missing")
+
+        result = list_directory(tmp_path, context=_CONTEXT)
+
+        assert result == (tmp_path / "dangling", tmp_path / "link", tmp_path / "target")
+
+    def test_recursive_lists_every_entry_except_apple_double(self, tmp_path: Path) -> None:
+        (tmp_path / "pca" / "graph").mkdir(parents=True)
+        (tmp_path / "pca" / "graph" / "projection.csv").touch()
+        (tmp_path / "pca" / "graph" / "._projection.csv").touch()
+        (tmp_path / "._skipped").mkdir()
+        (tmp_path / "._skipped" / "inner.csv").touch()
+        (tmp_path / "top.csv").touch()
+
+        result = list_directory(tmp_path, context=_CONTEXT, recursive=True)
+
+        assert result == (
+            tmp_path / "pca",
+            tmp_path / "pca" / "graph",
+            tmp_path / "pca" / "graph" / "projection.csv",
+            tmp_path / "top.csv",
+        )
+
+    def test_recursive_does_not_enter_symlinked_directories(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "inner.csv").touch()
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "link").symlink_to(outside, target_is_directory=True)
+
+        assert list_directory(root, context=_CONTEXT, recursive=True) == (root / "link",)
+
+    @pytest.mark.parametrize("kind", ["missing", "file"])
+    def test_contextualizes_listing_error(self, tmp_path: Path, kind: str) -> None:
+        directory = tmp_path / kind
+        if kind == "file":
+            directory.touch()
+
+        with pytest.raises(OSError, match=re.escape(str(directory))) as raised:
+            list_directory(directory, context=_CONTEXT)
+
+        assert isinstance(raised.value, FileNotFoundError if kind == "missing" else NotADirectoryError)
+        assert raised.value.__notes__ == [f"While handling {_CONTEXT.describe(path=directory)}."]
+
+    @_UNREADABLE_SKIP
+    @pytest.mark.parametrize("recursive", [False, True])
+    def test_unreadable_directory_raises_with_context(self, unreadable: Path, *, recursive: bool) -> None:
+        with pytest.raises(PermissionError) as raised:
+            list_directory(unreadable, context=_CONTEXT, recursive=recursive)
+
+        assert raised.value.errno == errno.EACCES
+        assert raised.value.filename == str(unreadable)
+        assert len(raised.value.__notes__) == 1
+        assert "test_reader" in raised.value.__notes__[0]
+        assert str(unreadable) in raised.value.__notes__[0]
+
+    @_UNREADABLE_SKIP
+    def test_recursive_listing_does_not_skip_an_unreadable_subdirectory(self, unreadable: Path) -> None:
+        root = unreadable.parent
 
         with pytest.raises(PermissionError) as raised:
-            sorted_paths(values, context=_CONTEXT, search_path=tmp_path)
+            list_directory(root, context=_CONTEXT, recursive=True)
 
-        assert raised.value is error
-        assert str(tmp_path) in raised.value.__notes__[0]
+        assert raised.value.filename == str(unreadable)
+        assert str(root) in raised.value.__notes__[0]
 
 
 class TestRequireUniquePath:

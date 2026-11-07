@@ -9,11 +9,13 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro._schemas import (
     CELL_ID_DTYPE,
     FLOAT_DTYPE,
+    MARKERS_CONTEXT,
+    QUANTIFICATION_CONTEXT,
     STRING_DTYPE,
     canonical_markers,
     cell_ids,
@@ -43,8 +45,12 @@ class TestValidateColumns:
 
     @pytest.mark.parametrize("columns", [[], ["a", "a"], ["a", ""], ["a\x00"]])
     def test_rejects(self, tmp_path: Path, columns: list[str]) -> None:
-        with pytest.raises(ReaderFormatError, match="unique nonempty"):
-            validate_columns(columns, _path(tmp_path))
+        with pytest.raises(ReaderFormatError, match="unique nonempty") as caught:
+            validate_columns(columns, _path(tmp_path), context=MARKERS_CONTEXT)
+        assert caught.value.context == MARKERS_CONTEXT
+
+    def test_accepts_unique_names(self, tmp_path: Path) -> None:
+        validate_columns(["a", "b"], _path(tmp_path), context=QUANTIFICATION_CONTEXT)
 
 
 class TestCanonicalMarkers:
@@ -78,8 +84,9 @@ class TestNormalizeMarkers:
         ],
     )
     def test_rejects(self, tmp_path: Path, frame: pd.DataFrame, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
+        with pytest.raises(ReaderFormatError, match=match) as caught:
             normalize_markers(frame, _path(tmp_path))
+        assert caught.value.context == ReaderErrorContext("mcmicro", "markers")
 
 
 class TestQuantificationColumns:
@@ -121,8 +128,9 @@ class TestQuantificationColumns:
         ],
     )
     def test_rejects(self, tmp_path: Path, header: list[str], match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
+        with pytest.raises(ReaderFormatError, match=match) as caught:
             quantification_columns(header, ("A",), _path(tmp_path))
+        assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")
 
 
 class TestFloatValues:

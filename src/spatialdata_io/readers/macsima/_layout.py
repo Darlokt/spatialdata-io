@@ -15,10 +15,10 @@ from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
+    list_directory,
     normalize_dataset_root,
     require_metadata_directory,
     require_metadata_file,
-    sorted_paths,
 )
 
 if TYPE_CHECKING:
@@ -90,9 +90,10 @@ def _is_candidate(path: Path, directory: ArtifactDirectory) -> bool:
 
 def _candidate_files(root: DatasetRoot, directory: ArtifactDirectory) -> tuple[ArtifactFile, ...]:
     """Return the candidate TIFFs below a folder of ``root`` in lexical path order."""
-    candidates = (path for path in directory.rglob("*") if _is_candidate(path, directory))
-    paths = sorted_paths(candidates, context=_CONTEXT, search_path=directory)
-    return tuple(require_metadata_file(root, path, context=_CONTEXT) for path in paths)
+    paths = list_directory(directory, context=_CONTEXT, recursive=True)
+    return tuple(
+        require_metadata_file(root, path, context=_CONTEXT) for path in paths if _is_candidate(path, directory)
+    )
 
 
 def _require_unique_names(stacks: Sequence[StackFiles], root: DatasetRoot) -> None:
@@ -119,11 +120,9 @@ def _single_folder(root: DatasetRoot) -> tuple[StackFiles, ...]:
 
 
 def _multiple_folders(root: DatasetRoot, exclude_folder_names: frozenset[str]) -> tuple[StackFiles, ...]:
-    folders = sorted_paths(
-        (entry for entry in root.path.iterdir() if _visible(entry.name) and entry.is_dir()),
-        context=_CONTEXT,
-        search_path=root.path,
-    )
+    folders = [
+        entry for entry in list_directory(root.path, context=_CONTEXT) if _visible(entry.name) and entry.is_dir()
+    ]
     unknown = exclude_folder_names - {folder.name for folder in folders}
     if unknown:
         message = f"exclude_folder_names {sorted(unknown)} match no folder in {str(root.path)!r}."

@@ -6,8 +6,8 @@ events, with compensated and uncompensated variants (``reg001_compensated.csv``,
 described in :mod:`spatialdata_io.readers.codex._schemas`.
 
 CSV
-    Decoded as text in bounded batches of at most 10,000 rows and about 32 MiB
-    of numerical values. Each batch becomes a CSR block, so the dense
+    Decoded as text in bounded batches of about 32 MiB of numerical values (at
+    least one row). Each batch becomes a CSR block, so the dense
     expression of the whole population never exists at once. Defined fields
     (``region``, ``x``, ``y``) are normalized once over the complete population,
     so their dtypes do not depend on batch boundaries.
@@ -17,7 +17,8 @@ FCS
     (https://help.codex.bio/codex/processor/technical-notes/fcs-format).
 
 Observation names are zero-based source row positions; ``x`` and ``y`` stay in
-native region pixels. With a calibration, :func:`set_positions` adds
+native region pixels. Metadata column names that a SpatialData table does not
+accept (``tile num``) are sanitized with one warning (``tile_num``). With a calibration, :func:`set_positions` adds
 ``obsm["spatial"]`` in micrometres.
 """
 
@@ -36,9 +37,11 @@ from scipy import sparse
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.csv import read_csv_header
 from spatialdata_io.readers._utils.errors import add_reader_context
+from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import as_csr_array
 from spatialdata_io.readers.codex._schemas import (
     CELL_TABLE_CONTEXT,
+    REQUIRED_COLUMNS,
     STRING_DTYPE,
     cell_columns,
     cell_ids,
@@ -61,7 +64,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_CSV_BATCH_ROWS = 10_000
 _CSV_MAX_DENSE_BYTES = 32 * 1024 * 1024
 
 
@@ -124,9 +126,9 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
     header = read_csv_header(path, context=CELL_TABLE_CONTEXT)
     columns, labels = csv_column_names(header, path)
     features, metadata = cell_columns(columns, path)
-    # Bound numerical materialization by width as well as row count. The
+    # Bound numerical materialization in bytes, rows times expression width. The
     # lexical parser buffers and retained sparse/annotation outputs are separate.
-    batch_rows = min(_CSV_BATCH_ROWS, max(1, _CSV_MAX_DENSE_BYTES // (len(features) * np.dtype(np.float64).itemsize)))
+    batch_rows = max(1, _CSV_MAX_DENSE_BYTES // (len(features) * np.dtype(np.float64).itemsize))
 
     blocks: list[sparse.csr_array] = []
     observations: list[pd.DataFrame] = []
@@ -234,6 +236,9 @@ def read_cell_table(path: ArtifactFile) -> CellTable:
     coordinates = validate_observations(obs, path)
     region = region_name(obs["region"], path)
     obs["region"] = pd.Categorical([region] * table.n_obs)
+    obs.columns = sanitize_column_names(
+        list(obs.columns), source="codex: the cell table header", reserved=REQUIRED_COLUMNS
+    )
     return CellTable(table, identifiers, coordinates, region)
 
 

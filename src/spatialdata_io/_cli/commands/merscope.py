@@ -44,8 +44,12 @@ if TYPE_CHECKING:
     default=(),
     help="Repeat z indices in desired order; omitted selects all discovered layers.",
 )
-@click.option("--region-name", type=str, default=None, help="Region name; inferred from the input directory.")
-@click.option("--slide-name", type=str, default=None, help="Slide name; inferred from the input parent directory.")
+@click.option(
+    "--region-name", type=str, default=None, help="Region part of the element names; default: the input directory name."
+)
+@click.option(
+    "--slide-name", type=str, default=None, help="Slide part of the element names; default: the input parent name."
+)
 @click.option(
     "--include-transcripts/--no-include-transcripts", default=True, show_default=True, help="Return lazy transcripts."
 )
@@ -59,8 +63,6 @@ if TYPE_CHECKING:
     "--include-table/--no-include-table", default=True, show_default=True, help="Return sparse counts and controls."
 )
 @click.option("--include-images/--no-include-images", default=True, show_default=True, help="Return mosaic images.")
-@scale_factors_option
-@chunks_option
 @click.option(
     "--invalid-geometries",
     type=click.Choice(["keep", "drop", "raise"]),
@@ -68,6 +70,8 @@ if TYPE_CHECKING:
     show_default=True,
     help="Keep marked invalid source components, drop affected cells, or fail.",
 )
+@scale_factors_option
+@chunks_option
 @path_policy_option
 def merscope_command(input_path: Path, output_path: Path, **options: Unpack[_MerscopeOptions]) -> None:
     """Read MERSCOPE, then write the requested SpatialData store."""

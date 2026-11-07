@@ -1,4 +1,41 @@
-"""MERSCOPE source columns, exact identities/counts, and physical annotations."""
+"""Column contracts of the MERSCOPE count, metadata, boundary and transcript artifacts.
+
+Instrument output and VPT output share these schemas. CSV files are decoded as
+text and every field is normalized here, so integers never pass through an
+inferred float and coordinates are rounded once from their source spelling.
+
+``cell_by_gene.csv``
+    A positional cell-identity column, unnamed or named (``cell``), followed
+    by one column per feature in source order. Values are nonnegative
+    integers, possibly spelled ``2.0`` or ``3e0``. Features named
+    ``Blank-<positive integer>`` are negative controls.
+
+``cell_metadata.csv``
+    Named columns in any order: ``EntityID``, ``center_x`` and ``center_y``
+    (micrometres) are required. Known physical fields (``volume``, bounds,
+    shape descriptors) become float64, ``transcript_count`` an integer and
+    ``fov`` a nullable int64 (merged entities have no FOV). Other fields stay
+    text.
+
+``cell_boundaries.parquet``, ``{cellpose,watershed}_micron_space.parquet``
+    One row per cell and z slice: ``EntityID`` (integer or text), ``ZIndex``
+    (nullable stack index) and ``Geometry`` (WKB Polygon or MultiPolygon in
+    micrometres), plus an optional ``Type`` that must be ``Cell``. Other
+    columns are not read.
+
+``detected_transcripts.csv``
+    ``gene``, ``global_x`` and ``global_y`` (micrometres) are required;
+    ``global_z`` (a stack index, not a physical depth), ``cell_id`` (``-1``
+    for unassigned), ``fov``, ``barcode_id`` and ``transcript_id`` are kept
+    when present. Local pixel ``x``/``y`` and the unnamed row index are not
+    read.
+
+Cell identities are kept as exact text in every product, so integer IDs above
+2**53 survive. Vendor schemas:
+https://vizgen.github.io/vizgen-postprocessing/output_data_formats/entity_metadata_format.html,
+https://vizgen.github.io/vizgen-postprocessing/output_data_formats/geometry_file_format.html and
+https://vizgen.github.io/vizgen-postprocessing/output_data_formats/detected_transcripts_format.html.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +57,17 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
+type Artifact = Literal["count matrix", "cell metadata", "cell boundaries", "transcripts"]
+
+COUNTS: Artifact = "count matrix"
+METADATA: Artifact = "cell metadata"
+BOUNDARIES: Artifact = "cell boundaries"
+TRANSCRIPTS: Artifact = "transcripts"
+
 STRING_DTYPE = pd.ArrowDtype(pa.string())
 GEOMETRY_REPRESENTATION_DTYPE = pd.CategoricalDtype(["union_footprint", "source_components"])
-FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
-INTEGER_DTYPE = pd.ArrowDtype(pa.int64())
+_FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
+_INTEGER_DTYPE = pd.ArrowDtype(pa.int64())
 _LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 _BLANK_NAME = re.compile(r"Blank-[1-9][0-9]*")
 _METADATA_FLOATS = frozenset(
@@ -41,74 +85,86 @@ _METADATA_FLOATS = frozenset(
     }
 )
 _TRANSCRIPT_OPTIONAL = ("global_z", "cell_id", "fov", "barcode_id", "transcript_id")
-_OUTPUT_ANNOTATIONS = ("region", "slide", "dataset_id", "cells_region")
+OUTPUT_ANNOTATIONS = ("region", "slide", "dataset_id", "cells_region")
 
 
-def schema_error(path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
-    """Describe a source contract violation with its reader and artifact identity."""
+def schema_error(path: ArtifactFile, artifact: Artifact, *, found: str, expected: str) -> ReaderFormatError:
+    """Describe one MERSCOPE artifact contract violation."""
     return ReaderFormatError(
-        context=ReaderErrorContext("merscope", path.name), path=path, found=found, expected=expected
+        context=ReaderErrorContext("merscope", artifact), path=path, found=found, expected=expected
     )
 
 
-def validate_columns(columns: Sequence[str], path: ArtifactFile, *, first_empty: bool = False) -> None:
-    """Reject duplicate names before parser repair, allowing an evidenced positional index."""
+def _validate_columns(
+    columns: Sequence[str], path: ArtifactFile, artifact: Artifact, *, first_empty: bool = False
+) -> None:
+    """Reject duplicate names before a parser could repair them; allow an unnamed index column."""
     if (
         not columns
         or len(set(columns)) != len(columns)
         or any("\x00" in name or (not name and not (first_empty and i == 0)) for i, name in enumerate(columns))
     ):
-        raise schema_error(path, found="empty, duplicate or NUL-containing names", expected="unique named fields")
+        raise schema_error(
+            path, artifact, found="empty, duplicate or NUL-containing names", expected="unique named fields"
+        )
 
 
 def count_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Return ordered count features following the first positional cell identity field."""
-    validate_columns(columns, path, first_empty=True)
+    """Return the ordered features that follow the positional cell-identity column."""
+    _validate_columns(columns, path, COUNTS, first_empty=True)
     if not columns[1:]:
-        raise schema_error(path, found="no count features", expected="a cell index followed by count features")
+        raise schema_error(path, COUNTS, found="no count features", expected="a cell index followed by count features")
     return tuple(columns[1:])
 
 
 def blank_columns(features: Sequence[str]) -> tuple[bool, ...]:
-    """Identify only canonical positive-numbered Blank-N control names."""
+    """Identify only canonical positive-numbered ``Blank-N`` control names."""
     return tuple(_BLANK_NAME.fullmatch(feature) is not None for feature in features)
 
 
-def normalize_cell_ids(series: pd.Series, path: ArtifactFile, *, allow_unassigned: bool = False) -> pd.Series:
-    """Preserve exact nonempty lexical cell identities and the optional -1 sentinel."""
+def normalize_cell_ids(
+    series: pd.Series, path: ArtifactFile, artifact: Artifact, *, allow_unassigned: bool = False
+) -> pd.Series:
+    """Return exact nonempty text identities, allowing the ``-1`` sentinel only for assignments."""
     if series.dtype.kind in "fb":
-        raise schema_error(path, found="floating or boolean cell IDs", expected="exact text or integer cell identities")
+        raise schema_error(
+            path, artifact, found="floating or boolean cell IDs", expected="exact text or integer cell identities"
+        )
     identifiers = series.astype(STRING_DTYPE)
     if identifiers.isna().any() or identifiers.eq("").any() or identifiers.str.contains("\x00", regex=False).any():
-        raise schema_error(path, found="missing or malformed cell IDs", expected="nonempty exact cell identities")
+        raise schema_error(
+            path, artifact, found="missing or malformed cell IDs", expected="nonempty exact cell identities"
+        )
     if not allow_unassigned and identifiers.eq("-1").any():
         raise schema_error(
-            path, found="unassigned cell ID in a cell population", expected="cell identities excluding -1"
+            path, artifact, found="unassigned cell ID in a cell population", expected="cell identities excluding -1"
         )
     return identifiers
 
 
 def integer_values(
-    source: pd.Series | pa.Array | pa.ChunkedArray, path: ArtifactFile
+    source: pd.Series | pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact
 ) -> npt.NDArray[np.int64 | np.uint64]:
-    """Decode nonnegative integral values without any floating intermediate."""
+    """Decode nonnegative integers without a floating intermediate; uint64 only above int64."""
     column = pa.array(source.astype(STRING_DTYPE)) if isinstance(source, pd.Series) else pc.cast(source, pa.string())
     if column.null_count:
-        raise schema_error(path, found="missing integer", expected="nonnegative 64-bit integral values")
+        raise schema_error(path, artifact, found="missing integer", expected="nonnegative 64-bit integral values")
     try:
         # Arrow's native integer parser is the common count and stack-index path.
         values = pc.cast(column, pa.uint64()).to_numpy()
     except pa.ArrowInvalid:
-        tokens = column.to_pylist()
+        # Exact decimal fallback for spellings such as "2.0" or "3e0".
         exact_values: list[int] = []
-        for token in tokens:
+        for token in column.to_pylist():
             try:
                 exact = Decimal(token)
             except InvalidOperation as error:
-                raise schema_error(path, found=f"integer {token!r}", expected="nonnegative integral values") from error
+                raise schema_error(
+                    path, artifact, found=f"integer {token!r}", expected="nonnegative integral values"
+                ) from error
             if not exact.is_finite() or exact < 0 or exact >= 2**64 or exact != exact.to_integral_value():
                 raise schema_error(
-                    path, found=f"integer {token!r}", expected="nonnegative 64-bit integral values"
+                    path, artifact, found=f"integer {token!r}", expected="nonnegative 64-bit integral values"
                 ) from None
             exact_values.append(int(exact))
         dtype = np.uint64 if exact_values and max(exact_values) >= 2**63 else np.int64
@@ -116,17 +172,18 @@ def integer_values(
     return values if len(values) and values.max() >= 2**63 else values.astype(np.int64, copy=False)
 
 
-def normalize_floats(series: pd.Series, path: ArtifactFile, column: str) -> pd.Series:
-    """Decode float64 physical values, rejecting nonfinite values and destructive conversion."""
+def _normalize_floats(series: pd.Series, path: ArtifactFile, artifact: Artifact, column: str) -> pd.Series:
+    """Decode float64 values, rejecting nonfinite values, underflow and integer precision loss."""
     lexical = series.astype(STRING_DTYPE)
     expected = "finite float64 values without underflow or integer precision loss"
     try:
-        normalized = lexical.astype(FLOAT_DTYPE)
+        normalized = lexical.astype(_FLOAT_DTYPE)
     except (ValueError, TypeError, pa.ArrowInvalid) as error:
-        raise schema_error(path, found=f"nonnumeric {column} values", expected=expected) from error
+        raise schema_error(path, artifact, found=f"nonnumeric {column} values", expected=expected) from error
     values = normalized.to_numpy(dtype=np.float64, na_value=np.nan)
     if not np.isfinite(values).all():
-        raise schema_error(path, found=f"nonfinite or missing {column} values", expected=expected)
+        raise schema_error(path, artifact, found=f"nonfinite or missing {column} values", expected=expected)
+    # Only large integers and zeros can hide destructive rounding; check those exactly.
     candidates = np.abs(values) >= 2**53
     zero = values == 0
     if zero.any():
@@ -135,43 +192,43 @@ def normalize_floats(series: pd.Series, path: ArtifactFile, column: str) -> pd.S
         exact = Decimal(lexical.iloc[row])
         number = float(values[row])
         if (number == 0 and exact != 0) or (exact == exact.to_integral_value() and exact != Decimal(number)):
-            raise schema_error(path, found=f"{column} precision loss", expected=expected)
+            raise schema_error(path, artifact, found=f"{column} precision loss", expected=expected)
     return normalized
 
 
 def metadata_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Require named metadata identities/centroids and preserve additional annotations."""
-    validate_columns(columns, path)
+    """Require named identities and centroids and keep every additional annotation."""
+    _validate_columns(columns, path, METADATA)
     if not {"EntityID", "center_x", "center_y"}.issubset(columns):
         raise schema_error(
-            path, found=f"columns {list(columns)!r}", expected="EntityID, center_x and center_y metadata"
+            path, METADATA, found=f"columns {list(columns)!r}", expected="EntityID, center_x and center_y metadata"
         )
     return tuple(columns)
 
 
 def normalize_metadata(frame: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
-    """Validate owned annotations, retaining unknown metadata as exact Arrow text."""
-    identifiers = normalize_cell_ids(frame.pop("EntityID"), path)
+    """Index owned annotations by exact identity and type the known physical fields."""
+    identifiers = normalize_cell_ids(frame.pop("EntityID"), path, METADATA)
     if not identifiers.is_unique:
-        raise schema_error(path, found="duplicate metadata identities", expected="one metadata row per cell")
+        raise schema_error(path, METADATA, found="duplicate metadata identities", expected="one metadata row per cell")
     frame.index = pd.Index(identifiers.to_numpy(), name=None)
     for column in frame.columns:
         if column in _METADATA_FLOATS:
-            frame[column] = normalize_floats(frame[column], path, column)
+            frame[column] = _normalize_floats(frame[column], path, METADATA, column)
     if "volume" in frame and frame["volume"].lt(0).any():
-        raise schema_error(path, found="negative volume", expected="nonnegative cell volumes")
+        raise schema_error(path, METADATA, found="negative volume", expected="nonnegative cell volumes")
     if "transcript_count" in frame:
-        values = integer_values(frame["transcript_count"], path)
+        values = integer_values(frame["transcript_count"], path, METADATA)
         frame["transcript_count"] = pd.Series(
             values, index=frame.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(values.dtype))
         )
     if "fov" in frame:
         # Vendor metadata permits absent FOV assignments for merged entities.
         missing = frame["fov"].eq("")
-        values = integer_values(frame.loc[~missing, "fov"], path)
+        values = integer_values(frame.loc[~missing, "fov"], path, METADATA)
         if values.dtype.kind == "u":
-            raise schema_error(path, found="FOV overflow", expected="nullable nonnegative int64 FOV indexes")
-        frame["fov"] = pd.Series(pd.NA, index=frame.index, dtype=INTEGER_DTYPE)
+            raise schema_error(path, METADATA, found="FOV overflow", expected="nullable nonnegative int64 FOV indexes")
+        frame["fov"] = pd.Series(pd.NA, index=frame.index, dtype=_INTEGER_DTYPE)
         frame.loc[~missing, "fov"] = values
     return frame
 
@@ -180,7 +237,7 @@ def validate_output_annotations(
     frame: pd.DataFrame, expected: Mapping[str, str], *, context: ReaderErrorContext
 ) -> None:
     """Reject conflicting source annotations before reader-owned names are attached."""
-    for column in _OUTPUT_ANNOTATIONS:
+    for column in OUTPUT_ANNOTATIONS:
         if column not in frame:
             continue
         value = expected.get(column)
@@ -200,40 +257,49 @@ def validate_output_annotations(
 
 
 def boundary_columns(names: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Project the source identity, plane, geometry and optional entity-type fields."""
-    validate_columns(names, path)
+    """Project the identity, plane and geometry fields and the optional entity type."""
+    _validate_columns(names, path, BOUNDARIES)
     columns = ("EntityID", "ZIndex", "Geometry")
     if not set(columns).issubset(names):
-        raise schema_error(path, found=f"columns {list(names)!r}", expected="EntityID, ZIndex and Geometry fields")
+        raise schema_error(
+            path, BOUNDARIES, found=f"columns {list(names)!r}", expected="EntityID, ZIndex and Geometry fields"
+        )
     return (*columns, "Type") if "Type" in names else columns
 
 
 def normalize_boundary_ids(table: pa.Table, path: ArtifactFile) -> pd.Index:
-    """Validate source primitives while retaining repeated rows for footprint union."""
+    """Validate slice identities, planes and types, keeping repeated rows for the footprint union."""
     ids = table.column("EntityID")
     if not (pa.types.is_integer(ids.type) or pa.types.is_string(ids.type) or pa.types.is_large_string(ids.type)):
-        raise schema_error(path, found=f"EntityID dtype {ids.type}", expected="exact integer or text identities")
-    identifiers = normalize_cell_ids(pd.Series(ids, dtype=STRING_DTYPE), path)
+        raise schema_error(
+            path, BOUNDARIES, found=f"EntityID dtype {ids.type}", expected="exact integer or text identities"
+        )
+    identifiers = normalize_cell_ids(pd.Series(ids, dtype=STRING_DTYPE), path, BOUNDARIES)
     # VPT permits absent plane annotations. XY footprint construction uses every
     # geometry row, independently of this optional 3D stack annotation.
-    planes = integer_values(table.column("ZIndex").drop_null(), path)
+    planes = integer_values(table.column("ZIndex").drop_null(), path, BOUNDARIES)
     if planes.dtype.kind == "u":
-        raise schema_error(path, found="ZIndex overflow", expected="nonnegative int64 plane indexes")
+        raise schema_error(path, BOUNDARIES, found="ZIndex overflow", expected="nonnegative int64 plane indexes")
     if "Type" in table.column_names:
         types = pd.Series(table.column("Type"), dtype=STRING_DTYPE)
         if types.isna().any() or not types.isin(("Cell", "cell")).all():
-            raise schema_error(path, found="unsupported entity types", expected="only Cell/cell boundaries")
+            raise schema_error(path, BOUNDARIES, found="unsupported entity types", expected="only Cell/cell boundaries")
     if identifiers.empty:
-        raise schema_error(path, found="no cell boundaries", expected="a nonempty cell footprint population")
-    return pd.Index(identifiers.to_numpy(), name="EntityID")
+        raise schema_error(
+            path, BOUNDARIES, found="no cell boundaries", expected="a nonempty cell footprint population"
+        )
+    return pd.Index(identifiers, name="EntityID")
 
 
 def validate_transcript_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Declare projected global coordinates, features and supported source annotations."""
-    validate_columns(columns, path, first_empty=True)
+    """Return the projected coordinate, feature and supported annotation fields."""
+    _validate_columns(columns, path, TRANSCRIPTS, first_empty=True)
     if not {"gene", "global_x", "global_y"}.issubset(columns):
         raise schema_error(
-            path, found=f"columns {list(columns)!r}", expected="gene, global_x and global_y transcript fields"
+            path,
+            TRANSCRIPTS,
+            found=f"columns {list(columns)!r}",
+            expected="gene, global_x and global_y transcript fields",
         )
     return ("gene", "global_x", "global_y", *(column for column in _TRANSCRIPT_OPTIONAL if column in columns))
 
@@ -244,39 +310,54 @@ def normalize_transcript_partition(
     features: tuple[str, ...],
     path: ArtifactFile,
     assignment: Literal["current", "original"],
-    allowed_cell_ids: tuple[str, ...] | None = None,
+    cell_population: pd.Index | None = None,
 ) -> pd.DataFrame:
-    """Validate one owned partition, preserving assignment provenance without a full scan."""
+    """Validate one owned partition and name its assignments by their provenance.
+
+    ``cell_population`` is the unique Arrow-string index of current cells;
+    assigned events must belong to it. ``None`` skips the check.
+    """
     genes = frame["gene"]
     if genes.isna().any() or not genes.isin(features).all():
         raise schema_error(
-            path, found="missing or unknown gene names", expected="the complete source feature vocabulary"
+            path, TRANSCRIPTS, found="missing or unknown gene names", expected="the complete source feature vocabulary"
         )
     frame["gene"] = pd.Categorical(genes.to_numpy(), categories=features)
     for column, axis in (("global_x", "x"), ("global_y", "y")):
-        frame[axis] = normalize_floats(frame.pop(column), path, column).to_numpy(dtype=np.float64)
+        frame[axis] = _normalize_floats(frame.pop(column), path, TRANSCRIPTS, column).to_numpy(dtype=np.float64)
     for column in ("global_z", "fov", "barcode_id"):
         if column in frame:
-            values = integer_values(frame.pop(column), path)
+            values = integer_values(frame.pop(column), path, TRANSCRIPTS)
             if values.dtype.kind == "u":
-                raise schema_error(path, found=f"{column} overflow", expected="nonnegative int64 source indexes")
+                raise schema_error(
+                    path, TRANSCRIPTS, found=f"{column} overflow", expected="nonnegative int64 source indexes"
+                )
             frame["z_raw" if column == "global_z" else column] = pd.Series(
-                values, index=frame.index, dtype=INTEGER_DTYPE
+                values, index=frame.index, dtype=_INTEGER_DTYPE
             )
     if "transcript_id" in frame:
         values = frame["transcript_id"].astype(STRING_DTYPE)
         if values.isna().any() or values.eq("").any():
-            raise schema_error(path, found="missing transcript_id", expected="nonempty codebook transcript identifiers")
+            raise schema_error(
+                path, TRANSCRIPTS, found="missing transcript_id", expected="nonempty codebook transcript identifiers"
+            )
         frame["transcript_id"] = values
     if "cell_id" in frame:
-        identifiers = normalize_cell_ids(frame.pop("cell_id"), path, allow_unassigned=True)
-        if (
-            assignment == "current"
-            and allowed_cell_ids is not None
-            and not (identifiers.eq("-1") | identifiers.isin(allowed_cell_ids)).all()
-        ):
-            raise schema_error(
-                path, found="unknown assigned cells", expected="current cell IDs or the -1 unassigned sentinel"
-            )
+        identifiers = normalize_cell_ids(frame.pop("cell_id"), path, TRANSCRIPTS, allow_unassigned=True)
+        if assignment == "current" and cell_population is not None:
+            _validate_assignments(identifiers, cell_population, path)
         frame["original_cell_id" if assignment == "original" else "cell_id"] = identifiers
     return frame
+
+
+def _validate_assignments(identifiers: pd.Series, cell_population: pd.Index, path: ArtifactFile) -> None:
+    """Require every assigned event to name a cell of the current population."""
+    # An Arrow-string population index builds its hash table once for all partitions.
+    assigned = pd.Index(identifiers[identifiers.ne("-1")])
+    if (cell_population.get_indexer(assigned) < 0).any():
+        raise schema_error(
+            path,
+            TRANSCRIPTS,
+            found="unknown assigned cells",
+            expected="current cell IDs or the -1 unassigned sentinel",
+        )

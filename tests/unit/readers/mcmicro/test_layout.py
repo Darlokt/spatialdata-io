@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import pytest
@@ -178,6 +179,56 @@ class TestWsiDiscovery:
         with pytest.raises(ReaderFormatError, match=match):
             discover_layout(_wsi(tmp_path, *extra))
 
+    def test_valid_names_are_kept_without_warning(self, tmp_path: Path) -> None:
+        root = _wsi(tmp_path, "segmentation/unmicst-slide_1/cell.ome.tif")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            layout = discover_layout(root)
+        assert isinstance(layout, WsiLayout)
+        assert layout.image_key == "slide_1_image"
+        assert [label.key for label in layout.segmentations] == ["slide_1_unmicst_cell"]
+
+    def test_file_derived_names_are_sanitized_with_a_warning(self, tmp_path: Path) -> None:
+        root = _wsi(
+            tmp_path,
+            "segmentation/un micst-my slide/a:b.ome.tif",
+            "quantification/my slide--un micst_a:b.csv",
+        )
+        (root / "registration" / "slide_1.ome.tif").rename(root / "registration" / "my slide.ome.tif")
+        unusable = "is not a usable SpatialData element name; using"
+        remedy = "Rename the source files to choose the name explicitly."
+        with pytest.warns(UserWarning, match=unusable) as caught:
+            layout = discover_layout(root)
+        assert [str(warning.message) for warning in caught] == [
+            f"mcmicro: the registered image ID 'my slide' {unusable} 'my_slide'. {remedy}",
+            f"mcmicro: the label name 'my_slide_un micst_a:b' {unusable} 'my_slide_un_micst_a_b'. {remedy}",
+        ]
+        assert isinstance(layout, WsiLayout)
+        assert layout.image_id == "my_slide"
+        assert layout.image_key == "my_slide_image"
+        label = layout.segmentations[0]
+        assert (label.image_id, label.method, label.compartment, label.key) == (
+            "my_slide",
+            "un micst",
+            "a:b",
+            "my_slide_un_micst_a_b",
+        )
+        assert layout.quantifications[0].target is label
+
+    @pytest.mark.parametrize(("first", "second"), [("cell", "Cell"), ("a b", "a:b")])
+    def test_names_colliding_after_case_folding_or_sanitizing_fail(
+        self, tmp_path: Path, first: str, second: str
+    ) -> None:
+        root = _wsi(
+            tmp_path, f"segmentation/unmicst-slide_1/{first}.ome.tif", f"segmentation/unmicst-slide_1/{second}.tif"
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ReaderFormatError, match="colliding keys") as caught:
+                discover_layout(root)
+        assert caught.value.context.artifact == "element names"
+        assert "unique ignoring letter case" in caught.value.expected
+
     def test_empty_registration_fails(self, tmp_path: Path) -> None:
         root = _wsi(tmp_path)
         (root / "registration" / "slide_1.ome.tif").unlink()
@@ -218,6 +269,10 @@ class TestTmaDiscovery:
             (10, "10.ome.tif", "10_mask.tif"),
         ]
         assert [label.key for label in layout.segmentations] == ["core_2_unmicst_cell", "core_10_unmicst_cell"]
+        assert [(core.image_key, core.mask_key) for core in layout.cores] == [
+            ("core_2_image", "core_2_mask"),
+            ("core_10_image", "core_10_mask"),
+        ]
         assert [table.target.key for table in layout.quantifications] == ["core_2_unmicst_cell", "core_10_unmicst_cell"]
 
     def test_many_cores_methods_and_compartments_keep_exact_associations(self, tmp_path: Path) -> None:

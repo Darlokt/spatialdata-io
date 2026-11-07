@@ -52,7 +52,7 @@ class TestReadTranscripts:
         mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 96)
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
-            points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+            points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         tasks.assert_not_called()
         assert points.npartitions > 5
         assert points.dtypes["cell"] == pd.ArrowDtype(pa.uint64())
@@ -71,7 +71,7 @@ class TestReadTranscripts:
         with path.open("a", encoding="utf-8") as output:
             output.write(f"annotation,2.5,GeneB,{invalid_cell},1,1.5\n")
         mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 128)
-        points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert not points.partitions[0].compute().empty
         with pytest.raises(ReaderFormatError, match="identifier"):
             points.partitions[-1].compute()
@@ -84,7 +84,7 @@ class TestReadTranscripts:
         tasks = mocker.Mock()
         filters = list(warnings.filters)
         with Callback(posttask=tasks):
-            points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+            points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         tasks.assert_not_called()
         assert warnings.filters == filters
         assert points.npartitions > 1
@@ -106,7 +106,7 @@ class TestReadTranscripts:
     def test_optional_annotations_are_absent_and_empty_points_are_supported(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "transcripts.csv")
         path.write_text("name,x,y\n", encoding="utf-8")
-        points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert set(points.columns) == {"name", "x", "y"}
         assert points.compute().empty
 
@@ -119,7 +119,7 @@ class TestReadTranscripts:
     ) -> None:
         path = _write_transcripts(tmp_path / "transcripts.csv", last_name=last_name, last_x=last_x)
         mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 128)
-        points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert points.npartitions > 1
         first = points.partitions[0].compute()
         assert set(first["name"]) == {"GeneB"}
@@ -143,7 +143,7 @@ class TestReadTranscripts:
         path.write_bytes(content)
         parser = mocker.spy(csv_blocks, "read_bytes")
         with pytest.raises(ReaderFormatError, match=message):
-            read_transcripts(path, features=_FEATURES, roi="Roi1")
+            read_transcripts(path, features=_FEATURES, frame="Roi1")
         parser.assert_not_called()
 
     def test_warning_filters_restore_when_public_model_parser_fails(
@@ -153,7 +153,7 @@ class TestReadTranscripts:
         parser = mocker.patch.object(transcript_module.PointsModel, "parse", side_effect=RuntimeError("injected"))
         initial = list(warnings.filters)
         with pytest.raises(RuntimeError, match="injected"):
-            read_transcripts(path, features=_FEATURES, roi="Roi1")
+            read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert warnings.filters == initial
         parser.assert_called_once()
         assert parser.call_args.kwargs["sort"] is False
@@ -163,7 +163,7 @@ class TestReadTranscripts:
         path.write_text("name,x,y,annotation\nGeneB,1,2," + "a" * (128 * 1024) + "\n", encoding="utf-8")
         storage = mocker.spy(csv_blocks, "read_bytes")
         parser = mocker.spy(csv_blocks, "_read_block")
-        points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         parser.assert_not_called()
         assert storage.call_args.kwargs["sample"] is False
         result = points.compute()
@@ -178,7 +178,7 @@ class TestReadTranscripts:
         with path.open("a", encoding="utf-8") as output:
             output.write(record)
         mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 128)
-        points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert not points.partitions[0].compute().empty
         with pytest.raises(ValueError, match=r"CSV|columns|fields|malformed"):
             points.partitions[-1].compute()
@@ -189,7 +189,7 @@ class TestReadTranscripts:
             "name,x,y,cell\nGeneB,0.10000000000000002,2.5,9007199254740993\nGeneB,1.5,2.5,2.0\n",
             encoding="utf-8",
         )
-        points = read_transcripts(path, features=_FEATURES, roi="Roi1")
+        points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         result = points.compute()
         assert result["cell"].tolist() == [9007199254740993, 2]
         assert result["x"].iloc[0] == float("0.10000000000000002")
@@ -198,5 +198,5 @@ class TestReadTranscripts:
         root = tmp_path / "[ROI]*?"
         root.mkdir()
         path = _write_transcripts(root / "transcripts.csv", rows=2)
-        result = read_transcripts(path, features=_FEATURES, roi="Roi1").compute()
+        result = read_transcripts(path, features=_FEATURES, frame="Roi1").compute()
         assert result["name"].tolist() == ["GeneB", "Gene,A"]

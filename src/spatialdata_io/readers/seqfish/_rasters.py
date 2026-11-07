@@ -1,4 +1,21 @@
-"""Construct lazy calibrated seqFISH DAPI and segmentation elements."""
+"""Construct the lazy seqFISH DAPI image and segmentation labels of one ROI.
+
+Both rasters are single-series TIFFs read at full resolution:
+
+- ``<ROI>_DAPI.tiff``: an OME-TIFF image with physical pixel sizes (see
+  :mod:`._transforms`) and spatial axes ``YX`` plus optional singleton axes
+  or a channel axis ``C``. It becomes a ``(c, y, x)`` image whose channel
+  coordinates are the OME channel names, or their IDs when names are missing
+  or repeated.
+- ``<ROI>_Segmentation.tiff``: integer ``(y, x)`` cell labels, ``0`` for
+  background and otherwise the cell ID, on the DAPI pixel grid. It must have
+  the DAPI shape and, if it declares OME physical sizes, the DAPI ones.
+
+Both are mapped into the ROI's micrometre frame with the DAPI pixel scale.
+Pixels are not read: the label dtype is checked against the largest table cell
+ID instead of scanning label values. A non-singleton samples axis (RGB) is
+rejected, because DAPI and labels are single-component rasters.
+"""
 
 from __future__ import annotations
 
@@ -21,16 +38,18 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.image import RasterOptions, TiffMetadata
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
+_DAPI_CONTEXT = ReaderErrorContext("seqfish", "DAPI")
+_SEGMENTATION_CONTEXT = ReaderErrorContext("seqfish", "Segmentation")
 _IMAGE_AXES = ("c", "y", "x")
 _LABEL_AXES = ("y", "x")
 
 
-def _inspect(path: ArtifactFile, artifact: str) -> TiffMetadata:
-    """Add source context while preserving precise TIFF failure types."""
-    metadata = inspect_tiff(path, context=ReaderErrorContext("seqfish", artifact))
+def _inspect(path: ArtifactFile, context: ReaderErrorContext) -> TiffMetadata:
+    """Inspect a TIFF once and require exactly one full-resolution series."""
+    metadata = inspect_tiff(path, context=context)
     if len(metadata.series) != 1:
         raise ReaderFormatError(
-            context=ReaderErrorContext("seqfish", artifact),
+            context=context,
             path=metadata.path,
             found=f"{len(metadata.series)} series",
             expected="exactly one full-resolution TIFF series",
@@ -40,12 +59,11 @@ def _inspect(path: ArtifactFile, artifact: str) -> TiffMetadata:
 
 def read_calibration(path: ArtifactFile) -> Scale:
     """Inspect DAPI physical XY calibration without constructing a pixel graph."""
-    return pixel_scale(_inspect(path, "DAPI"))
+    return pixel_scale(_inspect(path, _DAPI_CONTEXT), context=_DAPI_CONTEXT)
 
 
-def _array(metadata: TiffMetadata, target_axes: tuple[str, ...]) -> Array:
+def _array(metadata: TiffMetadata, target_axes: tuple[str, ...], context: ReaderErrorContext) -> Array:
     """Normalize full-resolution named axes without reading pixels."""
-    context = ReaderErrorContext("seqfish", "raster axes")
     raster = read_tiff(metadata, series=0, level=0, context=context)
     try:
         return normalize_raster_axes(
@@ -65,7 +83,7 @@ def _array(metadata: TiffMetadata, target_axes: tuple[str, ...]) -> Array:
 
 @dataclass(frozen=True, slots=True)
 class DapiRaster:
-    """Own one normalized DAPI graph and its validated scientific calibration."""
+    """One normalized DAPI graph with its validated calibration and channel names."""
 
     data: Array
     scale: Scale
@@ -74,88 +92,84 @@ class DapiRaster:
 
 def read_dapi(path: ArtifactFile) -> DapiRaster:
     """Inspect once and prepare one full-resolution CYX source graph."""
-    metadata = _inspect(path, "DAPI")
-    image = _array(metadata, _IMAGE_AXES)
-    scale = pixel_scale(metadata)
+    metadata = _inspect(path, _DAPI_CONTEXT)
+    image = _array(metadata, _IMAGE_AXES, _DAPI_CONTEXT)
+    scale = pixel_scale(metadata, context=_DAPI_CONTEXT)
     # Axis normalization already rejected a non-singleton samples axis.
-    names = ome_channel_names(
-        metadata,
-        series=0,
-        count=int(image.shape[0]),
-        samples=False,
-        context=ReaderErrorContext("seqfish", "DAPI channels"),
-    )
-    # pixel_scale establishes exactly one OME image before this private use.
-    channel_names = tuple(cast("list[str]", names))
-    return DapiRaster(image, scale, channel_names)
+    names = ome_channel_names(metadata, series=0, count=int(image.shape[0]), samples=False, context=_DAPI_CONTEXT)
+    # pixel_scale establishes exactly one OME image, so names are not None.
+    return DapiRaster(image, scale, tuple(cast("list[str]", names)))
 
 
-def read_image(dapi: DapiRaster, *, roi: str, options: RasterOptions) -> DataArray | DataTree:
+def read_image(dapi: DapiRaster, *, frame: str, options: RasterOptions) -> DataArray | DataTree:
     """Model the prepared CYX graph without rebuilding its source tasks."""
-    image = dapi.data
-    options.validate_image_pyramid(image, element="the seqFISH DAPI image")
+    options.validate_image_pyramid(dapi.data, element="the seqFISH DAPI image")
     return Image2DModel.parse(
-        image,
+        dapi.data,
         dims=_IMAGE_AXES,
         c_coords=list(dapi.channels),
         rgb=False,
         scale_factors=options.model_scale_factors,
         chunks=options.image_chunks(),
-        transformations={roi: dapi.scale},
+        transformations={frame: dapi.scale},
     )
 
 
+def _check_calibration(metadata: TiffMetadata, reference: Scale) -> None:
+    """Require any declared segmentation pixel size to equal the DAPI one."""
+    if metadata.ome is None:
+        return
+    pixels = metadata.ome.images[0].pixels
+    if pixels.physical_size_x is None and pixels.physical_size_y is None:
+        return
+    declared = pixel_scale(metadata, context=_SEGMENTATION_CONTEXT).to_scale_vector(("y", "x"))
+    if not all(
+        isclose(actual, expected, rel_tol=1e-12)
+        for actual, expected in zip(declared, reference.to_scale_vector(("y", "x")), strict=True)
+    ):
+        raise ReaderFormatError(
+            context=_SEGMENTATION_CONTEXT,
+            path=metadata.path,
+            found="segmentation OME physical sizes differ from DAPI",
+            expected="the same calibrated pixel grid for segmentation and DAPI",
+        )
+
+
 def read_labels(
-    path: ArtifactFile, *, reference: DapiRaster, roi: str, options: RasterOptions, max_instance_id: int
+    path: ArtifactFile, *, reference: DapiRaster, frame: str, options: RasterOptions, max_instance_id: int
 ) -> DataArray | DataTree:
     """Return integer YX labels sharing the calibrated full-resolution DAPI grid."""
-    metadata = _inspect(path, "segmentation")
-    labels = _array(metadata, _LABEL_AXES)
+    metadata = _inspect(path, _SEGMENTATION_CONTEXT)
+    labels = _array(metadata, _LABEL_AXES, _SEGMENTATION_CONTEXT)
     reference_shape = reference.data.shape[-2:]
     if labels.shape != reference_shape:
         raise ReaderFormatError(
-            context=ReaderErrorContext("seqfish", "segmentation alignment"),
+            context=_SEGMENTATION_CONTEXT,
             path=path,
             found=f"segmentation YX shape {labels.shape} and DAPI shape {reference_shape}",
             expected="the same full-resolution pixel extent for segmentation and DAPI",
         )
-    if metadata.ome is not None:
-        pixels = metadata.ome.images[0].pixels
-        if pixels.physical_size_x is not None or pixels.physical_size_y is not None:
-            segmentation_scale = pixel_scale(metadata)
-            if not all(
-                isclose(actual, expected, rel_tol=1e-12)
-                for actual, expected in zip(
-                    segmentation_scale.to_scale_vector(("y", "x")),
-                    reference.scale.to_scale_vector(("y", "x")),
-                    strict=True,
-                )
-            ):
-                raise ReaderFormatError(
-                    context=ReaderErrorContext("seqfish", "segmentation calibration"),
-                    path=path,
-                    found="segmentation OME physical sizes differ from DAPI",
-                    expected="the same calibrated pixel grid for segmentation and DAPI",
-                )
+    _check_calibration(metadata, reference.scale)
     if labels.dtype.kind not in {"i", "u"}:
         raise ReaderFormatError(
-            context=ReaderErrorContext("seqfish", "segmentation dtype"),
+            context=_SEGMENTATION_CONTEXT,
             path=path,
             found=str(labels.dtype),
             expected="integer label pixels with zero reserved for background",
         )
-    if max_instance_id > np.iinfo(labels.dtype.str).max:
+    if max_instance_id > np.iinfo(labels.dtype).max:
         raise ReaderFormatError(
-            context=ReaderErrorContext("seqfish", "label identity"),
+            context=_SEGMENTATION_CONTEXT,
             path=path,
             found="cell IDs exceeding the label dtype",
             expected=f"IDs representable by {labels.dtype}",
         )
+
     options.validate_label_pyramid(labels, element="the seqFISH segmentation")
     return Labels2DModel.parse(
         labels,
         dims=_LABEL_AXES,
         scale_factors=options.model_scale_factors,
         chunks=options.label_chunks(),
-        transformations={roi: reference.scale},
+        transformations={frame: reference.scale},
     )

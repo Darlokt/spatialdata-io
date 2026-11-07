@@ -27,6 +27,75 @@ if TYPE_CHECKING:
 class TestCurio:
     """Verify scientific values, metadata, geometry, and serialization."""
 
+    def test_h5ad_columns_and_metric_categories_are_sanitized(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        source = ad.read_h5ad(tmp_path / "sample_anndata.h5ad")
+        source.obs["my note"] = ["x", "y", "z"]
+        source.obs["Cluster"] = ["c", "c", "c"]
+        source.var["my note"] = ["f", "g", "h"]
+        source.uns["qc"] = {"source": "h5ad"}
+        source.write_h5ad(tmp_path / "sample_anndata.h5ad")
+        (tmp_path / "sample_Metrics.csv").write_text(
+            "Metric,Value,Category\nReads,100,Run Metrics\nBeads,3,QC\nSpots,4,Run Metrics\n", encoding="utf-8"
+        )
+
+        with pytest.warns(UserWarning, match="SpatialData table") as caught:
+            result = curio(tmp_path)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "curio: the H5AD obs has column names that a SpatialData table does not accept; using 'my note' -> "
+                "'my_note', 'Cluster' -> 'Cluster_1'. Rename the source columns to choose the names explicitly."
+            ),
+            (
+                "curio: the H5AD var has column names that a SpatialData table does not accept; using 'my note' -> "
+                "'my_note'. Rename the source columns to choose the names explicitly."
+            ),
+            (
+                "curio: the Category column of the metrics file has names that a SpatialData table does not accept as "
+                "uns keys; using 'Run Metrics' -> 'Run_Metrics', 'QC' -> 'QC_1'. Rename them in the source to choose "
+                "the names explicitly."
+            ),
+        ]
+        table = result.tables["table"]
+        assert table.obs.columns.tolist() == ["quality", "my_note", "Cluster_1", "cluster", "region", "instance_id"]
+        assert table.obs["my_note"].tolist() == ["x", "y", "z"]
+        assert table.var["my_note"].tolist() == ["f", "g", "h"]
+        assert table.uns["Run_Metrics"] == {"Reads": "100", "Spots": "4"}
+        assert table.uns["QC_1"] == {"Beads": "3"}
+        assert table.uns["qc"] == {"source": "h5ad"}
+        result.write(tmp_path / "output.zarr")
+        restored = SpatialData.read(tmp_path / "output.zarr").tables["table"]
+        assert restored.obs.columns.tolist() == table.obs.columns.tolist()
+        assert restored.uns["Run_Metrics"] == {"Reads": "100", "Spots": "4"}
+
+    def test_moran_statistic_names_are_sanitized(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        (tmp_path / "sample_variable_features_spatial_moransi.txt").write_text(
+            "gene\tCD45 RO\tSYMBOL\ngene-c\t0.8\t1\ngene-b\t0.4\t2\n", encoding="utf-8"
+        )
+
+        with pytest.warns(UserWarning, match="column names") as caught:
+            result = curio(tmp_path)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "curio: the Moran features header has column names that a SpatialData table does not accept; using "
+                "'CD45 RO' -> 'CD45_RO', 'SYMBOL' -> 'SYMBOL_1'. Rename the source columns to choose the names "
+                "explicitly."
+            )
+        ]
+        table = result.tables["table"]
+        assert table.var.columns.tolist() == ["symbol", "CD45_RO", "SYMBOL_1"]
+        np.testing.assert_array_equal(table.var["CD45_RO"], [0.4, np.nan, 0.8])
+        assert table.var["symbol"].tolist() == ["B", "A", "C"]
+        result.write(tmp_path / "output.zarr")
+        assert SpatialData.read(tmp_path / "output.zarr").tables["table"].var.columns.tolist() == [
+            "symbol",
+            "CD45_RO",
+            "SYMBOL_1",
+        ]
+
     def test_lexical_enrichment_and_category_order(self, tmp_path: Path) -> None:
         """Keep metadata spellings and order without guessing annotation semantics."""
         write_curio(tmp_path)

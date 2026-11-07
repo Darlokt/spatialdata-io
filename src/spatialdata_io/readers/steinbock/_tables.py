@@ -18,9 +18,12 @@ object, so expression, layers, ``raw`` and annotations are not copied.
   mixing calibrated and uncalibrated samples gets no ``spatial`` at all.
 - ``uns["spatialdata_io_positions"]`` declares both arrays. An imported
   ``obsm["spatial"]`` of unknown meaning moves unchanged to ``spatial_source``.
-- The redundant ``Image`` column is dropped and feature column names are
-  cleaned (spaces become underscores; the legacy ``Final Concentration /
-  Dilution`` becomes ``Final_Concentration``).
+- The redundant ``Image`` column is dropped. The legacy feature column
+  ``Final Concentration / Dilution`` becomes ``Final_Concentration``. Other
+  ``obs`` and ``var`` column names that SpatialData does not accept
+  (``Channel Name``, ``my note``) are sanitized with one warning per frame
+  (``Channel_Name``), before the reader adds its own columns, which keep their
+  names.
 """
 
 from __future__ import annotations
@@ -33,10 +36,12 @@ import pandas as pd
 
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
 from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers.steinbock._layout import NATIVE_FRAME_SUFFIX
 from spatialdata_io.readers.steinbock._schemas import (
     CELL_TABLE_CONTEXT,
     POSITIONS_CONTEXT,
+    REQUIRED_OBSERVATION_COLUMNS,
     SIGNED_CELL_ID_DTYPE,
     UNSIGNED_CELL_ID_DTYPE,
     centroid_columns,
@@ -53,6 +58,9 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.steinbock._images import Calibration, SampleGrid
 
+# Columns the reader reads by name or generates; imported columns that equal
+# one ignoring letter case are renamed rather than these.
+_READER_OBS_COLUMNS = (*REQUIRED_OBSERVATION_COLUMNS, "cell_id", "region", "spatial_frame", "spatial_pixel_frame")
 _NATIVE_POSITION = "source_regionprops_centroid_zero_based_pixel_index_centres"
 _PHYSICAL_POSITION = "source_regionprops_centroid_in_raster_corner_frame"
 
@@ -70,6 +78,14 @@ def read_table(path: ArtifactFile, grids: Mapping[str, SampleGrid]) -> ad.AnnDat
 
     # validate_table established eager frames; AnnData also types backed Dataset2D.
     obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
+    columns = metadata_columns(obs, var, path)
+    if "Image" in obs:
+        del obs["Image"]
+    obs.columns = sanitize_column_names(
+        list(obs.columns), source="steinbock: the observation metadata of the cell table", reserved=_READER_OBS_COLUMNS
+    )
+    var.columns = sanitize_column_names(columns, source="steinbock: the feature metadata of the cell table")
+
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")
     _set_instance_ids(obs, grids, path)
@@ -77,11 +93,6 @@ def read_table(path: ArtifactFile, grids: Mapping[str, SampleGrid]) -> ad.AnnDat
     coordinates = np.column_stack(centroid_columns(obs, path))
     validate_centroids(coordinates, obs, grids, path)
     table.obsm["spatial_pixels"] = coordinates
-
-    columns = metadata_columns(obs, var, path)
-    if "Image" in obs:
-        del obs["Image"]
-    var.columns = columns
     return table
 
 
@@ -90,7 +101,9 @@ def _set_instance_ids(obs: pd.DataFrame, grids: Mapping[str, SampleGrid], path: 
     identifiers = instance_identifiers(obs, grids, path)
     dtype = UNSIGNED_CELL_ID_DTYPE if max(identifiers) > np.iinfo(np.int64).max else SIGNED_CELL_ID_DTYPE
     obs["cell_id"] = pd.Series(identifiers, index=obs.index, dtype=dtype)
-    obs["region"] = pd.Categorical(obs["image"].map({f"{name}.tiff": f"{name}_labels" for name in grids}))
+    obs["region"] = pd.Categorical(
+        obs["image"].map({grid.image_name: f"{name}_labels" for name, grid in grids.items()})
+    )
 
 
 def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: ArtifactFile) -> None:
@@ -111,7 +124,7 @@ def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: Arti
         }
     else:
         obs["spatial_pixel_frame"] = pd.Categorical(
-            obs["image"].map({f"{name}.tiff": f"{name}{NATIVE_FRAME_SUFFIX}" for name in grids})
+            obs["image"].map({grid.image_name: f"{name}{NATIVE_FRAME_SUFFIX}" for name, grid in grids.items()})
         )
         descriptions["spatial_pixels"] = {
             "axes": ["x", "y"],
@@ -122,7 +135,8 @@ def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: Arti
 
     calibrations = {name: grid.calibration for name, grid in grids.items() if grid.calibration is not None}
     if len(calibrations) == len(grids):
-        table.obsm["spatial"] = _physical_positions(native, obs, calibrations, path)
+        by_image = {grids[name].image_name: calibration for name, calibration in calibrations.items()}
+        table.obsm["spatial"] = _physical_positions(native, obs, by_image, path)
         evidence = {grids[name].frame: calibration.source for name, calibration in calibrations.items()}
         if single:
             descriptions["spatial"] = {
@@ -134,7 +148,7 @@ def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: Arti
             }
         else:
             obs["spatial_frame"] = pd.Categorical(
-                obs["image"].map({f"{name}.tiff": grid.frame for name, grid in grids.items()})
+                obs["image"].map({grid.image_name: grid.frame for grid in grids.values()})
             )
             descriptions["spatial"] = {
                 "axes": ["x", "y"],
@@ -151,7 +165,10 @@ def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: Arti
 def _physical_positions(
     native: np.ndarray, obs: pd.DataFrame, calibrations: Mapping[str, Calibration], path: ArtifactFile
 ) -> np.ndarray:
-    """Return float64 micrometre XY, rejecting overflow and nonzero positions that underflow to zero."""
+    """Return float64 micrometre XY, rejecting overflow and nonzero positions that underflow to zero.
+
+    ``calibrations`` is keyed by the source image name of ``obs["image"]``.
+    """
     # Regionprops averages zero-based pixel indices; the unchanged raster
     # locates their centres half a pixel inward from its corner origin.
     with np.errstate(over="ignore", invalid="ignore", under="ignore"):
@@ -161,7 +178,7 @@ def _physical_positions(
             physical *= next(iter(calibrations.values())).spacing_xy_um
         else:
             for image, rows in obs.groupby("image", observed=True, sort=False).indices.items():
-                physical[rows] *= calibrations[str(image).removesuffix(".tiff")].spacing_xy_um
+                physical[rows] *= calibrations[str(image)].spacing_xy_um
 
     if not np.isfinite(physical).all():
         raise ReaderFormatError(

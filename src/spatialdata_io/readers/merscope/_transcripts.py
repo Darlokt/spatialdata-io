@@ -1,4 +1,21 @@
-"""Construct projected, path-backed MERSCOPE transcript partitions."""
+"""Build lazy transcript points from ``detected_transcripts.csv``.
+
+The CSV is split into newline-aligned byte blocks; each partition decodes only
+the projected columns as text (``_schemas.validate_transcript_columns``) and
+normalizes them on compute, so building the points reads only the header.
+Every record must fit one physical line: quoted commas and quotes are allowed,
+quoted newlines are not. Records must have the full header width, even in
+columns that are not read.
+
+``global_x``/``global_y`` become float64 ``x``/``y`` in micrometres, in the
+``global`` frame (identity). ``global_z`` is a stack index and stays the
+annotation ``z_raw``. ``gene`` is categorical in the order of the paired count
+header, which includes controls and features without counts; an unknown gene
+fails when its partition is computed. Assignments to current cells are
+``cell_id`` (the instance key, checked against the current cell population when
+one is returned); events of the original instrument read beside VPT cells keep
+their assignments as ``original_cell_id``, which refers to no returned element.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +30,7 @@ from spatialdata_io.readers._utils.csv import read_csv_blocks, read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers.merscope._schemas import (
     STRING_DTYPE,
+    TRANSCRIPTS,
     normalize_transcript_partition,
     validate_transcript_columns,
 )
@@ -22,38 +40,35 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers.merscope._layout import TranscriptSource
 
+_CONTEXT = ReaderErrorContext("merscope", TRANSCRIPTS)
+
 
 def read_transcripts(
     source: TranscriptSource,
     *,
     features: tuple[str, ...],
-    frame: str,
-    allowed_cell_ids: tuple[str, ...] | None,
+    cell_population: pd.Index | None,
 ) -> dd.DataFrame:
-    """Return calibrated XY points without reading transcript rows eagerly.
+    """Return projected lazy points; current assignments are checked against ``cell_population``.
 
-    Lazy newline-aligned blocks decode projected lexical fields before
-    reader-owned value normalization. CSV records must each occupy one
-    physical line. Quoted commas and quotes remain supported.
+    ``cell_population`` must be unique; ``None`` skips the assignment check.
     """
     path = source.path
-    context = ReaderErrorContext("merscope", path.name)
-    names = read_csv_header(path, context=context)
+    names = read_csv_header(path, context=_CONTEXT)
     columns = validate_transcript_columns(names, path)
-    # Arrow decodes projected fields as text, so exact IDs are never rounded
-    # through an inferred float, and checks every record's full width.
-    dataframe = read_csv_blocks(path, header=names, columns=columns, context=context)
-    empty = pd.DataFrame({name: pd.Series(dtype=STRING_DTYPE) for name in columns})
+    dataframe = read_csv_blocks(path, header=names, columns=columns, context=_CONTEXT)
 
+    population = None if cell_population is None else pd.Index(cell_population, dtype=STRING_DTYPE)
+    empty = pd.DataFrame({name: pd.Series(dtype=STRING_DTYPE) for name in columns})
     meta = normalize_transcript_partition(
-        empty, features=features, path=path, assignment=source.assignment, allowed_cell_ids=allowed_cell_ids
+        empty, features=features, path=path, assignment=source.assignment, cell_population=population
     )
     normalized = dataframe.map_partitions(
         normalize_transcript_partition,
         features=features,
         path=path,
         assignment=source.assignment,
-        allowed_cell_ids=allowed_cell_ids,
+        cell_population=population,
         meta=meta,
     )
 
@@ -68,6 +83,6 @@ def read_transcripts(
             coordinates={"x": "x", "y": "y"},
             feature_key="gene",
             instance_key="cell_id" if source.assignment == "current" and "cell_id" in columns else None,
-            transformations={frame: Identity()},
+            transformations={"global": Identity()},
             sort=False,
         )

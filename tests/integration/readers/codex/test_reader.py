@@ -60,6 +60,32 @@ class TestCodex:
             cast("pd.DataFrame", table.obs)[["x", "y"]].to_numpy(), [[20, 1.5], [2.5, 30], [13, 8]]
         )
 
+    def test_metadata_field_names_are_sanitized(self, tmp_path: Path) -> None:
+        frame = cell_frame()
+        frame["CD45 RO"] = ["a", "b", "c"]
+        frame["Region"] = ["r", "r", "r"]
+        frame["tile num"] = ["1", "2", "3"]
+        write_csv(tmp_path / "cells.csv", frame)
+
+        with pytest.warns(UserWarning, match="column names") as caught:
+            result = codex(tmp_path)
+
+        # AnnData separately reports its own index conversion.
+        assert [str(warning.message) for warning in caught if str(warning.message).startswith("codex")] == [
+            (
+                "codex: the cell table header has column names that a SpatialData table does not accept; using "
+                "'CD45 RO' -> 'CD45_RO', 'Region' -> 'Region_1', 'tile num' -> 'tile_num_1'. Rename the source columns "
+                "to choose the names explicitly."
+            )
+        ]
+        table = result.tables["table"]
+        assert table.obs.columns.tolist()[-3:] == ["CD45_RO", "Region_1", "tile_num_1"]
+        assert table.obs["tile_num"].tolist() == ["2", "1", "2"]
+        assert table.obs["tile_num_1"].tolist() == ["1", "2", "3"]
+        assert get_table_keys(table) == ("1", "region", "cell_id")
+        result.write(tmp_path / "output.zarr")
+        assert read_zarr(tmp_path / "output.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
+
     @pytest.mark.parametrize("large", [2**63, 2**64 - 1])
     def test_metadata_types_independent_of_csv_batches(self, tmp_path: Path, mocker: MockerFixture, large: int) -> None:
         """Arbitrary batch boundaries cannot round or reject exact unsigned metadata."""
@@ -68,7 +94,7 @@ class TestCodex:
         write_csv(tmp_path / "cells.csv", frame)
         whole = codex(tmp_path).tables["table"]
 
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", 1)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", 1)
         partitioned = codex(tmp_path).tables["table"]
 
         assert isinstance(whole.obs, pd.DataFrame)
@@ -114,10 +140,10 @@ class TestCodex:
         assert isinstance(loaded.X, sparse.csr_matrix | sparse.csr_array)
         np.testing.assert_array_equal(loaded.X.data, table.X.data)
 
-    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
     @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
     def test_unknown_csv_annotations_remain_exact_lexemes(
-        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, storage: str
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, storage: str
     ) -> None:
         """Preserve unknown values and explicit empties across batches and persistence."""
         lexemes = ["0042", "42", "18446744073709551615", "1e-400", "NA", "NULL", "mixed text", ""]
@@ -134,7 +160,7 @@ class TestCodex:
             }
         )
         write_csv(tmp_path / "cells.csv", frame)
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BATCH_ROWS", batch_rows)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
 
         table = codex(tmp_path).tables["table"]
         destination = tmp_path / f"lexemes.{storage}"

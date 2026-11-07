@@ -10,7 +10,9 @@ Both halves are looked up case-insensitively in the barcode map. A is the x axis
 and B the y axis; the one-based ordinals are written to ``obs["array_A"]``,
 ``obs["array_B"]`` and ``obsm["spatial_grid"]`` (int64, columns A then B), and
 ``uns["spatialdata_io_positions"]`` declares ``spatial_grid`` as one-based
-ordinals of the ``grid_pixels`` frame. An imported ``obsm["spatial"]`` is kept unchanged as
+ordinals of the ``grid_pixels`` frame. Imported ``obs`` and ``var`` column
+names that a SpatialData table does not accept (``my note``) are sanitized with
+one warning per frame before these columns are added. An imported ``obsm["spatial"]`` is kept unchanged as
 ``obsm["spatial_source"]``; no physical ``spatial`` embedding is produced.
 
 The table may hold any subset of the grid. Rows stay in source order here: the
@@ -29,6 +31,7 @@ import pandas as pd
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers.dbit._schemas import (
     BARCODE_LENGTH,
     GRID_DTYPE,
@@ -45,6 +48,9 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.dbit._barcodes import Barcodes
 
 _CONTEXT = ReaderErrorContext("dbit", "expression table")
+# Observation columns the reader writes; imported columns that equal one
+# ignoring letter case are renamed, and exact ones are replaced as before.
+READER_OBS_COLUMNS = ("array_A", "array_B", "region", "sample", "pixel_id")
 
 
 def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
@@ -59,6 +65,10 @@ def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
         raise
 
     validate_table(table, path)
+    # validate_table proved that read_h5ad returned eager DataFrames.
+    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
+    obs.columns = sanitize_column_names(list(obs.columns), source="dbit: the H5AD obs", reserved=READER_OBS_COLUMNS)
+    var.columns = sanitize_column_names(list(var.columns), source="dbit: the H5AD var")
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")
 
@@ -68,8 +78,6 @@ def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
     b = pd.Series([barcodes.b.get(value) for value in names.str.slice(0, BARCODE_LENGTH)], dtype=GRID_DTYPE)
     validate_mapped_positions(a, b, path)
 
-    # validate_table proved that read_h5ad returned eager DataFrames.
-    obs = cast("pd.DataFrame", table.obs)
     obs["array_A"], obs["array_B"] = a.array, b.array
     table.obsm["spatial_grid"] = np.column_stack((a.to_numpy(np.int64), b.to_numpy(np.int64)))
     positions: PositionsMetadata = {

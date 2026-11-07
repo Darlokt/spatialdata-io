@@ -10,6 +10,9 @@ observation columns:
   consist only of ASCII digits. Parsed IDs are exact Python integers, stored as
   int64, or uint64 when an ID needs it, so values above ``2**53`` stay exact.
 
+Imported ``obs`` and ``var`` column names that a SpatialData table does not
+accept (``my note``) are sanitized with one warning per frame before the
+linkage columns are added; ``region`` and the instance column keep their names.
 Feature names are made unique (``GeneB``, ``GeneB-1``) in their source order,
 and an imported ``obsm["spatial"]`` moves to ``spatial_source`` unchanged,
 because its axes and units are unknown. Expression is normalized later by the
@@ -38,6 +41,7 @@ from spatialdata_io.experimental.iss._schemas import (
     validate_table,
 )
 from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import prepare_anndata_dataframe
 
 if TYPE_CHECKING:
@@ -62,12 +66,17 @@ def read_table(
         raise
 
     validate_table(table, path=path, instance_key=instance_key)
+    # read_h5ad without backed mode loads eager DataFrames; AnnData also types backed Dataset2D.
+    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
+    # The caller's instance_key names a column, so it keeps its spelling.
+    obs.columns = sanitize_column_names(
+        list(obs.columns), source="iss: the H5AD obs", reserved=(REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY)
+    )
+    var.columns = sanitize_column_names(list(var.columns), source="iss: the H5AD var")
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")
     table.var_names_make_unique()
 
-    # read_h5ad without backed mode loads eager DataFrames; AnnData also types backed Dataset2D.
-    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
     _set_instance_ids(obs, instance_key=instance_key, label_dtype=label_dtype, path=path)
     regions = pd.Series(pd.Categorical([region] * len(obs)), index=obs.index)
     validate_output_column(obs, REGION_KEY, regions, path=path)

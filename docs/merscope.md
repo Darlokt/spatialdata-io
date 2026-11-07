@@ -23,7 +23,7 @@ Each product and its dependencies are required only when selected. Image-only lo
 
 `z_layers=None` selects every discovered image layer in ascending order. A nonempty sequence such as `(2, 0)` selects layers in the caller's order. Repeated, negative or noninteger indices fail; a scalar is not accepted. Stains are ordered lexically within each image. Every selected layer must have one file for every discovered stain, and all selected source planes must agree in spatial shape and dtype. Missing or duplicate stain/layer pairs fail.
 
-`region_name` defaults to the region directory name and `slide_name` to its parent name. Their joined form, `<slide>_<region>`, supplies the element prefix:
+`region_name` defaults to the region directory name and `slide_name` to its parent name. Their joined form, `<slide>_<region>`, supplies the element prefix. Explicit names must be valid SpatialData element names (letters, digits, `_`, `-` and `.`, not starting with `__`); an invalid value raises `ValueError` before any file is read. A default taken from a directory name that is not a valid element name is repaired with a `UserWarning`: every other character becomes `_`, so `my slide/region 1` gives the prefix `my_slide_region_1`. Pass `slide_name` and `region_name` to choose the names. A slide named `_` would start the prefix with `__` and fails. The element suffixes below are fixed, so element names cannot collide.
 
 | Element | Contract |
 | --- | --- |
@@ -34,7 +34,7 @@ Each product and its dependencies are required only when selected. Image-only lo
 
 ## VPT layouts and transcript provenance
 
-Set `vpt_directory` to the replacement analysis directory. Relative paths resolve against the instrument region root; absolute paths may be outside that root. Discovered artifacts, including symlink targets, remain within their owning instrument or analysis directory.
+Set `vpt_directory` to the replacement analysis directory. Relative paths resolve against the instrument region root; absolute paths may be outside that root. Discovered artifacts, including symlink targets, must remain within their owning instrument or analysis directory unless `path_policy="relaxed"` ([Dataset paths and symlinks](dataset_paths.md)).
 
 ```text
 region/
@@ -69,9 +69,9 @@ When original events accompany VPT cell replacements, their assignments become `
 
 `cell_by_gene.csv` begins with a positional cell-identifier field, followed by unique nonempty feature headers. Counts are finite nonnegative 64-bit integers, using an exact signed or unsigned count dtype as required by the source values. Count row and feature order are preserved, while cell metadata are aligned by exact identity. Duplicate, missing or conflicting cell populations fail. Integer identities are decoded without a floating intermediate and retained as exact text across observations, geometry indexes and point assignment columns.
 
-`cell_metadata.csv` requires `EntityID`, `center_x` and `center_y`; named columns accept arbitrary order and additional annotations. Known numeric fields retain validated numeric representations; extra annotation fields are preserved as text. Centroids must be finite. Volume, when present, is finite and nonnegative. The output table retains micron centroids in `obsm["spatial"]` and source annotations, together with categorical `region`, `slide` and `dataset_id` fields. [Vizgen's metadata schema](https://vizgen.github.io/vizgen-postprocessing/output_data_formats/entity_metadata_format.html) describes centroid and volume units.
+`cell_metadata.csv` requires `EntityID`, `center_x` and `center_y`; named columns accept arbitrary order and additional annotations. Known numeric fields retain validated numeric representations; extra annotation fields are preserved as text. Centroids must be finite. Volume, when present, is finite and nonnegative. The output table retains micron centroids in `obsm["spatial"]` and source annotations, together with categorical `region`, `slide` and `dataset_id` fields. Annotation column names that a SpatialData table does not accept are sanitized with one `UserWarning` listing every original and sanitized name: characters other than letters, digits, `_`, `-` and `.` become `_` (`cell type` gives `cell_type`), and a name that then equals another column ignoring letter case gets the first free `_1`, `_2`, … suffix; `EntityID`, `center_x`, `center_y`, the reader-owned fields and valid names keep their spelling. [Vizgen's metadata schema](https://vizgen.github.io/vizgen-postprocessing/output_data_formats/entity_metadata_format.html) describes centroid and volume units.
 
-Table `uns["spatialdata_io_positions"]` describes unchanged vendor cell-centroid XY micrometres in the resolved vector frame. A table together with an unregistered mosaic uses `microns` for the table and `mosaic_pixels` for images, including when boundaries and transcripts are disabled.
+Table `uns["spatialdata_io_positions"]` describes unchanged vendor cell-centroid XY micrometres in the `global` frame.
 
 Expression is a finite canonical SciPy CSR sparse array in `table.X`. Only case-sensitive names matching `Blank-[1-9][0-9]*` are separated as controls. Thus `Blank-1` is a control, while `Blank-0`, `Blank-01`, `blank-1` and `BlanketGene` remain expression features. Control measurements reside in CSR `obsm["blank"]`; `uns["blank_names"]` gives their source-header order. They are retained even though they are excluded from expression feature names. Both count products remain sparse.
 
@@ -128,11 +128,17 @@ shear, reflection and translation are retained without resampling pixels.
 Physical-only reads never inspect the pixel transform. Present malformed
 calibration fails when images require it.
 
-Without calibration, images alone retain the documented `global` mosaic-pixel
-frame. If native vectors are also selected, images instead use `mosaic_pixels`
-and vectors use `microns`, keeping unresolved registration explicit. A shared
-frame is never inferred from dimensions. Source slice indices remain `z_raw`
-annotations rather than physical Z.
+Without the calibration file, images have only the `mosaic_pixels` frame
+(identity) and no `global` transformation, while boundaries, transcripts and
+table centroids stay in `global`. `global` therefore always means micrometres,
+and no registration between pixels and micrometres is claimed or inferred from
+dimensions. Source slice indices remain `z_raw` annotations rather than
+physical Z.
+
+| Element | Calibration present | Calibration absent |
+| --- | --- | --- |
+| Images | `global`: inverse affine | `mosaic_pixels`: identity |
+| Points, shapes, table centroids | `global`: identity | `global`: identity |
 
 ## Transcript schema and lazy execution
 
@@ -157,7 +163,7 @@ Malformed unread coordinates, features and assignments raise with source context
 
 `scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A sequence such as `(2, 2)` creates a lazy image pyramid. TIFF decoding follows native tiles or bands of whole strips, grouped toward a 16 MiB decoded-byte target; a larger native strip stays indivisible. Output rechunking and generated pyramid dependencies can require additional source tiles or bands beyond the requested crop. The target is not a total-memory bound. The full-resolution source series and level remain fixed; each stain file must supply one grayscale plane with only singleton extra axes.
 
-Missing or wrong-kind paths raise the corresponding filesystem exception. Ambiguous layouts, malformed schemas, inconsistent populations and invalid scientific values raise `ReaderFormatError`, a `ValueError` subclass. Invalid option types raise `TypeError`; invalid values raise `ValueError`. Validation failures do not return partial results. Provenance records the reader and package version without absolute input paths.
+Missing or wrong-kind paths raise the corresponding filesystem exception. Ambiguous layouts, malformed schemas, inconsistent populations and invalid scientific values raise `ReaderFormatError`, a `ValueError` subclass; its message names the artifact (`count matrix`, `cell metadata`, `cell boundaries`, `transcripts`, `mosaic channel`, `micron-to-mosaic transform`) and the path. Invalid option types, including non-integer `z_layers` entries, raise `TypeError`; invalid values raise `ValueError`. All options are validated, in signature order, before any file is read. Validation failures do not return partial results. Provenance records the reader and package version without absolute input paths; file names establish no release, so no format version is recorded.
 
 ## Python and command line
 
@@ -184,7 +190,7 @@ python -m spatialdata_io merscope --input slide/region --output counts.zarr \
   --no-include-images --no-include-transcripts --no-include-cell-boundaries
 ```
 
-The former `vpt_outputs` mapping, `backend`, `imread_kwargs` and `image_models_kwargs` have been removed. Use `vpt_directory` and explicit raster options. Inclusion options are now `include_images`, `include_transcripts`, `include_cell_boundaries` and `include_table`. The default selects all image layers instead of z3; `z_layers=None` no longer disables images. Use `include_images=False` for that choice. Automatic four-level pyramids have been removed; request downsampling explicitly. Images default to `(1, 1024, 1024)` chunks instead of `(1, 4096, 4096)`, and `scale_factors=None` and `chunks=None` are no longer accepted: pass `()` for a single scale and explicit sizes for other chunks. Image loading follows the same shared TIFF path in every environment.
+The former `vpt_outputs` mapping, `backend`, `imread_kwargs` and `image_models_kwargs` have been removed. Use `vpt_directory` and explicit raster options. Inclusion options are now `include_images`, `include_transcripts`, `include_cell_boundaries` and `include_table`. The default selects all image layers instead of z3; `z_layers=None` no longer disables images. Use `include_images=False` for that choice. Automatic four-level pyramids have been removed; request downsampling explicitly. Uncalibrated images no longer share `global` in pixel units, and the former `microns` frame for vectors beside them is gone: vectors are always in `global` and uncalibrated images in `mosaic_pixels`. Explicit `region_name` and `slide_name` values must now be valid element names. Images default to `(1, 1024, 1024)` chunks instead of `(1, 4096, 4096)`, and `scale_factors=None` and `chunks=None` are no longer accepted: pass `()` for a single scale and explicit sizes for other chunks. Image loading follows the same shared TIFF path in every environment.
 
 Gene counts and blank controls use one common floating dtype: float32 when all
 completed values are exact, otherwise float64. Exact integer parsing retains

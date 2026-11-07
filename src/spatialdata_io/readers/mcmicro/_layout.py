@@ -1,4 +1,48 @@
-"""Discover one deterministic MCMICRO whole-slide or tissue-microarray inventory."""
+"""Discover one MCMICRO whole-slide or tissue-microarray run and pair its outputs.
+
+The YAML boolean ``workflow.tma`` in ``qc/params.yml`` selects the layout
+(https://mcmicro.org/). Only pipeline results are read; ``raw/``,
+``illumination/``, Coreograph QC files and segmentation puncta tables are
+ignored. A whole-slide run::
+
+    run/
+    ├── markers.csv
+    ├── qc/params.yml
+    ├── registration/<image>.ome.tif                 # exactly one TIFF-family image
+    ├── segmentation/<method>-<image>/<mask>.ome.tif # optional
+    └── quantification/<image>--<method>_<mask>.csv  # optional, one per label
+
+A tissue-microarray run adds numbered Coreograph cores; segmentation and
+quantification then refer to the core numbers::
+
+    run/
+    ├── markers.csv
+    ├── qc/params.yml
+    ├── registration/<tma>.ome.tif
+    ├── dearray/<n>.ome.tif                       # n: positive integer, no leading zero
+    ├── dearray/masks/<n>_mask.tif                # exactly one per core
+    ├── segmentation/<method>-<n>/<mask>.ome.tif
+    └── quantification/<n>--<method>_<mask>.csv
+
+Names follow MCMICRO's own conventions:
+
+- the image ID drops the extension and an ``.ome`` suffix (``getImageID``);
+- the mask name is the label file name up to its first dot, as MCQuant names
+  it (``cell_mask_ring.ome.tif`` is ``cell_mask_ring``);
+- ``<image>--<method>_<mask>.csv`` is matched against whole image, method and
+  mask names, so underscores in them are never split;
+- a historical ``segmentation/<image>/`` directory without the method prefix
+  takes the method of each mask from the one quantification table naming it.
+
+Element names are ``<image>_image`` and ``<image>_<method>_<mask>`` for a
+whole slide, and ``tma_map``, ``core_<n>_image``, ``core_<n>_mask`` and
+``core_<n>_<method>_<mask>`` for a TMA. Image IDs, methods and masks come from
+file names; one that is not a valid SpatialData element name is sanitized with
+a warning. Names that collide, ignoring letter case as SpatialData does, fail
+before any raster is opened. Images keep discovery order (cores numerically);
+labels are ordered by image, then method and mask lexically, and every
+quantification table follows its label.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +52,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.names import sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     require_metadata_directory,
     require_metadata_file,
-    sorted_paths,
 )
 from spatialdata_io.readers.mcmicro._metadata import read_workflow
 
@@ -29,21 +74,22 @@ _TIFF_SUFFIXES = (".tif", ".tiff", ".btf")
 _CORE = re.compile(r"(?P<core>[1-9][0-9]*)\.ome\.tif")
 _CORE_MASK = re.compile(r"(?P<core>[1-9][0-9]*)_mask\.tif")
 TABLE_KEY = "table"
+TMA_MAP_KEY = "tma_map"
 
 
 @dataclass(frozen=True, slots=True)
 class Segmentation:
-    """Identify one label image by its source image, method, and full mask stem."""
+    """One label image: its image's element prefix, method, full mask stem and element name.
+
+    ``method`` and ``compartment`` are the source names; ``key`` is the
+    (sanitized) element and table-region name.
+    """
 
     image_id: str
     method: str
     compartment: str
     path: ArtifactFile
-
-    @property
-    def key(self) -> str:
-        """Return the element and table-region name."""
-        return f"{self.image_id}_{self.method}_{self.compartment}"
+    key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,19 +110,34 @@ class Core:
 
     @property
     def image_id(self) -> str:
-        """Return the element prefix and local coordinate-system name."""
+        """Return the element prefix and grid name."""
         return f"core_{self.number}"
+
+    @property
+    def image_key(self) -> str:
+        """Return the core image's element name."""
+        return f"{self.image_id}_image"
+
+    @property
+    def mask_key(self) -> str:
+        """Return the tissue mask's element name and grid name."""
+        return f"{self.image_id}_mask"
 
 
 @dataclass(frozen=True, slots=True)
 class WsiLayout:
-    """Describe a whole-slide run with one registered image."""
+    """Describe a whole-slide run with one registered image; ``image_id`` is its element prefix."""
 
     markers: ArtifactFile
     image_id: str
     image: ArtifactFile
     segmentations: tuple[Segmentation, ...]
     quantifications: tuple[Quantification, ...]
+
+    @property
+    def image_key(self) -> str:
+        """Return the registered image's element name."""
+        return f"{self.image_id}_image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +162,7 @@ def _error(path: Path, *, artifact: str, found: str, expected: str) -> ReaderFor
 def _listing(directory: ArtifactDirectory, artifact: str) -> tuple[Path, ...]:
     """List one known directory once, in lexical order, ignoring hidden entries."""
     context = ReaderErrorContext("mcmicro", artifact)
-    entries = sorted_paths(directory.iterdir(), context=context, search_path=directory)
+    entries = list_directory(directory, context=context)
     return tuple(entry for entry in entries if not entry.name.startswith("."))
 
 
@@ -264,7 +325,12 @@ def _segmentations(  # noqa: C901, RUF100 - one ordered pass resolves both segme
             else:
                 resolved = method
             relative = f"segmentation/{directory.name}/{entry.name}"
-            labels.append(Segmentation(image_ids[source], resolved, compartment, _file(root, relative, "labels")))
+            key = sanitize_element_name(
+                f"{image_ids[source]}_{resolved}_{compartment}",
+                source="mcmicro: the label name",
+                parameter=None,
+            )
+            labels.append(Segmentation(image_ids[source], resolved, compartment, _file(root, relative, "labels"), key))
 
     # Images keep discovery order; methods and masks are lexical within each image.
     order = {image_id: index for index, image_id in enumerate(image_ids.values())}
@@ -291,24 +357,31 @@ def _segmentations(  # noqa: C901, RUF100 - one ordered pass resolves both segme
 
 
 def _require_unique_keys(layout: McmicroLayout, root: DatasetRoot) -> None:
-    """Reject any final element-name collision before raster construction."""
+    """Reject element names that collide ignoring letter case, as SpatialData compares them."""
     if isinstance(layout, WsiLayout):
-        keys = [f"{layout.image_id}_image"]
+        keys = [layout.image_key]
     else:
-        keys = ["tma_map", *(f"{core.image_id}_image" for core in layout.cores)]
-        keys += [f"{core.image_id}_mask" for core in layout.cores]
+        keys = [TMA_MAP_KEY, *(core.image_key for core in layout.cores), *(core.mask_key for core in layout.cores)]
     keys += [label.key for label in layout.segmentations]
     if layout.quantifications:
         keys.append(TABLE_KEY)
-    duplicates = sorted(key for key, count in Counter(keys).items() if count > 1)
+    counts = Counter(key.lower() for key in keys)
+    duplicates = sorted(key for key in keys if counts[key.lower()] > 1)
     if duplicates:
         raise _error(
-            root.path, artifact="element names", found=f"colliding keys {duplicates!r}", expected="unique keys"
+            root.path,
+            artifact="element names",
+            found=f"colliding keys {duplicates!r}",
+            expected="element names that are unique ignoring letter case",
         )
 
 
 def discover_layout(path: str | Path, *, path_policy: PathPolicy = "strict") -> McmicroLayout:
-    """Resolve the workflow mode and every supported output artifact once."""
+    """Resolve the workflow mode and every supported output artifact once.
+
+    Raises ``ReaderFormatError`` for an ambiguous, unpaired or colliding
+    inventory and the shared path errors for missing or wrong-kind artifacts.
+    """
     root = normalize_dataset_root(path, context=ReaderErrorContext("mcmicro", "dataset root"), path_policy=path_policy)
     mode = read_workflow(_file(root, "qc/params.yml", "workflow parameters"))
     markers = _file(root, "markers.csv", "markers")
@@ -316,8 +389,9 @@ def discover_layout(path: str | Path, *, path_policy: PathPolicy = "strict") -> 
 
     layout: McmicroLayout
     if mode == "wsi":
-        segmentations, quantifications = _segmentations(root, {registered_id: registered_id})
-        layout = WsiLayout(markers, registered_id, registered, segmentations, quantifications)
+        image_id = sanitize_element_name(registered_id, source="mcmicro: the registered image ID", parameter=None)
+        segmentations, quantifications = _segmentations(root, {registered_id: image_id})
+        layout = WsiLayout(markers, image_id, registered, segmentations, quantifications)
     else:
         cores = _cores(root)
         sources = {str(core.number): core.image_id for core in cores}

@@ -7,6 +7,7 @@ import warnings
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
+import pandas as pd
 import pytest
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
@@ -14,7 +15,7 @@ from spatialdata.transformations import Identity, get_transformation
 
 import spatialdata_io.readers.merscope._transcripts as transcript_module
 from spatialdata_io.readers._utils.csv import _blocks as csv_blocks
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.merscope._layout import TranscriptSource
 from spatialdata_io.readers.merscope._transcripts import read_transcripts
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 _FEATURES = ("GeneB", "Gene,A", "Undetected")
-_FRAME = "microns"
+_POPULATION = pd.Index(["9007199254740993"])
 
 
 def _write_source(
@@ -56,7 +57,7 @@ class TestReadTranscripts:
         tasks = mocker.Mock()
         initial_filters = list(warnings.filters)
         with Callback(posttask=tasks):
-            points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=("9007199254740993",))
+            points = read_transcripts(source, features=_FEATURES, cell_population=_POPULATION)
 
         tasks.assert_not_called()
         assert warnings.filters == initial_filters
@@ -66,7 +67,7 @@ class TestReadTranscripts:
         assert points.dtypes["x"] == np.dtype(np.float64)
         assert points.dtypes["y"] == np.dtype(np.float64)
         assert set(points.columns) == {"gene", "x", "y", "z_raw", "cell_id", "fov", "barcode_id", "transcript_id"}
-        assert get_transformation(points, to_coordinate_system=_FRAME) == Identity()
+        assert get_transformation(points, to_coordinate_system="global") == Identity()
 
         restored = pickle.loads(pickle.dumps(points))  # noqa: S301, RUF100 - Test-owned path-backed graph.
         result = restored.compute()
@@ -78,7 +79,7 @@ class TestReadTranscripts:
 
     def test_original_assignments_are_explicit_annotations(self, tmp_path: Path) -> None:
         source = _write_source(tmp_path / "transcripts.csv", assignment="original")
-        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
+        points = read_transcripts(source, features=_FEATURES, cell_population=None)
         result = points.compute()
         assert "cell_id" not in result
         assert result["original_cell_id"].tolist() == ["9007199254740993"] * 39 + ["-1"]
@@ -86,7 +87,7 @@ class TestReadTranscripts:
     def test_header_only_input_has_typed_empty_points_without_optional_annotations(self, tmp_path: Path) -> None:
         source = _write_source(tmp_path / "transcripts.csv")
         source.path.write_text("gene,global_x,global_y\n", encoding="utf-8")
-        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
+        points = read_transcripts(source, features=_FEATURES, cell_population=None)
         assert set(points.columns) == {"gene", "x", "y"}
         assert points.compute().empty
 
@@ -96,7 +97,7 @@ class TestReadTranscripts:
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv", assignment=assignment)
         source.path.write_text('gene,global_x,global_y\nGeneB,1.5,2.5\n"Gene,A",3.5,4.5\n', encoding="utf-8")
-        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=("9007199254740993",))
+        points = read_transcripts(source, features=_FEATURES, cell_population=_POPULATION)
         assert set(points.columns) == {"gene", "x", "y"}
         # SpatialData attaches metadata dynamically; Dask stubs type attrs as a method.
         attributes = cast("dict[str, dict[str, str]]", points.attrs)
@@ -113,13 +114,14 @@ class TestReadTranscripts:
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv", last_gene=gene, last_cell=cell)
         mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
-        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=("9007199254740993",))
+        points = read_transcripts(source, features=_FEATURES, cell_population=_POPULATION)
         assert points.npartitions > 1
         first = points.partitions[0].compute()
         assert set(first["gene"]) == {"GeneB"}
         with pytest.raises(ReaderFormatError, match=message) as caught:
             points.partitions[-1].compute()
         assert caught.value.path == source.path
+        assert caught.value.context == ReaderErrorContext("merscope", "transcripts")
 
     @pytest.mark.parametrize("content", [b'"gene,global_x,global_y\n', b"gene,\xff,global_y\n"])
     def test_malformed_header_fails_before_block_discovery(
@@ -129,7 +131,7 @@ class TestReadTranscripts:
         source.path.write_bytes(content)
         parser = mocker.spy(csv_blocks, "read_bytes")
         with pytest.raises(ReaderFormatError, match="malformed CSV header"):
-            read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
+            read_transcripts(source, features=_FEATURES, cell_population=None)
         parser.assert_not_called()
 
     @pytest.mark.parametrize("record", ["40,GeneB,1,2\n", "40,GeneB,1,2,0,-1,0,1,t,9,8,annotation,excess\n"])
@@ -138,7 +140,7 @@ class TestReadTranscripts:
         with source.path.open("a", encoding="utf-8") as output:
             output.write(record)
         mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
-        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
+        points = read_transcripts(source, features=_FEATURES, cell_population=None)
         assert not points.partitions[0].compute().empty
         with pytest.raises(ReaderFormatError, match="malformed CSV records"):
             points.partitions[-1].compute()
@@ -148,7 +150,7 @@ class TestReadTranscripts:
         parser = mocker.patch.object(transcript_module.PointsModel, "parse", side_effect=RuntimeError("injected"))
         initial = list(warnings.filters)
         with pytest.raises(RuntimeError, match="injected"):
-            read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
+            read_transcripts(source, features=_FEATURES, cell_population=None)
         assert warnings.filters == initial
         parser.assert_called_once()
         assert parser.call_args.kwargs["sort"] is False
@@ -161,7 +163,7 @@ class TestReadTranscripts:
         )
         storage = mocker.spy(csv_blocks, "read_bytes")
         parser = mocker.spy(csv_blocks, "_read_block")
-        points = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None)
+        points = read_transcripts(source, features=_FEATURES, cell_population=None)
         parser.assert_not_called()
         assert storage.call_args.kwargs["sample"] is False
         result = points.compute()
@@ -172,5 +174,5 @@ class TestReadTranscripts:
         root = tmp_path / "[region]*?"
         root.mkdir()
         source = _write_source(root / "transcripts.csv")
-        result = read_transcripts(source, features=_FEATURES, frame=_FRAME, allowed_cell_ids=None).compute()
+        result = read_transcripts(source, features=_FEATURES, cell_population=None).compute()
         assert len(result) == 40

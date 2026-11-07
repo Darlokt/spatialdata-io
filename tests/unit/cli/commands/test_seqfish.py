@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 
 import pytest
 
 from spatialdata_io._cli.commands.seqfish import seqfish_command
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers.seqfish import seqfish
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -131,6 +133,12 @@ class TestSeqfishCommand:
         )
         assert result.exit_code == 2, result.output
         reader.assert_not_called()
+
+    def test_option_order_matches_the_reader_signature(self) -> None:
+        options = [parameter.name for parameter in seqfish_command.params]
+        reader_parameters = list(inspect.signature(seqfish).parameters)
+
+        assert options == ["input_path", "output_path", *reader_parameters[1:]]
 
     def test_help_lists_new_contract(self, runner: CliRunner) -> None:
         result = runner.invoke(seqfish_command, ["--help"])

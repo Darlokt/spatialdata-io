@@ -484,6 +484,37 @@ class TestDbit:
         pd.testing.assert_frame_equal(restored.obs, table.obs, check_exact=True)
         pd.testing.assert_frame_equal(restored.var, table.var, check_exact=True)
 
+    def test_h5ad_column_names_are_sanitized(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        source = ad.read_h5ad(tmp_path / "sample.h5ad")
+        source.obs["my note"] = ["b", "a"]
+        source.obs["Region"] = ["r", "r"]
+        source.var["my note"] = ["g", "h"]
+        source.write_h5ad(tmp_path / "sample.h5ad")
+
+        with pytest.warns(UserWarning, match="column names") as caught:
+            result = dbit(tmp_path)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "dbit: the H5AD obs has column names that a SpatialData table does not accept; using 'my note' -> "
+                "'my_note', 'Region' -> 'Region_1'. Rename the source columns to choose the names explicitly."
+            ),
+            (
+                "dbit: the H5AD var has column names that a SpatialData table does not accept; using 'my note' -> "
+                "'my_note'. Rename the source columns to choose the names explicitly."
+            ),
+        ]
+        table = result.tables["table"]
+        # Rows are sorted by grid position, so the second source row comes first.
+        assert table.obs["my_note"].tolist() == ["a", "b"]
+        assert table.obs["Region_1"].tolist() == ["r", "r"]
+        assert table.obs["region"].tolist() == ["sample", "sample"]
+        assert table.var["my_note"].tolist() == ["g", "h"]
+        assert get_table_keys(table) == ("sample", "region", "pixel_id")
+        result.write(tmp_path / "output.zarr")
+        assert read_zarr(tmp_path / "output.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
+
     @pytest.mark.parametrize("kind", ["equal", "conflicting", "null", "categorical"])
     def test_reserved_output_columns_are_overwritten(self, tmp_path: Path, kind: str) -> None:
         """Replace all generated columns and prior linkage while preserving imported state."""

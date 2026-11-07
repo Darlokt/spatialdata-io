@@ -77,18 +77,73 @@ class TestDiscoverLayout:
 
         assert [sample.name for sample in layout.samples] == ["sample-b", name]
 
-    @pytest.mark.parametrize("name", ["sample name", "sample:name", "sample?", "sample[1]", "__private", ".", ".."])
-    def test_invalid_sample_names(self, tmp_path: Path, name: str) -> None:
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("sample name", "sample_name"),
+            ("sample:name", "sample_name"),
+            ("sample?", "sample_"),
+            ("sample[1]", "sample_1_"),
+            ("__private", "_private"),
+            (".", "unnamed"),
+            ("..", "unnamed"),
+        ],
+    )
+    def test_invalid_sample_names_are_sanitized(self, tmp_path: Path, name: str, expected: str) -> None:
         _write_paths(tmp_path)
         (tmp_path / "ome" / f"{name}.ome.tiff").touch()
         (tmp_path / "masks" / f"{name}.tiff").touch()
 
-        with pytest.raises(ReaderFormatError, match=re.escape(f"invalid sample name {name!r}")) as caught:
+        with pytest.warns(UserWarning, match="sample file name") as caught:
+            layout = discover_layout(tmp_path)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                f"steinbock: the sample file name {name!r} is not a usable SpatialData element name; using "
+                f"{expected!r}. Rename the source files to choose the name explicitly."
+            )
+        ]
+        sample = next(sample for sample in layout.samples if sample.image_name == f"{name}.tiff")
+        assert sample.name == expected
+        assert sample.image == tmp_path / "ome" / f"{name}.ome.tiff"
+        assert sample.labels == tmp_path / "masks" / f"{name}.tiff"
+
+    @pytest.mark.parametrize(("first", "second"), [("sample a", "sample_a"), ("sample a", "SAMPLE:A")])
+    def test_names_colliding_after_sanitizing(self, tmp_path: Path, first: str, second: str) -> None:
+        _write_paths(tmp_path)
+        for name in (first, second):
+            (tmp_path / "ome" / f"{name}.ome.tiff").touch()
+            (tmp_path / "masks" / f"{name}.tiff").touch()
+
+        with (
+            pytest.warns(UserWarning, match="is not a usable SpatialData element name"),
+            pytest.raises(ReaderFormatError, match="case-insensitively conflicting sample names") as caught,
+        ):
             discover_layout(tmp_path)
 
-        assert caught.value.context.reader == "steinbock"
+        assert repr(sorted([first, second])) in str(caught.value)
         assert caught.value.path == tmp_path
-        assert isinstance(caught.value.__cause__, ValueError)
+
+    def test_sanitized_name_colliding_with_a_derived_frame(self, tmp_path: Path) -> None:
+        _write_paths(tmp_path)
+        (tmp_path / "ome" / "sample-a pixels.ome.tiff").touch()
+        (tmp_path / "masks" / "sample-a pixels.tiff").touch()
+
+        with (
+            pytest.warns(UserWarning, match="'sample-a_pixels'"),
+            pytest.raises(ReaderFormatError, match=re.escape("derived frame names ['sample-a_pixels']")),
+        ):
+            discover_layout(tmp_path)
+
+    def test_apple_double_companions_are_not_samples(self, tmp_path: Path) -> None:
+        _write_paths(tmp_path)
+        (tmp_path / "ome" / "._sample-a.ome.tiff").touch()
+        (tmp_path / "masks" / "._sample-b.tiff").touch()
+
+        layout = discover_layout(tmp_path)
+
+        assert [sample.name for sample in layout.samples] == ["sample-a", "sample-b"]
+        assert [sample.image_name for sample in layout.samples] == ["sample-a.tiff", "sample-b.tiff"]
 
     @pytest.mark.parametrize("name", ["sample-a_pixels", "SAMPLE-A_Pixels", "sample-b_regionprops_indices"])
     def test_sample_named_like_a_derived_frame(self, tmp_path: Path, name: str) -> None:

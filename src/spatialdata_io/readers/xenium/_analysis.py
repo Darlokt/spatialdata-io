@@ -32,6 +32,7 @@ import pyarrow.csv as pacsv
 
 from spatialdata_io.readers._utils.csv import parse_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.paths import list_directory
 from spatialdata_io.readers.xenium._layout import AnalysisDirectory
 from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, schema_error, text_series, validate_analysis_header
 
@@ -48,6 +49,7 @@ _MEMBER = re.compile(
     r"(?:analysis/)?(?P<kind>clustering|pca|umap)/(?P<method>[A-Za-z0-9_.-]+)/(?P<file>clusters|projection)\.csv"
 )
 _FILES = {"clustering": "clusters", "pca": "projection", "umap": "projection"}
+_CONTEXT = ReaderErrorContext("xenium", "analysis")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +80,9 @@ def _members(source: AnalysisSource) -> Generator[tuple[str, str, IO[bytes], Pat
     if isinstance(source, AnalysisDirectory):
         files: list[tuple[str, str, Path]] = []
         path: Path
-        for path in sorted(source.directory.rglob("*.csv")):
+        # Path order (component-wise) fixes the order of the returned annotations.
+        listing = list_directory(source.directory, context=_CONTEXT, recursive=True)
+        for path in sorted(path for path in listing if path.name.endswith(".csv")):
             identity = _identity(path.relative_to(source.directory).as_posix(), seen, path)
             if identity is not None:
                 files.append((*identity, path))
@@ -101,7 +105,7 @@ def _members(source: AnalysisSource) -> Generator[tuple[str, str, IO[bytes], Pat
 
 
 def _header(handle: IO[bytes], path: Path) -> list[str]:
-    header = parse_csv_header(handle.readline(), context=ReaderErrorContext("xenium", "analysis"), path=path)
+    header = parse_csv_header(handle.readline(), context=_CONTEXT, path=path)
     # Arrow reads the header itself; no encoded body buffer is retained.
     handle.seek(0)
     return header

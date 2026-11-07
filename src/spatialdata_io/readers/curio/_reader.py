@@ -67,7 +67,11 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
           otherwise float64, and the read fails if neither is exact.
         - Other layers, ``raw``, ``varm``, ``obsp``, ``varp``, other
           ``obsm`` and ``uns`` entries and the imported ``obs`` and ``var``
-          columns are kept as stored.
+          columns are kept as stored. An imported column name that a
+          SpatialData table does not accept (``my note``) is sanitized with
+          a warning (``my_note``; a name that then collides, ignoring letter
+          case, with another column or a reader-owned one such as
+          ``cluster`` gets a ``_1``, ``_2``, ... suffix).
         - ``obs["cluster"]``: categorical cluster labels, matched by bead ID,
           with categories in order of first appearance along the rows.
         - ``obs["region"]`` (categorical, always ``"cells"``) and
@@ -76,11 +80,17 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
         - One ``var`` column per Moran statistic, matched by feature ID:
           int64 or uint64, float64 or bool. Unlisted features are missing,
           which makes integer and boolean columns nullable and float
-          columns NaN.
+          columns NaN. A statistic name that a SpatialData table does not
+          accept (``MoransI observed``) is sanitized with a warning
+          (``MoransI_observed``; a name that then equals another ``var``
+          column ignoring letter case gets a ``_1``, ``_2``, ... suffix).
         - ``uns["Top_cluster_defining_features"]``: the cluster-features file
           as a DataFrame of strings, with empty cells missing.
         - ``uns[<Category>]``: one ``{metric: value}`` dictionary of strings
-          per metric category.
+          per metric category. A category that is not a valid ``uns`` key
+          (``Run Metrics``) is sanitized with a warning (``Run_Metrics``), as
+          is one equal to an H5AD ``uns`` key ignoring letter case (``QC``
+          next to ``qc`` becomes ``QC_1``); an exact match still fails.
         - ``obsm["spatial_pixels"]``: the source ``X_spatial`` array
           unchanged; ``obsm["spatial"]``: float64 micrometres;
           ``uns["spatialdata_io_positions"]`` describes both.
@@ -97,7 +107,9 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
     -----
     UserWarning
         Once per call if duplicate sparse entries in ``X`` were summed,
-        naming the H5AD and any dtype change.
+        naming the H5AD and any dtype change; once each if H5AD ``obs`` or
+        ``var`` column names, Moran statistic names or metric categories were
+        sanitized.
 
     Raises
     ------

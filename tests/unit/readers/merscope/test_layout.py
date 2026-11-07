@@ -3,28 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.merscope._layout import (
     MerscopeLayout,
+    Names,
     Selection,
     discover_layout,
-    make_selection,
+    validate_options,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import Path
+    from pytest_mock import MockerFixture
 
 
 def _selection() -> Selection:
     """Keep valid public defaults together for isolated path tests."""
-    return make_selection(
-        include_images=True, include_cell_boundaries=True, include_table=True, include_transcripts=True, z_layers=None
-    )
+    return Selection(images=True, boundaries=True, table=True, transcripts=True, z_layers=None)
 
 
 def _files(root: Path, *names: str) -> None:
@@ -51,60 +50,94 @@ def _standard(root: Path) -> None:
     )
 
 
-class TestMakeSelection:
-    """Require real booleans and an ordered, owned nonnegative plane sequence."""
+def _options(**overrides: object) -> Selection:
+    """Validate the public defaults with selected overrides."""
+    options: dict[str, object] = {
+        "vpt_directory": None,
+        "z_layers": None,
+        "region_name": None,
+        "slide_name": None,
+        "include_transcripts": True,
+        "include_cell_boundaries": True,
+        "include_table": True,
+        "include_images": True,
+    }
+    options.update(overrides)
+    return validate_options(**options)  # pyrefly: ignore[bad-argument-type] - Runtime validation of untyped options.
+
+
+class TestValidateOptions:
+    """Validate layout options in signature order before any filesystem access."""
 
     def test_owns_order(self) -> None:
         supplied = [2, 0]
-        selection = make_selection(
-            include_images=True,
-            include_cell_boundaries=False,
-            include_table=False,
-            include_transcripts=False,
-            z_layers=supplied,
+        selection = _options(
+            z_layers=supplied, include_cell_boundaries=False, include_table=False, include_transcripts=False
         )
         supplied.reverse()
-        assert selection.z_layers == (2, 0)
+        assert selection == Selection(images=True, boundaries=False, table=False, transcripts=False, z_layers=(2, 0))
         assert _selection().z_layers is None
 
+    @pytest.mark.parametrize("vpt_directory", ["vpt", Path("vpt"), None])
+    def test_accepts_path_values(self, vpt_directory: str | Path | None) -> None:
+        assert _options(vpt_directory=vpt_directory) == _selection()
+
+    @pytest.mark.parametrize("vpt_directory", [1, b"vpt", ["vpt"]])
+    def test_invalid_vpt_directory_type(self, vpt_directory: object) -> None:
+        with pytest.raises(TypeError, match="vpt_directory must be a path or None"):
+            _options(vpt_directory=vpt_directory)
+
     @pytest.mark.parametrize(
-        "flags", [(1, True, True, True), (True, 0, True, True), (True, True, "yes", True), (True, True, True, None)]
+        "flag", ["include_transcripts", "include_cell_boundaries", "include_table", "include_images"]
     )
-    def test_invalid_inclusion_types(self, flags: tuple[bool, bool, bool, bool]) -> None:
-        with pytest.raises(TypeError, match="boolean"):
-            make_selection(
-                include_images=flags[0],
-                include_cell_boundaries=flags[1],
-                include_table=flags[2],
-                include_transcripts=flags[3],
-                z_layers=None,
-            )
+    @pytest.mark.parametrize("value", [1, 0, "yes", None])
+    def test_invalid_inclusion_types(self, flag: str, value: object) -> None:
+        with pytest.raises(TypeError, match=f"{flag} must be a boolean"):
+            _options(**{flag: value})
 
     @pytest.mark.parametrize(
         "indexes", [pytest.param(1, id="scalar-int"), "1", pytest.param(b"1", id="bytes"), {1, 2}, {1: 2}, iter([1, 2])]
     )
-    def test_nonsequence_plane_inputs(
-        self, indexes: int | str | bytes | set[int] | dict[int, int] | Iterator[int]
-    ) -> None:
+    def test_nonsequence_plane_inputs(self, indexes: object) -> None:
         with pytest.raises(TypeError, match="ordered sequence"):
-            make_selection(
-                include_images=True,
-                include_cell_boundaries=False,
-                include_table=False,
-                include_transcripts=False,
-                z_layers=indexes,  # pyrefly: ignore[bad-argument-type] - Validate malformed untyped caller input.
-            )
+            _options(z_layers=indexes)
 
-    @pytest.mark.parametrize("indexes", [[], [-1], [True], [1.0], [1, 1]])
-    def test_invalid_plane_values(self, indexes: list[float]) -> None:
+    @pytest.mark.parametrize("indexes", [[True], [1.0], [1, "2"]])
+    def test_noninteger_plane_values(self, indexes: list[object]) -> None:
+        with pytest.raises(TypeError, match="z_layers must contain integer indexes"):
+            _options(z_layers=indexes)
+
+    @pytest.mark.parametrize("indexes", [[], [-1], [1, 1]])
+    def test_invalid_plane_values(self, indexes: list[int]) -> None:
         with pytest.raises(ValueError, match="z_layers"):
-            make_selection(
-                include_images=True,
-                include_cell_boundaries=False,
-                include_table=False,
-                include_transcripts=False,
-                z_layers=indexes,  # pyrefly: ignore[bad-argument-type] - Runtime integer and duplicate validation.
-            )
+            _options(z_layers=indexes)
+
+    @pytest.mark.parametrize("parameter", ["region_name", "slide_name"])
+    @pytest.mark.parametrize("name", ["", " ", ".", "..", "a/b", "a\\b", "a\x00b", "a b", "__a", "a:b"])
+    def test_invalid_names(self, parameter: str, name: str) -> None:
+        with pytest.raises(ValueError, match=f"{parameter} must be a valid SpatialData element name"):
+            _options(**{parameter: name})
+
+    @pytest.mark.parametrize("parameter", ["region_name", "slide_name"])
+    def test_noncharacter_names(self, parameter: str) -> None:
+        with pytest.raises(TypeError, match=f"{parameter} must be a string"):
+            _options(**{parameter: 1})
+
+    def test_signature_order(self) -> None:
+        # Each invalid option is reported before every later invalid option.
+        invalid: list[tuple[str, object, type[Exception]]] = [
+            ("vpt_directory", 1, TypeError),
+            ("z_layers", [-1], ValueError),
+            ("region_name", "a b", ValueError),
+            ("slide_name", "a b", ValueError),
+            ("include_transcripts", 1, TypeError),
+            ("include_cell_boundaries", 1, TypeError),
+            ("include_table", 1, TypeError),
+            ("include_images", 1, TypeError),
+        ]
+        for index, (parameter, _, error) in enumerate(invalid):
+            with pytest.raises(error, match=parameter):
+                _options(**{name: value for name, value, _ in invalid[index:]})
 
 
 class TestDiscoverLayout:
@@ -162,22 +195,31 @@ class TestDiscoverLayout:
         assert isinstance(discover_layout(root, _selection(), vpt_directory=analysis), MerscopeLayout)
 
     @pytest.mark.parametrize(
-        "artifact",
+        ("artifact", "name"),
         [
-            "cell_by_gene.csv",
-            "cell_metadata.csv",
-            "cell_boundaries.parquet",
-            "detected_transcripts.csv",
+            ("cell_by_gene.csv", "count matrix"),
+            ("cell_metadata.csv", "cell metadata"),
+            ("cell_boundaries.parquet", "cell boundaries"),
+            ("detected_transcripts.csv", "transcripts"),
+            ("images/mosaic_DAPI_z0.tif", "mosaic channel"),
         ],
     )
-    @pytest.mark.parametrize("wrong_kind", [False, True])
-    def test_required_products_missing_or_wrong_kind(self, tmp_path: Path, artifact: str, *, wrong_kind: bool) -> None:
+    def test_required_products_wrong_kind_name_their_artifact(self, tmp_path: Path, artifact: str, name: str) -> None:
         _standard(tmp_path)
         path = tmp_path / artifact
         path.unlink()
-        if wrong_kind:
-            path.mkdir()
-        with pytest.raises(IsADirectoryError if wrong_kind else FileNotFoundError):
+        path.mkdir()
+        with pytest.raises(IsADirectoryError) as caught:
+            discover_layout(tmp_path, _selection())
+        assert f"reader 'merscope', artifact {name!r}" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "artifact", ["cell_by_gene.csv", "cell_metadata.csv", "cell_boundaries.parquet", "detected_transcripts.csv"]
+    )
+    def test_required_products_missing(self, tmp_path: Path, artifact: str) -> None:
+        _standard(tmp_path)
+        (tmp_path / artifact).unlink()
+        with pytest.raises(FileNotFoundError):
             discover_layout(tmp_path, _selection())
 
     def test_all_excluded_products_need_no_artifacts(self, tmp_path: Path) -> None:
@@ -246,12 +288,79 @@ class TestDiscoverLayout:
         with pytest.raises((ReaderFormatError, IsADirectoryError)):
             discover_layout(tmp_path, selected)
 
-    @pytest.mark.parametrize("name", ["", " ", ".", "..", "a/b", "a\\b", "a\x00b", 1])
-    def test_invalid_name_overrides(self, tmp_path: Path, name: str | int) -> None:
-        with pytest.raises((ValueError, TypeError), match="region_name"):
-            discover_layout(tmp_path, _selection(), region_name=name)  # pyrefly: ignore[bad-argument-type] - Validate untyped public names before I/O.
-        with pytest.raises((ValueError, TypeError), match="slide_name"):
-            discover_layout(tmp_path, _selection(), slide_name=name)  # pyrefly: ignore[bad-argument-type] - Both names share the same declared boundary.
+    def test_default_names_come_from_directories(self, tmp_path: Path) -> None:
+        root = tmp_path / "slide.1" / "region-A"
+        root.mkdir(parents=True)
+        layout = discover_layout(
+            root, replace(_selection(), images=False, boundaries=False, table=False, transcripts=False)
+        )
+        assert layout.names == Names(region="region-A", slide="slide.1")
+        assert layout.names.dataset_id == "slide.1_region-A"
+
+    def test_invalid_directory_names_are_repaired_with_a_warning(self, tmp_path: Path) -> None:
+        root = tmp_path / "my slide" / "region:1"
+        root.mkdir(parents=True)
+        nothing = replace(_selection(), images=False, boundaries=False, table=False, transcripts=False)
+        with pytest.warns(UserWarning, match="is not a usable SpatialData element name") as warnings:
+            layout = discover_layout(root, nothing)
+        region_warning = (
+            "merscope: the region directory name 'region:1' is not a usable SpatialData element name; "
+            "using 'region_1'. Pass region_name to choose the name explicitly."
+        )
+        slide_warning = (
+            "merscope: the slide (parent) directory name 'my slide' is not a usable SpatialData element name; "
+            "using 'my_slide'. Pass slide_name to choose the name explicitly."
+        )
+        assert [str(warning.message) for warning in warnings] == [region_warning, slide_warning]
+        assert layout.names == Names(region="region_1", slide="my_slide")
+
+    def test_explicit_names_replace_directory_names_without_warning(self, tmp_path: Path) -> None:
+        root = tmp_path / "my slide" / "region:1"
+        root.mkdir(parents=True)
+        nothing = replace(_selection(), images=False, boundaries=False, table=False, transcripts=False)
+        layout = discover_layout(root, nothing, region_name="ROI", slide_name="S1")
+        assert layout.names.dataset_id == "S1_ROI"
+
+    @pytest.mark.parametrize("explicit", [False, True])
+    def test_underscore_slide_cannot_start_the_prefix_with_two_underscores(
+        self, tmp_path: Path, *, explicit: bool
+    ) -> None:
+        root = tmp_path / "_" / "region"
+        root.mkdir(parents=True)
+        nothing = replace(_selection(), images=False, boundaries=False, table=False, transcripts=False)
+        with pytest.raises(ValueError, match=r"element-name prefix.*found '__region'"):
+            discover_layout(root, nothing, slide_name="_" if explicit else None)
+
+    def test_vpt_boundary_wrong_kind(self, tmp_path: Path) -> None:
+        _standard(tmp_path)
+        analysis = tmp_path / "vpt"
+        _files(analysis, "cell_by_gene.csv", "cell_metadata.csv")
+        (analysis / "watershed_micron_space.parquet").mkdir()
+        with pytest.raises(IsADirectoryError):
+            discover_layout(tmp_path, _selection(), vpt_directory="vpt")
+
+    def test_vpt_boundary_ambiguity_names_both_candidates(self, tmp_path: Path) -> None:
+        _standard(tmp_path)
+        analysis = tmp_path / "vpt"
+        _files(
+            analysis,
+            "cell_by_gene.csv",
+            "cell_metadata.csv",
+            "cellpose_micron_space.parquet",
+            "watershed_micron_space.parquet",
+        )
+        with pytest.raises(ReaderFormatError, match="2 candidates") as caught:
+            discover_layout(tmp_path, _selection(), vpt_directory="vpt")
+        assert caught.value.context == ReaderErrorContext("merscope", "cell boundaries")
+
+    def test_mosaic_listing_failure_propagates(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        _files(tmp_path, "images/mosaic_DAPI_z0.tif")
+        mocker.patch.object(Path, "iterdir", side_effect=PermissionError("injected"))
+        with pytest.raises(PermissionError, match="injected") as caught:
+            discover_layout(tmp_path, replace(_selection(), boundaries=False, table=False, transcripts=False))
+        assert caught.value.__notes__ == [
+            f"While handling reader 'merscope', artifact 'mosaic image grid', path '{tmp_path / 'images'}'."
+        ]
 
     @pytest.mark.parametrize("escape", ["relative_vpt", "artifact"])
     def test_containment(self, tmp_path: Path, escape: str) -> None:

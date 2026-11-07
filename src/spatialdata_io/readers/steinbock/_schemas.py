@@ -71,6 +71,7 @@ UNSIGNED_CELL_ID_DTYPE = pd.ArrowDtype(pa.uint64())
 _OBJECT_NAME = re.compile(r"Object ([0-9]+) in (.+)")
 _IMAGE_FIELDS = frozenset({"image", "width_px", "height_px"})
 _EXTENT_FIELDS = frozenset({"acquisition_width_um", "acquisition_height_um"})
+_LEGACY_DILUTION = "Final_Concentration"
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,15 +140,14 @@ def validate_position_destinations(table: ad.AnnData, *, multiple: bool, path: A
 
 def instance_identifiers(obs: pd.DataFrame, grids: Mapping[str, SampleGrid], path: ArtifactFile) -> list[int]:
     """Parse the exact mask label of every observation name and require exactly the discovered samples."""
-    source_names = {f"{name}.tiff": name for name in grids}
-    if obs["image"].isna().any() or set(obs["image"]) != set(source_names):
+    maxima = {grid.image_name: np.iinfo(grid.dtype).max for grid in grids.values()}
+    if obs["image"].isna().any() or set(obs["image"]) != set(maxima):
         raise _format_error(
             path, found="table/image/mask sample disagreement", expected="exactly the discovered sample set"
         )
 
     # The compound name holds the complete file name, which may contain " in ".
     # Python integers keep uint64 labels exact, which a float detour would not.
-    maxima = {f"{name}.tiff": np.iinfo(grid.dtype).max for name, grid in grids.items()}
     identifiers: list[int] = []
     for observation, source_name in zip(obs.index.tolist(), obs["image"].tolist(), strict=True):
         match = _OBJECT_NAME.fullmatch(observation)
@@ -212,10 +212,11 @@ def validate_centroids(
     if not np.isfinite(coordinates).all():
         raise _format_error(path, found="invalid centroids", expected="finite real centroid coordinates")
 
+    shapes = {grid.image_name: grid.shape for grid in grids.values()}
     # Group once rather than rescanning the entire cell population for each image.
     for filename, rows in obs.groupby("image", sort=False, observed=True).indices.items():
         positions = coordinates[rows]
-        height, width = grids[str(filename).removesuffix(".tiff")].shape
+        height, width = shapes[str(filename)]
         if (positions < 0).any() or (positions[:, 0] > width - 1).any() or (positions[:, 1] > height - 1).any():
             raise _format_error(
                 path,
@@ -225,18 +226,23 @@ def validate_centroids(
 
 
 def metadata_columns(obs: pd.DataFrame, var: pd.DataFrame, path: ArtifactFile) -> list[str]:
-    """Check the optional ``Image`` column and return the cleaned, collision-free feature column names."""
+    """Check the optional ``Image`` column and return the feature column names with the legacy dilution name.
+
+    ``Final Concentration / Dilution`` becomes ``Final_Concentration``; other
+    names are returned unchanged for the shared column-name sanitizer.
+    """
     if "Image" in obs and not obs["Image"].eq(obs["image"]).fillna(value=False).all():
         raise _format_error(path, found="conflicting Image and image columns", expected="equal source-image metadata")
 
     if any(not isinstance(name, str) or not name for name in var.columns):
         raise _format_error(path, found="empty or nonstring feature metadata keys", expected="nonempty string keys")
-    columns = [
-        ("Final Concentration" if name == "Final Concentration / Dilution" else name).replace(" ", "_")
-        for name in var.columns
-    ]
+    columns = [_LEGACY_DILUTION if name == "Final Concentration / Dilution" else name for name in var.columns]
     if len(set(columns)) != len(columns):
-        raise _format_error(path, found="feature metadata cleanup collision", expected="unique normalized column names")
+        raise _format_error(
+            path,
+            found=f"both 'Final Concentration / Dilution' and {_LEGACY_DILUTION!r}",
+            expected="one dilution column",
+        )
     return columns
 
 

@@ -1,4 +1,22 @@
-"""Invert the authoritative micron-to-mosaic-pixel calibration once."""
+"""Read ``images/micron_to_mosaic_pixel_transform.csv`` and invert it for the mosaics.
+
+The file holds a homogeneous 3x3 affine matrix that maps micrometre ``(x, y)``
+positions, the frame of boundaries, transcripts and cell centroids, to mosaic
+pixel ``(x, y)``: three nonempty rows of three whitespace-separated
+coefficients, the last row ``0 0 1``. Blank lines are ignored. For example::
+
+    2  0.25  10
+    0  3     -7
+    0  0      1
+
+maps the micrometre position ``(2, 2)`` to the pixel ``(14.5, -1)``.
+
+Mosaics are pixel grids, so their ``global`` (micrometre) transformation is the
+inverse of this matrix. Scale, anisotropy, shear, reflection and translation
+are kept as given; pixels are never resampled. Coefficients are decoded from
+their text exactly: an integral coefficient that does not survive float64, or
+a nonzero one that underflows, is rejected.
+"""
 
 from __future__ import annotations
 

@@ -27,9 +27,9 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
-def _sample(*, shape: tuple[int, int] = (8, 12), dtype: str = "uint16") -> SampleGrid:
+def _sample(name: str, *, shape: tuple[int, int] = (8, 12), dtype: str = "uint16") -> SampleGrid:
     """Provide independently inspected grid metadata without constructing models."""
-    return SampleGrid(shape, np.dtype(dtype), "sample", None)
+    return SampleGrid(f"{name}.tiff", shape, np.dtype(dtype), "sample", None)
 
 
 def _write_table(path: Path) -> ArtifactFile:
@@ -61,7 +61,7 @@ class TestReadTable:
 
     def test_values_order_metadata_and_source_ownership(self, tmp_path: Path) -> None:
         path = _write_table(tmp_path / "cells.h5ad")
-        samples = {"sample-a": _sample(), "sample-b": _sample()}
+        samples = {"sample-a": _sample("sample-a"), "sample-b": _sample("sample-b")}
         tasks: list[str] = []
 
         with Callback(pretask=lambda key, *_: tasks.append(str(key))):
@@ -110,7 +110,7 @@ class TestReadTable:
         table.write_h5ad(path)
 
         with pytest.raises(ReaderFormatError) as caught:
-            read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+            read_table(path, {"sample-a": _sample("sample-a"), "sample-b": _sample("sample-b")})
 
         assert caught.value.path == path
         assert caught.value.context.reader == "steinbock"
@@ -124,14 +124,14 @@ class TestReadTable:
         table.write_h5ad(path)
 
         with pytest.raises(ReaderFormatError, match="columns"):
-            read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+            read_table(path, {"sample-a": _sample("sample-a"), "sample-b": _sample("sample-b")})
 
     def test_read_failure_has_artifact_context(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "cells.h5ad")
         path.write_bytes(b"not an HDF5 file")
 
         with pytest.raises(OSError, match="file signature") as caught:
-            read_table(path, {"sample-a": _sample()})
+            read_table(path, {"sample-a": _sample("sample-a")})
 
         assert any("steinbock" in note and str(path) in note for note in caught.value.__notes__)
 
@@ -140,7 +140,7 @@ class TestReadTable:
         mocker.patch("spatialdata_io.readers.steinbock._tables.ad.read_h5ad", return_value=result)
 
         with pytest.raises(TypeError, match="eager DataFrames"):
-            read_table(ArtifactFile(tmp_path / "cells.h5ad"), {"sample-a": _sample()})
+            read_table(ArtifactFile(tmp_path / "cells.h5ad"), {"sample-a": _sample("sample-a")})
 
     @pytest.mark.parametrize("field", ["cell_id", "region"])
     def test_occupied_generated_columns_fail_before_annotation_mutation(
@@ -155,7 +155,7 @@ class TestReadTable:
         mocker.patch("spatialdata_io.readers.steinbock._tables.ad.read_h5ad", return_value=source)
 
         with pytest.raises(ReaderFormatError, match=f"occupied.*{field}"):
-            read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+            read_table(path, {"sample-a": _sample("sample-a"), "sample-b": _sample("sample-b")})
 
         pd.testing.assert_frame_equal(source.obs, before, check_exact=True)
         assert source.obsm["spatial"] is spatial
@@ -172,7 +172,7 @@ class TestReadTable:
             ),
         ).write_h5ad(path)
 
-        table = read_table(path, {"sample": _sample()})
+        table = read_table(path, {"sample": _sample("sample")})
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[8.5, 1.5], [0, 0], [11, 7]])
 
     @pytest.mark.parametrize("duplicate", [False, True])
@@ -188,11 +188,33 @@ class TestReadTable:
         with ad.settings.override(disallow_forward_slash_in_h5ad=False):
             source.write_h5ad(path)
 
-        table = read_table(path, {"sample-a": _sample(), "sample-b": _sample()})
+        table = read_table(path, {"sample-a": _sample("sample-a"), "sample-b": _sample("sample-b")})
 
         assert "Image" not in table.obs
         assert table.var.columns.tolist() == ["Channel_Name", "Final_Concentration"]
         assert table.var["Final_Concentration"].tolist() == ["1:100", "1:200"]
+
+    def test_feature_column_names_are_sanitized_with_one_warning(self, tmp_path: Path) -> None:
+        path = _write_table(tmp_path / "cells.h5ad")
+        source = ad.read_h5ad(path)
+        source.var["CD45 RO"] = ["a", "b"]
+        source.var["cd45_ro"] = ["c", "d"]
+        source.var["Final Concentration / Dilution"] = ["1:100", "1:200"]
+        with ad.settings.override(disallow_forward_slash_in_h5ad=False):
+            source.write_h5ad(path)
+
+        with pytest.warns(UserWarning, match="column names") as caught:
+            table = read_table(path, {"sample-a": _sample("sample-a"), "sample-b": _sample("sample-b")})
+
+        assert table.var.columns.tolist() == ["Channel_Name", "CD45_RO_1", "cd45_ro", "Final_Concentration"]
+        assert table.var["CD45_RO_1"].tolist() == ["a", "b"]
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "steinbock: the feature metadata of the cell table has column names that a SpatialData table "
+                "does not accept; using 'Channel Name' -> 'Channel_Name', 'CD45 RO' -> 'CD45_RO_1'. Rename the "
+                "source columns to choose the names explicitly."
+            )
+        ]
 
 
 class TestSetInstanceIds:
@@ -205,7 +227,7 @@ class TestSetInstanceIds:
             {"image": [filename, filename]}, index=[f"Object 2 in {filename}", f"Object 7 in {filename}"]
         )
 
-        _set_instance_ids(obs, {name: _sample()}, ArtifactFile(tmp_path / "cells.h5ad"))
+        _set_instance_ids(obs, {name: _sample(name)}, ArtifactFile(tmp_path / "cells.h5ad"))
 
         assert obs["cell_id"].tolist() == [2, 7]
         assert obs["region"].tolist() == [f"{name}_labels"] * 2
@@ -215,7 +237,7 @@ class TestSetInstanceIds:
         """Large uint64 ids exact."""
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[f"Object {identifier} in sample.tiff"])
 
-        _set_instance_ids(obs, {"sample": _sample(dtype="uint64")}, ArtifactFile(tmp_path / "cells.h5ad"))
+        _set_instance_ids(obs, {"sample": _sample("sample", dtype="uint64")}, ArtifactFile(tmp_path / "cells.h5ad"))
 
         assert int(obs["cell_id"].iloc[0]) == identifier
         assert str(obs["cell_id"].dtype) == ("uint64[pyarrow]" if identifier >= 2**63 else "int64[pyarrow]")
@@ -229,7 +251,9 @@ class TestSetPositions:
         self, tmp_path: Path, native_x: float, physical_x: float
     ) -> None:
         table = self._table([[native_x, 0.5]], ["sample.tiff"])
-        set_positions(table, {"sample": self._grid("global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad"))
+        set_positions(
+            table, {"sample": self._grid("sample", "global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad")
+        )
         np.testing.assert_array_equal(table.obsm["spatial"], [[physical_x, 3]])
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[native_x, 0.5]])
         assert table.obsm["spatial"].dtype == np.dtype(np.float64)
@@ -237,11 +261,13 @@ class TestSetPositions:
     def test_rejects_nonzero_shifted_coordinate_collapsing_to_zero(self, tmp_path: Path) -> None:
         table = self._table([[0, 0.5]], ["sample.tiff"])
         with pytest.raises(ReaderFormatError, match=r"nonzero.*zero"):
-            set_positions(table, {"sample": self._grid("global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad"))
+            set_positions(
+                table, {"sample": self._grid("sample", "global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad")
+            )
 
     def test_single_calibrated_sample_declares_fixed_frames(self, tmp_path: Path) -> None:
         table = self._table([[1, 2]], ["sample.tiff"])
-        set_positions(table, {"sample": self._grid("global", (2, 4))}, ArtifactFile(tmp_path / "cells.h5ad"))
+        set_positions(table, {"sample": self._grid("sample", "global", (2, 4))}, ArtifactFile(tmp_path / "cells.h5ad"))
         np.testing.assert_array_equal(table.obsm["spatial"], [[3, 10]])
         assert table.uns[POSITIONS_KEY] == {
             "schema_version": 1,
@@ -266,7 +292,7 @@ class TestSetPositions:
 
     def test_several_samples_scale_rows_by_their_own_frame(self, tmp_path: Path) -> None:
         table = self._table([[1, 2], [1, 2], [0, 0]], ["b.tiff", "a.tiff", "b.tiff"])
-        grids = {"a": self._grid("a", (2, 4)), "b": self._grid("b", (10, 100))}
+        grids = {"a": self._grid("a", "a", (2, 4)), "b": self._grid("b", "b", (10, 100))}
         set_positions(table, grids, ArtifactFile(tmp_path / "cells.h5ad"))
         np.testing.assert_array_equal(table.obsm["spatial"], [[15, 250], [3, 10], [5, 50]])
         assert table.obs["spatial_frame"].tolist() == ["b", "a", "b"]
@@ -285,7 +311,7 @@ class TestSetPositions:
         self, tmp_path: Path, calibrated: tuple[str, ...]
     ) -> None:
         table = self._table([[1, 2], [1, 2]], ["a.tiff", "b.tiff"])
-        grids = {name: self._grid(name, (2, 4) if name in calibrated else None) for name in ("a", "b")}
+        grids = {name: self._grid(name, name, (2, 4) if name in calibrated else None) for name in ("a", "b")}
         set_positions(table, grids, ArtifactFile(tmp_path / "cells.h5ad"))
         assert "spatial" not in table.obsm
         assert "spatial_frame" not in table.obs
@@ -298,6 +324,6 @@ class TestSetPositions:
         return table
 
     @staticmethod
-    def _grid(frame: str, spacing: tuple[float, float] | None) -> SampleGrid:
+    def _grid(name: str, frame: str, spacing: tuple[float, float] | None) -> SampleGrid:
         calibration = None if spacing is None else Calibration(spacing, "evidence")
-        return SampleGrid((8, 12), np.dtype("uint16"), frame, calibration)
+        return SampleGrid(f"{name}.tiff", (8, 12), np.dtype("uint16"), frame, calibration)

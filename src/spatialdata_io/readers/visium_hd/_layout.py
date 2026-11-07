@@ -10,6 +10,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     optional_metadata_file,
@@ -145,7 +146,7 @@ def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path
     if folder is not None:
         candidates.extend(
             entry
-            for entry in folder.iterdir()
+            for entry in list_directory(folder, context=_context("microscope_image"))
             if entry.suffix.lower() in {".btf", ".tif", ".tiff", ".png", ".jpg", ".jpeg"}
         )
 
@@ -158,7 +159,7 @@ def _bin_directories(root: DatasetRoot) -> dict[int, ArtifactDirectory]:
     binned = optional_metadata_directory(root, "binned_outputs", context=_context("binned outputs"))
     directories: dict[int, ArtifactDirectory] = {}
     if binned is not None:
-        for entry in sorted(binned.iterdir()):
+        for entry in list_directory(binned, context=_context("binned outputs")):
             match = re.fullmatch(r"square_(\d{3,})um", entry.name)
             if match is not None:
                 size = int(match[1])
@@ -191,7 +192,7 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
 ) -> VisiumHDLayout:
     """Resolve selected standard and loose-download artifacts without recursion."""
     root = normalize_dataset_root(path, context=_context("dataset root"), path_policy=path_policy)
-    entries: tuple[Path, ...] = tuple(sorted(root.path.iterdir()))
+    entries = list_directory(root.path, context=_context("dataset root"))
     directories = _bin_directories(root)
     selected = tuple(sorted(directories)) if bin_sizes == "all" else tuple(bin_sizes)
     absent = set(selected).difference(directories)

@@ -45,17 +45,17 @@ if TYPE_CHECKING:
     help="Cell geometry representations.",
 )
 @click.option(
-    "--rois", type=str, multiple=True, default=(), help="Repeat ROI prefixes in desired order; omitted selects all."
-)
-@scale_factors_option
-@chunks_option
-@click.option(
     "--invalid-geometries",
     type=click.Choice(["keep", "drop", "raise"]),
     default="keep",
     show_default=True,
     help="Keep invalid polygon topology, drop affected cells, or fail.",
 )
+@click.option(
+    "--rois", type=str, multiple=True, default=(), help="Repeat ROI file prefixes in reading order; omitted reads all."
+)
+@scale_factors_option
+@chunks_option
 @path_policy_option
 def seqfish_command(input_path: Path, output_path: Path, **options: Unpack[_SeqfishOptions]) -> None:
     """Read seqFISH, then write the requested SpatialData store."""

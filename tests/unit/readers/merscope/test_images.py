@@ -17,7 +17,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.merscope._images import _read_channel, read_images
-from spatialdata_io.readers.merscope._layout import MosaicChannel, MosaicLayer
+from spatialdata_io.readers.merscope._layout import MosaicChannel, MosaicLayer, Mosaics
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -86,9 +86,7 @@ class TestReadImages:
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
-            result = read_images(
-                (first, second), dataset_id="slide_region", options=NATIVE_CHUNKS, transform=None, frame="global"
-            )
+            result = read_images(Mosaics((first, second), None), dataset_id="slide_region", options=NATIVE_CHUNKS)
         tasks.assert_not_called()
         pixels.assert_not_called()
         assert list(result) == ["slide_region_z2", "slide_region_z0"]
@@ -98,22 +96,33 @@ class TestReadImages:
         assert image.dtype == np.dtype(np.uint16)
         assert image.data.chunks == ((1, 1), (16, 16, 16), (16, 16, 16, 16))
         assert image.coords["c"].values.tolist() == ["Cyto", "DAPI"]
-        assert get_transformation(image, to_coordinate_system="global") == Identity()
+        assert get_transformation(image, get_all=True) == {"mosaic_pixels": Identity()}
         restored = pickle.loads(pickle.dumps(image.data))  # noqa: S301, RUF100 - Test-owned lazy graph only.
         np.testing.assert_array_equal(restored[:, :4, :6].compute(), source[:, :4, :6])
         assert pixels.call_count == 2
 
     def test_default_single_scale_and_tiles(self, tmp_path: Path) -> None:
         layer, source = _write_layer(tmp_path, 0)
-        image = read_images((layer,), dataset_id="region", options=DEFAULT_OPTIONS, transform=None, frame="global")[
-            "region_z0"
-        ]
+        image = read_images(Mosaics((layer,), None), dataset_id="region", options=DEFAULT_OPTIONS)["region_z0"]
         assert isinstance(image, DataArray)
         assert image.data.chunks == ((1, 1), (48,), (64,))
         np.testing.assert_array_equal(image.data.compute(), source)
 
+    def test_calibration_places_images_only_in_global(self, tmp_path: Path) -> None:
+        layer, _ = _write_layer(tmp_path, 0)
+        transform = ArtifactFile(tmp_path / "micron_to_mosaic_pixel_transform.csv")
+        transform.write_text("2 0.25 10\n0 3 -7\n0 0 1\n", encoding="utf-8")
+        image = read_images(Mosaics((layer,), transform), dataset_id="region", options=DEFAULT_OPTIONS)["region_z0"]
+        transformations = get_transformation(image, get_all=True)
+        assert isinstance(transformations, dict)
+        assert list(transformations) == ["global"]
+        np.testing.assert_array_equal(
+            transformations["global"].to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")),
+            np.linalg.inv([[2, 0.25, 10], [0, 3, -7], [0, 0, 1]]),
+        )
+
     def test_no_requested_layers_is_empty(self) -> None:
-        assert read_images((), dataset_id="slide_region", options=DEFAULT_OPTIONS, transform=None, frame="global") == {}
+        assert read_images(Mosaics((), None), dataset_id="slide_region", options=DEFAULT_OPTIONS) == {}
 
     @pytest.mark.parametrize("invalid", ["shape", "dtype"])
     def test_selected_stains_and_planes_must_share_grid_and_dtype(self, tmp_path: Path, invalid: str) -> None:
@@ -128,38 +137,30 @@ class TestReadImages:
             photometric="minisblack",
         )
         with pytest.raises(ReaderFormatError, match="common shape"):
-            read_images((first, second), dataset_id="region", options=DEFAULT_OPTIONS, transform=None, frame="global")
+            read_images(Mosaics((first, second), None), dataset_id="region", options=DEFAULT_OPTIONS)
 
     def test_pyramids_and_output_chunks_are_explicit(self, tmp_path: Path) -> None:
         layer, source = _write_layer(tmp_path, 0)
         plain = read_images(
-            (layer,),
-            dataset_id="region",
-            options=make_raster_options(chunks=(2, 12, 16)),
-            transform=None,
-            frame="global",
+            Mosaics((layer,), None), dataset_id="region", options=make_raster_options(chunks=(2, 12, 16))
         )["region_z0"]
         assert isinstance(plain, DataArray)
         assert plain.data.chunks == ((2,), (12, 12, 12, 12), (16, 16, 16, 16))
         np.testing.assert_array_equal(plain.data.compute(), source)
-        pyramid = read_images(
-            (layer,), dataset_id="region", options=make_raster_options([2, 2], 16), transform=None, frame="global"
-        )["region_z0"]
+        pyramid = read_images(Mosaics((layer,), None), dataset_id="region", options=make_raster_options([2, 2], 16))[
+            "region_z0"
+        ]
         assert isinstance(pyramid, DataTree)
         assert list(pyramid.children) == ["scale0", "scale1", "scale2"]
         with pytest.raises(ValueError, match="spatial extent"):
-            read_images(
-                (layer,), dataset_id="region", options=make_raster_options([64]), transform=None, frame="global"
-            )
+            read_images(Mosaics((layer,), None), dataset_id="region", options=make_raster_options([64]))
 
     @pytest.mark.parametrize("fail", [False, True])
     def test_task_resources_close_on_success_and_failure(
         self, tmp_path: Path, mocker: MockerFixture, *, fail: bool
     ) -> None:
         layer, _ = _write_layer(tmp_path, 0)
-        image = read_images((layer,), dataset_id="region", options=NATIVE_CHUNKS, transform=None, frame="global")[
-            "region_z0"
-        ]
+        image = read_images(Mosaics((layer,), None), dataset_id="region", options=NATIVE_CHUNKS)["region_z0"]
         assert isinstance(image, DataArray)
         with tifffile.TiffFile(layer.channels[0].path) as source:
             store = source.aszarr(series=0, level=0, squeeze=True)

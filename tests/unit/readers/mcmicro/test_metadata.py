@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro._metadata import read_markers, read_workflow
 
@@ -66,8 +66,11 @@ class TestReadWorkflow:
         ],
     )
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
-            read_workflow(_write(tmp_path, text))
+        path = _write(tmp_path, text)
+        with pytest.raises(ReaderFormatError, match=match) as caught:
+            read_workflow(path)
+        assert caught.value.context == ReaderErrorContext("mcmicro", "workflow parameters")
+        assert caught.value.path == path
 
     def test_excessive_depth(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="malformed YAML"):
@@ -113,5 +116,9 @@ class TestReadMarkers:
         ],
     )
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
-            read_markers(_write(tmp_path, text, "markers.csv"))
+        # The artifact name is the stable role, not the file name.
+        path = _write(tmp_path, text, "panel_v2.csv")
+        with pytest.raises(ReaderFormatError, match=match) as caught:
+            read_markers(path)
+        assert caught.value.context == ReaderErrorContext("mcmicro", "markers")
+        assert caught.value.path == path

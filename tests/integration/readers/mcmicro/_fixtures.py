@@ -83,7 +83,7 @@ def _write_sample(  # noqa: PLR0913, RUF100 - Explicit sample, segmentation and 
         frame.to_csv(root / "quantification" / f"{sample}--{method}_{compartment}.csv", index=False)
 
 
-def write_mcmicro_dataset(  # noqa: PLR0913, RUF100 - Independent format variants exercise existing cohort boundaries.
+def write_mcmicro_dataset(  # noqa: PLR0913, RUF100 - Independent format variants exercise distinct layout boundaries.
     path: Path,
     *,
     mode: Literal["wsi", "tma"] = "wsi",

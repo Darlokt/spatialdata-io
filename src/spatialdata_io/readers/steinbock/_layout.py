@@ -37,15 +37,18 @@ Pairing rules:
   required. The table must describe exactly these samples (checked when it is
   read).
 - Sample names become element names (``<sample>_image``, ``<sample>_labels``)
-  and frame names, so they must be valid SpatialData names (letters, digits,
-  ``_``, ``-`` and ``.``; not ``.``, ``..`` or a leading ``__``) and distinct
-  ignoring case.
+  and frame names. A file name that is not a valid SpatialData name (letters,
+  digits, ``_``, ``-`` and ``.``; not ``.``, ``..`` or a leading ``__``) is
+  sanitized with a warning (``sample 1`` -> ``sample_1``); the table and
+  ``images.csv`` still identify the sample by its file name
+  ``<sample>.tiff``. The sanitized names must be distinct ignoring case.
 - A sample's frames are ``<sample>`` (micrometres, when several samples are
   read), ``<sample>_pixels`` (raster pixels of an uncalibrated sample) and
   ``<sample>_regionprops_indices`` (table centroids). Sample names allow ``_``,
   so no suffix can be collision-free by construction: a sample named like
   another sample's derived frame (``a_pixels`` next to ``a``) is rejected,
-  whatever the calibration, so one frame name never means two units.
+  whatever the calibration, so one frame name never means two units. Both
+  checks compare the sanitized names.
 - Samples are ordered by the lexical order of their image file names.
 
 There is no version marker, so no format version is detected.
@@ -53,24 +56,27 @@ There is no version marker, so no format version is detected.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.names import validate_element_name
+from spatialdata_io.readers._utils.names import sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
+    list_directory,
     normalize_dataset_root,
     optional_metadata_file,
     require_caller_file,
     require_metadata_directory,
     require_metadata_file,
-    sorted_paths,
 )
 from spatialdata_io.readers.steinbock._schemas import CELL_TABLE_CONTEXT, IMAGE_METADATA_CONTEXT
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from spatialdata_io.readers._utils.paths import PathPolicy
 
 PIXEL_FRAME_SUFFIX = "_pixels"
@@ -85,9 +91,15 @@ _MASKS_CONTEXT = ReaderErrorContext("steinbock", "masks")
 
 @dataclass(frozen=True, slots=True)
 class SampleLayout:
-    """One sample name with its validated OME image and mask."""
+    """One sample with its validated OME image and mask.
+
+    ``name`` is the (sanitized) element and frame name; ``image_name`` is the
+    source file name ``<sample>.tiff`` that identifies the sample in the
+    table's ``obs["image"]`` and in ``images.csv``.
+    """
 
     name: str
+    image_name: str
     image: ArtifactFile
     labels: ArtifactFile
 
@@ -136,12 +148,12 @@ def discover_layout(
 
     images = {
         candidate.name.removesuffix(_IMAGE_SUFFIX): require_metadata_file(root, candidate, context=_IMAGES_CONTEXT)
-        for candidate in sorted_paths(images_directory.iterdir(), context=_IMAGES_CONTEXT, search_path=images_directory)
+        for candidate in list_directory(images_directory, context=_IMAGES_CONTEXT)
         if candidate.name.endswith(_IMAGE_SUFFIX)
     }
     masks = {
         candidate.name.removesuffix(_LABEL_SUFFIX): require_metadata_file(root, candidate, context=_MASKS_CONTEXT)
-        for candidate in sorted_paths(masks_directory.iterdir(), context=_MASKS_CONTEXT, search_path=masks_directory)
+        for candidate in list_directory(masks_directory, context=_MASKS_CONTEXT)
         if candidate.name.endswith(_LABEL_SUFFIX)
     }
     if not images or "" in images or "" in masks or images.keys() != masks.keys():
@@ -156,40 +168,40 @@ def discover_layout(
             expected="at least one sample with a nonempty name and exactly one image and mask",
         )
 
-    _validate_sample_names(list(images), root.path)
+    names = {
+        sample: sanitize_element_name(sample, source="steinbock: the sample file name", parameter=None)
+        for sample in images
+    }
+    _validate_sample_names(names, root.path)
 
     return SteinbockLayout(
         table,
-        tuple(SampleLayout(name, image, masks[name]) for name, image in images.items()),
+        tuple(
+            SampleLayout(names[sample], f"{sample}{_LABEL_SUFFIX}", image, masks[sample])
+            for sample, image in images.items()
+        ),
         optional_metadata_file(root, "images.csv", context=IMAGE_METADATA_CONTEXT),
     )
 
 
-def _validate_sample_names(names: list[str], root: Path) -> None:
-    """Require valid, case-insensitively distinct names that no derived frame name repeats."""
-    for name in names:
-        try:
-            validate_element_name(name, parameter="sample name")
-        except ValueError as error:
-            raise ReaderFormatError(
-                context=_LAYOUT_CONTEXT,
-                path=root,
-                found=f"invalid sample name {name!r}",
-                expected="sample names that are valid SpatialData element and coordinate-system names",
-            ) from error
+def _validate_sample_names(names: Mapping[str, str], root: Path) -> None:
+    """Require sanitized names that are distinct ignoring case and that no derived frame name repeats.
 
-    folded = {name.lower() for name in names}
-    if len(folded) != len(names):
+    ``names`` maps each sample's file name stem to its sanitized name.
+    """
+    folded = Counter(name.lower() for name in names.values())
+    conflicting = [sample for sample, name in names.items() if folded[name.lower()] > 1]
+    if conflicting:
         raise ReaderFormatError(
             context=_LAYOUT_CONTEXT,
             path=root,
-            found=f"case-insensitively conflicting sample names {names!r}",
-            expected="case-insensitively distinct sample names",
+            found=f"case-insensitively conflicting sample names {conflicting!r} (after sanitizing)",
+            expected="sample names that stay distinct ignoring case after sanitizing",
         )
 
     conflicts = sorted(
         frame
-        for name in names
+        for name in names.values()
         for frame in (f"{name}{PIXEL_FRAME_SUFFIX}", f"{name}{NATIVE_FRAME_SUFFIX}")
         if frame.lower() in folded
     )
