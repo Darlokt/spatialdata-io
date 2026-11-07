@@ -98,6 +98,7 @@ class TestMakeChannelOptions:
             ({"exclude_cycles": "12"}, TypeError, "sequence of cycle numbers"),
             ({"exclude_cycles": (1.0,)}, TypeError, "only integers"),
             ({"exclude_cycles": (True,)}, TypeError, "only integers"),
+            ({"exclude_cycles": (2, -1)}, ValueError, r"only non-negative cycles; found \[-1, 2\]"),
             ({"include_cycle_in_channel_names": 1}, TypeError, "must be a boolean"),
             ({"nuclei_channel_name": 1}, TypeError, "must be a string"),
             ({"nuclei_channel_name": ""}, ValueError, "must not be empty"),

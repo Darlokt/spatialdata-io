@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
     from click.testing import CliRunner
     from spatialdata import SpatialData
     from xarray import DataArray
+
+    from spatialdata_io.readers.macsima._layout import ParsingStyle
 
 
 def _image(result: SpatialData, name: str) -> DataArray:
@@ -95,14 +98,27 @@ class TestMacsima:
         assert not executed
 
     def test_multiple_folders_keep_provenance_and_separate_frames(self, tmp_path: Path) -> None:
+        nuclei = tuple(ChannelSpec("DAPI", cycle, "DAPI") for cycle in (1, 2, 3))
         write_stack(tmp_path / "root" / "first run", V0_CHANNELS, version=0)
-        write_stack(tmp_path / "root" / "second", V1_CHANNELS, version=1)
+        write_stack(tmp_path / "root" / "second", nuclei, version=1, physical_size=("340", "nm"))
 
-        result = macsima(tmp_path / "root", parsing_style="processed_multiple_folders")
+        with pytest.warns(UserWarning, match="using 'first_run'"):
+            result = macsima(tmp_path / "root", parsing_style="processed_multiple_folders")
 
-        assert list(result.images) == ["first_run_image", "second_image"]
-        assert list(result.tables) == ["first_run_table", "second_table"]
+        assert list(result.images) == ["first_run_image", "second_image", "second_nuclei_image"]
+        assert list(result.tables) == ["first_run_table", "second_table", "second_nuclei_table"]
         assert sorted(result.coordinate_systems) == ["first_run", "second"]
+        # Every stack frame is in micrometres; the nuclei stack shares its parent's frame.
+        for name, frame, size in [
+            ("first_run_image", "first_run", 0.17),
+            ("second_image", "second", 0.34),
+            ("second_nuclei_image", "second", 0.34),
+        ]:
+            frames = _frames(result, name)
+            assert list(frames) == [frame]
+            scale = frames[frame]
+            assert isinstance(scale, Scale)
+            np.testing.assert_array_equal(scale.scale, [size, size])
         assert result.attrs["spatialdata_io_reader"] == "macsima"
         # Mixed software versions have no single format version.
         assert "spatialdata_io_format_version" not in result.attrs
@@ -181,6 +197,36 @@ class TestMacsima:
             result = macsima(tmp_path / "run")
 
         assert get_channel_names(result.images["run_image"]) == ["CD3"]
+
+    def test_roi_ids_beyond_float64_precision_stay_exact(self, tmp_path: Path) -> None:
+        roi = 2**53 + 1
+        write_stack(tmp_path / "run", tuple(replace(spec, roi=roi) for spec in V1_CHANNELS[:2]), version=1)
+
+        result = macsima(tmp_path / "run")
+        result.write(tmp_path / "out.zarr")
+
+        for table in (result.tables["run_table"], read_zarr(tmp_path / "out.zarr").tables["run_table"]):
+            assert str(table.var["ROI"].dtype) == "Int64"
+            assert table.var["ROI"].tolist() == [roi, roi]
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() == 0, reason="directory permissions do not restrict root"
+    )
+    @pytest.mark.parametrize("parsing_style", ["processed_single_folder", "processed_multiple_folders"])
+    def test_unreadable_hidden_folder_is_not_entered(self, tmp_path: Path, parsing_style: ParsingStyle) -> None:
+        stack = tmp_path / "root" / "run"
+        pixels = write_stack(stack, V1_CHANNELS[:2], version=1)
+        cache = stack / ".cache"
+        cache.mkdir()
+        cache.chmod(0o000)
+        try:
+            result = macsima(
+                stack.parent if parsing_style == "processed_multiple_folders" else stack, parsing_style=parsing_style
+            )
+        finally:
+            cache.chmod(0o755)
+
+        np.testing.assert_array_equal(_image(result, "run_image").data.compute(), np.stack(pixels))
 
     @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
     def test_writes_and_restores_the_table(self, tmp_path: Path, storage: str) -> None:
@@ -287,6 +333,15 @@ class TestMacsimaRejects:
         with pytest.raises(ReaderFormatError, match=f"element name '{duplicate_name}' generated twice, ignoring case"):
             macsima(tmp_path, parsing_style="processed_multiple_folders")
 
+    def test_dangling_channel_symlink_fails_instead_of_dropping_the_channel(self, tmp_path: Path) -> None:
+        write_stack(tmp_path / "run", V1_CHANNELS[:2], version=1)
+        link = tmp_path / "run" / "C-002_CD279.tif"
+        link.symlink_to(tmp_path / "annex" / "missing")
+
+        with pytest.raises(FileNotFoundError, match="dangling symlink") as caught:
+            macsima(tmp_path / "run")
+        assert caught.value.filename == str(link)
+
     def test_folder_without_ome_channels(self, tmp_path: Path) -> None:
         (tmp_path / "run").mkdir()
         tifffile.imwrite(tmp_path / "run" / "preview.tif", np.zeros((3, 3), dtype=np.uint16), metadata=None)
@@ -308,6 +363,31 @@ class TestMacsimaRejects:
             macsima(tmp_path / "missing", scale_factors=(1,))
         with pytest.raises(TypeError, match="include_transformations"):
             macsima(tmp_path / "missing", include_transformations=False)  # pyrefly: ignore[unexpected-keyword] - Invalid runtime input.
+
+    def test_options_are_validated_in_signature_order(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="parsing_style must be one of"):
+            macsima(
+                tmp_path / "missing",
+                parsing_style="raw",  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+                exclude_cycles=(-1,),
+                scale_factors=(1,),
+                path_policy="loose",  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+            )
+        with pytest.raises(ValueError, match="exclude_cycles"):
+            macsima(
+                tmp_path / "missing",
+                exclude_cycles=(-1,),
+                scale_factors=(1,),
+                path_policy="loose",  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+            )
+        with pytest.raises(ValueError, match="scale_factors"):
+            macsima(
+                tmp_path / "missing",
+                scale_factors=(1,),
+                path_policy="loose",  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+            )
+        with pytest.raises(ValueError, match="path_policy must be 'strict' or 'relaxed'"):
+            macsima(tmp_path / "missing", path_policy="loose")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
 
     def test_removed_raw_style(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="parsing_style must be one of"):

@@ -1,10 +1,44 @@
-"""Inspect one MACSima channel TIFF and interpret its v0 or v1 OME metadata.
+"""Inspect one MACSima channel TIFF and interpret its major 0 or 1 OME metadata.
 
-Each processed MACSima channel is a single-plane OME-TIFF. The marker,
-acquisition cycle, and acquisition type are stored in OME map annotations
-whose keys depend on the MACSiQView software major (0 or 1). The well comes
-from the OME plate and, in v0, the marker and clone from the screen reagent.
-Pixel size and plane position come from OME ``Pixels``.
+Each processed MACSima channel is a single-plane OME-TIFF: one OME ``Image``
+whose ``Pixels`` have ``SizeC``, ``SizeZ`` and ``SizeT`` of one and match the
+TIFF's YX shape. MACS iQ View describes the acquisition in OME map
+annotations, grouped into several ``MapAnnotation`` records that repeat some
+keys. The software version selects the keys::
+
+    <OME>
+      <Plate><Well ExternalIdentifier="D01"/></Plate>              # the well
+      <Screen><Reagent Name="CD15__VIMC6"/></Screen>                # major 0: marker__clone
+      <Image><Pixels PhysicalSizeX="0.17" PhysicalSizeXUnit="µm" ...>
+        <Plane PositionX="0" PositionXUnit="pixel" .../>            # optional
+      </Pixels></Image>
+      <StructuredAnnotations><MapAnnotation><Value>
+        <M K="SoftwareVersion">1.1.1</M> ...
+    </OME>
+
+===========  ======================================================  ======================================
+Field        Software major 0                                        Software major 1
+===========  ======================================================  ======================================
+Version      ``Software version``                                    ``SoftwareVersion``
+Marker       screen reagent name before ``__``                       ``Biomarker``, else ``Dye``
+Clone        screen reagent name after ``__``                        ``Clone``
+Fluorophore  ``Fluorochrome``                                        ``Fluorochrome``, else ``Dye``
+Cycle        ``Cycle``, else ``MICS cycle ID``                       ``Cycle``
+Type         ``MICS cycle type``: ``AntigenCycle``, ``BleachCycle``  ``ScanType``: ``S``, ``B``, ``AF``
+ROI          ``ROI ID``                                              ``RoiId``, zero-padded
+Exposure     ``Exposure time``, ``Exposure time unit``               ``ExposureTime``, ``ExposureTimeUnit``
+===========  ======================================================  ======================================
+
+- Blank values count as absent. A key the reader uses must have one value
+  across all groups; unread keys may differ (``Name`` names both the
+  instrument and the objective). Both version keys may be present when they
+  name the same version, with or without a leading ``v``.
+- Marker, cycle and acquisition type are required. Cycles and ROI IDs are
+  non-negative decimal integers within signed int64; exposures are finite,
+  non-negative milliseconds whose nonzero source text stays nonzero in float64.
+- The pixel size must be square, declared in µm or nm, and finite and
+  positive in µm. Plane positions are optional; when present they must be
+  integral and in pixel units (major 1 writes pixels).
 """
 
 from __future__ import annotations

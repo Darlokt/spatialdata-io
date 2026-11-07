@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import shutil
+import warnings
 from typing import TYPE_CHECKING, Literal, cast
 
 import anndata as ad
@@ -359,17 +360,19 @@ class TestVisiumSyntheticWorkflow:
             dataset_id=dataset_id,
             fullres_image_file=fullres,
             scale_factors=(2,),
-            chunks={"c": 1, "y": 3, "x": 4},
+            chunks=(1, 3, 4),
         )
 
         assert set(result.images) == {"sample_full_image", "sample_hires_image", "sample_lowres_image"}
         assert set(result.shapes) == {"sample"}
         assert set(result.tables) == {"table"}
+        # Without a verifiable calibration no element is placed in micrometres.
+        assert sorted(result.coordinate_systems) == ["sample_hires_pixels", "sample_lowres_pixels", "sample_pixels"]
 
         assert result.attrs["spatialdata_io_software_version"] == __version__
         assert result.attrs["spatialdata_io_reader"] == "visium"
         if counts_kind == "h5":
-            assert result.attrs["spatialdata_io_format_version"] == "spaceranger-9.9.9"
+            assert result.attrs["spatialdata_io_format_version"] == "9.9.9"
         else:
             assert "spatialdata_io_format_version" not in result.attrs
 
@@ -389,7 +392,7 @@ class TestVisiumSyntheticWorkflow:
         assert isinstance(hires, DataArray)
         assert hires.shape == (3, 4, 5)
         assert hires.chunksizes == {"c": (1, 1, 1), "y": (3, 1), "x": (4, 1)}
-        np.testing.assert_array_equal(_affine_matrix(hires, "sample"), np.diag([2.0, 2.0, 1.0]))
+        np.testing.assert_array_equal(_affine_matrix(hires, "sample_pixels"), np.diag([2.0, 2.0, 1.0]))
 
         circles = result.shapes["sample"]
         assert circles.index.tolist() == ["barcode-a", "barcode-b", "barcode-c"]
@@ -475,6 +478,125 @@ class TestVisiumSyntheticWorkflow:
         assert restored.tables["table"].shape == (3, 3)
 
 
+class TestVisiumImagesAndNames:
+    """Channel names follow declared colour models and derived names are repaired."""
+
+    @pytest.mark.parametrize(
+        ("kind", "expected"),
+        [
+            ("rgb", ["r", "g", "b"]),
+            ("if_ome", ["DAPI", "CD3", "CD8", "PanCK"]),
+            ("if_plain", [0, 1, 2, 3]),
+        ],
+    )
+    def test_channel_coordinates_are_exact(self, tmp_path: Path, kind: str, expected: list[object]) -> None:
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+        (tmp_path / "spatial" / "tissue_lowres_image.png").write_bytes(
+            imagecodecs.png_encode(np.zeros((2, 3, 4), dtype=np.uint8))
+        )
+        fullres = tmp_path / "fullres.tif"
+        if kind == "rgb":
+            values = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
+            tifffile.imwrite(fullres, values, photometric="rgb")
+            values = np.moveaxis(values, -1, 0)
+        else:
+            values = np.arange(4 * 6 * 8, dtype=np.uint16).reshape(4, 6, 8)
+            metadata: dict[str, object] = {"axes": "CYX"}
+            if kind == "if_ome":
+                metadata["Channel"] = {"Name": expected}
+            tifffile.imwrite(fullres, values, ome=kind == "if_ome", photometric="minisblack", metadata=metadata)
+
+        result = visium(tmp_path, fullres_image_file=fullres.name)
+
+        full = result.images["sample_full_image"]
+        assert full.coords["c"].to_numpy().tolist() == expected
+        assert full.dtype == values.dtype
+        np.testing.assert_array_equal(full.data.compute(), values)
+        assert result.images["sample_hires_image"].coords["c"].to_numpy().tolist() == ["r", "g", "b"]
+        assert result.images["sample_lowres_image"].coords["c"].to_numpy().tolist() == ["r", "g", "b", "a"]
+
+        store = tmp_path / "result.zarr"
+        result.write(store)
+        restored = SpatialData.read(store)
+        assert restored.images["sample_full_image"].coords["c"].to_numpy().tolist() == expected
+
+    def test_multi_series_tiff_requires_a_selection(self, tmp_path: Path) -> None:
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+        fullres = tmp_path / "fullres.tif"
+        with tifffile.TiffWriter(fullres) as writer:
+            writer.write(np.zeros((5, 7), dtype=np.uint8), photometric="minisblack")
+            writer.write(np.ones((9, 11), dtype=np.uint8), photometric="minisblack")
+
+        with pytest.raises(ReaderFormatError, match="2 series") as caught:
+            visium(tmp_path, fullres_image_file=fullres)
+        assert caught.value.context.detected_version == "9.9.9"
+
+        result = visium(tmp_path, fullres_image_file=fullres, tiff_series=1)
+        assert result.images["sample_full_image"].shape == (1, 9, 11)
+
+    def test_unusable_library_id_is_sanitized(self, tmp_path: Path) -> None:
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5", library_id=b"V1 Mouse:Brain")
+        _write_spatial(tmp_path, version="v2")
+
+        with pytest.warns(UserWarning, match=r"HDF5 library ID 'V1 Mouse:Brain' .* using 'V1_Mouse_Brain'"):
+            result = visium(tmp_path)
+
+        assert set(result.shapes) == {"V1_Mouse_Brain"}
+        assert set(result.images) == {"V1_Mouse_Brain_hires_image", "V1_Mouse_Brain_lowres_image"}
+        assert get_table_keys(result.tables["table"]) == ("V1_Mouse_Brain", "region", "spot_id")
+        assert result.tables["table"].uns["spatialdata_io_positions"]["coordinates"]["spatial_pixels"]["frame"] == (
+            "V1_Mouse_Brain_pixels"
+        )
+        assert sorted(result.coordinate_systems) == [
+            "V1_Mouse_Brain_hires_pixels",
+            "V1_Mouse_Brain_lowres_pixels",
+            "V1_Mouse_Brain_pixels",
+        ]
+        result.write(tmp_path / "result.zarr")
+        assert set(SpatialData.read(tmp_path / "result.zarr").shapes) == {"V1_Mouse_Brain"}
+
+    @pytest.mark.parametrize("counts", ["h5", "mex"])
+    @pytest.mark.parametrize(
+        ("make_unique", "expected"),
+        [(True, ["gene-a", "gene-a-1", "protein-a"]), (False, ["gene-a", "gene-a", "protein-a"])],
+    )
+    def test_feature_name_uniqueness_is_optional(
+        self, tmp_path: Path, counts: str, expected: list[str], *, make_unique: bool
+    ) -> None:
+        if counts == "h5":
+            _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+            with h5py.File(tmp_path / "filtered_feature_bc_matrix.h5", "r+") as source:
+                source["matrix/features/name"][1] = b"gene-a"
+        else:
+            mex = tmp_path / "filtered_feature_bc_matrix"
+            _write_mex(mex, compressed=False)
+            features = (mex / "features.tsv").read_text(encoding="utf-8").replace("\tgene-b\t", "\tgene-a\t")
+            (mex / "features.tsv").write_text(features, encoding="utf-8")
+        _write_spatial(tmp_path, version="v2")
+
+        with warnings.catch_warnings():
+            # AnnData warns about the duplicate names it is asked to keep.
+            warnings.filterwarnings("ignore", "Variable names are not unique", UserWarning)
+            result = visium(tmp_path, dataset_id="sample", make_var_names_unique=make_unique)
+
+        assert result.tables["table"].var_names.tolist() == expected
+        assert result.tables["table"].var["gene_ids"].tolist() == ["gene-id-a", "gene-id-b", "antibody-id"]
+
+    def test_raw_software_version_stays_in_uns(self, tmp_path: Path) -> None:
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+
+        result = visium(tmp_path)
+
+        assert result.tables["table"].uns["spatial"]["sample"]["metadata"] == {
+            "chemistry_description": "Synthetic chemistry",
+            "software_version": "spaceranger-9.9.9",
+        }
+        assert result.attrs["spatialdata_io_format_version"] == "9.9.9"
+
+
 class TestVisiumDownloadedWorkflow:
     """Smoke-test exact versioned vendor artifacts managed by the repository."""
 
@@ -482,8 +604,8 @@ class TestVisiumDownloadedWorkflow:
     @pytest.mark.parametrize(
         ("dataset_key", "dataset_id", "software_version"),
         [
-            ("visium_v1_human_lymph_node", "V1_Human_Lymph_Node", "spaceranger-1.1.0"),
-            ("visium_v2_1_mouse_brain", "V1_Adult_Mouse_Brain", "spaceranger-2.1.0"),
+            ("visium_v1_human_lymph_node", "V1_Human_Lymph_Node", "1.1.0"),
+            ("visium_v2_1_mouse_brain", "V1_Adult_Mouse_Brain", "2.1.0"),
         ],
     )
     def test_official_10x_dataset(

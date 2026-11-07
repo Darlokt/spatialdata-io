@@ -39,9 +39,9 @@ in `generic` and `dbit`); other vendor-written pyramid levels are not read.
 
 One positive size for every axis, or three positive sizes in `c, y, x` order.
 Labels use the `y` and `x` sizes. Requests may be non-square or group several
-channels; any regular grid is valid Zarr. Readers whose images can be 3D or use
-other axes (`generic`, `visium`) also accept one size per canonical axis or a
-mapping from axis name to size; see their documentation.
+channels; any regular grid is valid Zarr. `generic`, whose images can be 3D or
+use other axes, also accepts one size per canonical axis or a mapping from axis
+name to size; see its documentation.
 
 Chunks are always passed explicitly to the SpatialData models. Without them
 the multiscale image builder rechunks to its own 256-pixel tiles and merges all

@@ -13,7 +13,7 @@ import pytest
 from dask.callbacks import Callback
 from spatialdata.transformations import BaseTransformation, Identity, get_transformation
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.cosmx import _transcripts
 from spatialdata_io.readers.cosmx._transcripts import read_transcripts
@@ -88,10 +88,30 @@ class TestReadTranscripts:
             "CellComp",
         ]
 
+    @pytest.mark.parametrize("pixel_size_um", [None, 0.5])
+    def test_global_frame_is_micrometres_only_when_calibrated(
+        self, tmp_path: Path, pixel_size_um: float | None
+    ) -> None:
+        points = read_transcripts(
+            _plain(tmp_path), features=_FEATURES, placements=_PLACEMENTS, pixel_size_um=pixel_size_um
+        )
+        frames = get_transformation(points, get_all=True)
+        assert isinstance(frames, dict)
+        if pixel_size_um is None:
+            assert set(frames) == {"global_pixels", "fov_1_pixels"}
+            assert isinstance(frames["global_pixels"], Identity)
+        else:
+            assert set(frames) == {"global", "fov_1_pixels"}
+            scale = frames["global"]
+            assert isinstance(scale, BaseTransformation)
+            np.testing.assert_array_equal(
+                scale.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")), np.diag([0.5, 0.5, 1])
+            )
+
     def test_frames_and_serialization(self, tmp_path: Path) -> None:
         points = read_transcripts(_plain(tmp_path), features=_FEATURES, placements=_PLACEMENTS)
-        assert isinstance(get_transformation(points, "global"), Identity)
-        transform = get_transformation(points, "1")
+        assert isinstance(get_transformation(points, "global_pixels"), Identity)
+        transform = get_transformation(points, "fov_1_pixels")
         assert isinstance(transform, BaseTransformation)
         local = transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
         np.testing.assert_array_equal(local, [[1, 0, -1000], [0, 1, -5000], [0, 0, 1]])
@@ -103,8 +123,9 @@ class TestReadTranscripts:
         rows = [*_ROWS[:-1], _ROWS[-1].replace(",B,", ",Z,")]
         points = read_transcripts(_plain(tmp_path, rows), features=_FEATURES, placements=_PLACEMENTS)
         assert len(points.partitions[: points.npartitions - 1].compute()) > 0
-        with pytest.raises(ReaderFormatError, match="unknown targets"):
+        with pytest.raises(ReaderFormatError, match="unknown targets") as caught:
             points.compute()
+        assert caught.value.context == ReaderErrorContext("cosmx", "transcripts")
 
     @pytest.mark.parametrize(
         ("row", "match"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import re
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,8 +11,10 @@ import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io._positions import POSITIONS_KEY
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.cosmx import _tables
 from spatialdata_io.readers.cosmx._tables import (
     build_table,
     read_counts,
@@ -27,6 +30,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 _COUNTS = '"fov","cell_ID","B","HLA-A","NegPrb1"\n2,1,0,3,0\n1,0,9,9,9\n1,2,4,0,1\n1,1,0,0,2\n'
+_DEFAULT_BATCH_BYTES = _tables._BATCH_MEMORY_BYTES  # noqa: SLF001, RUF100
 _METADATA = (
     "fov,cell_ID,CenterX_local_px,CenterY_local_px,CenterX_global_px,CenterY_global_px,Area,Mean.DAPI,note\n"
     "1,1,2,5,102,15,4,1.5,01\n1,2,6,2,106,12,3,NA,\n2,1,2,5,202,25,5,,x\n"
@@ -45,14 +49,15 @@ class TestReadHeader:
     @pytest.mark.parametrize("compressed", [False, True])
     def test_quoted_header(self, tmp_path: Path, *, compressed: bool) -> None:
         path = _write(tmp_path, "c.csv", _COUNTS, compressed=compressed)
-        assert read_header(path) == ["fov", "cell_ID", "B", "HLA-A", "NegPrb1"]
+        assert read_header(path, "count matrix") == ["fov", "cell_ID", "B", "HLA-A", "NegPrb1"]
 
     @pytest.mark.parametrize("payload", [b"\xff\xfe,a\n", b'"unterminated\n'])
     def test_malformed(self, tmp_path: Path, payload: bytes) -> None:
         path = tmp_path / "c.csv"
         path.write_bytes(payload)
-        with pytest.raises(ReaderFormatError, match="malformed CSV header"):
-            read_header(ArtifactFile(path))
+        with pytest.raises(ReaderFormatError, match="malformed CSV header") as error:
+            read_header(ArtifactFile(path), "cell metadata")
+        assert error.value.context == ReaderErrorContext("cosmx", "cell metadata")
 
 
 class TestReadCounts:
@@ -62,7 +67,7 @@ class TestReadCounts:
     def test_background_removed_and_order_kept(
         self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
     ) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_BATCH_ROWS", 1)
+        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_MEMORY_BYTES", 1)
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS, compressed=compressed))
         assert isinstance(counts.expression, sparse.csr_array)
         assert counts.expression.dtype == np.float32
@@ -70,12 +75,12 @@ class TestReadCounts:
         assert counts.fovs.tolist() == [2, 1, 1]
         assert counts.cell_ids.tolist() == [1, 2, 1]
 
-    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("batch_bytes", [1, _DEFAULT_BATCH_BYTES])
     @pytest.mark.parametrize(("value", "dtype"), [(7, "float32"), (2**24 + 1, "float64"), (2**24 + 2, "float32")])
     def test_adaptive_exact_counts(
-        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, value: int, dtype: str
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, value: int, dtype: str
     ) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_BATCH_ROWS", batch_rows)
+        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_MEMORY_BYTES", batch_bytes)
         text = f"fov,cell_ID,A,B\n1,1,1,0\n1,2,{value},2\n"
         counts = read_counts(_write(tmp_path, "c.csv", text))
         assert counts.expression.dtype == np.dtype(dtype)
@@ -85,6 +90,28 @@ class TestReadCounts:
         with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
             read_counts(_write(tmp_path, "c.csv", f"fov,cell_ID,A\n1,1,{2**53 + 1}\n"))
         assert caught.value.path == tmp_path / "c.csv"
+        assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
+
+    def test_row_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        # Only the last row needs float64, so every earlier 1,000-row block is float32 on its own.
+        rows = "".join(
+            f"{1 + row % 3},{row // 3 + 1},{row % 5},{(row * 7) % 4},{2**24 + 1 if row == 20_000 else row % 2}\n"
+            for row in range(20_001)
+        )
+        path = _write(tmp_path, "c.csv", "fov,cell_ID,A,B,C\n" + rows)
+        blocks = mocker.spy(_tables, "count_block")
+        whole = read_counts(path)
+        # 20,001 rows of 3 features are 480 KiB of int64, under the 8 MiB target: one block.
+        assert blocks.call_count == 1
+        mocker.patch.object(_tables, "_BATCH_MEMORY_BYTES", 1_000 * 8 * 3)
+        batched = read_counts(path)
+        assert blocks.call_count == 1 + 21
+        assert whole.expression.dtype == batched.expression.dtype == np.float64
+        assert whole.expression.nnz == batched.expression.nnz
+        for name in ("data", "indices", "indptr"):
+            np.testing.assert_array_equal(getattr(whole.expression, name), getattr(batched.expression, name))
+        np.testing.assert_array_equal(whole.fovs, batched.fovs)
+        np.testing.assert_array_equal(whole.cell_ids, batched.cell_ids)
 
     def test_truncated_gzip_stream_fails(self, tmp_path: Path) -> None:
         path = _write(tmp_path, "c.csv", _COUNTS, compressed=True)
@@ -96,12 +123,12 @@ class TestReadCounts:
         counts = read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A\n"))
         assert counts.expression.shape == (0, 1)
 
-    @pytest.mark.parametrize("batch_rows", [1, 10_000])
+    @pytest.mark.parametrize("batch_bytes", [1, _DEFAULT_BATCH_BYTES])
     @pytest.mark.parametrize("cells", [(1, 2, 3), (0, 0, 0), (0, 2, 3)])
     def test_background_modes(
-        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int, cells: tuple[int, ...]
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, cells: tuple[int, ...]
     ) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._tables._MAX_BATCH_ROWS", batch_rows)
+        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_MEMORY_BYTES", batch_bytes)
         text = "fov,cell_ID,A,B\n" + "".join(f"1,{cell},{i},0\n" for i, cell in enumerate(cells))
         counts = read_counts(_write(tmp_path, "c.csv", text))
         assert isinstance(counts.expression, sparse.csr_array)
@@ -181,11 +208,25 @@ class TestReadMetadata:
         with pytest.raises(ReaderFormatError, match=match):
             read_metadata(_write(tmp_path, "m.csv", _METADATA.replace(*replace, 1)))
 
-    def test_case_variant_names_fail(self, tmp_path: Path) -> None:
-        text = _METADATA.replace("note\n", "note,NOTE\n").replace("01\n", "01,a\n").replace(",\n", ",,b\n", 1)
-        text = text.replace(",x\n", ",x,c\n")
-        with pytest.raises(ReaderFormatError, match="case-variant"):
-            read_metadata(_write(tmp_path, "m.csv", text))
+    def test_unusable_column_names_are_sanitized(self, tmp_path: Path) -> None:
+        header = "Region,Cell_ID,cell_id,my note,NOTE,cell,Cell,"
+        rows = ("A,1,c_x,x,y,c_1_1,u,", "B,2,c_y,x,y,c_1_2,v,", "C,3,c_z,x,y,c_2_1,w,")
+        lines = _METADATA.splitlines()
+        text = "\n".join([header + lines[0], *(row + line for row, line in zip(rows, lines[1:], strict=True))]) + "\n"
+        message = (
+            "cosmx: the cell metadata CSV header has column names that a SpatialData table does not accept; using "
+            "'Region' -> 'Region_1', 'Cell_ID' -> 'Cell_ID_1', 'cell_id' -> 'cell_id_2', 'my note' -> 'my_note', "
+            "'Cell' -> 'Cell_1', 'note' -> 'note_1'. Rename the source columns to choose the names explicitly."
+        )
+        with pytest.warns(UserWarning, match=re.escape(message)) as caught:
+            obs = read_metadata(_write(tmp_path, "m.csv", text)).obs
+        assert [str(warning.message) for warning in caught] == [message]
+        assert obs.columns.tolist() == [
+            "fov", "cell_ID", "Area", "Mean.DAPI", "Region_1", "Cell_ID_1", "cell_id_2", "my_note", "NOTE", "cell",
+            "Cell_1", "note_1",
+        ]  # fmt: skip
+        assert obs["note_1"].tolist() == ["01", "", "x"]
+        assert obs["cell"].tolist() == ["c_1_1", "c_1_2", "c_2_1"]
 
     def test_repeated_vendor_ids(self, tmp_path: Path) -> None:
         text = "cell," + _METADATA.replace("\n1,", "\nc,1,").replace("\n2,", "\nc,2,")
@@ -221,7 +262,21 @@ class TestBuildTable:
         assert table.var_names.tolist() == ["B", "HLA-A", "NegPrb1"]
         assert table.obs["region"].tolist() == ["1_labels", "1_labels", "2_labels"]
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[2, 5], [6, 2], [2, 5]])
-        np.testing.assert_array_equal(table.obsm["global"], [[102, 15], [106, 12], [202, 25]])
+        np.testing.assert_array_equal(table.obsm["spatial_global_pixels"], [[102, 15], [106, 12], [202, 25]])
+        assert "spatial" not in table.obsm
+        assert table.obs["spatial_pixel_frame"].tolist() == ["fov_1_pixels", "fov_1_pixels", "fov_2_pixels"]
+        assert table.obs["spatial_pixel_frame"].cat.categories.tolist() == ["fov_1_pixels", "fov_2_pixels"]
+        assert table.uns[POSITIONS_KEY] == {
+            "schema_version": 1,
+            "coordinates": {
+                "spatial_pixels": {
+                    "axes": ["x", "y"], "units": "pixel", "position": "cell center", "frame_key": "spatial_pixel_frame"
+                },
+                "spatial_global_pixels": {
+                    "axes": ["x", "y"], "units": "pixel", "position": "cell center", "frame": "global_pixels"
+                },
+            },
+        }  # fmt: skip
         assert get_table_keys(table) == (["1_labels", "2_labels"], "region", "cell_ID")
 
     def test_calibration_preserves_sparse_and_native_buffers(self, tmp_path: Path) -> None:
@@ -233,8 +288,18 @@ class TestBuildTable:
         assert isinstance(table.X, sparse.csr_array)
         assert np.shares_memory(table.X.data, counts.expression.data)
         assert table.obsm["spatial_pixels"] is metadata.local
-        assert table.obsm["global"] is metadata.global_
+        assert table.obsm["spatial_global_pixels"] is metadata.global_
         assert not np.shares_memory(table.obsm["spatial"], metadata.global_)
+        np.testing.assert_array_equal(table.obsm["spatial"], metadata.global_ * 0.5)
+        assert table.uns[POSITIONS_KEY]["coordinates"]["spatial"] == {
+            "axes": ["x", "y"],
+            "units": "micrometer",
+            "position": "cell center",
+            "frame": "global",
+            "calibration": {
+                "global": "Caller-declared 0.5 micrometres per validated global pixel; no stage registration."
+            },
+        }
 
     def test_unlinked_table(self, tmp_path: Path) -> None:
         metadata_path = _write(tmp_path, "m.csv", _METADATA)

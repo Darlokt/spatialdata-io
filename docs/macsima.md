@@ -22,13 +22,15 @@ experiment/
 
 Discovery follows these rules:
 
-- TIFFs are found recursively by a case-insensitive `.tif` or `.tiff` suffix and ordered by path.
-- Paths beginning with `.` and `__MACOSX` are ignored, so macOS archive metadata is never read.
+- TIFFs are found recursively by a case-insensitive `.tif` or `.tiff` suffix and ordered by path. Directories with such a suffix are ignored; any other match must be a regular file, so a dangling symlink fails with `FileNotFoundError` instead of silently dropping a channel.
+- Paths beginning with `.` and `__MACOSX` are ignored, so macOS archive metadata is never read. Hidden folders are not even entered, so an unreadable one (a cache, for example) does not fail the read.
 - A TIFF without OME-XML is not a channel, and a subfolder without TIFFs is not a stack; both are skipped with a warning.
 - `exclude_folder_names` omits subfolders by their exact names, each of which must exist; it is invalid in single-folder mode.
 - File names are never interpreted, and renamed files remain readable: an OME `TiffData` UUID equal to the file's own UUID refers to the file itself.
 
-Each stack is named after its folder, made a valid SpatialData element name (`my run` becomes `my_run`). Folder names that collide after this conversion, ignoring case, fail before any TIFF is read.
+Each stack is named after its folder. A folder name that is not a valid SpatialData element name is repaired with a warning (`my run` becomes `my_run`); rename the folder to choose the name. Folder names that collide after this repair, ignoring case, fail before any TIFF is read.
+
+The public example exports keep one ROI per folder, with file names such as `C-001_S-000_S_APC_R-01_W-D01_ROI-01_A-CD3_C-REA1151.tif` that spell the cycle, acquisition type, fluorochrome, well, ROI, antigen and clone. The reader takes all of these from the OME metadata instead.
 
 ## Channel metadata
 
@@ -62,7 +64,7 @@ When a stack contains more stain channels named exactly `nuclei_channel_name` th
 
 The channels of a stack must share one dtype, one pixel size, one software major, and one well and ROI where these are recorded. Each channel is placed on a common pixel grid by its OME plane position, which must be an integral number of pixels; absent positions mean the origin. Position integrality is checked on the decoded OME float64 values; original XML precision beyond float64 is not recovered. The canvas starts at the smallest plane position and spans every channel; uncovered pixels are zero, and padding emits a warning. A position shared by all channels is therefore not represented in the transformation.
 
-One selected stack uses `global` in micrometres through the validated isotropic OME pixel size (micrometres or nanometres). The converted micrometre size must remain finite and strictly positive; conversion underflow to zero fails. Multiple independent stacks retain separate `<stack>` coordinate systems. A split nuclei stack shares its parent frame. Excluding folders can leave one group, which then uses `global`.
+Every stack is calibrated in micrometres through its square OME pixel size (declared in micrometres or nanometres); a channel without a pixel size, with non-square pixels or with another unit fails. The converted micrometre size must remain finite and strictly positive; conversion underflow to zero fails. One selected stack uses `global`. Multiple stacks are not registered to each other, so each keeps its own micrometre coordinate system named `<stack>`. A split nuclei stack shares its parent frame. Excluding folders can leave one stack, which then uses `global`.
 
 ## Table
 
@@ -108,7 +110,7 @@ python -m spatialdata_io macsima --input experiment --output experiment.zarr \
 Renamed and removed options:
 
 - `filter_folder_names` is now `exclude_folder_names` and matches exact folder names.
-- `skip_rounds` is now `exclude_cycles`, and `include_cycle_in_channel_name` is now `include_cycle_in_channel_names`.
+- `skip_rounds` is now `exclude_cycles`, which rejects negative cycles, and `include_cycle_in_channel_name` is now `include_cycle_in_channel_names`.
 - The `transformations` and `include_transformations` switches are removed. Calibrated physical coordinates are always attached; source pixel arrays remain unchanged.
 - `max_chunk_size` and `c_chunks_size` are replaced by `chunks`.
 - `multiscale` and `default_scale_factor` are replaced by `scale_factors`, which no longer defaults to an automatic pyramid.
@@ -123,4 +125,6 @@ Corrections and contract changes that change results:
 - The `name` column of the channel table holds the marker; numbered or cycle-prefixed channel names remain in `var_names`.
 - Multiple-folder results keep their provenance.
 - Malformed metadata now fails instead of being skipped or silently becoming missing.
+- A dangling `.tif` or `.tiff` symlink now fails instead of being skipped.
+- A folder name that is not a valid element name is repaired as before, but now with a warning.
 - Discovered artifacts that are symlinks to targets outside the dataset directory are now rejected by default; earlier releases accepted them. Pass `path_policy="relaxed"` for git-annex or DVC datasets ([Dataset paths and symlinks](dataset_paths.md)).

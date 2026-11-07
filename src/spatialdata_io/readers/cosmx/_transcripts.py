@@ -1,4 +1,34 @@
-"""Construct one projected, path-backed CosMx transcript points element."""
+"""Construct one projected, path-backed CosMx transcript points element.
+
+``<prefix>_tx_file.csv`` holds one record per decoded transcript, each on one
+physical line. Points are placed at the global pixel position
+(``x_global_px``, ``y_global_px``); the local position, ``fov``, ``cell_ID``
+(0 for unassigned transcripts), ``target`` and the optional ``z``, ``CellComp``
+and ``cell`` fields are annotations. Construction reads only the header; every
+partition is parsed and validated when computed.
+
+Plain CSV is split by Dask into newline-delimited byte blocks of about 8 MiB.
+
+Gzip sources (``.csv.gz``) are read member by member. AtoMx writes
+concatenated, independently compressed members, each ending at a record
+boundary; the first may hold only the header or the header and rows::
+
+    byte 0                                                            EOF
+    | member: header [+ rows] | member: rows | member: rows | ... |
+    |<----- range 0 (8 MiB) ----->|<----- range 1 ----->|<- range 2 ->|
+
+One task owns the members that start in its compressed range, including the
+whole member crossing its end, so a range wholly inside a member yields an
+empty partition. Each task continues from the exact end offset that its
+predecessor verified, never scanning for a gzip magic number, and checks every
+member's deflate stream, CRC and size trailer; corrupt or trailing data fails.
+Source decoding is therefore sequential. A single-stream gzip file is one
+member and forms one nonempty partition with all its rows.
+
+Coordinate systems: ``global_pixels`` (identity) without ``pixel_size_um``, or
+``global`` (scale to micrometres) with it, and every FOV's local pixel frame
+``fov_<n>_pixels`` through the inverse of its placement.
+"""
 
 from __future__ import annotations
 
@@ -23,16 +53,20 @@ from spatialdata_io.readers.cosmx._schemas import (
     FOV,
     INTEGER_DTYPE,
     STRING_DTYPE,
+    TRANSCRIPTS,
     float_values,
     integer_values,
     schema_error,
     transcript_columns,
 )
 from spatialdata_io.readers.cosmx._tables import read_header
+from spatialdata_io.readers.cosmx._transforms import fov_frame, global_frame
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    import numpy as np
+    import numpy.typing as npt
     from dask.delayed import Delayed
     from spatialdata.transformations import BaseTransformation
 
@@ -48,22 +82,32 @@ def _normalize(table: pa.Table, *, features: tuple[str, ...], path: ArtifactFile
     """Validate one lexical partition and convert it to the returned point schema."""
     target = pd.Series(table.column("target").to_pandas(types_mapper=pd.ArrowDtype), dtype=STRING_DTYPE)
     if target.isna().any() or not target.isin(features).all():
-        raise schema_error(path, found="missing or unknown targets", expected="targets from the count vocabulary")
+        raise schema_error(
+            path, TRANSCRIPTS, found="missing or unknown targets", expected="targets from the count vocabulary"
+        )
+
+    def floats(name: str) -> npt.NDArray[np.float64]:
+        return float_values(table.column(name), path, TRANSCRIPTS, name)
+
+    def integers(name: str, minimum: int | None) -> pd.Series:
+        return pd.Series(
+            integer_values(table.column(name), path, TRANSCRIPTS, name, minimum=minimum), dtype=INTEGER_DTYPE
+        )
 
     frame = pd.DataFrame(
         {
-            "x": float_values(table.column("x_global_px"), path, "x_global_px"),
-            "y": float_values(table.column("y_global_px"), path, "y_global_px"),
+            "x": floats("x_global_px"),
+            "y": floats("y_global_px"),
             "target": pd.Categorical(target.to_numpy(), categories=features),
-            FOV: pd.Series(integer_values(table.column(FOV), path, FOV, minimum=1), dtype=INTEGER_DTYPE),
-            CELL_ID: pd.Series(integer_values(table.column(CELL_ID), path, CELL_ID, minimum=0), dtype=INTEGER_DTYPE),
-            "x_local": float_values(table.column("x_local_px"), path, "x_local_px"),
-            "y_local": float_values(table.column("y_local_px"), path, "y_local_px"),
+            FOV: integers(FOV, 1),
+            CELL_ID: integers(CELL_ID, 0),
+            "x_local": floats("x_local_px"),
+            "y_local": floats("y_local_px"),
         }
     )
     if "z" in table.column_names:
         # The vendor defines z as a slice number in arbitrary units; it can be negative.
-        frame["z_raw"] = pd.Series(integer_values(table.column("z"), path, "z", minimum=None), dtype=INTEGER_DTYPE)
+        frame["z_raw"] = integers("z", None)
     for name in ("CellComp", CELL):
         if name in table.column_names:
             frame[name] = pd.Series(table.column(name).to_pandas(types_mapper=pd.ArrowDtype), dtype=STRING_DTYPE)
@@ -100,7 +144,7 @@ def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
             )
     except pa.ArrowInvalid as error:
         raise schema_error(
-            path, found=f"malformed transcript CSV: {error}", expected="one field per header column"
+            path, TRANSCRIPTS, found=f"malformed transcript CSV: {error}", expected="one field per header column"
         ) from error
     return _normalize(table, features=projection.features, path=path)
 
@@ -121,18 +165,23 @@ def _decode_member(
     while not decoder.eof:
         chunk = pending or handle.read(_READ_BYTES)
         if not chunk:
-            raise schema_error(path, found=f"corrupt gzip member at byte {offset}", expected="complete members")
+            raise schema_error(
+                path, TRANSCRIPTS, found=f"corrupt gzip member at byte {offset}", expected="complete members"
+            )
         try:
             decoded = decoder.decompress(chunk, _READ_BYTES)
         except zlib.error as error:
             raise schema_error(
-                path, found=f"corrupt gzip member at byte {offset}: {error}", expected="complete members"
+                path, TRANSCRIPTS, found=f"corrupt gzip member at byte {offset}: {error}", expected="complete members"
             ) from error
         payload.extend(decoded)
         pending = decoder.unconsumed_tail
     if len(payload) == member_start or not payload.endswith(b"\n"):
         raise schema_error(
-            path, found=f"gzip member at byte {offset} ending inside a record", expected="record-aligned members"
+            path,
+            TRANSCRIPTS,
+            found=f"gzip member at byte {offset} ending inside a record",
+            expected="record-aligned members",
         )
     return handle.tell() - len(decoder.unused_data), decoder.unused_data
 
@@ -187,16 +236,18 @@ def read_transcripts(
     Records must each occupy one physical line. Values are validated when their
     partition is computed.
     """
-    names = tuple(read_header(path))
+    names = tuple(read_header(path, TRANSCRIPTS))
     columns = transcript_columns(names, path)
     empty = pa.table({name: pa.array([], pa.string()) for name in columns})
     meta = _normalize(empty, features=features, path=path)
     frame = dd.from_delayed(_partitions(_Projection(names, columns, features, path)), meta=meta)
 
     transformations: dict[str, BaseTransformation] = {
-        "global": Identity() if pixel_size_um is None else Scale([pixel_size_um, pixel_size_um], axes=("x", "y"))
+        global_frame(pixel_size_um): (
+            Identity() if pixel_size_um is None else Scale([pixel_size_um, pixel_size_um], axes=("x", "y"))
+        )
     }
-    transformations.update({str(fov): placement.global_to_local() for fov, placement in placements.items()})
+    transformations.update({fov_frame(fov): placement.global_to_local() for fov, placement in placements.items()})
     # Partitions are deliberately unsorted. Known target categories and
     # sort=False avoid the public model's eager category and index scans.
     with warnings.catch_warnings():

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 
 import pytest
 
 from spatialdata_io._cli.commands.cosmx import cosmx_command
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers.cosmx import cosmx
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,6 +34,7 @@ class TestCosmxCommand:
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
+            file_prefix=None,
             dataset_id=None,
             include_transcripts=True,
             pixel_size_um=None,
@@ -46,6 +49,8 @@ class TestCosmxCommand:
     ) -> None:
         reader = mocker.patch("spatialdata_io.readers.cosmx.cosmx", return_value=reader_result)
         arguments = [
+            "--file-prefix",
+            "Lung5 Rep2",
             "--dataset-id",
             "Lung5_Rep2",
             "--no-include-transcripts",
@@ -64,6 +69,7 @@ class TestCosmxCommand:
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
+            file_prefix="Lung5 Rep2",
             dataset_id="Lung5_Rep2",
             include_transcripts=False,
             pixel_size_um=None,
@@ -106,8 +112,13 @@ class TestCosmxCommand:
     def test_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cosmx_command, ["--help"])
         assert result.exit_code == 0
-        for option in ("--dataset-id", "--include-transcripts", "--scale-factors", "--chunks"):
+        for option in ("--file-prefix", "--dataset-id", "--include-transcripts", "--scale-factors", "--chunks"):
             assert option in result.output
+
+    def test_option_order_matches_the_reader_signature(self) -> None:
+        reader = list(inspect.signature(cosmx).parameters)
+        options = [parameter.name for parameter in cosmx_command.params]
+        assert options == ["input_path", "output_path", *reader[1:]]
 
     def test_explicit_pixel_size(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
         reader = mocker.patch("spatialdata_io.readers.cosmx.cosmx")

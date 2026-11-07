@@ -12,7 +12,7 @@ from anndata import AnnData
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium._layout import H5Counts, VisiumLayout
 from spatialdata_io.readers.visium._metadata import CountMetadata, ScaleFactors
@@ -24,14 +24,16 @@ if TYPE_CHECKING:
 
     from pytest_mock import MockerFixture
 
+_NO_METADATA = CountMetadata(None, None, None)
 
-def _layout(root: Path, positions: Path, *, headered: bool) -> VisiumLayout:
+
+def _layout(root: Path, positions: Path, *, headered: bool, metadata: CountMetadata = _NO_METADATA) -> VisiumLayout:
     counts = root / "counts.h5"
     counts.touch(exist_ok=True)
     scales = root / "scales.json"
     scales.touch(exist_ok=True)
     return VisiumLayout(
-        counts=H5Counts(ArtifactFile(counts), None),
+        counts=H5Counts(ArtifactFile(counts), None, metadata),
         positions=ArtifactFile(positions),
         position_format="headered" if headered else "headerless",
         scale_factors=ArtifactFile(scales),
@@ -121,6 +123,15 @@ class TestReadPositions:
         with pytest.raises(ReaderFormatError, match="required columns"):
             read_positions(_layout(tmp_path, path, headered=True))
 
+    def test_source_failure_keeps_its_error_with_context(self, tmp_path: Path) -> None:
+        path = tmp_path / "positions.csv"
+        path.mkdir()
+
+        with pytest.raises(IsADirectoryError) as caught:
+            read_positions(_layout(tmp_path, path, headered=True))
+
+        assert any("tissue positions" in note for note in caught.value.__notes__)
+
 
 class TestPrepareTable:
     """Align count order while preserving CSR-array sparsity and extra position rows."""
@@ -128,7 +139,9 @@ class TestPrepareTable:
     def test_aligns_positions_and_populates_spatial_metadata(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "positions.csv"
         path.write_text(_position_rows(), encoding="utf-8")
-        layout = _layout(tmp_path, path, headered=False)
+        layout = _layout(
+            tmp_path, path, headered=False, metadata=CountMetadata("sample", "chemistry", "spaceranger-2.1.0")
+        )
         positions = read_positions(layout)
         adata = AnnData(
             X=sparse.csr_array(np.asarray([[1, 0], [0, 2]], dtype=np.float32)),
@@ -141,7 +154,7 @@ class TestPrepareTable:
             layout,
             positions,
             dataset_id="sample",
-            metadata=CountMetadata("sample", "chemistry", "spaceranger-2.1.0"),
+            pixel_frame="sample_pixels",
             scale_factors=ScaleFactors(0.5, 0.25, 6.0, {"spot_diameter_fullres": 6.0}),
             make_var_names_unique=True,
         )
@@ -164,6 +177,12 @@ class TestPrepareTable:
                 "scalefactors": {"spot_diameter_fullres": 6.0},
             }
         }
+        assert result.adata.uns["spatialdata_io_positions"]["coordinates"]["spatial_pixels"] == {
+            "axes": ["x", "y"],
+            "units": "pixel",
+            "frame": "sample_pixels",
+            "position": "full-resolution spot centre",
+        }
 
     def test_rejects_count_barcode_missing_from_positions(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "positions.csv"
@@ -180,21 +199,50 @@ class TestPrepareTable:
                 layout,
                 read_positions(layout),
                 dataset_id="sample",
-                metadata=CountMetadata("sample", None, None),
+                pixel_frame="sample_pixels",
                 scale_factors=ScaleFactors(0.5, 0.25, 6.0, {}),
                 make_var_names_unique=True,
             )
+
+    def test_rejects_duplicate_count_barcodes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "positions.csv"
+        path.write_text("a,1,0,0,1,2\n", encoding="utf-8")
+        layout = _layout(tmp_path, path, headered=False)
+        with pytest.warns(UserWarning, match="Observation names are not unique"):
+            adata = AnnData(X=sparse.csr_array((2, 1), dtype=np.float32), obs=pd.DataFrame(index=["a", "a"]))
+        mocker.patch("spatialdata_io.readers.visium._tables._read_counts", return_value=adata)
+
+        with pytest.raises(ReaderFormatError, match=r"duplicate observation barcodes \('a',\)") as caught:
+            prepare_table(
+                layout,
+                read_positions(layout),
+                dataset_id="sample",
+                pixel_frame="sample_pixels",
+                scale_factors=ScaleFactors(0.5, 0.25, 6.0, {}),
+                make_var_names_unique=True,
+            )
+
+        assert caught.value.path == layout.counts.path
+        assert caught.value.context.artifact == "count matrix"
 
 
 class TestLinkTable:
     """Parse linkage once against an independent materialized shape index."""
 
-    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
-        path = ArtifactFile(tmp_path / "counts.h5")
+    def test_count_precision_error_identifies_source_and_version(self, tmp_path: Path) -> None:
+        layout = _layout(
+            tmp_path,
+            tmp_path / "positions.csv",
+            headered=False,
+            metadata=CountMetadata(None, None, "spaceranger-2.1.0"),
+        )
         table = AnnData(sparse.csr_array([[2**53 + 1]], dtype=np.int64))
+
         with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            link_table(table, dataset_id="sample", shape_index=pd.Index(["0"]), counts_path=path)
-        assert caught.value.path == path
+            link_table(table, dataset_id="sample", shape_index=pd.Index(["0"]), layout=layout)
+
+        assert caught.value.path == layout.counts.path
+        assert caught.value.context == ReaderErrorContext("visium", "count matrix", "2.1.0")
 
     def test_links_exact_barcode_membership(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "positions.csv"
@@ -210,7 +258,7 @@ class TestLinkTable:
             layout,
             read_positions(layout),
             dataset_id="sample",
-            metadata=CountMetadata("sample", None, None),
+            pixel_frame="sample_pixels",
             scale_factors=ScaleFactors(0.5, 0.25, 6.0, {}),
             make_var_names_unique=True,
         )
@@ -219,7 +267,7 @@ class TestLinkTable:
             prepared.adata,
             dataset_id="sample",
             shape_index=pd.Index(["a"], name="spot_id"),
-            counts_path=layout.counts.path,
+            layout=layout,
         )
 
         assert result is adata
@@ -235,12 +283,10 @@ class TestLinkTable:
             layout,
             read_positions(layout),
             dataset_id="sample",
-            metadata=CountMetadata("sample", None, None),
+            pixel_frame="sample_pixels",
             scale_factors=ScaleFactors(0.5, 0.25, 6.0, {}),
             make_var_names_unique=True,
         )
 
         with pytest.raises(ReaderFormatError, match="target-instance membership"):
-            link_table(
-                prepared.adata, dataset_id="sample", shape_index=pd.Index(["other"]), counts_path=layout.counts.path
-            )
+            link_table(prepared.adata, dataset_id="sample", shape_index=pd.Index(["other"]), layout=layout)

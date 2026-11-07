@@ -19,6 +19,7 @@ codex.md
 macsima.md
 stereoseq.md
 xenium.md
+visium.md
 visium_hd.md
 raster_options.md
 dataset_paths.md

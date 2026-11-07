@@ -27,7 +27,7 @@ class CosmxFixture:
     """Identify one written export and its scientific oracles."""
 
     root: Path
-    dataset_id: str
+    file_prefix: str
     profile: Literal["flat_2021", "atomx"]
     features: tuple[str, ...]
 
@@ -155,7 +155,7 @@ def write_cosmx_dataset(  # noqa: PLR0913, RUF100 - Independent format variants 
     compressed: bool = False,
     rasters: bool = True,
     positions: bool = True,
-    dataset_id: str = "Run_1",
+    file_prefix: str = "Run_1",
 ) -> CosmxFixture:
     """Write counts, metadata, positions, rasters, and transcripts for FOVs 2 and 10."""
     path.mkdir(parents=True, exist_ok=True)
@@ -163,14 +163,14 @@ def write_cosmx_dataset(  # noqa: PLR0913, RUF100 - Independent format variants 
     controls = ("NegPrb1",) if profile == "flat_2021" else ("Negative1", "SystemControl1")
     features = ("GeneB", "HLA-A", "GeneA", *controls)
 
-    _write_csv(path / f"{dataset_id}_metadata_file{suffix}", _metadata(profile), compressed=compressed)
-    _write_csv(path / f"{dataset_id}_exprMat_file{suffix}", _counts(features, len(controls)), compressed=compressed)
+    _write_csv(path / f"{file_prefix}_metadata_file{suffix}", _metadata(profile), compressed=compressed)
+    _write_csv(path / f"{file_prefix}_exprMat_file{suffix}", _counts(features, len(controls)), compressed=compressed)
     if positions:
-        _write_csv(path / f"{dataset_id}_fov_positions_file{suffix}", _positions(profile), compressed=compressed)
-    _write_csv(path / f"{dataset_id}_tx_file{suffix}", _transcripts(profile, controls[0]), compressed=compressed)
+        _write_csv(path / f"{file_prefix}_fov_positions_file{suffix}", _positions(profile), compressed=compressed)
+    _write_csv(path / f"{file_prefix}_tx_file{suffix}", _transcripts(profile, controls[0]), compressed=compressed)
     if rasters:
         _write_rasters(path)
-    return CosmxFixture(path, dataset_id, profile, features)
+    return CosmxFixture(path, file_prefix, profile, features)
 
 
 def write_extreme_cosmx_dataset(path: Path, *, placement: bool) -> Path:

@@ -41,7 +41,9 @@ Rules that hold in both modes:
   never data. Other hidden files are treated like any other file.
 - A directory that cannot be listed, also a subdirectory of a recursively
   searched directory (Xenium `analysis/`, MACSima folders), fails with the
-  reader and directory named in the error instead of being skipped.
+  reader and directory named in the error instead of being skipped. MACSima,
+  which ignores hidden paths, does not enter subdirectories whose names start
+  with `.`, so an unreadable hidden folder there does not fail the read.
 
 ## Known limitation: multi-file OME-TIFF sets
 

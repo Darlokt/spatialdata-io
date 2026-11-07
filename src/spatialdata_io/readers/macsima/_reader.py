@@ -1,4 +1,10 @@
-"""Assemble processed MACSima channel exports into lazy images and channel tables."""
+"""Assemble processed MACSima channel exports into lazy images and channel tables.
+
+The public function only orchestrates: validate the options in signature
+order, discover the stacks, inspect every candidate TIFF once, plan each
+stack's channels, then build one image and one metadata table per stack (and
+per split nuclei stack) and record provenance.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +34,7 @@ if TYPE_CHECKING:
 
 
 _STACK_CONTEXT = ReaderErrorContext("macsima", "channel stack")
-_LAYOUT_CONTEXT = ReaderErrorContext("macsima", "layout")
+_LAYOUT_CONTEXT = ReaderErrorContext("macsima", "dataset layout")
 
 
 def _read_sources(stack: StackFiles) -> list[ChannelSource]:
@@ -61,9 +67,11 @@ def _insert_unique(
 ) -> None:
     """Insert one image and reject a name that another stack already generated.
 
-    SpatialData element names must be unique ignoring case.
+    A split nuclei stack adds ``<stack>_nuclei_image``, which can equal the
+    image of a folder named ``<stack>_nuclei``. SpatialData compares element
+    names with ``str.lower()``.
     """
-    if any(existing.casefold() == name.casefold() for existing in elements):
+    if any(existing.lower() == name.lower() for existing in elements):
         raise ReaderFormatError(
             context=_LAYOUT_CONTEXT,
             path=stack.directory,
@@ -86,26 +94,27 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
-    """Read processed MACSima (MACSiQView) single-channel OME-TIFF exports.
+    """Read processed MACSima (MACS iQ View) single-channel OME-TIFF exports.
 
-    Every channel is one single-plane OME-TIFF; file names are not interpreted.
-    Channel metadata comes from OME map annotations written by MACSiQView
-    software major 0 or 1, from the OME plate well and, for major 0, from the
-    screen reagent. A single-folder layout stacks every TIFF below ``path``::
+    Supported layouts; file names are never interpreted::
 
-        path/
-        ├── <channel>.tif
-        └── <subfolder>/<channel>.ome.tif
+        run/                              experiment/
+        ├── <channel>.tif                 ├── <stack_a>/<channel>.tif
+        └── <subfolder>/<channel>.tif     └── <stack_b>/<channel>.tiff
 
-    A multiple-folder layout makes one stack per immediate subfolder::
-
-        path/
-        ├── <stack_a>/<channel>.tif
-        └── <stack_b>/<channel>.tiff
-
-    TIFF files are found recursively by a case-insensitive ``.tif``/``.tiff``
-    suffix. Paths beginning with ``.`` and ``__MACOSX`` are ignored, and TIFFs
-    without OME-XML are skipped with a warning.
+    - ``"processed_single_folder"`` stacks every TIFF below ``path``;
+      ``"processed_multiple_folders"`` makes one stack per immediate
+      subfolder and ignores files in ``path`` itself.
+    - TIFFs have a case-insensitive ``.tif`` or ``.tiff`` suffix. Paths
+      starting with ``.`` and ``__MACOSX`` are ignored, TIFFs without
+      OME-XML are skipped with a warning, and a dangling symlink fails.
+    - Every channel file holds one plane. The marker, cycle, acquisition
+      type, ROI, fluorophore, clone and exposure come from the OME map
+      annotations of MACS iQ View software major 0 or 1, the well from the
+      OME plate and, for major 0, marker and clone from the screen reagent.
+    - Each stack is named after its folder. A folder name that is not a
+      valid SpatialData element name is repaired with a warning (``my run``
+      becomes ``my_run``); folders whose names then agree ignoring case fail.
 
     Parameters
     ----------
@@ -119,7 +128,7 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
         Exact subfolder names omitted in multiple-folder mode. Each name must
         exist; the option is invalid in single-folder mode.
     exclude_cycles
-        Acquisition cycles to omit, exactly as recorded in the metadata.
+        Non-negative acquisition cycles to omit, as recorded in the metadata.
     include_cycle_in_channel_names
         Name channels ``"R<cycle> <name>"`` instead of ``"<name>"``.
     nuclei_channel_name
@@ -148,75 +157,87 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     Returns
     -------
     spatialdata.SpatialData
-        For each stack named after its folder (made a valid element name):
+        Per stack, with ``<stack>`` its (repaired) folder name:
 
-        - ``<stack>_image``: a lazy ``(c, y, x)`` image in source dtype. Channels
-          are ordered by cycle, then name, then file path. Names are the marker
-          (bleach images add ``_background``), optionally prefixed with the
-          cycle; repeated names are numbered in that order, for example
-          ``DAPI (1)`` and ``DAPI (2)``.
-        - ``<stack>_table``: ``AnnData`` with ``X=None``, no observations, and
-          one ``var`` row per image channel (``var_names`` are the channel
-          names). Columns: ``name`` (the marker, with ``_background`` for
-          bleach images) and ``imagetype`` (``stain``, ``bleach`` or
-          ``autofluorescence``) strings; ``cycle`` int64; ``well``,
-          ``fluorophore`` and ``clone`` strings and ``ROI`` nullable Int64,
-          NA when absent; ``exposure`` float64 milliseconds, NaN when absent.
-          Exposures must be non-negative; nonzero source text becoming zero
-          in float64 fails.
-          Cycle and ROI values are non-negative and at most ``2**63 - 1``.
-          The table annotates no element.
-        - ``<stack>_nuclei_image`` and ``<stack>_nuclei_table`` when the
-          nuclei stack is split off. A channel has the same name in both
-          images.
+        - ``images["<stack>_image"]``: lazy ``(c, y, x)`` image in the source
+          dtype. Channels are ordered by cycle, then name, then file path, and
+          named after the marker (bleach images add ``_background``),
+          optionally prefixed with the cycle. Repeated names are numbered in
+          that order, for example ``DAPI (1)`` and ``DAPI (2)``.
+        - ``tables["<stack>_table"]``: ``AnnData`` with ``X=None``, no
+          observations and one ``var`` row per image channel; ``var_names``
+          are the channel names and the table annotates no element. Columns:
+          ``name`` (the marker, with ``_background`` for bleach images) and
+          ``imagetype`` (``stain``, ``bleach`` or ``autofluorescence``)
+          strings; ``cycle`` int64; ``well``, ``fluorophore`` and ``clone``
+          strings and ``ROI`` nullable Int64, NA when absent; ``exposure``
+          float64 milliseconds, NaN when absent.
+        - ``images["<stack>_nuclei_image"]`` and
+          ``tables["<stack>_nuclei_table"]`` when the nuclei stack is split
+          off. A channel has the same name in both images.
 
-        One selected stack uses ``global`` in micrometers through the isotropic
-        OME pixel size (µm or nm), finite and strictly positive after conversion.
-        Multiple independent stacks use their own
-        ``<stack>`` frames; each nuclei stack shares its parent frame. Channels
-        are placed on one canvas by their integral
-        OME plane position in pixels (absent positions are the origin). Offset
-        validation uses decoded OME float64 values, without recovering source
-        XML precision. The
-        canvas starts at the smallest position and spans every channel;
-        uncovered pixels are zero, with a warning. A position shared by all
-        channels is not represented in the transformation. The reader name
-        and, when all channels agree, the MACSiQView software version are
-        recorded in ``attrs``.
+        ``attrs`` record the reader, the package version and, when all
+        returned channels agree, the MACS iQ View software version as the
+        format version.
 
     Raises
     ------
-    FileNotFoundError, NotADirectoryError
-        ``path`` is missing or not a directory.
-    ValueError
-        No channel TIFFs are found; element names collide; a TIFF or its
-        OME-XML is malformed; OME content violates the v0/v1 contract
-        (missing marker, cycle or acquisition type, conflicting annotation
-        values, unsupported software version, units or plane positions, more
-        than one plane); the channels of a stack differ in dtype, pixel size,
-        software major, well or ROI; or option values are invalid, including
-        ``exclude_cycles`` removing all channels of a stack and
-        ``scale_factors`` exceeding the image.
     TypeError
-        Public options have invalid types.
+        If an option has the wrong type.
+    ValueError
+        If an option has an invalid value, including ``exclude_folder_names``
+        that match no folder, ``exclude_cycles`` removing every channel of a
+        stack and ``scale_factors`` exceeding the image.
+    FileNotFoundError, NotADirectoryError
+        If ``path`` is missing or not a directory, or a TIFF is a dangling
+        symlink.
+    ValueError
+        A contextual ``ReaderFormatError`` naming the reader, artifact, path
+        and, once known, the detected software version if no channel TIFF is
+        found; element names collide; OME content violates the major 0 or 1
+        contract (missing marker, cycle or acquisition type, conflicting
+        annotation values, unsupported software version, units, plane
+        positions or values, more than one plane); or the channels of a stack
+        differ in dtype, pixel size, software major, well or ROI. A malformed
+        TIFF or OME-XML raises ``RasterFormatError``.
+
+    Warns
+    -----
+    UserWarning
+        When a folder name is repaired into an element name, TIFFs without
+        OME-XML or subfolders without TIFFs are skipped, or channels are
+        zero-padded onto a common canvas.
 
     Notes
     -----
-    Each TIFF is inspected once. Construction executes no pixel tasks. The
-    shared TIFF reader uses native tiles or whole-row bands targeting 16 MiB
-    of decoded data; a larger native strip remains one source chunk. Output
-    rechunking can require neighboring tiles or bands beyond a requested crop.
-    A whole-plane source strip can require whole-plane decoding. Source files
-    must remain available. Vendor-written pyramid levels are not used.
+    Coordinates: every stack is calibrated in micrometres by its square OME
+    pixel size, declared in µm or nm; a missing, non-square or
+    nonpositive size fails. One stack uses ``global``. Several stacks are
+    not registered to each other, so each keeps its own micrometre frame
+    named ``<stack>``; a nuclei stack shares its parent's frame. Channels are
+    placed on one pixel canvas by their integral OME plane positions in
+    pixels (absent positions are the origin). The canvas starts at the
+    smallest position and spans every channel; uncovered pixels are zero.
+    A position shared by all channels is not represented in the
+    transformation.
+
+    Laziness: each TIFF is inspected once and construction executes no pixel
+    tasks. Source chunks follow native tiles or whole-row bands of about
+    16 MiB of decoded pixels; a larger native strip stays one chunk, so a
+    plane stored as one strip is decoded whole. Rechunking to ``chunks`` can
+    make a small crop read neighbouring tiles or bands. Keep the files
+    available until the pixels are computed or written. Vendor-written
+    pyramid levels are not used.
     """
-    raster = make_raster_options(scale_factors, chunks)
+    excluded_folders = validate_layout_options(parsing_style, exclude_folder_names)
     channel_options = make_channel_options(
         exclude_cycles=exclude_cycles,
         include_cycle_in_channel_names=include_cycle_in_channel_names,
         nuclei_channel_name=nuclei_channel_name,
         split_threshold_nuclei_channel=split_threshold_nuclei_channel,
     )
-    excluded_folders = validate_layout_options(parsing_style, exclude_folder_names)
+    raster = make_raster_options(scale_factors, chunks)
+    # Discovery validates path_policy before touching the filesystem.
     layout = discover_layout(
         path, parsing_style=parsing_style, exclude_folder_names=excluded_folders, path_policy=path_policy
     )
@@ -226,6 +247,10 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     versions: set[str] = set()
     for stack in layout.stacks:
         plan = plan_stack(stack, _read_sources(stack), channel_options)
+        # Every selected channel is in the main stack, the nuclei stack or both.
+        versions.update(channel.source.software_version for channel in (*plan.channels, *(plan.nuclei or ())))
+        # Stacks are calibrated in micrometres; unregistered stacks keep separate frames.
+        frame = "global" if len(layout.stacks) == 1 else plan.name
 
         # The optional nuclei stack shares the main stack's canvas and frame.
         selections = {"": plan.channels}
@@ -233,18 +258,12 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
             selections["_nuclei"] = plan.nuclei
 
         for suffix, channels in selections.items():
-            image = make_image(
-                channels,
-                frame="global" if len(layout.stacks) == 1 else plan.name,
-                pixel_size_um=plan.pixel_size_um,
-                raster=raster,
-            )
+            image = make_image(channels, frame=frame, pixel_size_um=plan.pixel_size_um, raster=raster)
             _insert_unique(images, f"{plan.name}{suffix}_image", image, stack=stack)
             tables[f"{plan.name}{suffix}_table"] = make_channel_table(channels)
-            versions.update(channel.source.software_version for channel in channels)
 
     result = SpatialData(images=images, tables=tables)
-    # Channels from different MACSiQView releases have no single format version.
+    # Channels from different MACS iQ View releases have no single format version.
     format_version = next(iter(versions)) if len(versions) == 1 else None
     set_reader_provenance(result.attrs, reader="macsima", format_version=format_version)
     return result

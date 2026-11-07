@@ -1,7 +1,41 @@
-"""Scale-factor and HDF5 metadata parsing for Visium."""
+"""Read the Space Ranger scale factors and the identity attributes of a 10x HDF5 count matrix.
+
+``spatial/scalefactors_json.json`` relates the full-resolution tissue image to
+its two downsampled PNGs and gives display diameters in full-resolution
+pixels, for example::
+
+    {
+        "tissue_hires_scalef": 0.17011142,  # full-resolution px -> hires px
+        "tissue_lowres_scalef": 0.051033426,  # full-resolution px -> lowres px
+        "spot_diameter_fullres": 89.43834961,  # display diameter of a spot
+        "fiducial_diameter_fullres": 144.48502629,
+    }
+
+The three named keys are required, finite and positive; every key, including
+any not listed, is kept unchanged in ``uns["spatial"]``. Space Ranger
+estimates the diameters from the fiducial registration and the nominal spot
+size, not from the image's pixel size, so they draw spots but do not
+calibrate the image in micrometres. Both scale factors must have finite
+inverses, which register the PNGs to the full-resolution frame, and half the
+spot diameter must stay a positive float64 radius. See
+https://www.10xgenomics.com/support/software/space-ranger/latest/analysis/outputs/spatial-outputs
+
+A 10x HDF5 count matrix carries the run's identity as root attributes::
+
+    library_ids = [b"V1_Adult_Mouse_Brain"]  # exactly one; optional
+    chemistry_description = b"Spatial 3' v1"  # optional
+    software_version = b"spaceranger-2.1.0"  # optional
+
+Text may be stored as fixed- or variable-length strings and must be nonempty
+UTF-8 (shared ``decode_hdf5_text``). The software version normalized to
+``<major>.<minor>.<patch>`` (``2.1.0``) is the detected format version; other
+spellings are kept as text but give no format version. A MEX count directory
+has no such attributes.
+"""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING
@@ -10,21 +44,21 @@ import h5py
 import numpy as np
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.metadata import read_json_object
-from spatialdata_io.readers.visium._layout import H5Counts
+from spatialdata_io.readers._utils.metadata import decode_hdf5_text, read_json_object
 
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.visium._layout import CountsLayout
 
 HIRES_SCALE = "tissue_hires_scalef"
 LOWRES_SCALE = "tissue_lowres_scalef"
 SPOT_DIAMETER = "spot_diameter_fullres"
 
+_SOFTWARE_VERSION = re.compile(r"(?:spaceranger-)?(\d+\.\d+\.\d+)")
+
 
 @dataclass(frozen=True, slots=True)
 class ScaleFactors:
-    """Validated transformations plus the complete owned vendor mapping."""
+    """Validated scale factors plus the complete owned vendor mapping."""
 
     hires: float
     lowres: float
@@ -34,155 +68,92 @@ class ScaleFactors:
 
 @dataclass(frozen=True, slots=True)
 class CountMetadata:
-    """Small reader-owned metadata copied from a closed HDF5 source."""
+    """Identity attributes copied from a closed 10x HDF5 count matrix."""
 
     library_id: str | None
     chemistry_description: str | None
     software_version: str | None
 
+    @property
+    def format_version(self) -> str | None:
+        """Return the Space Ranger version as ``<major>.<minor>.<patch>``, if recognized."""
+        if self.software_version is None:
+            return None
+        match = _SOFTWARE_VERSION.fullmatch(self.software_version)
+        return None if match is None else match[1]
 
-def _context(artifact: str) -> ReaderErrorContext:
-    return ReaderErrorContext(reader="visium", artifact=artifact)
 
-
-def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile) -> float:
+def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile, context: ReaderErrorContext) -> float:
+    """Return one required finite positive JSON number as float."""
     value = values.get(key)
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise ReaderFormatError(
-            context=_context("scale factors"),
-            found=f"{key!r}={value!r}",
-            expected=f"a finite positive numeric {key!r}",
-            path=path,
-        )
-
     # The strict JSON reader rejects integers beyond the float range.
-    result = float(value)
-
-    if not isfinite(result) or result <= 0:
+    result = float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+    if result is None or not isfinite(result) or result <= 0:
         raise ReaderFormatError(
-            context=_context("scale factors"),
-            found=f"{key!r}={value!r}",
-            expected=f"a finite positive numeric {key!r}",
-            path=path,
+            context=context, found=f"{key!r}={value!r}", expected=f"a finite positive numeric {key!r}", path=path
         )
-
     return result
 
 
-def read_scale_factors(path: ArtifactFile) -> ScaleFactors:
+def read_scale_factors(path: ArtifactFile, *, version: str | None) -> ScaleFactors:
     """Read and validate the Space Ranger scale-factor object."""
-    values = read_json_object(path, context=_context("scale factors"))
-    hires = _positive_number(values, HIRES_SCALE, path=path)
-    lowres = _positive_number(values, LOWRES_SCALE, path=path)
-    spot_diameter = _positive_number(values, SPOT_DIAMETER, path=path)
+    context = ReaderErrorContext("visium", "scale factors", version)
+    values = read_json_object(path, context=context)
+    hires = _positive_number(values, HIRES_SCALE, path=path, context=context)
+    lowres = _positive_number(values, LOWRES_SCALE, path=path, context=context)
+    spot_diameter = _positive_number(values, SPOT_DIAMETER, path=path, context=context)
 
     # Source positivity alone does not guarantee representable inverse transforms.
-    for key, inverse in ((HIRES_SCALE, 1.0 / hires), (LOWRES_SCALE, 1.0 / lowres)):
-        if not isfinite(inverse):
+    for key, scale in ((HIRES_SCALE, hires), (LOWRES_SCALE, lowres)):
+        if not isfinite(1.0 / scale):
             raise ReaderFormatError(
-                context=_context("scale factors"),
+                context=context,
                 found=f"nonfinite inverse of {key!r}",
                 expected="a finite positive inverse scale",
                 path=path,
             )
     if spot_diameter / 2.0 == 0:
         raise ReaderFormatError(
-            context=_context("scale factors"),
+            context=context,
             found=f"{SPOT_DIAMETER!r} underflows when divided by two",
             expected="a positive representable circle radius",
             path=path,
         )
 
-    return ScaleFactors(
-        hires=hires,
-        lowres=lowres,
-        spot_diameter=spot_diameter,
-        values=values,
-    )
+    return ScaleFactors(hires=hires, lowres=lowres, spot_diameter=spot_diameter, values=values)
 
 
-def _text(value: object, *, attribute: str, path: ArtifactFile) -> str:
-    if isinstance(value, bytes | np.bytes_):
-        try:
-            result = bytes(value).decode("utf-8", errors="strict")
-        except UnicodeDecodeError as error:
-            raise ReaderFormatError(
-                context=_context("count metadata"),
-                found=f"non-UTF-8 bytes in attribute {attribute!r}",
-                expected="UTF-8 text",
-                path=path,
-            ) from error
-    elif isinstance(value, str | np.str_):
-        result = str(value)
-    else:
-        raise ReaderFormatError(
-            context=_context("count metadata"),
-            found=f"attribute {attribute!r} with value type {type(value).__name__}",
-            expected="UTF-8 text",
-            path=path,
-        )
-
-    if not result:
-        raise ReaderFormatError(
-            context=_context("count metadata"),
-            found=f"attribute {attribute!r} with {len(result)} characters",
-            expected="nonempty text",
-            path=path,
-        )
-
-    return result
-
-
-def _optional_text(attributes: h5py.AttributeManager, name: str, *, path: ArtifactFile) -> str | None:
-    return None if name not in attributes else _text(attributes[name], attribute=name, path=path)
-
-
-def _library_id(attributes: h5py.AttributeManager, *, path: ArtifactFile) -> str | None:
+def _library_id(attributes: h5py.AttributeManager, *, path: ArtifactFile, context: ReaderErrorContext) -> str | None:
+    """Return the single library ID of single-library ``spaceranger count`` output."""
     if "library_ids" not in attributes:
         return None
 
     raw: object = attributes["library_ids"]
-    if isinstance(raw, np.ndarray) and raw.size != 1:
-        raise ReaderFormatError(
-            context=_context("count metadata"),
-            found=f"{raw.size} library IDs",
-            expected="exactly one library ID from single-library spaceranger count output",
-            path=path,
-        )
-
-    value = raw.reshape(-1)[0] if isinstance(raw, np.ndarray) else raw
-    return _text(value, attribute="library_ids", path=path)
-
-
-def read_count_metadata(counts: CountsLayout) -> CountMetadata:
-    """Copy optional HDF5 metadata, or return empty MEX metadata."""
-    if not isinstance(counts, H5Counts):
-        return CountMetadata(library_id=None, chemistry_description=None, software_version=None)
-
-    try:
-        with h5py.File(counts.path, mode="r") as source:
-            return CountMetadata(
-                library_id=_library_id(source.attrs, path=counts.path),
-                chemistry_description=_optional_text(source.attrs, "chemistry_description", path=counts.path),
-                software_version=_optional_text(source.attrs, "software_version", path=counts.path),
+    if isinstance(raw, np.ndarray):
+        if raw.size != 1:
+            raise ReaderFormatError(
+                context=context,
+                found=f"{raw.size} library IDs",
+                expected="exactly one library ID from single-library spaceranger count output",
+                path=path,
             )
+        raw = raw.reshape(-1)[0]
+    return decode_hdf5_text(raw, attribute="library_ids", context=context, path=path)
+
+
+def read_count_metadata(path: ArtifactFile) -> CountMetadata:
+    """Copy the identity attributes of a 10x HDF5 count matrix and close it."""
+    context = ReaderErrorContext("visium", "count metadata")
+    try:
+        with h5py.File(path, mode="r") as source:
+            attributes = source.attrs
+            chemistry, software = (
+                None
+                if name not in attributes
+                else decode_hdf5_text(attributes[name], attribute=name, context=context, path=path)
+                for name in ("chemistry_description", "software_version")
+            )
+            return CountMetadata(_library_id(attributes, path=path, context=context), chemistry, software)
     except OSError as error:
-        add_reader_context(error, context=_context("count metadata"), path=counts.path)
+        add_reader_context(error, context=context, path=path)
         raise
-
-
-def resolve_dataset_id(explicit: str | None, counts: CountsLayout, metadata: CountMetadata) -> str:
-    """Resolve and validate the stable element/coordinate-system identifier."""
-    inferred = metadata.library_id or counts.filename_prefix
-    value = explicit if explicit is not None else inferred
-    if value is None:
-        message = "dataset_id is required when the selected count source contains no library identifier."
-        raise ValueError(message)
-    if not isinstance(value, str):
-        message = f"dataset_id must be a string or None. Found {type(value).__name__}."
-        raise TypeError(message)
-    if not value or value != value.strip() or any(character in value for character in ("/", "\\", "\x00")):
-        message = "dataset_id must be nonempty, trimmed, and contain no path separators or NUL characters."
-        raise ValueError(message)
-
-    return value

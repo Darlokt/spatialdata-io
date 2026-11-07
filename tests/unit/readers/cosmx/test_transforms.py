@@ -15,6 +15,8 @@ from spatialdata_io.readers.cosmx._transforms import (
     Placement,
     Sign,
     _midpoint,
+    fov_frame,
+    global_frame,
     raster_to_local,
     solve_placements,
 )
@@ -249,3 +251,19 @@ class TestSolvePlacements:
                 required=frozenset({fov}),
                 positions={fov: FovPosition(1.7e308, 100, 5e307, 0.5)},
             )
+
+
+class TestFovFrame:
+    """Each FOV's local pixel frame is named descriptively by its number."""
+
+    def test_name(self) -> None:
+        assert fov_frame(2) == "fov_2_pixels"
+        assert fov_frame(10) == "fov_10_pixels"
+
+
+class TestGlobalFrame:
+    """Global is micrometres; without a scale the global frame is a pixel frame."""
+
+    def test_names(self) -> None:
+        assert global_frame(None) == "global_pixels"
+        assert global_frame(0.18) == "global"

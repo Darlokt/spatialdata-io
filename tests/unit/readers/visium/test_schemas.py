@@ -8,10 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.visium._schemas import POSITION_COLUMNS, classify_position_row, normalize_positions
 
 _PATH = Path("positions.csv")
+_CONTEXT = ReaderErrorContext("visium", "tissue positions", "2.1.0")
 
 
 def _frame() -> pd.DataFrame:
@@ -35,11 +36,11 @@ class TestClassifyPositionRow:
     @pytest.mark.parametrize("columns", [POSITION_COLUMNS, tuple(reversed(POSITION_COLUMNS))])
     def test_named_fields_accept_order_and_extensions(self, columns: tuple[str, ...]) -> None:
         """Named fields accept order and extensions."""
-        assert classify_position_row(("quality", *columns), path=_PATH) == "headered"
+        assert classify_position_row(("quality", *columns), path=_PATH, context=_CONTEXT) == "headered"
 
     def test_headerless_fields_have_positional_meaning(self) -> None:
         """Headerless fields have positional meaning."""
-        assert classify_position_row(("002-1", "1", "0", "0", "20", "30"), path=_PATH) == "headerless"
+        assert classify_position_row(("002-1", "1", "0", "0", "20", "30"), path=_PATH, context=_CONTEXT) == "headerless"
 
     @pytest.mark.parametrize(
         ("columns", "message"),
@@ -54,8 +55,11 @@ class TestClassifyPositionRow:
     )
     def test_rejects_ambiguous_and_malformed_fields(self, columns: tuple[str, ...], message: str) -> None:
         """Rejects ambiguous and malformed fields."""
-        with pytest.raises(ReaderFormatError, match=message):
-            classify_position_row(columns, path=_PATH)
+        with pytest.raises(ReaderFormatError, match=message) as caught:
+            classify_position_row(columns, path=_PATH, context=_CONTEXT)
+
+        assert caught.value.context is _CONTEXT
+        assert caught.value.path == _PATH
 
 
 class TestNormalizePositions:
@@ -63,7 +67,7 @@ class TestNormalizePositions:
 
     def test_explicit_arrow_storage_and_order(self) -> None:
         """Explicit arrow storage and order."""
-        result = normalize_positions(_frame(), path=_PATH)
+        result = normalize_positions(_frame(), path=_PATH, context=_CONTEXT)
 
         assert result.index.tolist() == ["002-1", "001-1"]
         assert result.index.name == "barcode"
@@ -86,7 +90,7 @@ class TestNormalizePositions:
         frame = _frame()
         frame.loc[0, "array_row"] = token
 
-        result = normalize_positions(frame, path=_PATH)
+        result = normalize_positions(frame, path=_PATH, context=_CONTEXT)
 
         assert int(result["array_row"].iloc[0]) == expected
         assert int(result["array_row"].iloc[1]) == 1
@@ -131,13 +135,16 @@ class TestNormalizePositions:
         frame = _frame()
         frame.loc[0, column] = value
 
-        with pytest.raises(ReaderFormatError, match=message):
-            normalize_positions(frame, path=_PATH)
+        with pytest.raises(ReaderFormatError, match=message) as caught:
+            normalize_positions(frame, path=_PATH, context=_CONTEXT)
+
+        assert caught.value.context is _CONTEXT
+        assert "detected version '2.1.0'" in str(caught.value)
 
     def test_rejects_empty_positions(self) -> None:
         """Rejects empty positions."""
         with pytest.raises(ReaderFormatError, match="zero rows"):
-            normalize_positions(_frame().iloc[:0], path=_PATH)
+            normalize_positions(_frame().iloc[:0], path=_PATH, context=_CONTEXT)
 
     @pytest.mark.parametrize("column", ["in_tissue", "array_row", "array_col"])
     @pytest.mark.parametrize("token", ["1.0", "1e0", "9007199254740993.0"])
@@ -146,14 +153,14 @@ class TestNormalizePositions:
         frame.loc[0, column] = token
 
         with pytest.raises(ReaderFormatError, match="integer tokens"):
-            normalize_positions(frame, path=_PATH)
+            normalize_positions(frame, path=_PATH, context=_CONTEXT)
 
     def test_float_text_conversion_uses_correct_rounding(self) -> None:
         """Float text conversion uses correct rounding."""
         frame = _frame()
         frame.loc[0, "pxl_row_in_fullres"] = "0.10000000000000002"
 
-        result = normalize_positions(frame, path=_PATH)
+        result = normalize_positions(frame, path=_PATH, context=_CONTEXT)
 
         assert result["pxl_row_in_fullres"].iloc[0] == float("0.10000000000000002")
 
@@ -162,6 +169,6 @@ class TestNormalizePositions:
         frame = _frame()
         frame.loc[0, "pxl_row_in_fullres"] = str(2**54)
 
-        result = normalize_positions(frame, path=_PATH)
+        result = normalize_positions(frame, path=_PATH, context=_CONTEXT)
 
         assert result["pxl_row_in_fullres"].iloc[0] == float(2**54)

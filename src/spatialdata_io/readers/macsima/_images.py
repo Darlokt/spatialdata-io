@@ -1,4 +1,11 @@
-"""Construct lazy, padded MACSima channel stacks as SpatialData images."""
+"""Construct lazy, padded MACSima channel stacks as SpatialData images.
+
+Each channel TIFF is one ``(y, x)`` plane read lazily through the shared TIFF
+reader, zero-padded onto the stack canvas and stacked as ``(c, y, x)`` in
+channel order. The image maps pixels to micrometres with the stack's square
+OME pixel size, ``Scale([size, size])``, into the stack's coordinate system.
+Channels are named by the plan; MACSima planes are never RGB.
+"""
 
 from __future__ import annotations
 

@@ -221,8 +221,8 @@ these pixel fields are not also `obs` columns. Canonical physical `spatial` is
 absent because display diameters and visualization scale factors do not prove
 a physical ruler. `uns["spatial"]` retains the
 library's metadata and vendor scale factors without embedded images. No
-expression layers or `raw` are created. See the
-[API](generated/spatialdata_io.visium.rst) for image selection and overrides.
+expression layers or `raw` are created. See [Visium](visium.md) for layouts,
+images, names and coordinate systems.
 
 ### Curio
 
@@ -462,13 +462,15 @@ otherwise positional string names are generated. `var` has no columns.
 `region` even in unlinked mode. Optional `Area`, `Area.um2`, `AspectRatio`,
 `Width`, `Height`, and `Mean.*`/`Max.*` stain summaries are nullable float64;
 other metadata stay text. Centre columns leave `obs`:
-`obsm["spatial_pixels"]` is local XY pixels, and `obsm["global"]` is
-global XY pixels, both float64. Local row frames identify the FOV; the native
+`obsm["spatial_pixels"]` is local XY pixels, and `obsm["spatial_global_pixels"]`
+is global XY pixels, both float64. Local row frames `fov_<n>_pixels` identify the FOV; the native
 global declaration uses `global_pixels`. With explicit `pixel_size_um`,
-canonical float64 `spatial` contains scaled global XY micrometres, and the same
-scale follows placement for rasters and transcripts. Without calibration,
-canonical `spatial` is absent. A scalar scale does not establish a different
-local/global source mapping.
+canonical float64 `spatial` contains scaled global XY micrometres in `global`,
+and the same scale follows placement for rasters and transcripts. Without
+calibration, canonical `spatial` is absent and no element is in `global`. A
+scalar scale does not establish a different local/global source mapping.
+Metadata column names SpatialData cannot store (for example `Mean.CD45 RO`, or
+`Region` beside the generated `region`) are sanitized with one warning.
 Linkage, when requested, uses `(region, cell_ID)` with label dtype/range
 validation, without enumerating pixels. No layers or `raw` are created.
 See [CosMx](cosmx.md) for FOV transforms and chained gzip-member decoding,

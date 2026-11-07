@@ -716,6 +716,61 @@ class TestListDirectory:
         assert raised.value.filename == str(unreadable)
         assert str(root) in raised.value.__notes__[0]
 
+    def test_hidden_directories_are_listed_but_not_entered_on_request(self, tmp_path: Path) -> None:
+        (tmp_path / ".cache" / "nested").mkdir(parents=True)
+        (tmp_path / ".cache" / "inner.csv").touch()
+        (tmp_path / "run" / ".git").mkdir(parents=True)
+        (tmp_path / "run" / ".git" / "HEAD").touch()
+        (tmp_path / "run" / ".hidden.csv").touch()
+        (tmp_path / "run" / "._companion.csv").touch()
+
+        result = list_directory(tmp_path, context=_CONTEXT, recursive=True, enter_hidden_directories=False)
+
+        assert result == (
+            tmp_path / ".cache",
+            tmp_path / "run",
+            tmp_path / "run" / ".git",
+            tmp_path / "run" / ".hidden.csv",
+        )
+
+    def test_hidden_root_is_always_listed(self, tmp_path: Path) -> None:
+        (tmp_path / ".root").mkdir()
+        (tmp_path / ".root" / "a.csv").touch()
+
+        result = list_directory(tmp_path / ".root", context=_CONTEXT, recursive=True, enter_hidden_directories=False)
+
+        assert result == (tmp_path / ".root" / "a.csv",)
+
+    def test_not_entering_hidden_directories_requires_recursion(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match=r"enter_hidden_directories=False requires recursive=True\."):
+            list_directory(tmp_path, context=_CONTEXT, enter_hidden_directories=False)
+
+    @_UNREADABLE_SKIP
+    def test_unreadable_hidden_subdirectory_fails_only_when_entered(self, tmp_path: Path) -> None:
+        hidden = tmp_path / ".cache"
+        hidden.mkdir()
+        (tmp_path / "a.csv").touch()
+        hidden.chmod(0o000)
+        try:
+            with pytest.raises(PermissionError) as raised:
+                list_directory(tmp_path, context=_CONTEXT, recursive=True)
+            result = list_directory(tmp_path, context=_CONTEXT, recursive=True, enter_hidden_directories=False)
+        finally:
+            hidden.chmod(0o755)
+
+        assert raised.value.filename == str(hidden)
+        assert result == (hidden, tmp_path / "a.csv")
+
+    @_UNREADABLE_SKIP
+    def test_unreadable_visible_subdirectory_still_raises_without_hidden_entry(self, unreadable: Path) -> None:
+        root = unreadable.parent
+
+        with pytest.raises(PermissionError) as raised:
+            list_directory(root, context=_CONTEXT, recursive=True, enter_hidden_directories=False)
+
+        assert raised.value.filename == str(unreadable)
+        assert raised.value.__notes__ == [f"While handling {_CONTEXT.describe(path=root)}."]
+
 
 class TestRequireUniquePath:
     def test_rejects_zero_candidates_with_search_path(self, tmp_path: Path) -> None:

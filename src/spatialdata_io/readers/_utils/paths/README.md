@@ -263,7 +263,10 @@ its iteration), returns the entries sorted by POSIX spelling, and leaves out
 macOS AppleDouble companions (`._<name>`) in every reader. Other hidden
 entries are listed; readers decide whether they matter. With
 `recursive=True` it walks subdirectories and raises if one cannot be listed,
-instead of skipping it silently like `Path.rglob()`.
+instead of skipping it silently like `Path.rglob()`. A reader that ignores
+hidden paths passes `enter_hidden_directories=False`: subdirectories whose
+name starts with `.` are then listed but not entered, so an unreadable cache or
+`.git` directory cannot fail its read. Hidden files are listed either way.
 
 Unique selectors consume their reader-filtered iterable once, do not resolve
 or filter candidates, and avoid sorting successful zero- or one-candidate

@@ -647,7 +647,7 @@ def _is_apple_double(path: Path) -> bool:
     return path.name.startswith(_APPLE_DOUBLE_PREFIX)
 
 
-def _walk(directory: Path) -> Iterator[Path]:
+def _walk(directory: Path, *, enter_hidden_directories: bool) -> Iterator[Path]:
     """Yield every entry below ``directory``, without following directory symlinks."""
     for parent, directories, files in os.walk(directory, onerror=_raise):
         # Pruning in place stops the walk from descending into AppleDouble entries.
@@ -655,9 +655,19 @@ def _walk(directory: Path) -> Iterator[Path]:
         base = Path(parent)
         yield from (base / name for name in directories)
         yield from (base / name for name in files)
+        if not enter_hidden_directories:
+            # Listed above, but never entered, so an unreadable one cannot fail the walk.
+            directories[:] = [name for name in directories if not name.startswith(".")]
 
 
-def list_directory(directory: Path, /, *, context: ReaderErrorContext, recursive: bool = False) -> tuple[Path, ...]:
+def list_directory(
+    directory: Path,
+    /,
+    *,
+    context: ReaderErrorContext,
+    recursive: bool = False,
+    enter_hidden_directories: bool = True,
+) -> tuple[Path, ...]:
     """List the entries of one directory in deterministic lexical order.
 
     macOS AppleDouble companions, entries whose name starts with ``._``, are
@@ -675,6 +685,13 @@ def list_directory(directory: Path, /, *, context: ReaderErrorContext, recursive
         Whether to list the entries of every subdirectory too. Symlinked
         subdirectories are listed but not entered, and AppleDouble
         directories are not entered.
+    enter_hidden_directories
+        With ``recursive``, whether to enter subdirectories whose name starts
+        with ``.``. ``False`` still lists such a directory but none of its
+        entries, so an unreadable hidden directory (a cache, a ``.git``
+        folder) cannot fail a reader that ignores hidden paths anyway.
+        ``directory`` itself is always listed, and hidden files are
+        unaffected.
 
     Returns
     -------
@@ -685,13 +702,20 @@ def list_directory(directory: Path, /, *, context: ReaderErrorContext, recursive
 
     Raises
     ------
+    ValueError
+        If ``enter_hidden_directories`` is ``False`` without ``recursive``.
     OSError
-        If ``directory`` or, with ``recursive``, a subdirectory cannot be
-        listed. The original exception is retained with reader and directory
-        context; no directory is skipped silently.
+        If ``directory`` or, with ``recursive``, an entered subdirectory
+        cannot be listed. The original exception is retained with reader and
+        directory context; no entered directory is skipped silently.
     """
+    if not (recursive or enter_hidden_directories):
+        message = "enter_hidden_directories=False requires recursive=True."
+        raise ValueError(message)
     try:
-        entries = _walk(directory) if recursive else directory.iterdir()
+        entries = (
+            _walk(directory, enter_hidden_directories=enter_hidden_directories) if recursive else directory.iterdir()
+        )
         return tuple(sorted((path for path in entries if not _is_apple_double(path)), key=Path.as_posix))
     except OSError as error:
         add_reader_context(error, context=context, path=directory)

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     class _CosmxOptions(TypedDict):
         """Describe the values normalized by Click."""
 
+        file_prefix: str | None
         dataset_id: str | None
         include_transcripts: bool
         pixel_size_um: float | None
@@ -25,11 +26,21 @@ if TYPE_CHECKING:
 
 @click.command(name="cosmx")
 @dataset_io_options
-@click.option("--dataset-id", type=str, default=None, help="File prefix; inferred from the count matrix when omitted.")
+@click.option(
+    "--file-prefix",
+    type=str,
+    default=None,
+    help="Prefix of the flat files; inferred from the count matrix when omitted.",
+)
+@click.option(
+    "--dataset-id", type=str, default=None, help="Prefix of the transcripts element name; defaults to the file prefix."
+)
 @click.option(
     "--include-transcripts/--no-include-transcripts", default=True, show_default=True, help="Return lazy transcripts."
 )
-@click.option("--pixel-size-um", type=float, default=None, help="Associated global-pixel size in micrometres.")
+@click.option(
+    "--pixel-size-um", type=float, default=None, help="Micrometres per global pixel; places elements in 'global'."
+)
 @scale_factors_option
 @chunks_option
 @path_policy_option
@@ -39,6 +50,7 @@ def cosmx_command(input_path: Path, output_path: Path, **options: Unpack[_CosmxO
 
     result = cosmx(
         input_path,
+        file_prefix=options["file_prefix"],
         dataset_id=options["dataset_id"],
         include_transcripts=options["include_transcripts"],
         pixel_size_um=options["pixel_size_um"],

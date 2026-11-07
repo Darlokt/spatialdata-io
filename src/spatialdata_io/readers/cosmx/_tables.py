@@ -1,4 +1,26 @@
-"""Bounded CosMx counts and cell metadata aligned into one finite sparse table."""
+"""Read CosMx counts, cell metadata and FOV positions into one aligned sparse table.
+
+The three eager flat files are streamed as text through Arrow, from plain CSV or
+from gzip (one stream or concatenated members), and decoded by the exact rules
+in ``_schemas``:
+
+- the count matrix becomes canonical CSR in bounded blocks of about 8 MiB of
+  decoded int64 counts. Each block drops the per-FOV background rows
+  (``cell_ID`` 0) and is converted to float32 at once, or float64 when
+  float32 cannot hold its counts exactly;
+- cell metadata keeps its row order. Keys and centre coordinates become exact
+  NumPy arrays, with the printed rounding bound of every centre; annotations
+  become ``obs`` columns;
+- FOV positions are read only when the file has pixel positions.
+
+The table follows metadata row order. Counts are aligned to it by the exact
+``(fov, cell_ID)`` keys, and both populations must be identical. Coordinates::
+
+    obsm["spatial_pixels"]          local cell centres, pixels, frame per FOV
+    obsm["spatial_global_pixels"]   global cell centres, pixels, frame global_pixels
+    obsm["spatial"]                 global cell centres, micrometres, frame global
+                                    (only with pixel_size_um)
+"""
 
 from __future__ import annotations
 
@@ -17,6 +39,7 @@ from scipy import sparse
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.csv import parse_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     as_csr_array,
@@ -29,8 +52,12 @@ from spatialdata_io.readers.cosmx._schemas import (
     CELL,
     CELL_ID,
     CENTERS,
+    COUNTS,
     FOV,
+    FRAME_KEY,
     INTEGER_DTYPE,
+    METADATA,
+    POSITIONS,
     REGION_KEY,
     STRING_DTYPE,
     count_block,
@@ -43,7 +70,7 @@ from spatialdata_io.readers.cosmx._schemas import (
     optional_float_values,
     schema_error,
 )
-from spatialdata_io.readers.cosmx._transforms import AxisSamples, FovPosition
+from spatialdata_io.readers.cosmx._transforms import GLOBAL, GLOBAL_PIXELS, AxisSamples, FovPosition, fov_frame
 
 if TYPE_CHECKING:
     import io
@@ -52,10 +79,14 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers.cosmx._schemas import Artifact
 
 _CSV_BLOCK_BYTES = 1024 * 1024
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
-_MAX_BATCH_ROWS = 10_000
+_TABLE_CONTEXT = ReaderErrorContext("cosmx", "cell table")
+# Columns of obs that the reader generates or relies on by name; the vendor
+# 'cell' IDs too, when present, because they name the observations.
+_READER_OBS_COLUMNS = (FOV, CELL_ID, REGION_KEY, FRAME_KEY)
 
 
 def open_source(path: ArtifactFile) -> io.BufferedReader | gzip.GzipFile:
@@ -63,17 +94,19 @@ def open_source(path: ArtifactFile) -> io.BufferedReader | gzip.GzipFile:
     return gzip.GzipFile(path, "rb") if path.name.endswith(".gz") else path.open("rb")
 
 
-def read_header(path: ArtifactFile) -> list[str]:
+def read_header(path: ArtifactFile, artifact: Artifact) -> list[str]:
     """Read and parse the first CSV record before interpreting names."""
     try:
         with open_source(path) as handle:
             line = handle.readline()
     except (gzip.BadGzipFile, EOFError, zlib.error) as error:
-        raise schema_error(path, found=f"invalid gzip data: {error}", expected="a readable gzip stream") from error
-    return parse_csv_header(line, context=ReaderErrorContext("cosmx", path.name), path=path)
+        raise schema_error(
+            path, artifact, found=f"invalid gzip data: {error}", expected="a readable gzip stream"
+        ) from error
+    return parse_csv_header(line, context=ReaderErrorContext("cosmx", artifact), path=path)
 
 
-def _batches(path: ArtifactFile, columns: list[str]) -> Iterator[pa.RecordBatch]:
+def _batches(path: ArtifactFile, artifact: Artifact, columns: list[str]) -> Iterator[pa.RecordBatch]:
     """Stream lexical record batches; Arrow checks full record widths."""
     try:
         with (
@@ -89,15 +122,19 @@ def _batches(path: ArtifactFile, columns: list[str]) -> Iterator[pa.RecordBatch]
         ):
             yield from reader
     except pa.ArrowInvalid as error:
-        raise schema_error(path, found=f"malformed CSV: {error}", expected="one field per header column") from error
+        raise schema_error(
+            path, artifact, found=f"malformed CSV: {error}", expected="one field per header column"
+        ) from error
     except (gzip.BadGzipFile, EOFError, zlib.error) as error:
-        raise schema_error(path, found=f"invalid gzip data: {error}", expected="a readable gzip stream") from error
+        raise schema_error(
+            path, artifact, found=f"invalid gzip data: {error}", expected="a readable gzip stream"
+        ) from error
 
 
-def _table(path: ArtifactFile, columns: list[str]) -> pa.Table:
+def _table(path: ArtifactFile, artifact: Artifact, columns: list[str]) -> pa.Table:
     """Read a bounded-width eager source as exact text."""
     schema = pa.schema([(name, pa.string()) for name in columns])
-    return pa.Table.from_batches(list(_batches(path, columns)), schema=schema)
+    return pa.Table.from_batches(list(_batches(path, artifact, columns)), schema=schema)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,25 +149,28 @@ class Counts:
 
 def read_counts(path: ArtifactFile) -> Counts:
     """Stream exact counts to CSR, removing the zero-ID background rows."""
-    columns = read_header(path)
+    columns = read_header(path, COUNTS)
     features = count_features(columns, path)
-    rows_per_batch = max(1, min(_MAX_BATCH_ROWS, _BATCH_MEMORY_BYTES // (8 * len(features))))
+    # Only the decoded int64 block is bounded; Arrow's text batches bound the parser.
+    rows_per_batch = max(1, _BATCH_MEMORY_BYTES // (8 * len(features)))
+    context = ReaderErrorContext("cosmx", COUNTS)
     blocks: list[sparse.csr_array] = []
     fovs: list[npt.NDArray[np.int64]] = []
     cell_ids: list[npt.NDArray[np.int64]] = []
-    for batch in _batches(path, columns):
+    for batch in _batches(path, COUNTS, columns):
         for offset in range(0, batch.num_rows, rows_per_batch):
             block = batch.slice(offset, rows_per_batch)
-            fov = integer_values(block.column(FOV), path, FOV, minimum=1)
-            cell = integer_values(block.column(CELL_ID), path, CELL_ID, minimum=0)
+            fov = integer_values(block.column(FOV), path, COUNTS, FOV, minimum=1)
+            cell = integer_values(block.column(CELL_ID), path, COUNTS, CELL_ID, minimum=0)
             values = count_block([block.column(name) for name in features], features, path)
             # CosMx reports per-FOV background as cell 0; it is not a cell observation.
             keep = cell != 0
             if not keep.all():
                 values, fov, cell = values[keep], fov[keep], cell[keep]
-            blocks.extend(
-                finalize_count_arrays((as_csr_array(values),), context=ReaderErrorContext("cosmx", "counts"), path=path)
-            )
+            # Counts are complete when read (rows are never summed), and stacking
+            # promotes float32 blocks exactly to float64 when any block needs it:
+            # the dtype one final conversion would select, without an int64 copy.
+            blocks.extend(finalize_count_arrays((as_csr_array(values),), context=context, path=path))
             fovs.append(fov)
             cell_ids.append(cell)
     expression = (
@@ -139,7 +179,7 @@ def read_counts(path: ArtifactFile) -> Counts:
     all_fovs = np.concatenate(fovs) if fovs else np.empty(0, np.int64)
     all_cells = np.concatenate(cell_ids) if cell_ids else np.empty(0, np.int64)
     if pd.MultiIndex.from_arrays([all_fovs, all_cells]).has_duplicates:
-        raise schema_error(path, found="duplicate (fov, cell_ID) count rows", expected="one count row per cell")
+        raise schema_error(path, COUNTS, found="duplicate (fov, cell_ID) count rows", expected="one count row per cell")
     return Counts(expression, all_fovs, all_cells, features)
 
 
@@ -157,19 +197,19 @@ class CellMetadata:
 
 def read_metadata(path: ArtifactFile) -> CellMetadata:
     """Read eager cell metadata with exact keys, coordinates, and typed annotations."""
-    columns = metadata_columns(read_header(path), path)
-    source = _table(path, list(columns.names))
-    fovs = integer_values(source.column(FOV), path, FOV, minimum=1)
-    cell_ids = integer_values(source.column(CELL_ID), path, CELL_ID, minimum=1)
+    columns = metadata_columns(read_header(path, METADATA), path)
+    source = _table(path, METADATA, list(columns.names))
+    fovs = integer_values(source.column(FOV), path, METADATA, FOV, minimum=1)
+    cell_ids = integer_values(source.column(CELL_ID), path, METADATA, CELL_ID, minimum=1)
     if pd.MultiIndex.from_arrays([fovs, cell_ids]).has_duplicates:
-        raise schema_error(path, found="duplicate (fov, cell_ID) keys", expected="one row per cell")
+        raise schema_error(path, METADATA, found="duplicate (fov, cell_ID) keys", expected="one row per cell")
 
     local = np.empty((source.num_rows, 2), dtype=np.float64)
     global_ = np.empty_like(local)
     for axis, (local_name, global_name) in enumerate((CENTERS[0::2], CENTERS[1::2])):
-        local[:, axis] = float_values(source.column(local_name), path, local_name)
-        global_[:, axis] = float_values(source.column(global_name), path, global_name)
-    halves = {name: half_units(source.column(name), path, name) for name in CENTERS}
+        local[:, axis] = float_values(source.column(local_name), path, METADATA, local_name)
+        global_[:, axis] = float_values(source.column(global_name), path, METADATA, global_name)
+    halves = {name: half_units(source.column(name), path, METADATA, name) for name in CENTERS}
     samples = (
         AxisSamples(local[:, 0], global_[:, 0], halves[CENTERS[0]], halves[CENTERS[2]]),
         AxisSamples(local[:, 1], global_[:, 1], halves[CENTERS[1]], halves[CENTERS[3]]),
@@ -183,43 +223,82 @@ def read_metadata(path: ArtifactFile) -> CellMetadata:
     for name in (*columns.numeric, *columns.text):
         column = source.column(name)
         if name in numeric:
-            obs[name] = optional_float_values(column, path, name).set_axis(index)
+            obs[name] = optional_float_values(column, path, METADATA, name).set_axis(index)
         else:
             obs[name] = pd.Series(column.to_pandas(types_mapper=pd.ArrowDtype), dtype=STRING_DTYPE).set_axis(index)
 
     if CELL in obs and (obs[CELL].isna().any() or obs[CELL].eq("").any() or not obs[CELL].is_unique):
-        raise schema_error(path, found="missing or repeated vendor cell IDs", expected="unique nonempty 'cell' values")
-    # AtoMx repeats the vendor 'cell' ID as 'cell_id', a case variant of 'cell_ID' that
-    # SpatialData cannot store. Only an exact duplicate is dropped.
+        raise schema_error(
+            path, METADATA, found="missing or repeated vendor cell IDs", expected="unique nonempty 'cell' values"
+        )
+    # AtoMx repeats the vendor 'cell' ID as 'cell_id', a case variant of
+    # 'cell_ID' that SpatialData cannot store beside it. An exact copy is
+    # redundant; any other case variant is renamed below.
     if "cell_id" in obs and CELL in obs and obs["cell_id"].equals(obs[CELL]):
         obs = obs.drop(columns="cell_id")
-    folded = pd.Index([*obs.columns, REGION_KEY]).str.lower()
-    if folded.has_duplicates:
-        raise schema_error(
-            path,
-            found=f"case-variant column names {sorted(set(folded[folded.duplicated()]))}",
-            expected="annotation names that are unique ignoring case",
-        )
+    reserved = (*_READER_OBS_COLUMNS, CELL) if CELL in obs else _READER_OBS_COLUMNS
+    obs.columns = sanitize_column_names(
+        list(obs.columns), source="cosmx: the cell metadata CSV header", reserved=reserved
+    )
     return CellMetadata(obs, fovs, cell_ids, local, global_, samples)
 
 
 def read_fov_positions(path: ArtifactFile) -> dict[int, FovPosition]:
     """Read pixel FOV positions; millimetre-only exports provide no pixel cross-check."""
-    columns = read_header(path)
+    columns = read_header(path, POSITIONS)
     selected = fov_position_columns(columns, path)
     if selected is None:
         return {}
     fov_name, x_name, y_name = selected
-    source = _table(path, columns)
-    fovs = integer_values(source.column(fov_name), path, fov_name, minimum=1)
+    source = _table(path, POSITIONS, columns)
+    fovs = integer_values(source.column(fov_name), path, POSITIONS, fov_name, minimum=1)
     if len(np.unique(fovs)) != len(fovs):
-        raise schema_error(path, found="repeated FOV positions", expected="one position per FOV")
-    x, y = (float_values(source.column(name), path, name) for name in (x_name, y_name))
-    x_half, y_half = (half_units(source.column(name), path, name) for name in (x_name, y_name))
+        raise schema_error(path, POSITIONS, found="repeated FOV positions", expected="one position per FOV")
+    x, y = (float_values(source.column(name), path, POSITIONS, name) for name in (x_name, y_name))
+    x_half, y_half = (half_units(source.column(name), path, POSITIONS, name) for name in (x_name, y_name))
     return {
         int(fov): FovPosition(float(x[i]), float(y[i]), float(x_half[i]), float(y_half[i]))
         for i, fov in enumerate(fovs.tolist())
     }
+
+
+def _positions(metadata: CellMetadata, pixel_size_um: float | None) -> tuple[dict[str, np.ndarray], PositionsMetadata]:
+    """Return the observation coordinates and their declaration, scaling global pixels when calibrated."""
+    arrays: dict[str, np.ndarray] = {"spatial_pixels": metadata.local, "spatial_global_pixels": metadata.global_}
+    descriptions: PositionsMetadata = {
+        "schema_version": 1,
+        "coordinates": {
+            "spatial_pixels": {"axes": ["x", "y"], "units": "pixel", "position": "cell center", "frame_key": FRAME_KEY},
+            "spatial_global_pixels": {
+                "axes": ["x", "y"],
+                "units": "pixel",
+                "position": "cell center",
+                "frame": GLOBAL_PIXELS,
+            },
+        },
+    }
+    if pixel_size_um is None:
+        return arrays, descriptions
+
+    with np.errstate(over="ignore", under="ignore"):
+        physical = metadata.global_ * pixel_size_um
+    if not np.isfinite(physical).all():
+        msg = "pixel_size_um produces nonfinite physical cell coordinates."
+        raise ValueError(msg)
+    if ((metadata.global_ != 0) & (physical == 0)).any():
+        msg = "pixel_size_um makes nonzero physical cell coordinates underflow to zero."
+        raise ValueError(msg)
+    arrays["spatial"] = physical
+    descriptions["coordinates"]["spatial"] = {
+        "axes": ["x", "y"],
+        "units": "micrometer",
+        "position": "cell center",
+        "frame": GLOBAL,
+        "calibration": {
+            GLOBAL: f"Caller-declared {pixel_size_um} micrometres per validated global pixel; no stage registration."
+        },
+    }
+    return arrays, descriptions
 
 
 def build_table(
@@ -235,70 +314,30 @@ def build_table(
     if len(keys) != len(order) or (order < 0).any():
         raise schema_error(
             path,
+            METADATA,
             found=f"{len(keys)} positive count rows for {len(order)} metadata cells",
             expected="identical positive count and metadata populations",
         )
     expression = counts.expression if np.array_equal(order, np.arange(len(order))) else counts.expression[order]
+    arrays, descriptions = _positions(metadata, pixel_size_um)
 
     obs = metadata.obs
-    if CELL in obs:
-        obs.index = pd.Index(obs[CELL].to_numpy(), name=None)
-    else:
-        obs.index = pd.Index([str(position) for position in range(len(obs))])
+    obs.index = pd.Index(obs[CELL].to_numpy() if CELL in obs else pd.RangeIndex(len(obs)).astype(str), name=None)
     fovs = np.unique(metadata.fovs)
     regions = [f"{fov}_labels" for fov in fovs.tolist()]
     codes = np.searchsorted(fovs, metadata.fovs)
     obs.insert(0, REGION_KEY, pd.Series(pd.Categorical.from_codes(codes, pd.Index(regions)), index=obs.index))
+    obs[FRAME_KEY] = pd.Categorical.from_codes(codes, pd.Index([fov_frame(fov) for fov in fovs.tolist()]))
 
-    obs["spatial_pixel_frame"] = pd.Categorical(metadata.fovs.astype(str))
-    context = ReaderErrorContext("cosmx", "cell table")
     table = ad.AnnData(
         X=expression,
-        obs=prepare_anndata_dataframe(obs, context=context, allow_float_nulls=True),
+        obs=prepare_anndata_dataframe(obs, context=_TABLE_CONTEXT, allow_float_nulls=True),
         var=pd.DataFrame(index=pd.Index(counts.features)),
     )
-    table.obsm["spatial_pixels"] = metadata.local
-    table.obsm["global"] = metadata.global_
-    descriptions: PositionsMetadata = {
-        "schema_version": 1,
-        "coordinates": {
-            "spatial_pixels": {
-                "axes": ["x", "y"],
-                "units": "pixel",
-                "position": "cell center",
-                "frame_key": "spatial_pixel_frame",
-            },
-            "global": {
-                "axes": ["x", "y"],
-                "units": "pixel",
-                "position": "cell center",
-                "frame": "global_pixels",
-            },
-        },
-    }
-    if pixel_size_um is not None:
-        with np.errstate(over="ignore", under="ignore"):
-            physical = metadata.global_ * pixel_size_um
-        if not np.isfinite(physical).all():
-            msg = "pixel_size_um produces nonfinite physical cell coordinates."
-            raise ValueError(msg)
-        if ((metadata.global_ != 0) & (physical == 0)).any():
-            msg = "pixel_size_um makes nonzero physical cell coordinates underflow to zero."
-            raise ValueError(msg)
-        table.obsm["spatial"] = physical
-        descriptions["coordinates"]["spatial"] = {
-            "axes": ["x", "y"],
-            "units": "micrometer",
-            "position": "cell center",
-            "frame": "global",
-            "calibration": {
-                "global": (
-                    f"Caller-declared {pixel_size_um} micrometres per validated global pixel; no stage registration."
-                )
-            },
-        }
+    for key, array in arrays.items():
+        table.obsm[key] = array
     table.uns[POSITIONS_KEY] = descriptions
     if linked:
-        return parse_linked_table(table, TableLinkage(tuple(regions), REGION_KEY, CELL_ID), context=context)
+        return parse_linked_table(table, TableLinkage(tuple(regions), REGION_KEY, CELL_ID), context=_TABLE_CONTEXT)
     normalize_owned_anndata(table)
     return table

@@ -12,7 +12,7 @@ from dask.callbacks import Callback
 from spatialdata.transformations import BaseTransformation, get_transformation
 from xarray import DataArray, DataTree
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.cosmx._rasters import read_image, read_labels
@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 _DEFAULT = make_raster_options()
 _PLACEMENT = Placement(1, 1, 1000.0, 5000.5)
 _AXES = ("x", "y")
+_MINISBLACK: dict[str, object] = {"photometric": "minisblack"}
+_THREE = [0, 1, 2]
+_FOUR = [0, 1, 2, 3]
 
 
 def _frames(element: DataArray | DataTree) -> dict[str, BaseTransformation]:
@@ -67,9 +70,42 @@ class TestReadImage:
         assert element.data.chunks == ((1, 1, 1), (4,), (5,))
         np.testing.assert_array_equal(element.data.compute(), np.moveaxis(pixels, -1, 0))
         frames = _frames(element)
-        assert set(frames) == {"2", "global"}
-        np.testing.assert_array_equal(_matrix(frames["2"]), [[1, 0, -0.5], [0, -1, 4.5], [0, 0, 1]])
-        np.testing.assert_array_equal(_matrix(frames["global"]), [[1, 0, 999.5], [0, -1, 5005.0], [0, 0, 1]])
+        assert set(frames) == {"fov_2_pixels", "global_pixels"}
+        np.testing.assert_array_equal(_matrix(frames["fov_2_pixels"]), [[1, 0, -0.5], [0, -1, 4.5], [0, 0, 1]])
+        np.testing.assert_array_equal(_matrix(frames["global_pixels"]), [[1, 0, 999.5], [0, -1, 5005.0], [0, 0, 1]])
+
+    def test_calibration_replaces_the_pixel_frame_with_global_micrometres(self, tmp_path: Path) -> None:
+        tifffile.imwrite(tmp_path / "C_F002.tif", np.ones((4, 5), np.uint16))
+        element, _ = read_image(
+            ArtifactFile(tmp_path / "C_F002.tif"), fov=2, placement=_PLACEMENT, options=_DEFAULT, pixel_size_um=0.5
+        )
+        frames = _frames(element)
+        assert set(frames) == {"fov_2_pixels", "global"}
+        np.testing.assert_array_equal(_matrix(frames["global"]), [[0.5, 0, 499.75], [0, -0.5, 2502.5], [0, 0, 1]])
+
+    @pytest.mark.parametrize(
+        ("name", "pixels", "options", "expected"),
+        [
+            ("rgb.tif", np.zeros((4, 5, 3), np.uint16), {"photometric": "rgb"}, ["r", "g", "b"]),
+            ("rgba.tif", np.zeros((4, 5, 4), np.uint8), {"photometric": "rgb", "extrasamples": [2]}, list("rgba")),
+            ("unspecified.tif", np.zeros((4, 5, 4), np.uint8), {"photometric": "rgb", "extrasamples": [0]}, _FOUR),
+            ("samples.tif", np.zeros((4, 5, 3), np.uint8), _MINISBLACK | {"planarconfig": "contig"}, _THREE),
+            ("channels.tif", np.zeros((3, 4, 5), np.uint8), _MINISBLACK | {"metadata": {"axes": "CYX"}}, _THREE),
+            ("gray_alpha.png", np.zeros((4, 5, 2), np.uint8), None, [0, 1]),
+            ("rgba.png", np.zeros((4, 5, 4), np.uint8), None, list("rgba")),
+        ],
+    )  # fmt: skip
+    def test_rgb_names_only_for_declared_colour_samples(
+        self, tmp_path: Path, name: str, pixels: np.ndarray, options: dict[str, object] | None, expected: list[object]
+    ) -> None:
+        path = tmp_path / name
+        if options is None:
+            path.write_bytes(imagecodecs.png_encode(pixels))
+        else:
+            tifffile.imwrite(path, pixels, **options)  # pyrefly: ignore[bad-argument-type] - Test-owned writer options.
+        element, _ = read_image(ArtifactFile(path), fov=1, placement=_PLACEMENT, options=_DEFAULT)
+        assert element.dims == ("c", "y", "x")
+        assert element.coords["c"].to_numpy().tolist() == expected
 
     def test_jpeg_and_grayscale_tiff(self, tmp_path: Path) -> None:
         (tmp_path / "C_F001.jpg").write_bytes(imagecodecs.jpeg8_encode(np.zeros((4, 5, 3), np.uint8)))
@@ -95,12 +131,13 @@ class TestReadImage:
         with tifffile.TiffWriter(tmp_path / "C_F001.tif") as writer:
             writer.write(np.ones((4, 5), np.uint8), metadata={"axes": "YX"})
             writer.write(np.ones((3, 3), np.uint8), metadata={"axes": "YX"})
-        with pytest.raises(ReaderFormatError, match="2 TIFF series"):
+        with pytest.raises(ReaderFormatError, match="2 TIFF series") as caught:
             read_image(ArtifactFile(tmp_path / "C_F001.tif"), fov=1, placement=_PLACEMENT, options=_DEFAULT)
+        assert caught.value.context == ReaderErrorContext("cosmx", "composite images")
         (tmp_path / "C_F002.jpg").write_bytes(b"not a jpeg")
         with pytest.raises(ValueError, match=r"JPEG|SOI") as error:
             read_image(ArtifactFile(tmp_path / "C_F002.jpg"), fov=2, placement=_PLACEMENT, options=_DEFAULT)
-        assert any("cosmx" in note for note in getattr(error.value, "__notes__", []))
+        assert any("artifact 'composite images'" in note for note in getattr(error.value, "__notes__", []))
 
     def test_unnamed_extra_axis_fails(self, tmp_path: Path) -> None:
         tifffile.imwrite(tmp_path / "C_F001.tif", np.ones((2, 2, 4, 5), np.uint8), metadata={"axes": "ZCYX"})
@@ -124,7 +161,9 @@ class TestReadLabels:
         assert dtype == np.dtype(np.uint16)
         assert element.data.chunks == ((2, 2), (3, 2))
         np.testing.assert_array_equal(element.data.compute(), values)
-        np.testing.assert_array_equal(_matrix(_frames(element)["2"]), [[1, 0, -0.5], [0, -1, 4.5], [0, 0, 1]])
+        np.testing.assert_array_equal(
+            _matrix(_frames(element)["fov_2_pixels"]), [[1, 0, -0.5], [0, -1, 4.5], [0, 0, 1]]
+        )
 
     def test_default_single_scale_keeps_64_bit_labels(self, tmp_path: Path) -> None:
         values = np.array([[0, 2**40], [7, 0]], dtype=np.uint64)
@@ -149,5 +188,7 @@ class TestReadLabels:
         self, tmp_path: Path, dtype: type[np.number], grid: tuple[int, int] | None, options: RasterOptions, match: str
     ) -> None:
         tifffile.imwrite(tmp_path / "L_F001.tif", np.ones((4, 5), dtype))
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ValueError, match=match) as caught:
             read_labels(ArtifactFile(tmp_path / "L_F001.tif"), fov=1, grid=grid, placement=_PLACEMENT, options=options)
+        if isinstance(caught.value, ReaderFormatError):
+            assert caught.value.context == ReaderErrorContext("cosmx", "cell labels")

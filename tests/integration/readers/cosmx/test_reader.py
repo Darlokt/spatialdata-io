@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pickle
+import re
 import shutil
+import warnings
 from typing import TYPE_CHECKING, cast
 
 import anndata as ad
@@ -23,7 +25,7 @@ from xarray import DataArray
 from spatialdata_io import __version__
 from spatialdata_io._cli.commands.cosmx import cosmx_command
 from spatialdata_io._positions import POSITIONS_KEY
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.cosmx import _reader, cosmx
 from tests.integration.readers.cosmx._fixtures import (
     LANDMARKS,
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
     from xarray import DataTree
 
 _AXES = ("x", "y")
+_FRAMES = ["fov_2_pixels", "fov_2_pixels", "fov_10_pixels", "fov_10_pixels"]
 
 
 def _expression(table: AnnData) -> sparse.csr_array:
@@ -79,6 +82,9 @@ class TestCosmx:
         assert list(result.labels) == ["2_labels", "10_labels"]
         assert list(result.points) == ["Run_1_transcripts"]
         assert result.attrs == {"spatialdata_io_reader": "cosmx", "spatialdata_io_software_version": __version__}
+        # Without calibration nothing is in global, which always means micrometres.
+        assert sorted(result.coordinate_systems) == ["fov_10_pixels", "fov_2_pixels", "global_pixels"]
+        assert result.images["2_image"].coords["c"].to_numpy().tolist() == ["r", "g", "b"]
 
         table = result.tables["table"]
         np.testing.assert_array_equal(
@@ -101,7 +107,7 @@ class TestCosmx:
         result = cosmx(fixture.root)
         for fov in POSITIONS:
             labels = _labels(result, fov)
-            to_local, to_global = _transform(labels, str(fov)), _transform(labels, "global")
+            to_local, to_global = _transform(labels, f"fov_{fov}_pixels"), _transform(labels, "global_pixels")
             pixels = labels.data.compute()
             for cell in LANDMARKS:
                 row, column = np.argwhere(pixels == cell)[0]
@@ -120,7 +126,7 @@ class TestCosmx:
             frame = points.compute()
             selected = frame[frame["fov"] == fov]
             xy = np.column_stack([selected["x"], selected["y"], np.ones(len(selected))])
-            local = (_transform(points, str(fov)) @ xy.T).T[:, :2]
+            local = (_transform(points, f"fov_{fov}_pixels") @ xy.T).T[:, :2]
             np.testing.assert_array_equal(local, selected[["x_local", "y_local"]].to_numpy())
 
     def test_atomx_profile_reversed_axis_vendor_ids_and_unlinked_table(self, tmp_path: Path) -> None:
@@ -132,7 +138,7 @@ class TestCosmx:
         assert "spatialdata_attrs" not in table.uns
         assert table.var_names.tolist() == list(fixture.features)
         points = result.points["Run_1_transcripts"]
-        np.testing.assert_array_equal(_transform(points, "2"), [[1, 0, -1000], [0, -1, 5000.5], [0, 0, 1]])
+        np.testing.assert_array_equal(_transform(points, "fov_2_pixels"), [[1, 0, -1000], [0, -1, 5000.5], [0, 0, 1]])
 
     def test_rasters_in_a_reversed_axis_export_fail(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path, profile="atomx")
@@ -148,9 +154,11 @@ class TestCosmx:
         tasks: list[object] = []
         with (
             Callback(posttask=lambda *args: tasks.append(args)),
-            pytest.raises(ReaderFormatError, match=r"no labels for FOVs \[10\]"),
+            pytest.raises(ReaderFormatError, match=r"no labels for FOVs \[10\]") as caught,
         ):
             cosmx(fixture.root)
+        assert caught.value.path == fixture.root / "CellLabels"
+        assert caught.value.context == ReaderErrorContext("cosmx", "cell labels")
         counts.assert_not_called()
         image.assert_not_called()
         labels.assert_not_called()
@@ -362,7 +370,8 @@ class TestCosmx:
         center = np.array([2.5, 1.5, 1.0])
         for raster in (actual_image, actual_labels):
             np.testing.assert_array_equal(
-                (_transform(raster, "global") @ center)[:2], result.tables["table"].obsm["global"][0]
+                (_transform(raster, "global_pixels") @ center)[:2],
+                result.tables["table"].obsm["spatial_global_pixels"][0],
             )
 
     @pytest.mark.cli
@@ -379,8 +388,8 @@ class TestCosmx:
         assert get_table_keys(table) == (["2_labels", "10_labels"], "region", "cell_ID")
         assert len(restored.points["Run_1_transcripts"].compute()) == 6
         np.testing.assert_array_equal(
-            _transform(restored.labels["2_labels"], "global"),
-            _transform(cosmx(fixture.root).labels["2_labels"], "global"),
+            _transform(restored.labels["2_labels"], "global_pixels"),
+            _transform(cosmx(fixture.root).labels["2_labels"], "global_pixels"),
         )
 
 
@@ -408,11 +417,15 @@ class TestCosmxCalibration:
         )
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[2, 5], [6, 2], [2, 5], [6, 2]])
         np.testing.assert_array_equal(
-            table.obsm["global"], [[1002, 5005.5], [1006, 5002.5], [3002.25, 7005], [3006.25, 7002]]
+            table.obsm["spatial_global_pixels"], [[1002, 5005.5], [1006, 5002.5], [3002.25, 7005], [3006.25, 7002]]
         )
-        assert table.obs["spatial_pixel_frame"].tolist() == ["2", "2", "10", "10"]
+        assert table.obs["spatial_pixel_frame"].tolist() == _FRAMES
         assert isinstance(table.obs["spatial_pixel_frame"].dtype, pd.CategoricalDtype)
-        assert table.uns[POSITIONS_KEY]["coordinates"]["global"]["frame"] == "global_pixels"
+        assert table.obs["spatial_pixel_frame"].cat.categories.tolist() == ["fov_2_pixels", "fov_10_pixels"]
+        assert table.uns[POSITIONS_KEY]["coordinates"]["spatial_global_pixels"]["frame"] == "global_pixels"
+        assert table.uns[POSITIONS_KEY]["coordinates"]["spatial"]["frame"] == "global"
+        # Calibrated elements are in global micrometres only, never also in the pixel frame.
+        assert set(result.coordinate_systems) <= {"fov_2_pixels", "fov_10_pixels", "global"}
         for elements, key in ((result.images, "2_image"), (result.labels, "2_labels")):
             if key in elements:
                 element = elements[key]
@@ -441,25 +454,29 @@ class TestCosmxCalibration:
         points = result.points["Run_1_transcripts"]
         events = points.compute()
         np.testing.assert_array_equal(
-            table.obsm["global"], [global_xy(fov, cell, "flat_2021") for fov in POSITIONS for cell in LANDMARKS]
+            table.obsm["spatial_global_pixels"],
+            [global_xy(fov, cell, "flat_2021") for fov in POSITIONS for cell in LANDMARKS],
         )
+        global_frame = "global_pixels" if pixel_size_um is None else "global"
         if pixel_size_um is not None:
-            np.testing.assert_array_equal(table.obsm["spatial"], table.obsm["global"] * scale)
+            np.testing.assert_array_equal(table.obsm["spatial"], table.obsm["spatial_global_pixels"] * scale)
         for index, fov in enumerate(POSITIONS):
             # Bounds combine the half printed units of the local and global cell centers.
             half = np.array([0.1 if fov == 2 else 0.055, 0.1])
             for cell, (row, column) in LANDMARKS.items():
                 center = np.array([column + 0.5, row + 0.5, 1.0])
-                expected = table.obsm["global"][index * 2 + cell - 1]
+                expected = table.obsm["spatial_global_pixels"][index * 2 + cell - 1]
                 for raster in (result.images[f"{fov}_image"], result.labels[f"{fov}_labels"]):
-                    observed = (_transform(raster, "global") @ center)[:2] / scale
+                    observed = (_transform(raster, global_frame) @ center)[:2] / scale
                     assert np.all(np.abs(observed - expected) <= half)
-                    np.testing.assert_array_equal((_transform(raster, str(fov)) @ center)[:2], local_xy(cell))
+                    np.testing.assert_array_equal(
+                        (_transform(raster, f"fov_{fov}_pixels") @ center)[:2], local_xy(cell)
+                    )
             selected = events[events["fov"] == fov]
             native = np.column_stack([selected["x"], selected["y"], np.ones(len(selected))])
-            local = (_transform(points, str(fov)) @ native.T).T[:, :2]
+            local = (_transform(points, f"fov_{fov}_pixels") @ native.T).T[:, :2]
             assert np.all(np.abs(local - selected[["x_local", "y_local"]].to_numpy()) <= half)
-            global_points = (_transform(points, "global") @ native.T).T[:, :2]
+            global_points = (_transform(points, global_frame) @ native.T).T[:, :2]
             np.testing.assert_array_equal(global_points, native[:, :2] * scale)
 
     @pytest.mark.parametrize("value", [0.0, -1.0, float("inf"), float("nan")])
@@ -481,10 +498,10 @@ class TestCosmxCalibration:
         else:
             result.write(destination)
             loaded = read_zarr(destination).tables["table"]
-        for key in ("spatial", "spatial_pixels", "global"):
+        for key in ("spatial", "spatial_pixels", "spatial_global_pixels"):
             np.testing.assert_array_equal(loaded.obsm[key], table.obsm[key])
         assert loaded.uns[POSITIONS_KEY]["coordinates"]["spatial_pixels"]["frame_key"] == "spatial_pixel_frame"
-        assert loaded.obs["spatial_pixel_frame"].tolist() == ["2", "2", "10", "10"]
+        assert loaded.obs["spatial_pixel_frame"].tolist() == _FRAMES
         assert set(loaded.uns[POSITIONS_KEY]["coordinates"]["spatial"]["calibration"]) == {"global"}
         np.testing.assert_array_equal(loaded[[2, 0]].obsm["spatial"], [[1501.125, 3502.5], [501, 2502.75]])
 
@@ -579,10 +596,111 @@ class TestCosmxPathPolicy:
     ) -> None:
         fixture = write_cosmx_dataset(tmp_path)
         expected = cosmx(fixture.root)
-        link_outside_root(fixture.root / f"{fixture.dataset_id}_exprMat_file.csv")
+        link_outside_root(fixture.root / f"{fixture.file_prefix}_exprMat_file.csv")
         link_outside_root(fixture.root / "CellComposite" / "CellComposite_F002.png")
 
         with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
             cosmx(fixture.root)
 
         assert_spatial_data_objects_are_identical(cosmx(fixture.root, path_policy="relaxed"), expected)
+
+
+class TestCosmxNames:
+    """The file prefix selects files; dataset_id only names the transcripts element."""
+
+    def test_prefix_with_a_space_is_readable_and_repaired_for_element_names(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path / "input", file_prefix="Lung 5")
+        message = (
+            "cosmx: the file prefix 'Lung 5' is not a usable SpatialData element name; using 'Lung_5'. "
+            "Pass dataset_id to choose the name explicitly."
+        )
+        with pytest.warns(UserWarning, match=re.escape(message)) as caught:
+            result = cosmx(fixture.root)
+        assert [str(warning.message) for warning in caught] == [message]
+        assert list(result.points) == ["Lung_5_transcripts"]
+        result.write(tmp_path / "output.zarr")
+        assert list(read_zarr(tmp_path / "output.zarr").points) == ["Lung_5_transcripts"]
+
+    def test_explicit_names_select_files_and_name_points_independently(self, tmp_path: Path) -> None:
+        write_cosmx_dataset(tmp_path, file_prefix="Lung 5")
+        write_cosmx_dataset(tmp_path, file_prefix="Run_2", rasters=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            explicit = cosmx(tmp_path, file_prefix="Lung 5", dataset_id="lung5")
+            default = cosmx(tmp_path, file_prefix="Run_2")
+        assert list(explicit.points) == ["lung5_transcripts"]
+        assert list(default.points) == ["Run_2_transcripts"]
+        with pytest.raises(ReaderFormatError, match="2 count matrices"):
+            cosmx(tmp_path)
+
+    def test_no_name_is_derived_without_transcripts(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path, file_prefix="Lung 5")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = cosmx(fixture.root, include_transcripts=False)
+        assert not result.points
+
+    @pytest.mark.parametrize(
+        ("dataset_id", "error", "match"),
+        [
+            (3, TypeError, "dataset_id must be a string; found int"),
+            ("my sample", ValueError, "dataset_id must be a valid SpatialData element name"),
+            ("_", ValueError, "the transcripts element name '<dataset_id>_transcripts' must be a valid"),
+        ],
+    )
+    def test_invalid_dataset_id_fails_before_io(
+        self, tmp_path: Path, dataset_id: object, error: type[Exception], match: str
+    ) -> None:
+        with pytest.raises(error, match=match):
+            cosmx(tmp_path / "missing", dataset_id=cast("str", dataset_id), include_transcripts=False)
+
+    def test_derived_underscore_prefix_cannot_name_points(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path, file_prefix="_", rasters=False)
+        with pytest.raises(ValueError, match=r"element name.*found '__transcripts'"):
+            cosmx(fixture.root)
+        assert list(cosmx(fixture.root, dataset_id="run").points) == ["run_transcripts"]
+
+    def test_options_are_validated_in_signature_order_before_io(self, tmp_path: Path) -> None:
+        invalid: list[tuple[str, object, type[Exception]]] = [
+            ("file_prefix", "a/b", ValueError),
+            ("dataset_id", "a b", ValueError),
+            ("include_transcripts", "yes", TypeError),
+            ("pixel_size_um", -1.0, ValueError),
+            ("scale_factors", (1,), ValueError),
+            ("chunks", 0, ValueError),
+            ("path_policy", "lenient", ValueError),
+        ]
+        options = {name: value for name, value, _ in invalid}
+        for name, _, error in invalid:
+            # Every later option is invalid too, so the first error proves the order.
+            with pytest.raises(error, match=name.split("_")[0]):
+                cosmx(tmp_path / "missing", **options)  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+            del options[name]
+
+
+class TestCosmxMetadataColumns:
+    """Metadata header names SpatialData cannot store are sanitized once, with one warning."""
+
+    def test_unusable_names_are_repaired_and_round_trip(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path / "input")
+        path = fixture.root / "Run_1_metadata_file.csv"
+        metadata = pd.read_csv(path)
+        metadata["Mean.CD45 RO"] = [1.5, 2.5, 3.5, 4.5]
+        metadata["Region"] = ["a", "b", "c", "d"]
+        metadata.to_csv(path, index=False)
+        message = (
+            "cosmx: the cell metadata CSV header has column names that a SpatialData table does not accept; using "
+            "'Mean.CD45 RO' -> 'Mean.CD45_RO', 'Region' -> 'Region_1'. Rename the source columns to choose the "
+            "names explicitly."
+        )
+        with pytest.warns(UserWarning, match=re.escape(message)) as caught:
+            result = cosmx(fixture.root)
+        assert [str(warning.message) for warning in caught] == [message]
+        table = result.tables["table"]
+        assert table.obs["Mean.CD45_RO"].tolist() == [1.5, 2.5, 3.5, 4.5]
+        assert table.obs["Region_1"].tolist() == ["a", "b", "c", "d"]
+        assert get_table_keys(table) == (["2_labels", "10_labels"], "region", "cell_ID")
+        result.write(tmp_path / "output.zarr")
+        restored = read_zarr(tmp_path / "output.zarr").tables["table"]
+        assert restored.obs["Mean.CD45_RO"].tolist() == [1.5, 2.5, 3.5, 4.5]
+        assert restored.obs["Region_1"].tolist() == ["a", "b", "c", "d"]

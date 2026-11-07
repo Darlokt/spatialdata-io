@@ -1,16 +1,31 @@
-"""Exact FOV placement and pixel-convention transforms for CosMx exports.
+"""Exact FOV placement, pixel-convention transforms and frame names for CosMx exports.
 
 CosMx local coordinates are pixel indices with a reversed vertical axis: the
 pixel at row ``r`` and column ``c`` of an ``H``-row FOV raster has local
 coordinates ``(c, H - r)``. This was measured on the 2021 Lung5_Rep2 release
 and on an AtoMx mouse-brain export, from label-pixel centroids against cell
-metadata and from polygon extremes against label pixels.
+metadata and from polygon extremes against label pixels. SpatialData places
+pixel centres at ``(c + 0.5, r + 0.5)``, so the raster-to-local map is::
+
+    [[1, 0, -0.5], [0, -1, H + 0.5], [0, 0, 1]]
 
 Each FOV's local-to-global relation is a translation per axis, possibly with a
 reversed axis: ``global = sign * local + offset``. Exports differ in the sign
 of the y axis, so the sign and offset are derived from every metadata cell and
 accepted only when one offset lies within all of their printed rounding
-intervals. No affine is fitted and no tolerance is chosen.
+intervals. No affine is fitted and no tolerance is chosen. A pixel FOV
+position (``fov_positions_file``) is the printed origin of a positive axis: it
+must agree with the cell evidence, is preserved when feasible, and places FOVs
+without cells.
+
+Coordinate systems, all in pixels except ``global``::
+
+    fov_<n>_pixels  FOV n's local pixel frame, for example "fov_2_pixels"
+    global_pixels   the export's global pixel frame (without pixel_size_um)
+    global          global micrometres: global pixels times pixel_size_um
+
+``global`` always means micrometres, so an uncalibrated export has no
+``global`` frame.
 """
 
 from __future__ import annotations
@@ -31,6 +46,9 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 type Sign = Literal[1, -1]
+
+GLOBAL = "global"
+GLOBAL_PIXELS = "global_pixels"
 
 _AXES = ("x", "y")
 # Float64 decoding error of each correctly rounded value, in units of its magnitude.
@@ -79,6 +97,16 @@ class Placement:
             [0, 0, 1],
         ]
         return Affine(np.asarray(matrix, dtype=np.float64), input_axes=_AXES, output_axes=_AXES)
+
+
+def fov_frame(fov: int) -> str:
+    """Return the name of one FOV's local pixel coordinate system."""
+    return f"fov_{fov}_pixels"
+
+
+def global_frame(pixel_size_um: float | None) -> str:
+    """Return the global coordinate system: micrometres when calibrated, else pixels."""
+    return GLOBAL_PIXELS if pixel_size_um is None else GLOBAL
 
 
 def raster_to_local(height: int) -> Affine:

@@ -10,15 +10,9 @@ import h5py
 import numpy as np
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
-from spatialdata_io.readers.visium._layout import H5Counts, MtxCounts
-from spatialdata_io.readers.visium._metadata import (
-    CountMetadata,
-    read_count_metadata,
-    read_scale_factors,
-    resolve_dataset_id,
-)
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.visium._metadata import CountMetadata, read_count_metadata, read_scale_factors
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,7 +35,7 @@ class TestReadScaleFactors:
             encoding="utf-8",
         )
 
-        result = read_scale_factors(ArtifactFile(path))
+        result = read_scale_factors(ArtifactFile(path), version=None)
 
         assert result.hires == 0.5
         assert result.lowres == 0.25
@@ -59,7 +53,7 @@ class TestReadScaleFactors:
         path.write_text(json.dumps(values), encoding="utf-8")
 
         with pytest.raises(ReaderFormatError, match="finite"):
-            read_scale_factors(ArtifactFile(path))
+            read_scale_factors(ArtifactFile(path), version=None)
 
     @pytest.mark.parametrize("key", ["tissue_hires_scalef", "tissue_lowres_scalef"])
     def test_rejects_finite_scale_with_nonfinite_inverse(self, tmp_path: Path, key: str) -> None:
@@ -71,11 +65,10 @@ class TestReadScaleFactors:
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             with pytest.raises(ReaderFormatError, match=key) as caught:
-                read_scale_factors(ArtifactFile(path))
+                read_scale_factors(ArtifactFile(path), version="2.1.0")
 
         assert caught.value.path == path
-        assert caught.value.context.reader == "visium"
-        assert caught.value.context.artifact == "scale factors"
+        assert caught.value.context == ReaderErrorContext("visium", "scale factors", "2.1.0")
 
     def test_accepts_small_scales_with_finite_inverse(self, tmp_path: Path) -> None:
         path = tmp_path / "scales.json"
@@ -85,7 +78,7 @@ class TestReadScaleFactors:
             encoding="utf-8",
         )
 
-        result = read_scale_factors(ArtifactFile(path))
+        result = read_scale_factors(ArtifactFile(path), version=None)
 
         assert result.hires == tiny
         assert result.lowres == tiny
@@ -105,7 +98,7 @@ class TestReadScaleFactors:
         )
 
         with pytest.raises(ReaderFormatError, match="spot_diameter_fullres") as caught:
-            read_scale_factors(ArtifactFile(path))
+            read_scale_factors(ArtifactFile(path), version=None)
 
         assert caught.value.path == path
         assert caught.value.context.artifact == "scale factors"
@@ -118,36 +111,52 @@ class TestReadScaleFactors:
             encoding="utf-8",
         )
 
-        result = read_scale_factors(ArtifactFile(path))
+        result = read_scale_factors(ArtifactFile(path), version=None)
 
         assert result.spot_diameter / 2 == radius
+
+
+class TestCountMetadata:
+    """Normalize the Space Ranger software version once."""
+
+    @pytest.mark.parametrize(
+        ("software_version", "expected"),
+        [
+            ("spaceranger-1.1.0", "1.1.0"),
+            ("spaceranger-2.1.0", "2.1.0"),
+            ("3.0.1", "3.0.1"),
+            ("spaceranger-2.1", None),
+            ("spaceranger-2.1.0-rc1", None),
+            ("cellranger-7.0.0", None),
+            (None, None),
+        ],
+    )
+    def test_format_version(self, software_version: str | None, expected: str | None) -> None:
+        assert CountMetadata(None, None, software_version).format_version == expected
 
 
 class TestReadCountMetadata:
     """Read optional attributes while the HDF5 owner is open."""
 
-    def test_reads_single_library_and_optional_text(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "library_ids", [np.asarray([b"library"]), b"library", "library"], ids=["array", "bytes", "str"]
+    )
+    def test_reads_single_library_and_optional_text(self, tmp_path: Path, library_ids: object) -> None:
         path = tmp_path / "counts.h5"
         with h5py.File(path, "w") as source:
-            source.attrs["library_ids"] = np.asarray([b"library"])
+            source.attrs["library_ids"] = library_ids
             source.attrs["chemistry_description"] = "chemistry"
             source.attrs["software_version"] = b"spaceranger-2.1.0"
 
-        result = read_count_metadata(H5Counts(path=ArtifactFile(path), filename_prefix=None))
+        result = read_count_metadata(ArtifactFile(path))
 
         assert result == CountMetadata("library", "chemistry", "spaceranger-2.1.0")
 
-    def test_mex_has_no_embedded_metadata(self, tmp_path: Path) -> None:
-        result = read_count_metadata(
-            MtxCounts(
-                path=ArtifactDirectory(tmp_path),
-                prefix=None,
-                compressed=True,
-                filename_prefix="sample",
-            )
-        )
+    def test_absent_attributes_are_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "counts.h5"
+        h5py.File(path, "w").close()
 
-        assert result == CountMetadata(None, None, None)
+        assert read_count_metadata(ArtifactFile(path)) == CountMetadata(None, None, None)
 
     @pytest.mark.parametrize("library_ids", [np.asarray([], dtype="S1"), np.asarray([b"a", b"b"])])
     def test_rejects_non_single_library_h5(self, tmp_path: Path, library_ids: np.ndarray) -> None:
@@ -156,28 +165,35 @@ class TestReadCountMetadata:
             source.attrs["library_ids"] = library_ids
 
         with pytest.raises(ReaderFormatError, match="exactly one library ID"):
-            read_count_metadata(H5Counts(path=ArtifactFile(path), filename_prefix=None))
+            read_count_metadata(ArtifactFile(path))
 
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            # h5py stores bytes as a variable-length string and returns it decoded with surrogateescape.
+            (b"\xff", "non-UTF-8 bytes"),
+            (np.bytes_(b"\xff"), "non-UTF-8 bytes"),
+            (b"", "empty attribute"),
+            (np.int64(1), "value type int64"),
+        ],
+        ids=["variable-length", "fixed-length", "empty", "integer"],
+    )
+    def test_rejects_malformed_text(self, tmp_path: Path, value: object, message: str) -> None:
+        path = tmp_path / "counts.h5"
+        with h5py.File(path, "w") as source:
+            source.attrs["software_version"] = value
 
-class TestResolveDatasetId:
-    """Resolve precedence and reject identifiers unsafe for element names."""
+        with pytest.raises(ReaderFormatError, match=message) as caught:
+            read_count_metadata(ArtifactFile(path))
 
-    def test_explicit_id_precedes_embedded_and_filename_ids(self, tmp_path: Path) -> None:
-        counts = H5Counts(path=ArtifactFile(tmp_path / "counts.h5"), filename_prefix="prefix")
+        assert caught.value.context.artifact == "count metadata"
+        assert caught.value.path == path
 
-        result = resolve_dataset_id("explicit", counts, CountMetadata("embedded", None, None))
+    def test_unreadable_file_keeps_its_error_with_context(self, tmp_path: Path) -> None:
+        path = tmp_path / "counts.h5"
+        path.write_bytes(b"not hdf5")
 
-        assert result == "explicit"
+        with pytest.raises(OSError, match="signature") as caught:
+            read_count_metadata(ArtifactFile(path))
 
-    def test_uses_embedded_then_filename_prefix(self, tmp_path: Path) -> None:
-        counts = H5Counts(path=ArtifactFile(tmp_path / "counts.h5"), filename_prefix="prefix")
-
-        assert resolve_dataset_id(None, counts, CountMetadata("embedded", None, None)) == "embedded"
-        assert resolve_dataset_id(None, counts, CountMetadata(None, None, None)) == "prefix"
-
-    @pytest.mark.parametrize("value", [None, "", " sample", "sample/one", "sample\\one", "sample\x00one"])
-    def test_rejects_missing_or_unsafe_id(self, tmp_path: Path, value: str | None) -> None:
-        counts = H5Counts(path=ArtifactFile(tmp_path / "counts.h5"), filename_prefix=None)
-
-        with pytest.raises(ValueError, match="dataset_id"):
-            resolve_dataset_id(value, counts, CountMetadata(None, None, None))
+        assert any("count metadata" in note for note in caught.value.__notes__)

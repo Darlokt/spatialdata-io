@@ -1,4 +1,9 @@
-"""Describe the channels of one MACSima stack in a metadata-only table."""
+"""Describe the channels of one MACSima stack in a metadata-only table.
+
+The table has no observations and ``X=None``; each ``var`` row describes one
+image channel, indexed by its channel name, with the columns and dtypes of
+``_schemas.CHANNEL_VAR_DTYPES``. It annotates no element.
+"""
 
 from __future__ import annotations
 
@@ -34,7 +39,8 @@ def make_channel_table(channels: Sequence[PlannedChannel]) -> AnnData:
         # A missing exposure becomes NaN in the float column.
         "exposure": [row.exposure_ms for row in metadata],
     }
-    # Type source values before DataFrame inference can round nullable integer IDs.
+    # Typed columns keep ROI IDs above 2**53 exact; DataFrame inference would
+    # round a nullable integer column through float64.
     index = pd.Index([channel.name for channel in channels])
     columns = {name: pd.Series(values[name], index=index, dtype=dtype) for name, dtype in CHANNEL_VAR_DTYPES.items()}
     var = pd.DataFrame(columns, index=index)

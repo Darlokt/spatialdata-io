@@ -28,7 +28,12 @@ if TYPE_CHECKING:
 
 @click.command(name="visium")
 @dataset_io_options
-@click.option("--dataset-id", type=str, default=None, help="Dataset identifier. Inferred when omitted.")
+@click.option(
+    "--dataset-id",
+    type=str,
+    default=None,
+    help="Name of the circles element and full-resolution frame. Defaults to the HDF5 library ID.",
+)
 @click.option(
     "--counts-source",
     type=click.Path(path_type=Path),
@@ -39,7 +44,7 @@ if TYPE_CHECKING:
     "--fullres-image-file",
     type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
     default=None,
-    help="Optional full-resolution TIFF/BTF, PNG, or JPEG. Relative paths resolve below the dataset root.",
+    help="Optional full-resolution TIFF/BigTIFF/BTF, PNG or JPEG. Relative paths resolve below the dataset root.",
 )
 @click.option(
     "--positions-file",
@@ -63,7 +68,7 @@ if TYPE_CHECKING:
     "--data-axes",
     type=str,
     default=None,
-    help="Explicit axes for an ambiguous full-resolution TIFF series, for example CYX or ZCYX.",
+    help="Source axes of the full-resolution TIFF as one string, for example CYX. Defaults to the file's axes.",
 )
 @click.option(
     "--tiff-series",

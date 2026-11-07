@@ -1,4 +1,22 @@
-"""Plan one MACSima stack: channel selection, order, names, canvas, and nuclei split."""
+"""Plan one MACSima stack: channel selection, order, names, canvas and nuclei split.
+
+A stack holds the channel images of one ROI. Planning works on the
+normalized metadata of the inspected channels and reads no pixels:
+
+- ``exclude_cycles`` removes channels first; the rest are ordered by cycle,
+  then by marker name (bleach images carry ``_background``), then by path.
+- All channels must share dtype, pixel size, software major and, where
+  recorded, well and ROI, because they are stacked on one grid.
+- Channel names are the marker, or ``R<cycle> <marker>``. A repeated name is
+  numbered in channel order (``DAPI (1)``, ``DAPI (2)``); names are assigned
+  once over the whole stack, so a channel keeps its name in the nuclei stack.
+- MACS iQ View records each plane's position in pixels on the ROI grid. The
+  canvas starts at the smallest position and spans every channel; each
+  channel is zero-padded onto it.
+- More stain channels named ``nuclei_channel_name`` than the split threshold
+  form a separate nuclei stack. The main stack keeps the first and the last
+  of them, the registration reference and the end-of-run image.
+"""
 
 from __future__ import annotations
 
@@ -71,6 +89,9 @@ def make_channel_options(
     if any(isinstance(cycle, bool) or not isinstance(cycle, int) for cycle in exclude_cycles):
         message = "exclude_cycles must contain only integers."
         raise TypeError(message)
+    if any(cycle < 0 for cycle in exclude_cycles):
+        message = f"exclude_cycles must contain only non-negative cycles; found {sorted(exclude_cycles)}."
+        raise ValueError(message)
     if not isinstance(include_cycle_in_channel_names, bool):
         message = "include_cycle_in_channel_names must be a boolean."
         raise TypeError(message)

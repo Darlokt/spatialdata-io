@@ -42,7 +42,7 @@ class TestCosmxCharacterization:
         assert table.var_names.tolist() == ["GeneB", "HLA-A", "GeneA", "NegPrb1"]
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[2, 5], [6, 2], [2, 5], [6, 2]])
         np.testing.assert_array_equal(
-            table.obsm["global"], [[1002, 5005.5], [1006, 5002.5], [3002.25, 7005], [3006.25, 7002]]
+            table.obsm["spatial_global_pixels"], [[1002, 5005.5], [1006, 5002.5], [3002.25, 7005], [3006.25, 7002]]
         )
 
     def test_transcript_values(self, tmp_path: Path) -> None:
@@ -63,15 +63,15 @@ class TestCosmxCorrections:
         # Two cells per FOV made the legacy six-parameter fit return a distorted affine.
         result = cosmx(write_cosmx_dataset(tmp_path).root)
         frames = _frames(result.images["2_image"])
-        np.testing.assert_array_equal(frames["global"], [[1, 0, 999.5], [0, -1, 5007.0], [0, 0, 1]])
+        np.testing.assert_array_equal(frames["global_pixels"], [[1, 0, 999.5], [0, -1, 5007.0], [0, 0, 1]])
 
     def test_source_pixels_are_unchanged_and_redundant_frames_are_gone(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path)
         result = cosmx(fixture.root)
         labels = result.labels["2_labels"].data.compute()
         assert np.argwhere(labels).tolist() == [[1, 2], [4, 6]]
-        assert set(_frames(result.images["2_image"])) == {"2", "global"}
-        assert set(_frames(result.labels["2_labels"])) == {"2", "global"}
+        assert set(_frames(result.images["2_image"])) == {"fov_2_pixels", "global_pixels"}
+        assert set(_frames(result.labels["2_labels"])) == {"fov_2_pixels", "global_pixels"}
 
     def test_one_global_points_element_with_reader_owned_names(self, tmp_path: Path) -> None:
         result = cosmx(write_cosmx_dataset(tmp_path).root)

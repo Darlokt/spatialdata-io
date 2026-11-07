@@ -4,16 +4,27 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import h5py
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 from spatialdata_io.readers.visium._layout import H5Counts, MtxCounts, VisiumLayout, _position_format, discover_layout
+from spatialdata_io.readers.visium._metadata import CountMetadata
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pytest_mock import MockerFixture
+
+
+_CONTEXT = ReaderErrorContext("visium", "tissue positions")
+
+
+def _write_h5(path: Path, **attributes: bytes) -> None:
+    """Write an HDF5 file holding only root identity attributes."""
+    with h5py.File(path, "w") as source:
+        source.attrs.update(attributes)
 
 
 def _write_required_spatial(root: Path, *, current: bool = True) -> None:
@@ -48,7 +59,7 @@ class TestDiscoverLayout:
     def test_invalid_position_encoding_has_artifact_context(self, tmp_path: Path) -> None:
         """Invalid position encoding has artifact context."""
         _write_required_spatial(tmp_path)
-        (tmp_path / "filtered_feature_bc_matrix.h5").touch()
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
         (tmp_path / "spatial" / "tissue_positions.csv").write_bytes(b"\xff,1,0,0,1,2\n")
 
         with pytest.raises(ReaderFormatError, match=r"visium.*tissue positions.*invalid UTF-8") as caught:
@@ -59,7 +70,7 @@ class TestDiscoverLayout:
     def test_standard_h5_precedes_standard_mex_and_finds_optional_images(self, tmp_path: Path) -> None:
         _write_required_spatial(tmp_path)
         h5 = tmp_path / "filtered_feature_bc_matrix.h5"
-        h5.touch()
+        _write_h5(h5)
         _write_mex(tmp_path / "filtered_feature_bc_matrix")
         for name in ("tissue_hires_image.png", "tissue_lowres_image.png"):
             (tmp_path / "spatial" / name).touch()
@@ -127,7 +138,7 @@ class TestDiscoverLayout:
     def test_legacy_prefixed_count_source_infers_dataset_prefix(self, tmp_path: Path, kind: str) -> None:
         _write_required_spatial(tmp_path, current=False)
         if kind == "h5":
-            (tmp_path / "library_filtered_feature_bc_matrix.h5").touch()
+            _write_h5(tmp_path / "library_filtered_feature_bc_matrix.h5")
         else:
             _write_mex(tmp_path / "library_filtered_feature_bc_matrix")
 
@@ -138,7 +149,7 @@ class TestDiscoverLayout:
 
     def test_relative_overrides_resolve_under_root(self, tmp_path: Path) -> None:
         _write_required_spatial(tmp_path)
-        (tmp_path / "raw_feature_bc_matrix.h5").touch()
+        _write_h5(tmp_path / "raw_feature_bc_matrix.h5")
         (tmp_path / "positions.csv").write_text(
             "barcode,in_tissue,array_row,array_col,pxl_row_in_fullres,pxl_col_in_fullres\na,1,0,0,1,2\n",
             encoding="utf-8",
@@ -161,7 +172,7 @@ class TestDiscoverLayout:
 
     def test_current_positions_take_precedence_over_legacy_file(self, tmp_path: Path) -> None:
         _write_required_spatial(tmp_path)
-        (tmp_path / "filtered_feature_bc_matrix.h5").touch()
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
         (tmp_path / "spatial" / "tissue_positions_list.csv").write_text("a,1,0,0,1,2\n", encoding="utf-8")
 
         layout = _discover(tmp_path)
@@ -171,7 +182,7 @@ class TestDiscoverLayout:
 
     def test_detects_header_in_legacy_position_filename(self, tmp_path: Path) -> None:
         _write_required_spatial(tmp_path, current=False)
-        (tmp_path / "filtered_feature_bc_matrix.h5").touch()
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
         path = tmp_path / "spatial" / "tissue_positions_list.csv"
         path.write_text(
             "barcode,in_tissue,array_row,array_col,pxl_row_in_fullres,pxl_col_in_fullres\na,1,0,0,1,2\n",
@@ -185,7 +196,7 @@ class TestDiscoverLayout:
 
     def test_rejects_ambiguous_legacy_count_sources(self, tmp_path: Path) -> None:
         _write_required_spatial(tmp_path)
-        (tmp_path / "sample_filtered_feature_bc_matrix.h5").touch()
+        _write_h5(tmp_path / "sample_filtered_feature_bc_matrix.h5")
         _write_mex(tmp_path / "sample_filtered_feature_bc_matrix")
 
         with pytest.raises(ReaderFormatError, match=r"both .* and"):
@@ -229,6 +240,47 @@ class TestDiscoverLayout:
 
         assert error.value.filename == str(tmp_path / "filtered_feature_bc_matrix.h5")
 
+    def test_reads_hdf5_identity_before_naming_later_errors_with_its_version(self, tmp_path: Path) -> None:
+        _write_required_spatial(tmp_path)
+        _write_h5(
+            tmp_path / "filtered_feature_bc_matrix.h5",
+            library_ids=b"library",
+            chemistry_description=b"Spatial 3' v1",
+            software_version=b"spaceranger-2.1.0",
+        )
+
+        layout = _discover(tmp_path)
+
+        assert isinstance(layout.counts, H5Counts)
+        assert layout.counts.metadata == CountMetadata("library", "Spatial 3' v1", "spaceranger-2.1.0")
+        assert layout.format_version == "2.1.0"
+
+        (tmp_path / "spatial" / "tissue_positions.csv").write_text("a,1,0,0,1\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match="six positional") as caught:
+            _discover(tmp_path)
+        assert caught.value.context == ReaderErrorContext("visium", "tissue positions", "2.1.0")
+
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_explicit_mex_directory_has_no_version_or_prefix(self, tmp_path: Path, *, compressed: bool) -> None:
+        _write_required_spatial(tmp_path)
+        _write_mex(tmp_path / "selected", compressed=compressed)
+
+        layout = _discover(tmp_path, counts_source="selected")
+
+        assert layout.counts == MtxCounts(
+            path=ArtifactDirectory(tmp_path / "selected"), prefix=None, compressed=compressed, filename_prefix=None
+        )
+        assert layout.format_version is None
+
+    @pytest.mark.parametrize("name", ["counts.H5", "counts.hdf5"])
+    def test_explicit_hdf5_is_selected_by_suffix(self, tmp_path: Path, name: str) -> None:
+        _write_required_spatial(tmp_path)
+        _write_h5(tmp_path / name)
+
+        layout = _discover(tmp_path, counts_source=name)
+
+        assert layout.counts == H5Counts(ArtifactFile(tmp_path / name), None, CountMetadata(None, None, None))
+
 
 class TestPositionFormat:
     """Classify logical CSV records while owning and closing the source."""
@@ -239,7 +291,7 @@ class TestPositionFormat:
         path.write_text(f'{bom}"barcode\ncontinued",1,0,0,1,2\n', encoding="utf-8")
         opened = mocker.spy(type(path), "open")
 
-        result = _position_format(ArtifactFile(path))
+        result = _position_format(ArtifactFile(path), context=_CONTEXT)
 
         assert result == "headerless"
         assert opened.spy_return.closed
@@ -257,7 +309,7 @@ class TestPositionFormat:
         opened = mocker.spy(type(path), "open")
 
         with pytest.raises(ReaderFormatError) as caught:
-            _position_format(ArtifactFile(path))
+            _position_format(ArtifactFile(path), context=_CONTEXT)
 
         assert caught.value.path == path
         assert caught.value.context.reader == "visium"
@@ -268,7 +320,7 @@ class TestPositionFormat:
         path = tmp_path / "missing.csv"
 
         with pytest.raises(FileNotFoundError) as caught:
-            _position_format(ArtifactFile(path))
+            _position_format(ArtifactFile(path), context=_CONTEXT)
 
         assert caught.value.filename == str(path)
         assert any("visium" in note and "tissue positions" in note for note in caught.value.__notes__)
