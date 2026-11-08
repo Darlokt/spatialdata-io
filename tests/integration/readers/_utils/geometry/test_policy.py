@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 import shapely
 from shapely.geometry import Polygon
+from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
@@ -78,8 +79,22 @@ class TestStereoseqConsumer:
         assert np.flatnonzero(mask).tolist() == list(invalid)
         if invalid:
             with pytest.raises(ReaderFormatError, match="invalid geometries") as caught:
-                make_polygons(centers, _borders(rings), index, path=tmp_path / "cells.gef", policy="raise")
+                make_polygons(
+                    centers,
+                    _borders(rings),
+                    index,
+                    path=tmp_path / "cells.gef",
+                    policy="raise",
+                    transformations={"global": Identity()},
+                )
             assert str(index[invalid[0]]) in str(caught.value)
         else:
-            shapes = make_polygons(centers, _borders(rings), index, path=tmp_path / "cells.gef", policy="keep")
+            shapes = make_polygons(
+                centers,
+                _borders(rings),
+                index,
+                path=tmp_path / "cells.gef",
+                policy="keep",
+                transformations={"global": Identity()},
+            )
             assert shapely.equals_exact(shapes.geometry.to_numpy(), geometries, tolerance=0).all()

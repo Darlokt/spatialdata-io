@@ -146,7 +146,8 @@ class TestStereoseqPositions:
         source.write_h5ad(fixture.analysis)
         with pytest.raises(ReaderFormatError, match="reserved") as error:
             stereoseq(fixture.root, analysis_files=(fixture.analysis,))
-        assert str(fixture.analysis) in "".join(error.value.__notes__)
+        assert error.value.path == fixture.analysis.resolve()
+        assert error.value.context.artifact == "analysis table"
 
     @pytest.mark.parametrize("storage", ["h5ad", "anndata-zarr", "spatialdata-zarr"])
     def test_actual_reader_persistence(self, tmp_path: Path, storage: str) -> None:

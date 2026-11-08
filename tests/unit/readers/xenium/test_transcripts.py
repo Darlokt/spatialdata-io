@@ -14,7 +14,7 @@ from dask.callbacks import Callback
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity, get_transformation
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium import _transcripts
 from spatialdata_io.readers.xenium._layout import TabularSource
@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 COLUMNS_1_0 = ["transcript_id", "cell_id", "overlaps_nucleus", "feature_name", "x", "y", "z", "qv"]
 COLUMNS_3_0 = [*COLUMNS_1_0, "fov_name", "nucleus_distance", "codeword_index", "codeword_category", "is_gene"]
+_COORDINATE_SOURCES = {"x": "x_location", "y": "y_location", "z": "z_location"}
+CONTEXT = ReaderErrorContext("xenium", "transcripts", "5.0.0")
 
 
 def _cells(bundle: fx.XeniumFixture) -> pd.Index:
@@ -40,7 +42,11 @@ def _cells(bundle: fx.XeniumFixture) -> pd.Index:
 def _read(bundle: fx.XeniumFixture, kind: str = "parquet") -> dd.DataFrame:
     source = TabularSource(ArtifactFile(bundle.root / f"transcripts.{kind}"), "parquet" if kind == "parquet" else "csv")
     return read_transcripts(
-        source, bundle.profile.family, features=pd.Index(bundle.features, dtype="str"), cells=_cells(bundle)
+        source,
+        bundle.profile.family,
+        features=pd.Index(bundle.features, dtype="str"),
+        cells=_cells(bundle),
+        context=CONTEXT,
     )
 
 
@@ -116,18 +122,32 @@ class TestReadTranscripts:
         pd.testing.assert_frame_equal(points.compute(), whole)
 
     # Blocks smaller than one record leave empty blocks between record boundaries.
+    @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_3_0], ids=["integer-ids", "hex-ids"])
     @pytest.mark.parametrize("block_bytes", [64, 256])
-    def test_csv_blocks_equal_parquet(self, tmp_path: Path, mocker: MockerFixture, block_bytes: int) -> None:
+    def test_csv_blocks_equal_parquet(
+        self, tmp_path: Path, mocker: MockerFixture, profile: fx.Profile, block_bytes: int
+    ) -> None:
         mocker.patch.object(_transcripts, "_BLOCK_BYTES", block_bytes)
-        parquet = _read(fx.write_xenium_bundle(tmp_path / "parquet", fx.XOA_3_0)).compute()
-        bundle = fx.write_xenium_bundle(tmp_path / "csv", fx.XOA_3_0, fx.Options(transcripts="csv"))
+        parquet = _read(fx.write_xenium_bundle(tmp_path / "parquet", profile)).compute()
+        bundle = fx.write_xenium_bundle(tmp_path / "csv", profile, fx.Options(transcripts="csv"))
 
         points = _read(bundle, "csv")
 
         assert points.npartitions > 1
         assert not points.known_divisions
         frame = points.compute()
-        pd.testing.assert_frame_equal(frame.reset_index(drop=True), parquet)
+        pd.testing.assert_frame_equal(frame.reset_index(drop=True), parquet, check_exact=True)
+
+    def test_csv_uses_shared_blocks_of_64_mib(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcripts="csv"))
+        blocks = mocker.spy(_transcripts, "read_csv_blocks")
+
+        points = _read(bundle, "csv")
+
+        assert blocks.call_args.kwargs["block_bytes"] == 64 * 1024 * 1024
+        source_columns = [_COORDINATE_SOURCES.get(name, name) for name in COLUMNS_3_0]
+        assert list(blocks.call_args.kwargs["columns"]) == source_columns
+        assert points.npartitions == 1
 
     def test_projects_documented_columns_only(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
@@ -155,8 +175,10 @@ class TestReadTranscripts:
             ("cell_id", ["zzzzzzzz-1"], r"unknown cell_id values \['zzzzzzzz-1'\]"),
             ("x_location", [np.inf], "nonfinite x_location values"),
             ("qv", [None], r"missing values in \['qv'\]"),
+            ("qv", [np.nan], "nonfinite qv values"),
+            ("nucleus_distance", [-np.inf], "nonfinite nucleus_distance values"),
         ],
-        ids=["feature", "cell", "nonfinite", "null"],
+        ids=["feature", "cell", "nonfinite", "null", "nan-qv", "infinite-distance"],
     )
     def test_invalid_rows_raise_when_computed(
         self, tmp_path: Path, column: str, values: list[object], match: str
@@ -171,8 +193,9 @@ class TestReadTranscripts:
 
         # Only the partition holding the defect fails.
         points.get_partition(1).compute()
-        with pytest.raises(ReaderFormatError, match=match):
+        with pytest.raises(ReaderFormatError, match=match) as caught:
             points.get_partition(0).compute()
+        assert caught.value.context == CONTEXT
 
     def test_integer_sentinel_needs_integer_ids(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)
@@ -197,7 +220,25 @@ class TestReadTranscripts:
         path = bundle.root / "transcripts.csv"
         path.write_text(path.read_text() + "1,2\n")
 
-        with pytest.raises(ReaderFormatError, match="malformed CSV"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV records") as caught:
+            _read(bundle, "csv").compute()
+        assert caught.value.context == CONTEXT
+
+    # CSV has no null spelling: an empty numeric field is malformed, and NaN text is a nonfinite number.
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [("", r"malformed CSV records .*invalid value ''"), ("NA", "malformed CSV records"), ("NaN", "nonfinite qv")],
+        ids=["empty", "na", "nan"],
+    )
+    def test_csv_numeric_fields_hold_finite_numbers(self, tmp_path: Path, value: str, match: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcripts="csv"))
+        path = bundle.root / "transcripts.csv"
+        header, first, rest = path.read_text().split("\n", 2)
+        fields = first.split(",")
+        fields[header.split(",").index('"qv"')] = value
+        path.write_text("\n".join([header, ",".join(fields), rest]))
+
+        with pytest.raises(ReaderFormatError, match=match):
             _read(bundle, "csv").compute()
 
     def test_missing_documented_column(self, tmp_path: Path) -> None:

@@ -7,13 +7,25 @@ micrometre ``global`` frame the image therefore carries
 ``experiment.xenium``, not the image's own pixel size. Without a CSV the image is
 taken to be registered to the Xenium pixel grid already and carries ``Scale(ps)``.
 https://kb.10xgenomics.com/hc/en-us/articles/35386990499853-How-can-I-convert-coordinates-between-H-E-image-and-Xenium-data
+
+Level 0 of the first TIFF series is read with its declared axes, or the
+caller's ``data_axes``::
+
+    YXS    interleaved samples, e.g. an RGB H&E scan
+    CYX    channels, e.g. an IF stack or an H&E stored as Hematoxylin/Eosin/Residual
+    YX     one channel
+
+Samples become channels named ``r, g, b(, a)`` only when the TIFF declares an
+RGB colour model; otherwise channels take their OME names or IDs, and
+positional indexes without OME metadata. Three channels are never guessed to be
+RGB.
 """
 
 from __future__ import annotations
 
 import csv
 import math
-from collections.abc import Sequence
+from dataclasses import replace
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,21 +41,25 @@ from spatialdata_io.readers._utils.image import (
     inspect_tiff,
     make_raster_options,
     normalize_raster_axes,
+    ome_channel_names,
+    raster_channel_names,
     read_tiff,
 )
 from spatialdata_io.readers._utils.paths import ArtifactFile, require_file
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from numpy.typing import NDArray
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
+_AXES = ("c", "y", "x")
 _MATRIX_SHAPE = (3, 3)
-_RGB_CHANNELS = ("r", "g", "b", "a")
-_RGB_SIZES = (3, 4)
+_CONTEXT = ReaderErrorContext("xenium", "aligned image")
 
 
-def read_alignment(path: ArtifactFile) -> NDArray[np.float64]:
+def read_alignment(path: ArtifactFile, *, context: ReaderErrorContext) -> NDArray[np.float64]:
     """Read a strict 3 x 3 alignment matrix with last row ``[0, 0, 1]``.
 
     Raises
@@ -52,7 +68,6 @@ def read_alignment(path: ArtifactFile) -> NDArray[np.float64]:
         If the file is not three rows of three finite numbers, has another
         last row, or is not invertible.
     """
-    context = ReaderErrorContext("xenium", "image alignment")
     expected = "a 3 x 3 comma-separated finite invertible matrix with last row 0,0,1"
     try:
         with path.open(encoding="utf-8-sig", newline="") as handle:
@@ -75,50 +90,53 @@ def read_alignment(path: ArtifactFile) -> NDArray[np.float64]:
     return matrix
 
 
-def read_aligned(
+def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, raster options and context.
     image: ArtifactFile,
     alignment: ArtifactFile | None,
     *,
     pixel_size: float,
-    data_axes: tuple[str, ...] | None,
+    data_axes: str | None,
     raster: RasterOptions,
+    context: ReaderErrorContext,
 ) -> DataArray | DataTree:
-    """Return one aligned image as lazy CYX pixels in the micrometre frame."""
-    context = ReaderErrorContext("xenium", "aligned image")
+    """Return one aligned image as lazy CYX pixels in the micrometre frame.
+
+    Raises
+    ------
+    ValueError
+        If ``data_axes`` does not name one axis per stored dimension, or
+        ``raster`` requests more downsampling than the image extent allows.
+    ReaderFormatError
+        If the image metadata or the alignment matrix is malformed.
+    """
     metadata = inspect_tiff(image, context=context)
-
     lazy = read_tiff(metadata, series=0, level=0, context=context)
-    axes = tuple(axis.lower() for axis in (lazy.axes if data_axes is None else data_axes))
-    if len(axes) != lazy.data.ndim:
-        raise ReaderFormatError(
-            context=context,
-            path=image,
-            found=f"axes {axes} for shape {lazy.data.shape}",
-            expected="one axis per dimension",
-        )
-    # TIFF samples (S) are interleaved RGB(A) components; C axes are named channels.
-    samples = "s" in axes
+    declared = tuple(axis.lower() for axis in lazy.axes)
+    source = declared if data_axes is None else tuple(data_axes.lower())
+    if len(source) != len(declared):
+        message = f"data_axes {data_axes!r} names {len(source)} axes; the image has axes {''.join(lazy.axes)!r}."
+        raise ValueError(message)
+    # Interleaved samples (S) become channels; C axes are channels already.
     data = normalize_raster_axes(
-        lazy.data, tuple("c" if axis == "s" else axis for axis in axes), target_axes=("c", "y", "x"), add_missing=("c",)
+        lazy.data, tuple("c" if axis == "s" else axis for axis in source), target_axes=_AXES, add_missing=("c",)
     )
+    raster.validate_image_pyramid(data, element="the aligned image")
 
-    channels = data.shape[0]
-    names: list[str] | None = None
-    if samples and channels in _RGB_SIZES:
-        names = list(_RGB_CHANNELS[:channels])
-    elif metadata.ome is not None and metadata.ome.images:
-        ome_names = [channel.name for channel in metadata.ome.images[0].pixels.channels]
-        if len(ome_names) == channels and all(ome_names) and len(set(ome_names)) == channels:
-            names = [str(name) for name in ome_names]
+    # Declared RGB samples and OME sample records apply only when the file's
+    # samples axis became the channels.
+    samples = "s" in declared and source[declared.index("s")] in {"c", "s"}
+    ome = ome_channel_names(metadata, series=0, count=int(data.shape[0]), samples=samples, context=context)
 
     transformation: BaseTransformation = Scale([pixel_size, pixel_size], axes=("y", "x"))
     if alignment is not None:
-        matrix = np.diag([pixel_size, pixel_size, 1.0]) @ read_alignment(alignment)
+        matrix = np.diag([pixel_size, pixel_size, 1.0]) @ read_alignment(
+            alignment, context=replace(context, artifact="image alignment")
+        )
         transformation = Affine(matrix, input_axes=("x", "y"), output_axes=("x", "y"))
     return Image2DModel.parse(
         data,
-        dims=("c", "y", "x"),
-        c_coords=names,
+        dims=_AXES,
+        c_coords=raster_channel_names(lazy.color, samples=samples, ome=ome),
         rgb=False,
         scale_factors=raster.model_scale_factors,
         chunks=raster.image_chunks(),
@@ -126,12 +144,23 @@ def read_aligned(
     )
 
 
+def _validate_data_axes(data_axes: str | None) -> None:
+    if data_axes is None:
+        return
+    if not isinstance(data_axes, str):
+        message = "data_axes must be a string such as 'YXS', or None."
+        raise TypeError(message)
+    if not data_axes.isalpha() or len(set(data_axes.lower())) != len(data_axes):
+        message = f"data_axes must contain distinct single-letter axis names, such as 'YXS'; found {data_axes!r}."
+        raise ValueError(message)
+
+
 def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretation and raster options.
     image_file: str | Path,
     alignment_file: str | Path | None = None,
     *,
     pixel_size: float,
-    data_axes: Sequence[str] | None = None,
+    data_axes: str | None = None,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> DataArray | DataTree:
@@ -150,9 +179,9 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
         ``pixel_size`` (``sdata.attrs["xenium"]["experiment"]["pixel_size"]``).
         The image's own OME pixel size is a different quantity and is not used.
     data_axes
-        Explicit single-letter axes of the stored array, overriding the TIFF
-        axes, for example ``("y", "x", "s")``. ``s`` marks interleaved RGB(A)
-        samples and ``c`` named channels.
+        Axes of the stored array, one letter per dimension in any letter case,
+        overriding the TIFF axes, for example ``"YXS"``. ``S`` marks interleaved
+        samples and ``C`` channels; both become the channel axis.
     scale_factors
         Integer factors of at least two, one per generated pyramid level; empty
         for a single scale.
@@ -163,21 +192,32 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
     Returns
     -------
     xarray.DataArray or xarray.DataTree
-        A ``(c, y, x)`` image in the source dtype. RGB(A) samples are named
-        ``r, g, b(, a)``; other channels use their OME names, or default indexes
-        without OME names. Its ``global`` transformation maps image pixels to
-        micrometres: ``Affine(diag(pixel_size, pixel_size, 1) @ M)`` with an
-        alignment matrix ``M``, otherwise ``Scale(pixel_size)``. Pixels stay lazy.
+        A ``(c, y, x)`` image in the source dtype. Its ``global``
+        transformation maps image pixels to micrometres:
+        ``Affine(diag(pixel_size, pixel_size, 1) @ M)`` with an alignment
+        matrix ``M``, otherwise ``Scale(pixel_size)``. Pixels stay lazy.
+
+        Channel names follow the file's declarations:
+
+        - ``r, g, b`` (and ``a`` for declared alpha) when the channels are the
+          TIFF samples and the TIFF declares an RGB colour model
+          (photometric RGB or JPEG-compressed YCbCr);
+        - otherwise the OME channel names when all are nonempty and unique, else
+          the OME channel IDs; samples without a colour model are named
+          ``<name or ID>:sample:<index>``;
+        - positional ``0, 1, ...`` without OME metadata.
+
+        Three or four channels are never assumed to be RGB from their count.
 
     Raises
     ------
     TypeError, ValueError
-        If options are invalid.
+        If options are invalid, or ``data_axes`` does not match the image rank.
     FileNotFoundError, IsADirectoryError
         If a file is missing or a directory.
     ValueError
-        A contextual ``ReaderFormatError`` if the image or the alignment matrix
-        is malformed.
+        A contextual ``ReaderFormatError`` if the image, its OME channels or the
+        alignment matrix are malformed.
     """
     if isinstance(pixel_size, bool) or not isinstance(pixel_size, int | float):
         message = "pixel_size must be a number of micrometres."
@@ -185,13 +225,11 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
     if not math.isfinite(pixel_size) or pixel_size <= 0:
         message = "pixel_size must be a finite positive number of micrometres."
         raise ValueError(message)
-    if data_axes is not None and (isinstance(data_axes, str) or not isinstance(data_axes, Sequence)):
-        message = "data_axes must be a sequence of single-letter axis names."
-        raise TypeError(message)
+    _validate_data_axes(data_axes)
     raster = make_raster_options(scale_factors, chunks)
 
-    context = ReaderErrorContext("xenium", "aligned image")
-    image = require_file(Path(image_file).expanduser(), context=context)
-    alignment = None if alignment_file is None else require_file(Path(alignment_file).expanduser(), context=context)
-    axes = None if data_axes is None else tuple(data_axes)
-    return read_aligned(image, alignment, pixel_size=float(pixel_size), data_axes=axes, raster=raster)
+    image = require_file(Path(image_file).expanduser(), context=_CONTEXT)
+    alignment = None if alignment_file is None else require_file(Path(alignment_file).expanduser(), context=_CONTEXT)
+    return read_aligned(
+        image, alignment, pixel_size=float(pixel_size), data_axes=data_axes, raster=raster, context=_CONTEXT
+    )

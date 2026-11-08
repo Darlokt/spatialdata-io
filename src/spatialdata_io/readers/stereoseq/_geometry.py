@@ -1,4 +1,12 @@
-"""Preserve source grid coordinates and reconstruct literal paired cell contours."""
+"""Build count-target points and literal cell contours in the DNB grid.
+
+Points hold the eager int64 ``x, y`` grid coordinates of square bins, cells or
+analysis observations, unchanged. Cell GEFs store each contour in
+``cellBin/cellBorder`` as an ``(n_cells, 32, 2)`` int16 array of vertex offsets
+relative to the cell centre, followed by paired ``(32767, 32767)`` padding;
+vertices are centre plus offset. Contours are not repaired; the
+``invalid_geometries`` policy keeps, drops or rejects invalid ones.
+"""
 
 from __future__ import annotations
 
@@ -9,16 +17,17 @@ import numpy as np
 import pandas as pd
 import shapely
 from spatialdata.models import PointsModel, ShapesModel
-from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     import dask.dataframe as dd
     from numpy.typing import NDArray
+    from spatialdata.transformations import BaseTransformation
 
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
 
@@ -26,22 +35,25 @@ _PADDING = 32767
 _MIN_VERTICES = 3
 
 
-def make_points(coordinates: NDArray[np.int64], index: pd.Index) -> dd.DataFrame:
+def make_points(
+    coordinates: NDArray[np.int64], index: pd.Index, *, transformations: Mapping[str, BaseTransformation]
+) -> dd.DataFrame:
     """Wrap eager count/analysis positions in the required points model without computing tasks."""
     # Keep numerical coordinates native: PointsModel's pandas path converts
     # Arrow columns to object arrays. Its ndarray boundary preserves int64.
     return PointsModel.parse(
-        coordinates, annotation=pd.DataFrame(index=index), sort=False, transformations={"global": Identity()}
+        coordinates, annotation=pd.DataFrame(index=index), sort=False, transformations=dict(transformations)
     )
 
 
-def make_polygons(
+def make_polygons(  # noqa: PLR0913 - contour arrays, identity, policy and frame are separate inputs.
     coordinates: NDArray[np.int64],
     borders: NDArray[np.int16],
     index: pd.Index,
     *,
     path: Path,
     policy: InvalidGeometryPolicy,
+    transformations: Mapping[str, BaseTransformation],
 ) -> gpd.GeoDataFrame:
     """Decode literal centroid-relative pairs and apply the selected topology policy."""
     context = ReaderErrorContext("stereoseq", "cell borders")
@@ -91,4 +103,4 @@ def make_polygons(
                     found="all polygons dropped, leaving an empty element",
                     expected="at least one retained cell contour",
                 )
-    return ShapesModel.parse(gpd.GeoDataFrame(geometry=polygons, index=index), transformations={"global": Identity()})
+    return ShapesModel.parse(gpd.GeoDataFrame(geometry=polygons, index=index), transformations=dict(transformations))

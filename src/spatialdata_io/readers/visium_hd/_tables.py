@@ -1,4 +1,22 @@
-"""Reader-owned count population checks and final Visium HD table linkage."""
+"""Read Visium HD count matrices and link the final tables to their elements.
+
+Bin and cell matrices are 10x HDF5 feature-barcode matrices read through the
+shared Scanpy boundary, in source observation and feature order. A bin table
+holds::
+
+    X                  canonical CSR sparse array; float32 when exact, else float64
+    obs                in_tissue, array_row, array_col, pxl_row_in_fullres,
+                       pxl_col_in_fullres (aligned positions), region, instance_id
+    obs_names          s_<size:03d>um_<row:05d>_<col:05d>-1 barcodes
+    var                gene_ids, feature_types, genome; var_names are gene symbols
+    obsm["spatial"]    float64 nominal bin centres in global micrometres
+
+``instance_id`` numbers the bins 1..n in table order; it is the shapes index
+or the label value. Cell tables use the numeric cell ID of
+``cellid_<id:09d>-1`` instead (``_cells``). Every table records its canonical
+positions in ``uns["spatialdata_io_positions"]`` and is linked exactly once,
+against the returned element's materialized index, after all filtering.
+"""
 
 from __future__ import annotations
 
@@ -29,9 +47,9 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 
 
-def read_counts(path: ArtifactFile) -> AnnData:
+def read_counts(path: ArtifactFile, *, version: str | None) -> AnnData:
     """Read shared sparse counts and validate the selected HD population."""
-    context = ReaderErrorContext("visium_hd", "count matrix")
+    context = ReaderErrorContext("visium_hd", "count matrix", version)
     table = read_10x_h5(path, context=context)
     if not table.n_obs or not table.n_vars:
         raise ReaderFormatError(
@@ -47,11 +65,11 @@ def read_counts(path: ArtifactFile) -> AnnData:
 
 
 def read_bin_table(
-    layout: BinLayout, shape: tuple[int, int], frame: SlideFrame, *, make_var_names_unique: bool
+    layout: BinLayout, shape: tuple[int, int], frame: SlideFrame, *, make_var_names_unique: bool, version: str | None
 ) -> AnnData:
     """Align sparse counts and nominal centres after source calibration is validated."""
-    table = read_counts(layout.counts)
-    positions = read_positions(layout.positions, shape, table.obs_names, layout.size_um, frame)
+    table = read_counts(layout.counts, version=version)
+    positions = read_positions(layout.positions, shape, table.obs_names, layout.size_um, frame, version=version)
     table.obs = positions
 
     rows: NDArray[np.uint32] = positions["array_row"].to_numpy(dtype=np.uint32)
@@ -64,13 +82,18 @@ def read_bin_table(
     return table
 
 
-def link_table(
-    table: AnnData, target: str, identifiers: pd.Index, *, position: str, counts_path: ArtifactFile
+def link_table(  # noqa: PLR0913, RUF100 - Explicit table, target, IDs, position meaning, source and version.
+    table: AnnData,
+    target: str,
+    identifiers: pd.Index,
+    *,
+    position: str,
+    counts_path: ArtifactFile,
+    version: str | None,
 ) -> AnnData:
     """Link the final owned table once against its materialized target index."""
-    table.X = finalize_count_arrays(
-        (cast("csr_array", table.X),), context=ReaderErrorContext("visium_hd", target), path=counts_path
-    )[0]
+    context = ReaderErrorContext("visium_hd", "count matrix", version)
+    table.X = finalize_count_arrays((cast("csr_array", table.X),), context=context, path=counts_path)[0]
     if "spatial" in table.obsm:
         positions: PositionsMetadata = {
             "schema_version": 1,
@@ -85,7 +108,6 @@ def link_table(
             },
         }
         table.uns[POSITIONS_KEY] = positions
-    context = ReaderErrorContext("visium_hd", target)
     table.obs["region"] = pd.Categorical([target] * table.n_obs, categories=pd.Index([target]))
 
     # Shared counts guarantee eager annotations; upstream types also include Dataset2D.
@@ -97,4 +119,5 @@ def link_table(
         TableLinkage((target,), "region", "instance_id"),
         context=context,
         expected_instance_ids={target: identifiers},
+        path=counts_path,
     )

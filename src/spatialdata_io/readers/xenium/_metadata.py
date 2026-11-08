@@ -5,13 +5,13 @@ from __future__ import annotations
 import csv
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import islice
 from typing import TYPE_CHECKING, cast
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.metadata import read_json_object
-from spatialdata_io.readers.xenium._version import FormatVersion, detect_version
+from spatialdata_io.readers.xenium._version import detect_version
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -30,14 +30,20 @@ _INTEGER = re.compile(r"[+-]?[0-9]+")
 
 @dataclass(frozen=True, slots=True)
 class Experiment:
-    """Validated ``experiment.xenium`` facts used by discovery and assembly."""
+    """Validated ``experiment.xenium`` facts used by discovery and assembly.
 
-    version: FormatVersion | None
+    ``version`` is the dotted format version, ``None`` for XOA 1.0/1.1.
+    """
+
+    version: str | None
     family: Family
-    software: str
     pixel_size: float
     images: Mapping[str, str]
     attrs: Mapping[str, object]
+
+    def context(self, artifact: str) -> ReaderErrorContext:
+        """Return the error context of a bundle artifact with the detected format version."""
+        return ReaderErrorContext("xenium", artifact, self.version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,21 +63,22 @@ class ProteinPanel:
     targets: Mapping[str, ProteinTarget]
 
 
-def _error(path: ArtifactFile, artifact: str, *, found: str, expected: str) -> ReaderFormatError:
-    return ReaderFormatError(context=ReaderErrorContext("xenium", artifact), path=path, found=found, expected=expected)
-
-
-def _positive(value: object, name: str, path: ArtifactFile) -> float:
+def _positive(value: object, name: str, path: ArtifactFile, context: ReaderErrorContext) -> float:
     # JSON booleans are ints in Python but never a size.
     if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
-        raise _error(path, "experiment.xenium", found=f"{name} = {value!r}", expected=f"a finite positive {name}")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"{name} = {value!r}", expected=f"a finite positive {name}"
+        )
     return float(value)
 
 
-def _object(value: object, name: str, path: ArtifactFile, artifact: str) -> dict[str, object]:
+def _object(value: object, name: str, path: ArtifactFile, context: ReaderErrorContext) -> dict[str, object]:
     if not isinstance(value, dict):
-        raise _error(
-            path, artifact, found=f"{name} of type {type(value).__name__}", expected=f"{name} as a JSON object"
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"{name} of type {type(value).__name__}",
+            expected=f"{name} as a JSON object",
         )
     # read_json_object builds every JSON object, at any depth, as dict[str, object].
     return cast("dict[str, object]", value)
@@ -88,27 +95,34 @@ def read_experiment(path: ArtifactFile) -> Experiment:
         positive when present, ``images`` is not an object of text paths, or the
         format version is unsupported.
     """
-    experiment = read_json_object(path, context=ReaderErrorContext("xenium", "experiment.xenium"))
+    context = ReaderErrorContext("xenium", "experiment.xenium")
+    experiment = read_json_object(path, context=context)
 
     software = experiment.get("analysis_sw_version")
     if type(software) is not str:
-        raise _error(
-            path, "experiment.xenium", found=f"analysis_sw_version = {software!r}", expected="a software version string"
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"analysis_sw_version = {software!r}",
+            expected="a software version string",
         )
     version, family = detect_version(experiment, software, path=path)
-    pixel_size = _positive(experiment.get("pixel_size"), "pixel_size", path)
+    context = replace(context, detected_version=version)
+    pixel_size = _positive(experiment.get("pixel_size"), "pixel_size", path, context)
     if "z_step_size" in experiment:
-        _positive(experiment["z_step_size"], "z_step_size", path)
+        _positive(experiment["z_step_size"], "z_step_size", path, context)
 
-    images = _object(experiment.get("images", {}), "images", path, "experiment.xenium")
+    images = _object(experiment.get("images", {}), "images", path, context)
     if any(type(value) is not str or not value for value in images.values()):
-        raise _error(path, "experiment.xenium", found=f"images = {images!r}", expected="nonempty relative image paths")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"images = {images!r}", expected="nonempty relative image paths"
+        )
 
     attrs = {key: value for key, value in experiment.items() if key not in _EXCLUDED_KEYS}
     if "xenium_ranger" in attrs:
-        ranger = _object(attrs["xenium_ranger"], "xenium_ranger", path, "experiment.xenium")
+        ranger = _object(attrs["xenium_ranger"], "xenium_ranger", path, context)
         attrs["xenium_ranger"] = {key: ranger[key] for key in _RANGER_KEYS if key in ranger}
-    return Experiment(version, family, software, pixel_size, {key: str(value) for key, value in images.items()}, attrs)
+    return Experiment(version, family, pixel_size, {key: str(value) for key, value in images.items()}, attrs)
 
 
 def _metric(token: str) -> object:
@@ -124,7 +138,7 @@ def _metric(token: str) -> object:
     return value if math.isfinite(value) else token
 
 
-def read_metrics(path: ArtifactFile) -> dict[str, object]:
+def read_metrics(path: ArtifactFile, *, context: ReaderErrorContext) -> dict[str, object]:
     """Read the one-row ``metrics_summary.csv`` with strict CSV syntax.
 
     Raises
@@ -139,36 +153,41 @@ def read_metrics(path: ArtifactFile) -> dict[str, object]:
             records = (row for row in csv.reader(handle, strict=True) if row)
             rows = list(islice(records, _METRICS_RECORDS + 1))
     except (UnicodeDecodeError, csv.Error) as error:
-        raise _error(path, "metrics_summary.csv", found="malformed CSV", expected=expected) from error
+        raise ReaderFormatError(context=context, path=path, found="malformed CSV", expected=expected) from error
     if (
         len(rows) != _METRICS_RECORDS
         or len(rows[0]) != len(rows[1])
         or len(set(rows[0])) != len(rows[0])
         or "" in rows[0]
     ):
-        raise _error(path, "metrics_summary.csv", found=f"{len(rows)} records", expected=expected)
+        raise ReaderFormatError(context=context, path=path, found=f"{len(rows)} records", expected=expected)
     return {name: _metric(token) for name, token in zip(rows[0], rows[1], strict=True)}
 
 
-def _panel_identity(panel: dict[str, object], spec: object, path: ArtifactFile, artifact: str) -> dict[str, object]:
+def _payload(path: ArtifactFile, context: ReaderErrorContext) -> tuple[dict[str, object], dict[str, object]]:
+    """Return ``payload`` and ``payload.panel`` of a panel JSON document."""
+    document = read_json_object(path, context=context)
+    payload = _object(document.get("payload"), "payload", path, context)
+    return payload, _object(payload.get("panel"), "payload.panel", path, context)
+
+
+def _panel_identity(panel: dict[str, object], path: ArtifactFile, context: ReaderErrorContext) -> dict[str, object]:
     """Keep the scalar identity fields of a panel; per-target entries stay unread."""
-    identity = _object(panel.get("identity", {}), "panel.identity", path, artifact)
+    identity = _object(panel.get("identity", {}), "panel.identity", path, context)
     values: dict[str, object] = {key: value for key, value in identity.items() if isinstance(value, (str, int, float))}
-    values |= {key: panel[key] for key in _PANEL_KEYS if isinstance(panel.get(key), (str, int, float))}
-    if isinstance(spec, str):
-        values["spec_version"] = spec
-    return values
+    return values | {key: panel[key] for key in _PANEL_KEYS if isinstance(panel.get(key), (str, int, float))}
 
 
-def read_gene_panel(path: ArtifactFile) -> dict[str, object]:
+def read_gene_panel(path: ArtifactFile, *, context: ReaderErrorContext) -> dict[str, object]:
     """Return the identity of ``gene_panel.json``: name, design ID, version, species, tissue, targets, spec."""
-    document = read_json_object(path, context=ReaderErrorContext("xenium", "gene_panel.json"))
-    payload = _object(document.get("payload"), "payload", path, "gene_panel.json")
-    panel = _object(payload.get("panel"), "payload.panel", path, "gene_panel.json")
-    return _panel_identity(panel, payload.get("spec_version"), path, "gene_panel.json")
+    payload, panel = _payload(path, context)
+    identity = _panel_identity(panel, path, context)
+    # Gene panels record their specification version beside the panel.
+    spec = payload.get("spec_version")
+    return identity | {"spec_version": spec} if isinstance(spec, str) else identity
 
 
-def read_protein_panel(path: ArtifactFile) -> ProteinPanel:
+def read_protein_panel(path: ArtifactFile, *, context: ReaderErrorContext) -> ProteinPanel:
     """Return the protein panel identity and a 1:1 ``public_id`` target map.
 
     Raises
@@ -176,17 +195,16 @@ def read_protein_panel(path: ArtifactFile) -> ProteinPanel:
     ReaderFormatError
         If targets are malformed or a ``public_id`` repeats.
     """
-    artifact = "protein_panel.json"
-    document = read_json_object(path, context=ReaderErrorContext("xenium", artifact))
-    payload = _object(document.get("payload"), "payload", path, artifact)
-    panel = _object(payload.get("panel"), "payload.panel", path, artifact)
+    _, panel = _payload(path, context)
     targets_value = panel.get("targets")
     if type(targets_value) is not list:
-        raise _error(path, artifact, found="no targets list", expected="payload.panel.targets as a list")
+        raise ReaderFormatError(
+            context=context, path=path, found="no targets list", expected="payload.panel.targets as a list"
+        )
 
     targets: dict[str, ProteinTarget] = {}
     for item in targets_value:
-        target = _object(item, "target", path, artifact)
+        target = _object(item, "target", path, context)
         public_id, long_name, clone, codeword = (
             target.get(key) for key in ("public_id", "long_name", "clone", "codeword_index")
         )
@@ -196,13 +214,18 @@ def read_protein_panel(path: ArtifactFile) -> ProteinPanel:
             and isinstance(clone, str)
             and type(codeword) is int
         ):
-            raise _error(
-                path,
-                artifact,
+            raise ReaderFormatError(
+                context=context,
+                path=path,
                 found=f"target {target!r}",
                 expected="text public_id, long_name, clone and an integer codeword_index",
             )
         if public_id in targets:
-            raise _error(path, artifact, found=f"duplicate public_id {public_id!r}", expected="one target per protein")
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found=f"duplicate public_id {public_id!r}",
+                expected="one target per protein",
+            )
         targets[public_id] = ProteinTarget(long_name, clone, codeword)
-    return ProteinPanel(_panel_identity(panel, panel.get("spec_version"), path, artifact), targets)
+    return ProteinPanel(_panel_identity(panel, path, context), targets)

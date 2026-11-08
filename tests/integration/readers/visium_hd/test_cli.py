@@ -61,9 +61,7 @@ class TestVisiumHDCommand:
                 str(output),
                 "--no-include-images",
                 "--data-axes",
-                "y",
-                "--data-axes",
-                "x",
+                "YX",
             ],
         )
         assert invoked.exit_code == 1

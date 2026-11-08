@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
+import warnings
 from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd import _metadata as metadata
-from tests.integration.readers.visium_hd._fixtures import write_bundle
+from tests.integration.readers.visium_hd._fixtures import VERSION, write_bundle
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,7 +37,7 @@ class TestReadSourceMetadata:
     def test_ignores_unused_nested_layout(self, tmp_path: Path, layout: object) -> None:
         write_bundle(tmp_path)
         path = _source(tmp_path)
-        expected = metadata.read_source_metadata(path)
+        expected = metadata.read_source_metadata(path, version=VERSION)
         with h5py.File(path, "r+") as handle:
             values = json.loads(handle.attrs["metadata_json"])
         if layout is None:
@@ -44,7 +45,7 @@ class TestReadSourceMetadata:
         else:
             values["hd_layout_json"] = layout
         _replace_metadata(path, json.dumps(values))
-        actual = metadata.read_source_metadata(path)
+        actual = metadata.read_source_metadata(path, version=VERSION)
         assert (actual.nrows, actual.ncols) == (expected.nrows, expected.ncols)
         np.testing.assert_array_equal(actual.cytassist, expected.cytassist)
 
@@ -57,7 +58,7 @@ class TestReadSourceMetadata:
                 values["transform_matrices"][f"spot_colrow_to_{null}_colrow"] = None
                 values["transform_matrices"][f"{null}_colrow_to_spot_colrow"] = None
                 handle.attrs["metadata_json"] = json.dumps(values)
-        result = metadata.read_source_metadata(_source(tmp_path))
+        result = metadata.read_source_metadata(_source(tmp_path), version=VERSION)
         assert (result.nrows, result.ncols) == (17, 17)
         assert (result.cytassist is None) == (null == "cytassist")
         if result.cytassist is not None:
@@ -71,7 +72,7 @@ class TestReadSourceMetadata:
         write_bundle(tmp_path)
         _replace_metadata(_source(tmp_path), text)
         with pytest.raises(ReaderFormatError):
-            metadata.read_source_metadata(_source(tmp_path))
+            metadata.read_source_metadata(_source(tmp_path), version=VERSION)
 
     @pytest.mark.parametrize(
         "mode",
@@ -80,7 +81,6 @@ class TestReadSourceMetadata:
             "ncols",
             "pitch",
             "unsupported-pitch",
-            "sample",
             "matrices",
             "missing",
             "part-null",
@@ -104,13 +104,11 @@ class TestReadSourceMetadata:
             "ncols": 0,
             "pitch": -1,
             "unsupported-pitch": 4,
-            "sample": None,
             "matrices": [],
         }
         keys = {
             "pitch": "spot_pitch",
             "unsupported-pitch": "spot_pitch",
-            "sample": "sample_id",
             "matrices": "transform_matrices",
         }
         if mode in replacements:
@@ -130,24 +128,53 @@ class TestReadSourceMetadata:
             matrices[key] = matrix_replacements[mode]
         _replace_metadata(path, json.dumps(values))
         with pytest.raises(ReaderFormatError):
-            metadata.read_source_metadata(path)
+            metadata.read_source_metadata(path, version=VERSION)
 
-    def test_invalid_bytes_and_io(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("sample", [None, "", 3])
+    def test_unconsumed_sample_id_is_ignored(self, tmp_path: Path, sample: object) -> None:
         write_bundle(tmp_path)
         path = _source(tmp_path)
         with h5py.File(path, "r+") as handle:
-            handle.attrs["metadata_json"] = np.bytes_(b"\xff")
-        with pytest.raises(ReaderFormatError):
-            metadata.read_source_metadata(path)
+            values = json.loads(handle.attrs["metadata_json"])
+        if sample is None:
+            del values["sample_id"]
+        else:
+            values["sample_id"] = sample
+        _replace_metadata(path, json.dumps(values))
+        assert (metadata.read_source_metadata(path, version=VERSION).nrows) == 17
+
+    @pytest.mark.parametrize("value", [np.bytes_(b"\xff"), b"\xff"], ids=["fixed-length", "variable-length"])
+    def test_invalid_utf8(self, tmp_path: Path, value: bytes) -> None:
+        write_bundle(tmp_path)
+        path = _source(tmp_path)
+        with h5py.File(path, "r+") as handle:
+            # h5py stores Python bytes as a variable-length string and returns "\udcff".
+            handle.attrs["metadata_json"] = value
+        with pytest.raises(ReaderFormatError, match="non-UTF-8 bytes in attribute 'metadata_json'") as error:
+            metadata.read_source_metadata(path, version=VERSION)
+        assert error.value.context == ReaderErrorContext("visium_hd", "feature slice metadata", VERSION)
+        assert error.value.path == path
+
+    def test_missing_attribute_and_io(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path)
+        path = _source(tmp_path)
+        with h5py.File(path, "r+") as handle:
+            del handle.attrs["metadata_json"]
+        with pytest.raises(ReaderFormatError, match="attribute 'metadata_json' with value type NoneType"):
+            metadata.read_source_metadata(path, version=VERSION)
         path.unlink()
-        with pytest.raises(FileNotFoundError):
-            metadata.read_source_metadata(path)
+        with pytest.raises(FileNotFoundError) as error:
+            metadata.read_source_metadata(path, version=VERSION)
+        assert "detected version '4.1.0'" in "".join(error.value.__notes__)
 
 
 class TestReadIdentity:
     """Verify read identity contracts."""
 
-    @pytest.mark.parametrize("version", ["spaceranger-3.0.0", "spaceranger-3.1.2", "spaceranger-4.0.1", "4.1.0"])
+    @pytest.mark.parametrize(
+        "version",
+        ["spaceranger-3.0.0", "spaceranger-3.1.2", "spaceranger-4.0.1", "4.1.0", "spaceranger-2.1.0", "5.0.0"],
+    )
     def test_versions(self, tmp_path: Path, version: str) -> None:
         path = ArtifactFile(tmp_path / "identity.h5")
         with h5py.File(path, "w") as handle:
@@ -161,25 +188,74 @@ class TestReadIdentity:
         assert metadata.read_identity(path).library_id is None
 
     @pytest.mark.parametrize(
-        "mode", ["version", "future", "unobserved3", "missing", "libraries", "bytes", "kind", "io"]
+        "value",
+        ["spaceranger-4.0.1-rc1", "cellranger-9", "cellranger-4.0.1", "4.1", "dev", b"spaceranger-4.1", None],
+        ids=["release-candidate", "cellranger-major", "cellranger", "major-minor", "dev", "bytes", "missing"],
     )
-    def test_invalid(self, tmp_path: Path, mode: str) -> None:
+    def test_unrecognized_version_is_none(self, tmp_path: Path, value: str | bytes | None) -> None:
         path = ArtifactFile(tmp_path / "identity.h5")
         with h5py.File(path, "w") as handle:
-            if mode != "missing":
-                handle.attrs["software_version"] = {
-                    "version": "spaceranger-2.0.0",
-                    "future": "4.2.0",
-                    "unobserved3": "3.99.0",
-                    "bytes": np.bytes_(b"\xff"),
-                    "kind": 3,
-                }.get(mode, "4.1.0")
-            if mode == "libraries":
-                handle.attrs["library_ids"] = np.array([b"one", b"two"])
-        if mode == "io":
-            path.unlink()
-        with pytest.raises((ReaderFormatError, OSError)):
+            if value is not None:
+                handle.attrs["software_version"] = value
+            handle.attrs["library_ids"] = np.array([b"sample"])
+        assert metadata.read_identity(path) == metadata.Identity(None, "sample")
+
+    @pytest.mark.parametrize(
+        ("value", "found"),
+        [
+            (np.bytes_(b"\xff"), "non-UTF-8 bytes in attribute 'software_version'"),
+            (b"spaceranger-\xff", "non-UTF-8 bytes in attribute 'software_version'"),
+            ("", "empty attribute 'software_version'"),
+            (3, "attribute 'software_version' with value type"),
+        ],
+    )
+    def test_malformed_version_text(self, tmp_path: Path, value: object, found: str) -> None:
+        path = ArtifactFile(tmp_path / "identity.h5")
+        with h5py.File(path, "w") as handle:
+            handle.attrs["software_version"] = value
+        with pytest.raises(ReaderFormatError) as error:
             metadata.read_identity(path)
+        assert error.value.context == ReaderErrorContext("visium_hd", "count identity")
+        assert error.value.path == path
+        assert found in error.value.found
+
+    @pytest.mark.parametrize(
+        ("value", "found"),
+        [
+            (np.array([b"one", b"two"]), "2 library IDs"),
+            (np.array([], dtype="S1"), "0 library IDs"),
+            (np.array([b"\xff"]), "non-UTF-8 bytes in attribute 'library_ids'"),
+            (b"\xff", "non-UTF-8 bytes in attribute 'library_ids'"),
+            (np.array([b""]), "empty attribute 'library_ids'"),
+        ],
+    )
+    def test_invalid_library_ids(self, tmp_path: Path, value: object, found: str) -> None:
+        path = ArtifactFile(tmp_path / "identity.h5")
+        with h5py.File(path, "w") as handle:
+            handle.attrs["software_version"] = "4.1.0"
+            handle.attrs["library_ids"] = value
+        with pytest.raises(ReaderFormatError) as error:
+            metadata.read_identity(path)
+        assert error.value.context.detected_version == "4.1.0"
+        assert found in error.value.found
+
+    @pytest.mark.parametrize(
+        "value",
+        ["sample", b"sample", np.bytes_(b"sample"), np.array(b"sample")],
+        ids=["str", "bytes", "numpy-bytes", "zero-dimensional"],
+    )
+    def test_library_id_storage_forms(self, tmp_path: Path, value: object) -> None:
+        path = ArtifactFile(tmp_path / "identity.h5")
+        with h5py.File(path, "w") as handle:
+            handle.attrs["software_version"] = "4.1.0"
+            handle.attrs["library_ids"] = value
+        assert metadata.read_identity(path) == metadata.Identity("4.1.0", "sample")
+
+    def test_unreadable_file(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "identity.h5")
+        with pytest.raises(FileNotFoundError) as error:
+            metadata.read_identity(path)
+        assert "artifact 'count identity'" in "".join(error.value.__notes__)
 
 
 class TestReadBinScaleFactors:
@@ -188,7 +264,7 @@ class TestReadBinScaleFactors:
     def test_values(self, tmp_path: Path) -> None:
         write_bundle(tmp_path)
         path = ArtifactFile(tmp_path / "binned_outputs/square_002um/spatial/scalefactors_json.json")
-        assert metadata.read_bin_scale_factors(path, 2) == metadata.ScaleFactors(
+        assert metadata.read_bin_scale_factors(path, 2, version=VERSION) == metadata.ScaleFactors(
             hires=0.5, lowres=0.25, microns_per_pixel=0.5
         )
 
@@ -204,7 +280,7 @@ class TestReadBinScaleFactors:
         values[field] = value
         path.write_text(json.dumps(values))
         with pytest.raises(ReaderFormatError):
-            metadata.read_bin_scale_factors(path, 2)
+            metadata.read_bin_scale_factors(path, 2, version=VERSION)
 
     def test_missing_bin_size(self, tmp_path: Path) -> None:
         write_bundle(tmp_path)
@@ -213,7 +289,7 @@ class TestReadBinScaleFactors:
         del values["bin_size_um"]
         path.write_text(json.dumps(values))
         with pytest.raises(ReaderFormatError, match="bin_size_um"):
-            metadata.read_bin_scale_factors(path, 2)
+            metadata.read_bin_scale_factors(path, 2, version=VERSION)
 
     @pytest.mark.parametrize("mode", ["valid", "size", "diameter"])
     def test_calibration(self, tmp_path: Path, mode: str) -> None:
@@ -226,19 +302,20 @@ class TestReadBinScaleFactors:
             values["spot_diameter_fullres"] = 9
         path.write_text(json.dumps(values))
         if mode == "valid":
-            assert metadata.read_bin_scale_factors(path, 2).microns_per_pixel == 0.5
+            assert metadata.read_bin_scale_factors(path, 2, version=VERSION).microns_per_pixel == 0.5
         else:
             with pytest.raises(ReaderFormatError):
-                metadata.read_bin_scale_factors(path, 2)
+                metadata.read_bin_scale_factors(path, 2, version=VERSION)
 
 
 class TestReconcileIdentities:
     """Every consumed source must belong to one coherent producer export."""
 
     @staticmethod
-    def _write(path: ArtifactFile, version: str, library_id: str | None) -> None:
+    def _write(path: ArtifactFile, version: str | None, library_id: str | None) -> None:
         with h5py.File(path, "w") as handle:
-            handle.attrs["software_version"] = version
+            if version is not None:
+                handle.attrs["software_version"] = version
             if library_id is not None:
                 handle.attrs["library_ids"] = np.array([library_id.encode()])
 
@@ -286,3 +363,65 @@ class TestReconcileIdentities:
     def test_empty_sources(self) -> None:
         with pytest.raises(ReaderFormatError, match="identity-bearing"):
             metadata.reconcile_identities([])
+
+    @pytest.mark.parametrize("version", ["3.0.0", "3.1.3", "4.0.1", "4.1.0"])
+    def test_tested_release_does_not_warn(self, tmp_path: Path, version: str) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("first.h5", "second.h5")]
+        self._write(paths[0], f"spaceranger-{version}", None)
+        self._write(paths[1], version, None)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert metadata.reconcile_identities(paths) == metadata.Identity(version, None)
+
+    @pytest.mark.parametrize("version", ["2.1.0", "3.2.0", "4.2.0", "5.0.0"])
+    def test_untested_release_warns_once(self, tmp_path: Path, version: str) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("first.h5", "second.h5", "third.h5")]
+        self._write(paths[0], f"spaceranger-{version}", None)
+        self._write(paths[1], version, "sample")
+        self._write(paths[2], "dev", None)
+        with pytest.warns(UserWarning, match="untested") as record:
+            result = metadata.reconcile_identities(paths)
+        assert result == metadata.Identity(version, "sample")
+        expected = (
+            f"visium_hd: Space Ranger {version} is untested (tested releases: 3.0, 3.1, 4.0, 4.1); "
+            "its layout is read from the artifacts present."
+        )
+        assert [str(warning.message) for warning in record] == [expected]
+        assert record[0].filename == __file__
+
+    @pytest.mark.parametrize("position", [0, 1, 2])
+    def test_sources_without_version_do_not_constrain(self, tmp_path: Path, position: int) -> None:
+        versions: list[str | None] = ["spaceranger-4.1.0", "4.1.0"]
+        versions.insert(position, "cellranger-9")
+        paths = [ArtifactFile(tmp_path / f"{index}.h5") for index in range(4)]
+        for path, version in zip(paths, [*versions, None], strict=True):
+            self._write(path, version, None)
+        assert metadata.reconcile_identities(paths) == metadata.Identity("4.1.0", None)
+
+    def test_no_source_with_version(self, tmp_path: Path) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("first.h5", "second.h5")]
+        self._write(paths[0], "4.1", "sample")
+        self._write(paths[1], None, None)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert metadata.reconcile_identities(paths) == metadata.Identity(None, "sample")
+
+    def test_conflict_across_source_without_version(self, tmp_path: Path) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("first.h5", "second.h5", "third.h5")]
+        for path, version in zip(paths, ("4.0.1", "dev", "spaceranger-4.1.0"), strict=True):
+            self._write(path, version, None)
+        with pytest.raises(ReaderFormatError) as caught:
+            metadata.reconcile_identities(paths)
+        assert caught.value.path == paths[2]
+        assert caught.value.context == ReaderErrorContext("visium_hd", "count identity", "4.1.0")
+        assert caught.value.found == "software_version='4.1.0'"
+        assert caught.value.expected == "software_version='4.0.1' shared by all consumed sources"
+
+    def test_library_conflict_without_version_names_known_version(self, tmp_path: Path) -> None:
+        paths = [ArtifactFile(tmp_path / name) for name in ("first.h5", "second.h5")]
+        self._write(paths[0], "4.0.1", "sample")
+        self._write(paths[1], None, "other")
+        with pytest.raises(ReaderFormatError) as caught:
+            metadata.reconcile_identities(paths)
+        assert caught.value.path == paths[1]
+        assert caught.value.context == ReaderErrorContext("visium_hd", "count identity", "4.0.1")

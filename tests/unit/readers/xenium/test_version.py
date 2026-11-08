@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers.xenium._version import FormatVersion, detect_version
+from spatialdata_io.readers.xenium._version import detect_version
 
 PATH = Path("bundle/experiment.xenium")
 
@@ -32,7 +32,7 @@ class TestDetectVersion:
         version, detected = detect_version(fields, "R&D", path=PATH)
 
         assert detected == family
-        assert str(version) == text
+        assert version == text
 
     @pytest.mark.parametrize("software", ["Xenium-1.0.1", "xenium-1.0.2", "xenium-1.1.0.4", "xenium-1.0.1-3-gabc"])
     def test_unversioned_xoa_1_0_and_1_1(self, software: str) -> None:
@@ -74,11 +74,3 @@ class TestDetectVersion:
         else:
             with pytest.raises(ReaderFormatError, match="non-negative integer format version field"):
                 detect_version(experiment, "xenium-2.0.0.10", path=PATH)
-
-
-class TestFormatVersion:
-    """Format versions print as recorded."""
-
-    def test_string_omits_an_absent_patch(self) -> None:
-        assert str(FormatVersion(2, 0, None)) == "2.0"
-        assert str(FormatVersion(6, 1, 0)) == "6.1.0"

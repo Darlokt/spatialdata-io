@@ -1,22 +1,22 @@
-"""Assemble independently selected Stereo-seq products with final exact linkage."""
+"""Public Stereo-seq reader: select products, read them, put them in one frame and link tables."""
 
 from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
+import geopandas as gpd
 import pandas as pd
 from spatialdata import SpatialData
-from spatialdata.transformations import Scale, set_transformation
+from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import finalize_count_arrays
 from spatialdata_io.readers.stereoseq._analysis import read_analyses
 from spatialdata_io.readers.stereoseq._cells import read_cells
 from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygons
@@ -24,38 +24,38 @@ from spatialdata_io.readers.stereoseq._layout import discover_layout
 from spatialdata_io.readers.stereoseq._metadata import read_image_pitch
 from spatialdata_io.readers.stereoseq._rasters import read_image, read_mask
 from spatialdata_io.readers.stereoseq._square import read_square
-from spatialdata_io.readers.stereoseq._tables import finalize_positions, link_table
+from spatialdata_io.readers.stereoseq._tables import finalize_positions, link_table, select_cells
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import anndata as ad
     import dask.dataframe as dd
-    import geopandas as gpd
-    from scipy.sparse import csr_array
+    from spatialdata.transformations import BaseTransformation
 
+    from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
+    from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers._utils.table import SparseDuplicateSummary
+    from spatialdata_io.readers.stereoseq._analysis import AnalysisResult
     from spatialdata_io.readers.stereoseq._cells import CellCounts
-    from spatialdata_io.readers.stereoseq._layout import ImageRole
+    from spatialdata_io.readers.stereoseq._layout import AnalysisSource, CellSource, ImageRole
     from spatialdata_io.readers.stereoseq._square import SquareCounts
 
-_ROLES = frozenset({"registered", "mask", "tissue_cut", "distance_mask", "expression"})
+_CELL_BINS: tuple[Literal["none", "unadjusted", "adjusted", "both"], ...] = ("none", "unadjusted", "adjusted", "both")
+_CELL_GEOMETRIES: tuple[Literal["centroids", "polygons"], ...] = ("centroids", "polygons")
+_IMAGE_ROLES: tuple[ImageRole, ...] = ("registered", "mask", "tissue_cut", "distance_mask", "expression")
+# Images without a GEF or H5AD pitch keep their pixel grid, never `global`.
+IMAGE_PIXELS = "image_pixels"
 
 
-def _warn_imported_duplicates(messages: list[str]) -> None:
-    """Report all imported-table normalization only after result assembly."""
-    if messages:
-        warnings.warn("stereoseq: " + "; ".join(messages), UserWarning, stacklevel=3)
-
-
-def _set_grid_pitch(result: SpatialData, pitch_nm: int) -> None:
-    """Map every spatial element's native grid to micrometres without touching its buffers.
-
-    The common pitch can come from analyses read after the raw elements were
-    built, so it is attached in one pass over the assembled container.
-    """
-    scale = Scale([pitch_nm / 1000, pitch_nm / 1000], axes=("x", "y"))
-    for elements in (result.images, result.labels, result.points, result.shapes):
-        for element in elements.values():
-            set_transformation(element, scale, to_coordinate_system="global")
+def _choice[T: str](value: T, name: str, choices: tuple[T, ...]) -> T:
+    if not isinstance(value, str):
+        message = f"{name} must be one of {list(choices)}; found {type(value).__name__}."
+        raise TypeError(message)
+    if value not in choices:
+        message = f"{name} must be one of {list(choices)}; found {value!r}."
+        raise ValueError(message)
+    return value
 
 
 def _sequence[T](values: Sequence[T], name: str) -> tuple[T, ...]:
@@ -63,6 +63,19 @@ def _sequence[T](values: Sequence[T], name: str) -> tuple[T, ...]:
         message = f"{name} must be a sequence, not a scalar or string."
         raise TypeError(message)
     return tuple(values)
+
+
+def _sample_id(value: str | None) -> str | None:
+    """Validate a sample selector; it selects files and never names elements."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        message = f"sample_id must be a string; found {type(value).__name__}."
+        raise TypeError(message)
+    if not value or value in {".", ".."} or any(character in value for character in "/\\\0"):
+        message = "sample_id must be a nonempty sample filename component."
+        raise ValueError(message)
+    return value
 
 
 def _bin_selection(values: Sequence[int] | Literal["all"]) -> tuple[int, ...] | Literal["all"]:
@@ -80,40 +93,161 @@ def _bin_selection(values: Sequence[int] | Literal["all"]) -> tuple[int, ...] | 
     return tuple(sorted(bins))
 
 
-def _validate_options(
-    *,
-    sample_id: str | None,
+def _path(value: str | Path, name: str) -> str | Path:
+    if not isinstance(value, (str, Path)):
+        message = f"{name} must contain filesystem paths; found {type(value).__name__}."
+        raise TypeError(message)
+    return value
+
+
+def _image_roles(values: Sequence[ImageRole]) -> tuple[ImageRole, ...]:
+    roles = tuple(_choice(role, "image_roles", _IMAGE_ROLES) for role in _sequence(values, "image_roles"))
+    if len(set(roles)) != len(roles):
+        message = f"image_roles must be distinct; found {list(roles)}."
+        raise ValueError(message)
+    return roles
+
+
+def _transformations(pitch_nm: int | None) -> dict[str, BaseTransformation]:
+    """Map the shared DNB grid to micrometres, or keep it as a pixel frame without a pitch."""
+    if pitch_nm is None:
+        return {IMAGE_PIXELS: Identity()}
+    return {"global": Scale([pitch_nm / 1000, pitch_nm / 1000], axes=("x", "y"))}
+
+
+def _require_products(
+    bins: tuple[int, ...] | Literal["all"],
     cell_bins: Literal["none", "unadjusted", "adjusted", "both"],
-    cell_geometry: Literal["centroids", "polygons"],
     roles: tuple[ImageRole, ...],
     analyses: tuple[str | Path, ...],
+    overrides: tuple[str | Path | None, ...],
 ) -> None:
-    """Validate independent product choices before discovery or source reads."""
-    if sample_id is not None and (
-        not isinstance(sample_id, str)
-        or not sample_id
-        or sample_id in {".", ".."}
-        or any(character in sample_id for character in "/\\\0")
+    """Require at least one product and a selected product for every count override."""
+    if not bins and cell_bins == "none" and not roles and not analyses:
+        message = "Select products, e.g. stereoseq(path, bin_sizes=(50,)) or stereoseq(path, cell_bins='unadjusted')."
+        raise ValueError(message)
+    square, cells, adjusted = (override is not None for override in overrides)
+    if (
+        (square and not bins)
+        or (cells and cell_bins not in ("unadjusted", "both"))
+        or (adjusted and cell_bins not in ("adjusted", "both"))
     ):
-        message = "sample_id must be a nonempty sample filename component."
+        message = "Count-source overrides require selection of their corresponding product."
         raise ValueError(message)
 
-    if cell_bins not in ("none", "unadjusted", "adjusted", "both"):
-        message = "cell_bins must be 'none', 'unadjusted', 'adjusted', or 'both'."
-        raise ValueError(message)
-    if cell_geometry not in ("centroids", "polygons"):
-        message = "cell_geometry must be 'centroids' or 'polygons'."
-        raise ValueError(message)
 
-    if any(role not in _ROLES for role in roles) or len(set(roles)) != len(roles):
-        message = f"image_roles must be distinct selections from {sorted(_ROLES)}."
-        raise ValueError(message)
-    if any(not isinstance(file, (str, Path)) for file in analyses):
-        message = "analysis_files must contain filesystem paths."
-        raise TypeError(message)
+def _population(source: CellSource) -> Literal["cells", "adjusted_cells"]:
+    return "cells" if source.kind == "unadjusted" else "adjusted_cells"
 
 
-def _validate_frames(products: Sequence[SquareCounts | CellCounts], sample: str | None, path: Path) -> None:
+def _square_products(
+    square: SquareCounts, transformations: Mapping[str, BaseTransformation]
+) -> tuple[dd.DataFrame, ad.AnnData]:
+    """Build one square bin's points and linked table; the IDs are the row positions."""
+    name = f"bin{square.bin_size}"
+    index = pd.RangeIndex(len(square.coordinates))
+    context = ReaderErrorContext("stereoseq", "square counts", square.format_version)
+    finalize_positions(
+        square.table,
+        square.resolution,
+        "source_bin_reference_position",
+        calibration=f"GEF geneExp/{name}/expression@resolution = {square.resolution} nm per grid unit",
+        context=context,
+        path=square.file,
+    )
+    points = make_points(square.coordinates, index, transformations=transformations)
+    return points, link_table(square.table, f"{name}_genes", index, context=context, path=square.file)
+
+
+def _cell_products(
+    source: CellSource,
+    cells: CellCounts,
+    target: str,
+    *,
+    policy: InvalidGeometryPolicy,
+    transformations: Mapping[str, BaseTransformation],
+) -> tuple[dd.DataFrame | gpd.GeoDataFrame, ad.AnnData]:
+    """Build one cell population's centroids or polygons and its linked table."""
+    context = ReaderErrorContext("stereoseq", f"{source.kind} cell counts", cells.format_version)
+    index = pd.Index(cells.cell_ids)
+    element: dd.DataFrame | gpd.GeoDataFrame
+    if cells.borders is None:
+        element = make_points(cells.coordinates, index, transformations=transformations)
+    else:
+        element = make_polygons(
+            cells.coordinates, cells.borders, index, path=source.file, policy=policy, transformations=transformations
+        )
+        # Dropped contours remove their rows; analyses still match the full population.
+        index = element.index
+    table = select_cells(cells.table, index, context=context, path=source.file)
+    finalize_positions(
+        table,
+        cells.resolution,
+        "vendor_cell_center",
+        calibration=f"GEF root@resolution = {cells.resolution} nm per grid unit",
+        context=context,
+        path=source.file,
+    )
+    return element, link_table(table, target, index, context=context, path=source.file)
+
+
+def _analysis_products(
+    source: AnalysisSource,
+    analysis: AnalysisResult,
+    *,
+    from_gef: bool,
+    transformations: Mapping[str, BaseTransformation],
+    duplicate_sums: list[SparseDuplicateSummary],
+) -> tuple[dd.DataFrame, ad.AnnData]:
+    """Build one analysis product's own points and linked table, in H5AD row order."""
+    context = ReaderErrorContext("stereoseq", "analysis table")
+    population = analysis.population
+    finalize_positions(
+        analysis.table,
+        analysis.resolution,
+        "vendor_cell_center" if population in ("cells", "adjusted_cells") else "source_bin_reference_position",
+        calibration=(
+            f"Matching raw GEF {population} resolution = {analysis.resolution} nm per grid unit"
+            if from_gef
+            else f"H5AD uns/resolution = {analysis.resolution} nm per grid unit"
+        ),
+        context=context,
+        path=source.file,
+    )
+    points = make_points(analysis.coordinates, analysis.instance_ids, transformations=transformations)
+    table = link_table(
+        analysis.table,
+        f"{analysis.name}_points",
+        analysis.instance_ids,
+        context=context,
+        path=source.file,
+        duplicate_sums=duplicate_sums,
+    )
+    return points, table
+
+
+def _format_version(sources: Mapping[ArtifactFile, str | None]) -> str | None:
+    """Return the GEF schema version shared by every read GEF, or ``None``.
+
+    A file without a ``version`` attribute leaves the version unknown. Known
+    versions that disagree are reported, because no single one describes the
+    result.
+    """
+    versions = set(sources.values())
+    if len(versions - {None}) > 1:
+        found = ", ".join(f"{file.name}: {version or 'no version'}" for file, version in sources.items())
+        warnings.warn(
+            f"stereoseq: the read GEFs have different schema versions ({found}); no format version is recorded.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return None
+    return versions.pop() if len(versions) == 1 else None
+
+
+def _validate_frames(
+    products: Sequence[SquareCounts | CellCounts], sample: str | None, path: Path, format_version: str | None
+) -> None:
     """Reject incompatible grids instead of inventing a crop/registration transform."""
     if not products:
         return
@@ -126,14 +260,14 @@ def _validate_frames(products: Sequence[SquareCounts | CellCounts], sample: str 
         for product in products
     ):
         raise ReaderFormatError(
-            context=ReaderErrorContext("stereoseq", "coordinate frame"),
+            context=ReaderErrorContext("stereoseq", "coordinate frame", format_version),
             path=path,
             found="inconsistent source sample, origin or physical pitch",
             expected="matching normalized grids; separately recentered sources require an established transform",
         )
 
 
-def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain one explicit transaction outline.
+def stereoseq(  # noqa: PLR0913 - every product selection is an explicit public option.
     path: str | Path,
     *,
     sample_id: str | None = None,
@@ -150,62 +284,66 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
-    """Read independent SAW transcriptomic counts, clustering analysis and images.
+    """Read selected Stereo-seq (SAW) count, analysis and image products.
 
-    Supports the documented compact numbered workflow, SAW 7.0/7.1 numbered
-    layouts, SAW 8.0/8.1/8.2 ``outs`` layouts, and explicit flat count exports.
-    Directory family and GEF schema do not identify a SAW release; provenance
-    records only reader/package versions. See the Stereo-seq format guide for
-    directory trees, tested storage profiles, and migration examples.
+    Supported inputs are the compact numbered workflow, the SAW 7.0/7.1
+    numbered layouts, the SAW 8.0/8.1/8.2 ``outs`` layouts (task root or
+    ``outs`` itself) and flat directories of exported files. The Stereo-seq
+    format guide shows the directory trees.
+
+    Provenance records no SAW release: the directory family does not identify
+    one and the read artifacts do not store one. It records the GEF schema
+    version as ``gef-<n>`` (the root ``version`` attribute, for example
+    ``gef-4``) when every read square or cell GEF reports the same version.
+    It records none when a GEF has no ``version``, when the versions differ,
+    or when no count GEF is read (analysis or image products alone, even
+    when a GEF supplies the image pitch).
+
+    Nothing is read by default: select at least one product (square bins, cell
+    bins, analysis files or image roles). Products are independent; for
+    example, cells need no square counts, analysis or images.
 
     Parameters
     ----------
     path
-        Dataset root, task root containing ``outs``, or direct ``outs`` path.
+        Dataset root, task root containing ``outs``, or ``outs`` itself.
     sample_id
-        Source sample selector. Required when multiple samples are present.
-        Dots in sample names are preserved; this is not an output-name prefix.
+        Chip serial that selects the source files when the dataset contains
+        several samples; inferred when unique. Dots are kept. It does not name
+        any element.
     bin_sizes
-        Distinct positive stored bin sizes, sorted numerically, or ``"all"``.
-        Empty selects no square counts. Missing bins fail; none are derived.
+        Stored square bin sizes to read, or ``"all"``. Empty reads no square
+        counts. Missing bins fail; none are derived from finer bins.
     cell_bins
-        Select no cells, unadjusted cells, adjusted cells, or both populations.
-        Raw cells do not require square counts, analysis, or images.
+        Read no cells, the unadjusted cells, the adjusted cells, or both.
     cell_geometry
-        Source centroids or literal source polygons. Centroid mode never
-        reads borders. Polygon mode applies the topology policy without repair.
-        Empty selected populations cannot be linked and fail.
+        ``"centroids"`` returns the stored cell centres as points and never
+        reads contours; ``"polygons"`` returns the stored contours as shapes.
     invalid_geometries
-        Preserve invalid source topology, drop affected cells and matching
-        count rows/layers, or raise. Raw adjusted and unadjusted populations
-        are independent; analyses and masks remain unchanged. Paired-padding
-        errors always fail, and centroid mode does not inspect borders.
+        For polygons: keep invalid contours, drop them together with their
+        table rows, or raise. Malformed contour padding always fails. Analysis
+        tables are matched against the full raw population and are not
+        filtered.
     square_counts_file
-        Explicit square GEF. By default select the unique tissue/full GEF;
-        ambiguous sources fail. Whole-chip raw counts require this override.
+        Square GEF to read instead of the default unique ``tissue`` or full
+        GEF; whole-chip ``raw`` counts need this override.
     cell_counts_file, adjusted_cell_counts_file
-        Explicit sources for their selected cell populations. Overrides do not
-        select products. Relative paths resolve under ``path``; absolute caller
-        paths are allowed. Flat counts require explicit paths.
+        Cell GEFs to read instead of the discovered ones. Flat directories
+        need these overrides. An override does not select its product.
     analysis_files
-        Exact native SAW H5AD paths. Preserve analysis values, source order,
-        annotations, embeddings and raw. Sparse duplicates are summed safely,
-        with exact float32/f64 promotion when integer sums exceed source storage. No supported exact
-        result raises a contextual error. A matching selected GEF validates
-        filtered membership and coordinates by source keys. Analysis-only
-        requires native spatial metadata and constructs its own point target.
+        Analysis H5ADs to read. Relative paths resolve against ``path``;
+        absolute paths may point anywhere.
     image_roles
-        Registered microscopy, binary masks, tissue-cut images, expanded masks,
-        or ``bin1_img.tif`` expression intensity. All stains for each selected
-        role are included. Masks, tissue cuts and expanded masks become labels.
+        Image products to read, every matching stain included:
+        ``"registered"`` microscopy, ``"mask"``, ``"tissue_cut"``,
+        ``"distance_mask"`` (expanded cell masks) and ``"expression"``
+        (``bin1_img.tif``).
     scale_factors
         Integer factors of at least two, one per generated pyramid level;
-        empty for a single scale. The same factors apply to every selected
-        image and mask.
+        empty for a single scale. They apply to every image and mask.
     chunks
-        One positive size for every axis or three ``c, y, x`` sizes; by default
-        one channel per chunk and square 1024-pixel tiles. Masks use the
-        ``y, x`` sizes. Pixels remain lazy after return.
+        One positive size for every axis or three ``c, y, x`` sizes. Masks use
+        the ``y, x`` sizes.
     path_policy
         How symlinks inside the dataset directory are treated. ``"strict"``
         requires every discovered artifact and relative file option to resolve
@@ -219,94 +357,102 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
     Returns
     -------
     SpatialData
-        ``bin<N>_genes`` points and ``bin<N>_table`` hold source-ordered features
-        and first-occurrence coordinates, including zero-count positions and
-        zero-occurrence features. Cells use stable source IDs in
-        ``cells_centroids`` points or ``cells_polygons`` shapes and
-        ``cells_table``; adjusted products use the ``adjusted_cells`` prefix.
-        Raw expression and optional ``exon`` layers are eager canonical CSR
-        sparse arrays with one float32 dtype when all counts are exact,
-        otherwise float64. Unrepresentable counts raise. Source summaries remain annotations, not replacements
-        for exact expression. No NNZ-sized alternate traversal is copied to uns.
+        The selected products, each with its own target element and table.
 
-        Analysis products use ``<population>_analysis[_r<resolution>]`` plus
-        ``_points``/``_table``; decimal points in clustering resolution become
-        underscores. Historical unknown resolution is omitted. Images and
-        labels use ``<stain>_<role>`` (distance masks append their pixel
-        distance), or the role alone without a stain. ``bin1_img_tissue_cut.tif``
-        becomes ``expression_tissue_cut`` to distinguish its mask from
-        microscopy. Registered and expression images have CYX axes with source
-        dtype and channel order; RGB(A) samples use r/g/b/a channel names.
-        Masks are YX labels with their source boolean or integer dtype and
-        values; generated levels downsample by nearest neighbour.
+        Count products:
 
-        All elements map to ``global`` in micrometres using the common source
-        pitch in nm divided by 1000. Tables expose finite float64 XY micrometres
-        in ``obsm["spatial"]``, with frame, position meaning and calibration in
-        ``uns["spatialdata_io_positions"]``. Exact native embeddings, including
-        imported storage dtype, are retained in ``obsm["spatial_grid"]``.
-        Bins retain source reference positions; cells retain vendor centres.
-        These arrays are snapshots and are not updated by later registration.
-        Native point values remain in the matching normalized expression grid.
-        Image-only reads use associated GEF metadata when available, otherwise
-        retain the source grid. Stored square coordinates are
-        already in that grid and are not multiplied by bin size. Common chip
-        origins are retained as metadata, never added to only one element.
-        Conflicting origins/pitches fail. Physical pitch is recorded in nm.
-        Points wrap eager coordinates needed for counts; GEF ingestion itself
-        is eager with bounded input slices and O(NNZ) working/output storage.
-        Files close on success/failure. No caller-owned data are mutated.
+        - square bin ``N``: points ``bin<N>_genes`` and table ``bin<N>_table``.
+          Rows are the distinct stored positions in order of first occurrence,
+          with IDs ``0, 1, ...``; records with the same position and feature
+          are summed. Features keep the GEF order, including features without
+          counts.
+        - cells: points ``cells_centroids`` or shapes ``cells_polygons`` and
+          table ``cells_table``, in source cell order with the source integer
+          cell IDs; ``adjusted_cells_*`` for adjusted cells.
+        - ``X`` and the optional ``layers["exon"]`` are canonical CSR sparse
+          arrays, float32 when every count is exact, otherwise float64;
+          counts that neither represents exactly raise. Source summaries and
+          ``uns["stereoseq"]`` (origin, pitch, cell-type names) are kept.
+
+        Analysis products: points ``<population>_analysis[_r<resolution>]_points``
+        and table ``..._table``, where ``<population>`` is ``bin<N>``, ``cells``
+        or ``adjusted_cells`` and ``<resolution>`` the clustering resolution
+        from the filename with ``.`` replaced by ``_``. The H5AD keeps its
+        values, row and feature order, annotations, embeddings and ``raw``;
+        ``X`` and the ``counts``, ``log1p`` and ``exon`` layers become CSR
+        sparse arrays and duplicate sparse entries are summed. ``obs`` and
+        ``var`` column names and top-level ``uns`` keys that SpatialData does
+        not accept are sanitized; ``uns`` values and nested keys are kept.
+
+        Images (``c, y, x``, source dtype and channel order) and mask labels
+        (``y, x``, source values) are named ``<stain>_<role>`` (distance masks
+        ``<stain>_distance_mask_<distance>``), or the role alone without a
+        stain; ``bin1_img_tissue_cut.tif`` becomes ``expression_tissue_cut``.
+        Channels are ``r, g, b(, a)`` only when the TIFF declares an RGB colour
+        model, otherwise positional. Pixels stay lazy.
+
+        Coordinate systems: points, shapes and rasters store native DNB-grid
+        coordinates (registered images share that grid). ``global`` maps them
+        to micrometres with ``Scale(pitch_nm / 1000)``, using the common pitch
+        of the selected GEFs and H5ADs, or, for images alone, of the sample's
+        GEFs in the dataset. Images without any pitch go to ``image_pixels``
+        instead and have no ``global`` frame. Every table holds float64
+        micrometres in ``obsm["spatial"]`` and the exact grid coordinates in
+        ``obsm["spatial_grid"]``, described in
+        ``uns["spatialdata_io_positions"]``. Chip origins are recorded, not
+        applied. Tables link to their target through ``obs["region"]`` and
+        ``obs["instance_id"]``.
 
     Warns
     -----
     UserWarning
-        One summary per successful call if imported sparse duplicate entries
-        were combined, identifying affected expression slots and dtype changes.
-        Expected format aggregation does not trigger this warning.
+        Once per analysis file whose sparse duplicate entries were summed.
+        When an image name from a file name, an analysis ``obs``/``var``
+        column name or a top-level analysis ``uns`` key is not valid in
+        SpatialData; it is sanitized.
+        Once when the read GEFs report different schema versions; no format
+        version is recorded.
 
     Raises
     ------
     TypeError, ValueError
-        Invalid options, no selected products, unsupported axes (including
-        multichannel masks) or invalid data.
-        Format errors use the contextual ``ReaderFormatError`` subclass:
-        ambiguous layouts, malformed schemas, overflow, identity/coordinate
-        disagreement, invalid polygons, non-integer masks, or missing selected
-        products.
+        If an option has the wrong type or value, no product is selected, or
+        a count override is given without its product.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
-        Missing selected artifacts or incorrect filesystem kinds.
+        If a selected artifact is missing or has the wrong kind.
+    ValueError
+        A contextual ``ReaderFormatError`` for an ambiguous layout, a missing
+        bin or image role, malformed GEF, H5AD or TIFF content, inconsistent
+        samples, origins or pitches, analysis rows or features absent from the
+        matching GEF, or invalid polygons under ``"raise"``. Malformed analysis
+        expression raises ``ValueError`` from final linkage.
     """
-    policy = validate_invalid_geometry_policy(invalid_geometries)
+    sample_id = _sample_id(sample_id)
     bins = _bin_selection(bin_sizes)
-    roles = _sequence(image_roles, "image_roles")
-    analyses = _sequence(analysis_files, "analysis_files")
-    _validate_options(
-        sample_id=sample_id,
-        cell_bins=cell_bins,
-        cell_geometry=cell_geometry,
-        roles=roles,
-        analyses=analyses,
+    cell_bins = _choice(cell_bins, "cell_bins", _CELL_BINS)
+    cell_geometry = _choice(cell_geometry, "cell_geometry", _CELL_GEOMETRIES)
+    policy = validate_invalid_geometry_policy(invalid_geometries)
+    overrides = tuple(
+        None if value is None else _path(value, name)
+        for value, name in (
+            (square_counts_file, "square_counts_file"),
+            (cell_counts_file, "cell_counts_file"),
+            (adjusted_cell_counts_file, "adjusted_cell_counts_file"),
+        )
     )
+    analyses = tuple(_path(file, "analysis_files") for file in _sequence(analysis_files, "analysis_files"))
+    roles = _image_roles(image_roles)
     raster = make_raster_options(scale_factors, chunks)
-    if not bins and cell_bins == "none" and not roles and not analyses:
-        message = "Select products, e.g. stereoseq(path, bin_sizes=(50,)) or stereoseq(path, cell_bins='unadjusted')."
-        raise ValueError(message)
-    if (
-        (square_counts_file is not None and not bins)
-        or (cell_counts_file is not None and cell_bins not in ("unadjusted", "both"))
-        or (adjusted_cell_counts_file is not None and cell_bins not in ("adjusted", "both"))
-    ):
-        message = "Count-source overrides require selection of their corresponding product."
-        raise ValueError(message)
+    _require_products(bins, cell_bins, roles, analyses, overrides)
 
     layout = discover_layout(
         path,
         sample_id=sample_id,
         bins=bins,
         cell_bins=cell_bins,
-        square_counts_file=square_counts_file,
-        cell_counts_file=cell_counts_file,
-        adjusted_cell_counts_file=adjusted_cell_counts_file,
+        square_counts_file=overrides[0],
+        cell_counts_file=overrides[1],
+        adjusted_cell_counts_file=overrides[2],
         analysis_files=analyses,
         image_roles=roles,
         path_policy=path_policy,
@@ -314,107 +460,70 @@ def stereoseq(  # noqa: PLR0913, PLR0915, RUF100 - Independent products retain o
     square_counts = read_square(layout.square) if layout.square is not None else ()
     cell_counts = tuple(read_cells(source, read_borders=cell_geometry == "polygons") for source in layout.cells)
     products: tuple[SquareCounts | CellCounts, ...] = (*square_counts, *cell_counts)
-    _validate_frames(products, layout.sample_id, layout.root.path)
+    format_version = _format_version(
+        {square.file: square.format_version for square in square_counts}
+        | {source.file: cells.format_version for source, cells in zip(layout.cells, cell_counts, strict=True)}
+    )
+    _validate_frames(products, layout.sample_id, layout.root.path, format_version)
 
-    # Raw populations establish independent targets before any analysis is
-    # matched against them; no analysis row order determines a raw identity.
+    # Raw populations are the independent targets that analyses are matched
+    # against; no analysis row order determines a raw identity.
+    populations: dict[str, SquareCounts | CellCounts] = {f"bin{square.bin_size}": square for square in square_counts}
+    populations.update((_population(source), cells) for source, cells in zip(layout.cells, cell_counts, strict=True))
+    analysis_results, pitch = read_analyses(
+        layout.analyses, counts=populations, resolution=products[0].resolution if products else None
+    )
+    if pitch is None:
+        pitch = read_image_pitch(layout.calibration, sample_id=layout.sample_id)
+    transformations = _transformations(pitch)
+
     points: dict[str, dd.DataFrame] = {}
     shapes: dict[str, gpd.GeoDataFrame] = {}
     tables: dict[str, ad.AnnData] = {}
-    counts_by_population: dict[str, SquareCounts | CellCounts] = {
-        f"bin{square.bin_size}": square for square in square_counts
-    }
-    counts_by_population.update(
-        ("cells" if source.kind == "unadjusted" else "adjusted_cells", cells)
-        for source, cells in zip(layout.cells, cell_counts, strict=True)
-    )
-    analyses, pitch = read_analyses(
-        layout.analyses,
-        counts=counts_by_population,
-        resolution=products[0].resolution if products else None,
-    )
-    pitch = pitch if pitch is not None else read_image_pitch(layout.calibration, sample_id=layout.sample_id)
 
     for square in square_counts:
         name = f"bin{square.bin_size}"
-        target = f"{name}_genes"
-        square_index = pd.RangeIndex(len(square.coordinates))
-        points[target] = make_points(square.coordinates, square_index)
-        finalize_positions(
-            square.table,
-            square.resolution,
-            "source_bin_reference_position",
-            calibration=(
-                f"GEF geneExp/bin{square.bin_size}/expression@resolution = {square.resolution} nm per grid unit"
-            ),
-        )
-        tables[f"{name}_table"] = link_table(square.table, target, square_index)
+        points[f"{name}_genes"], tables[f"{name}_table"] = _square_products(square, transformations)
 
-    for cell_source, cells in zip(layout.cells, cell_counts, strict=True):
-        name = "cells" if cell_source.kind == "unadjusted" else "adjusted_cells"
-        target = f"{name}_{cell_geometry}"
-        index = pd.Index(cells.cell_ids)
-        if cells.borders is None:
-            points[target] = make_points(cells.coordinates, index)
+    for source, cells in zip(layout.cells, cell_counts, strict=True):
+        name = _population(source)
+        element, tables[f"{name}_table"] = _cell_products(
+            source, cells, f"{name}_{cell_geometry}", policy=policy, transformations=transformations
+        )
+        if isinstance(element, gpd.GeoDataFrame):
+            shapes[f"{name}_{cell_geometry}"] = element
         else:
-            shapes[target] = make_polygons(
-                cells.coordinates, cells.borders, index, path=cell_source.file, policy=policy
-            )
-            # Dropped contours remove their count rows; analyses still match the full raw population.
-            index = shapes[target].index
-        table = cells.table
-        if len(index) != table.n_obs:
-            retained = pd.Index(cells.cell_ids).isin(index)
-            table = table[retained].copy()
-            layers = ("exon",) if "exon" in table.layers else ()
-            completed = finalize_count_arrays(
-                (cast("csr_array", table.X), *(cast("csr_array", table.layers[name]) for name in layers)),
-                context=ReaderErrorContext("stereoseq", f"{name} counts"),
-                path=cell_source.file,
-            )
-            table.X = completed[0]
-            table.layers.update(zip(layers, completed[1:], strict=True))
-        finalize_positions(
-            table,
-            cells.resolution,
-            "vendor_cell_center",
-            calibration=f"GEF root@resolution = {cells.resolution} nm per grid unit",
-        )
-        tables[f"{name}_table"] = link_table(table, target, index)
+            points[f"{name}_{cell_geometry}"] = element
 
-    duplicate_messages: list[str] = []
-    for source, analysis in zip(layout.analyses, analyses, strict=True):
-        name = f"{analysis.name}_table"
-        target = f"{analysis.name}_points"
-        points[target] = make_points(analysis.coordinates, analysis.instance_ids)
-        try:
-            population = analysis.population
-            finalize_positions(
-                analysis.table,
-                analysis.resolution,
-                "vendor_cell_center" if population in ("cells", "adjusted_cells") else "source_bin_reference_position",
-                calibration=(
-                    f"Matching raw GEF {population} resolution = {analysis.resolution} nm per grid unit"
-                    if population in counts_by_population
-                    else f"H5AD uns/resolution = {analysis.resolution} nm per grid unit"
-                ),
-            )
-            duplicate_sums: list[SparseDuplicateSummary] = []
-            tables[name] = link_table(analysis.table, target, analysis.instance_ids, duplicate_sums=duplicate_sums)
-            duplicate_messages.extend(f"{source.file.name}/{name}: {summary}" for summary in duplicate_sums)
-        except (TypeError, ValueError) as error:
-            add_reader_context(error, context=ReaderErrorContext("stereoseq", "analysis table"), path=source.file)
-            raise
+    duplicates: list[tuple[Path, list[SparseDuplicateSummary]]] = []
+    for source, analysis in zip(layout.analyses, analysis_results, strict=True):
+        sums: list[SparseDuplicateSummary] = []
+        points[f"{analysis.name}_points"], tables[f"{analysis.name}_table"] = _analysis_products(
+            source,
+            analysis,
+            from_gef=analysis.population in populations,
+            transformations=transformations,
+            duplicate_sums=sums,
+        )
+        duplicates.append((source.file, sums))
 
     result = SpatialData(
-        images={source.name: read_image(source, raster=raster) for source in layout.images if source.kind == "image"},
-        labels={source.name: read_mask(source, raster=raster) for source in layout.images if source.kind == "labels"},
+        images={
+            image.name: read_image(image, raster=raster, transformations=transformations)
+            for image in layout.images
+            if image.kind == "image"
+        },
+        labels={
+            image.name: read_mask(image, raster=raster, transformations=transformations)
+            for image in layout.images
+            if image.kind == "labels"
+        },
         points=points,
         shapes=shapes,
         tables=tables,
     )
-    if pitch is not None:
-        _set_grid_pitch(result, pitch)
-    set_reader_provenance(result.attrs, reader="stereoseq")
-    _warn_imported_duplicates(duplicate_messages)
+    set_reader_provenance(result.attrs, reader="stereoseq", format_version=format_version)
+    for file, sums in duplicates:
+        if sums:
+            warnings.warn(f"stereoseq {file.name}: " + "; ".join(map(str, sums)), UserWarning, stacklevel=2)
     return result

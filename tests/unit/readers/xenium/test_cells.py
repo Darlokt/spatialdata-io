@@ -38,6 +38,19 @@ def _assign(key: str, index: int | tuple[int, int], value: float | list[int]) ->
     return mutate
 
 
+def _rename_summary_columns(group: zarr.Group) -> None:
+    """Keep one name per summary column, none of them a documented name."""
+    columns = group["cell_summary"].attrs["column_names"]
+    assert isinstance(columns, list)
+    group["cell_summary"].attrs["column_names"] = [f"c{index}" for index in range(len(columns))]
+
+
+def _replace(group: zarr.Group, key: str, values: np.ndarray) -> None:
+    """Replace a stored array, keeping its attributes."""
+    attrs = dict(group[key].attrs)
+    group.create_array(key, data=values, overwrite=True).attrs.update(attrs)
+
+
 # Each mutation breaks one store invariant of an otherwise valid bundle.
 STORE_DEFECTS: dict[str, tuple[fx.Profile, Mutation, str]] = {
     "family-structure": (
@@ -68,6 +81,23 @@ STORE_DEFECTS: dict[str, tuple[fx.Profile, Mutation, str]] = {
     ),
     "nucleus-count": (fx.XOA_2_0, _assign("cell_summary", (0, 7), 1.5), "integral nucleus counts"),
     "centroids": (fx.XOA_2_0, _assign("cell_summary", (0, 3), np.inf), "finite nucleus centroids"),
+    "absent-array": (fx.XOA_2_0, lambda g: g.__delitem__("cell_summary"), "a 'cell_summary' array"),
+    "id-dtype": (fx.XOA_1_0, lambda g: _replace(g, "cell_id", np.arange(1.0, 5.0)), "a 1-D 'cell_id' array"),
+    "pair-width": (
+        fx.XOA_1_9,
+        lambda g: _replace(g, "cell_id", np.ones((4, 3), dtype=np.uint32)),
+        r"\(N, 2\) uint32 prefix/suffix pairs",
+    ),
+    "label-count": (
+        fx.XOA_1_9,
+        lambda g: _replace(g, "seg_mask_value", np.arange(1, 4, dtype=np.uint32)),
+        "4 labels; found 3 seg_mask_value entries",
+    ),
+    "summary-column": (
+        fx.XOA_2_0,
+        _rename_summary_columns,
+        "a 'nucleus_centroid_x' column",
+    ),
 }
 
 

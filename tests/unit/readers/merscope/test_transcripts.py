@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import warnings
+from functools import partial
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
@@ -15,6 +16,7 @@ from spatialdata.transformations import Identity, get_transformation
 
 import spatialdata_io.readers.merscope._transcripts as transcript_module
 from spatialdata_io.readers._utils.csv import _blocks as csv_blocks
+from spatialdata_io.readers._utils.csv import read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.merscope._layout import TranscriptSource
@@ -53,7 +55,7 @@ class TestReadTranscripts:
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv")
-        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
+        mocker.patch.object(transcript_module, "read_csv_blocks", partial(read_csv_blocks, block_bytes=256))
         tasks = mocker.Mock()
         initial_filters = list(warnings.filters)
         with Callback(posttask=tasks):
@@ -113,7 +115,7 @@ class TestReadTranscripts:
         self, tmp_path: Path, mocker: MockerFixture, gene: str, cell: str, message: str
     ) -> None:
         source = _write_source(tmp_path / "transcripts.csv", last_gene=gene, last_cell=cell)
-        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
+        mocker.patch.object(transcript_module, "read_csv_blocks", partial(read_csv_blocks, block_bytes=256))
         points = read_transcripts(source, features=_FEATURES, cell_population=_POPULATION)
         assert points.npartitions > 1
         first = points.partitions[0].compute()
@@ -139,7 +141,7 @@ class TestReadTranscripts:
         source = _write_source(tmp_path / "transcripts.csv")
         with source.path.open("a", encoding="utf-8") as output:
             output.write(record)
-        mocker.patch.object(csv_blocks, "CSV_BLOCK_BYTES", 256)
+        mocker.patch.object(transcript_module, "read_csv_blocks", partial(read_csv_blocks, block_bytes=256))
         points = read_transcripts(source, features=_FEATURES, cell_population=None)
         assert not points.partitions[0].compute().empty
         with pytest.raises(ReaderFormatError, match="malformed CSV records"):

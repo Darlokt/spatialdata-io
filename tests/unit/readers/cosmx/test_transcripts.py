@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import io
 import pickle
+from functools import partial
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -13,6 +14,7 @@ import pytest
 from dask.callbacks import Callback
 from spatialdata.transformations import BaseTransformation, Identity, get_transformation
 
+from spatialdata_io.readers._utils.csv import read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.cosmx import _transcripts
@@ -49,6 +51,11 @@ def _members(tmp_path: Path, rows: list[str] = _ROWS, size: int = 3) -> Artifact
     return ArtifactFile(path)
 
 
+def _small_blocks(mocker: MockerFixture) -> None:
+    """Split plain sources into blocks of a few records."""
+    mocker.patch.object(_transcripts, "read_csv_blocks", partial(read_csv_blocks, block_bytes=64))
+
+
 def _expected() -> pd.DataFrame:
     return pd.read_csv(io.StringIO(_HEADER + "".join(_ROWS)))
 
@@ -58,7 +65,7 @@ class TestReadTranscripts:
 
     @pytest.mark.parametrize("source", ["plain", "gzip"])
     def test_partitions_reproduce_source_rows(self, tmp_path: Path, mocker: MockerFixture, source: str) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._transcripts._BLOCK_BYTES", 64)
+        _small_blocks(mocker)
         mocker.patch("spatialdata_io.readers.cosmx._transcripts._GZIP_RANGE_BYTES", 40)
         mocker.patch("spatialdata_io.readers.cosmx._transcripts._READ_BYTES", 16)
         path = _plain(tmp_path) if source == "plain" else _members(tmp_path)
@@ -119,7 +126,7 @@ class TestReadTranscripts:
         assert len(restored.compute()) == len(_ROWS)
 
     def test_unknown_target_fails_when_its_partition_is_computed(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._transcripts._BLOCK_BYTES", 64)
+        _small_blocks(mocker)
         rows = [*_ROWS[:-1], _ROWS[-1].replace(",B,", ",Z,")]
         points = read_transcripts(_plain(tmp_path, rows), features=_FEATURES, placements=_PLACEMENTS)
         assert len(points.partitions[: points.npartitions - 1].compute()) > 0
@@ -131,14 +138,41 @@ class TestReadTranscripts:
         ("row", "match"),
         [
             ("1,1,inf,1,1,1,0,A,N,x\n", "nonfinite"),
-            ("1,1,1,1,1,1,0,A,N\n", "malformed transcript"),
+            ("1,1,1,1,1,1,0,A,N\n", "malformed CSV records"),
             ("0,1,1,1,1,1,0,A,N,x\n", "below 1"),
         ],
     )
-    def test_invalid_rows_fail_lazily(self, tmp_path: Path, row: str, match: str) -> None:
-        points = read_transcripts(_plain(tmp_path, [row]), features=_FEATURES, placements=_PLACEMENTS)
-        with pytest.raises(ReaderFormatError, match=match):
+    @pytest.mark.parametrize("source", ["plain", "gzip"])
+    def test_invalid_rows_fail_lazily(self, tmp_path: Path, row: str, match: str, source: str) -> None:
+        path = _plain(tmp_path, [row]) if source == "plain" else _members(tmp_path, [row])
+        points = read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+        with pytest.raises(ReaderFormatError, match=match) as caught:
             points.compute()
+        assert caught.value.context == ReaderErrorContext("cosmx", "transcripts")
+        assert caught.value.path == path
+
+    def test_plain_source_uses_shared_blocks_of_the_default_size(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        blocks = mocker.spy(_transcripts, "read_csv_blocks")
+        path = _plain(tmp_path)
+
+        read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+
+        blocks.assert_called_once_with(
+            path,
+            header=tuple(_HEADER.strip().split(",")),
+            columns=(
+                "fov",
+                "cell_ID",
+                "x_local_px",
+                "y_local_px",
+                "x_global_px",
+                "y_global_px",
+                "target",
+                "z",
+                "CellComp",
+            ),
+            context=ReaderErrorContext("cosmx", "transcripts"),
+        )
 
     def test_missing_columns_fail_at_construction(self, tmp_path: Path) -> None:
         path = tmp_path / "tx.csv"

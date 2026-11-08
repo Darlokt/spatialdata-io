@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -100,6 +101,65 @@ class TestReadTable:
         np.testing.assert_array_equal(table.obsm["spatial_source"], native)
         assert table.obsm["spatial_source"].dtype == np.int16
         assert "spatial" not in table.obsm
+
+    def test_uns_keys_are_sanitized_with_one_warning(self, tmp_path: Path) -> None:
+        """Rename invalid and reader-colliding top-level keys only, keeping values and stored order."""
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["my key"] = {"inner key": "kept"}
+        source.uns["SpatialData_Attrs"] = "stale"
+        source.uns["Spatialdata_io_positions"] = np.asarray([1, 2])
+        source.write_h5ad(path)
+
+        with pytest.warns(UserWarning, match="uns keys") as caught:
+            table = _read(tmp_path)
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "dbit: the H5AD uns has names that a SpatialData table does not accept as uns keys; using "
+                "'SpatialData_Attrs' -> 'SpatialData_Attrs_1', 'Spatialdata_io_positions' -> "
+                "'Spatialdata_io_positions_1', 'my key' -> 'my_key'. Rename them in the source to choose the names "
+                "explicitly."
+            )
+        ]
+        # HDF5 stores group members by name, so the stored order is alphabetical.
+        assert list(table.uns) == [
+            "SpatialData_Attrs_1",
+            "Spatialdata_io_positions_1",
+            "experiment",
+            "my_key",
+            "spatialdata_io_positions",
+        ]
+        assert table.uns["my_key"] == {"inner key": "kept"}
+        assert table.uns["SpatialData_Attrs_1"] == "stale"
+        np.testing.assert_array_equal(table.uns["Spatialdata_io_positions_1"], [1, 2])
+        assert table.uns["experiment"] == {"assay": "DBiT", "replicate": 4}
+
+    def test_valid_uns_keys_are_untouched_without_warning(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        source = ad.read_h5ad(tmp_path / "sample.h5ad")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            table = _read(tmp_path)
+
+        assert list(table.uns) == [*source.uns, "spatialdata_io_positions"]
+        assert table.uns["experiment"] == source.uns["experiment"]
+
+    def test_exact_imported_linkage_metadata_keeps_its_key(self, tmp_path: Path) -> None:
+        """The reader replaces an exact spatialdata_attrs later, so it is not renamed here."""
+        _write_layout(tmp_path)
+        path = tmp_path / "sample.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["spatialdata_attrs"] = {"region": "stale"}
+        source.write_h5ad(path)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            table = _read(tmp_path)
+
+        assert table.uns["spatialdata_attrs"] == {"region": "stale"}
 
     @pytest.mark.parametrize("kind", ["missing", "no_obs", "no_var", "duplicate_obs", "duplicate_var", "empty_var"])
     def test_invalid_table(self, tmp_path: Path, kind: str) -> None:

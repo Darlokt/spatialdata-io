@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._layout import (
     AnalysisArchive,
     AnalysisDirectory,
     H5Counts,
+    MorphologyImage,
     MtxArchive,
     MtxDirectory,
     Selection,
@@ -79,7 +81,7 @@ class TestDiscoverLayout:
         layout = discover_layout(tmp_path, replace(EVERYTHING, morphology_mip=profile.images == "single"))
 
         assert layout.experiment.family == family
-        assert (None if layout.experiment.version is None else str(layout.experiment.version)) == version
+        assert layout.experiment.version == version
         assert layout.cells_store == tmp_path / "cells.zarr.zip"
         assert layout.cells is not None
         assert layout.cells.kind == "parquet"
@@ -192,7 +194,9 @@ class TestDiscoverLayout:
         layout = discover_layout(tmp_path, replace(NOTHING, morphology_focus=True))
 
         assert layout.focus is not None
-        assert [path.name for path in layout.focus.files] == [f"morphology_focus_{i:04d}.ome.tif" for i in range(4)]
+        assert layout.focus.entry == tmp_path / "morphology_focus" / "morphology_focus_0000.ome.tif"
+        assert layout.focus.name == "morphology_focus_0000.ome.tif"
+        assert layout.focus.members == {f"morphology_focus_{i:04d}.ome.tif" for i in range(4)}
 
     def test_focus_set_members_must_be_files(self, tmp_path: Path) -> None:
         fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
@@ -220,7 +224,16 @@ class TestDiscoverLayout:
 
         layout = discover_layout(tmp_path, replace(NOTHING, morphology_mip=True))
 
-        assert layout.mip == tmp_path / "morphology_mip.ome.tif"
+        mip = tmp_path / "morphology_mip.ome.tif"
+        assert layout.mip == MorphologyImage(ArtifactFile(mip), mip.name, frozenset({mip.name}))
+
+    def test_errors_name_the_detected_format_version(self, tmp_path: Path) -> None:
+        fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+
+        with pytest.raises(ReaderFormatError, match=r"detected version '4\.0\.0'") as caught:
+            discover_layout(tmp_path, replace(NOTHING, morphology_mip=True))
+
+        assert caught.value.context == ReaderErrorContext("xenium", "maximum-intensity projection", "4.0.0")
 
     def test_aligned_images(self, tmp_path: Path) -> None:
         fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(aligned=("he", "if")))

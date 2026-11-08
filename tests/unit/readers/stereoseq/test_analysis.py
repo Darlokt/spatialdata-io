@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -19,8 +21,6 @@ from spatialdata_io.readers.stereoseq._layout import AnalysisSource
 from spatialdata_io.readers.stereoseq._square import SquareCounts
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pytest_mock import MockerFixture
 
 
@@ -52,8 +52,10 @@ def _counts(*, square: bool = False) -> CellCounts | SquareCounts:
     table.obsm["spatial"] = coordinates
     table.uns["stereoseq"] = {"origin": [5, 6], "resolution": 500}
     if square:
-        return SquareCounts(table, coordinates, 50, (5, 6), 500, "sample")
-    return CellCounts(table, coordinates, np.array([200, 100, 300], dtype=np.uint64), None, (5, 6), 500, "sample")
+        return SquareCounts(ArtifactFile(Path("sample.gef")), table, coordinates, 50, (5, 6), 500, "sample", "gef-2")
+    return CellCounts(
+        table, coordinates, np.array([200, 100, 300], dtype=np.uint64), None, (5, 6), 500, "sample", "gef-2"
+    )
 
 
 def _source(path: Path, *, resolution: Decimal | None = Decimal("0.50")) -> AnalysisSource:
@@ -77,6 +79,16 @@ class TestReadAnalysis:
         else:
             with pytest.raises(ReaderFormatError, match="ambiguous source centroids"):
                 read_analysis(_source(path), counts={"cells": raw})
+
+    def test_unreadable_h5ad_names_the_artifact(self, tmp_path: Path) -> None:
+        path = tmp_path / "sample.cellbin_0.50.h5ad"
+        path.write_bytes(b"not an HDF5 file")
+
+        with pytest.raises(OSError, match="Unable to") as caught:
+            read_analysis(_source(path), counts={})
+        assert caught.value.__notes__ == [
+            f"While handling reader 'stereoseq', artifact 'analysis table', path '{path}'."
+        ]
 
     def test_square_id_annotation_is_not_a_semantic_cell_key(self, tmp_path: Path) -> None:
         path = tmp_path / "sample.bin50_0.50.h5ad"
@@ -235,3 +247,53 @@ class TestReadAnalysis:
         loaded = _analysis(path)
         mocker.patch("spatialdata_io.readers.stereoseq._analysis.ad.read_h5ad", return_value=loaded)
         assert read_analysis(_source(path), counts={}).table is loaded
+
+    def test_uns_keys_are_sanitized_with_one_warning(self, tmp_path: Path) -> None:
+        """Rename invalid and reader-colliding top-level keys only, keeping values and stored order."""
+        path = tmp_path / "sample.cellbin_0.50.h5ad"
+        table = _analysis(path)
+        table.uns["my key"] = {"inner key": "kept"}
+        table.uns["Resolution"] = "clustering"
+        table.uns["Spatialdata_io_positions"] = np.array([1, 2])
+        table.write_h5ad(path)
+
+        with pytest.warns(UserWarning, match="uns keys") as caught:
+            result = read_analysis(_source(path), counts={"cells": _counts()})
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "stereoseq: the uns of sample.cellbin_0.50.h5ad has names that a SpatialData table does not accept as "
+                "uns keys; using 'Resolution' -> 'Resolution_1', 'Spatialdata_io_positions' -> "
+                "'Spatialdata_io_positions_1', 'my key' -> 'my_key'. Rename them in the source to choose the names "
+                "explicitly."
+            )
+        ]
+        # HDF5 stores group members by name, so the stored order is alphabetical.
+        uns = result.table.uns
+        assert list(uns) == [
+            "Resolution_1",
+            "Spatialdata_io_positions_1",
+            "bin_size",
+            "bin_type",
+            "my_key",
+            "resolution",
+            "sn",
+        ]
+        assert uns["my_key"] == {"inner key": "kept"}
+        assert uns["Resolution_1"] == "clustering"
+        np.testing.assert_array_equal(uns["Spatialdata_io_positions_1"], [1, 2])
+        assert (uns["bin_type"], uns["bin_size"], uns["resolution"]) == ("cell_bins", 1, 500)
+        assert uns["sn"]["sn"].tolist() == ["sample"]
+        assert result.resolution == 500
+
+    def test_valid_uns_keys_are_untouched_without_warning(self, tmp_path: Path) -> None:
+        path = tmp_path / "sample.cellbin_0.50.h5ad"
+        _analysis(path)
+        stored = ad.read_h5ad(path).uns
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = read_analysis(_source(path), counts={"cells": _counts()})
+
+        assert list(result.table.uns) == list(stored)
+        pd.testing.assert_frame_equal(result.table.uns["sn"], stored["sn"])

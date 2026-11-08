@@ -15,7 +15,7 @@ from scipy.sparse import csr_array
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd._cells import _aggregate_counts, cell_ids, read_cell_table, read_nucleus_table
-from tests.integration.readers.visium_hd._fixtures import write_counts
+from tests.integration.readers.visium_hd._fixtures import VERSION, write_counts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,7 +41,11 @@ def _sources(root: Path, values: tuple[int, int] = (2, 3)) -> tuple[ArtifactFile
         ),
         mapping,
     )
-    return ArtifactFile(raw), ArtifactFile(mapping), read_cell_table(ArtifactFile(cell), make_var_names_unique=True)
+    return (
+        ArtifactFile(raw),
+        ArtifactFile(mapping),
+        read_cell_table(ArtifactFile(cell), make_var_names_unique=True, version=VERSION),
+    )
 
 
 class TestCellIds:
@@ -49,7 +53,8 @@ class TestCellIds:
 
     def test_exact(self, tmp_path: Path) -> None:
         np.testing.assert_array_equal(
-            cell_ids(pd.Index(["cellid_999999999-1", "cellid_000000001-1"]), ArtifactFile(tmp_path)), [999999999, 1]
+            cell_ids(pd.Index(["cellid_999999999-1", "cellid_000000001-1"]), ArtifactFile(tmp_path), version=VERSION),
+            [999999999, 1],
         )
 
     @pytest.mark.parametrize(
@@ -57,7 +62,7 @@ class TestCellIds:
     )
     def test_invalid(self, tmp_path: Path, barcode: str) -> None:
         with pytest.raises(ReaderFormatError, match="cell"):
-            cell_ids(pd.Index([barcode]), ArtifactFile(tmp_path))
+            cell_ids(pd.Index([barcode]), ArtifactFile(tmp_path), version=VERSION)
 
 
 class TestAggregateCounts:
@@ -83,6 +88,7 @@ class TestAggregateCounts:
             np.array([0, 1], dtype=np.int64),
             1,
             ArtifactFile(tmp_path / "raw.h5"),
+            version=VERSION,
         )
         assert result.dtype == np.dtype(expected_dtype)
         assert result.has_canonical_format
@@ -96,7 +102,12 @@ class TestAggregateCounts:
         source = csr_array([[1e300]], dtype=np.float64)
         with np.errstate(over="raise", invalid="raise"):
             result = _aggregate_counts(
-                source, np.array([], dtype=np.int64), np.array([], dtype=np.int64), 2, ArtifactFile(tmp_path / "raw.h5")
+                source,
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+                2,
+                ArtifactFile(tmp_path / "raw.h5"),
+                version=VERSION,
             )
         assert result.shape == (2, 1)
         assert result.nnz == 0
@@ -110,7 +121,7 @@ class TestReadNucleusTable:
         raw, mapping, population = _sources(tmp_path)
         write_counts(raw, np.array([[2, 4, 0], [3, 0, 5]], np.int32), ["bin0", "bin1"], "4.1.0")
         mocker.patch.object(csr_array, "toarray", side_effect=AssertionError("densification"))
-        result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X.has_canonical_format
         assert result.X.dtype == np.float32
@@ -121,7 +132,7 @@ class TestReadNucleusTable:
 
     def test_integer_sum_and_no_mutation(self, tmp_path: Path) -> None:
         raw, mapping, population = _sources(tmp_path)
-        result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X.dtype == np.float32
         assert isinstance(population.X, csr_array)
@@ -133,7 +144,7 @@ class TestReadNucleusTable:
         raw, mapping, population = _sources(tmp_path)
         source_mapping = pq.read_table(mapping)
         pq.write_table(source_mapping.set_column(3, "in_nucleus", pa.array([False, False])), mapping)
-        result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X.shape == (1, 3)
         assert result.X.nnz == 0
@@ -149,7 +160,7 @@ class TestReadNucleusTable:
             source.create_dataset("matrix/data", data=np.array([maximum, 0], dtype=np.int64))
         source_mapping = pq.read_table(mapping)
         pq.write_table(source_mapping.set_column(3, "in_nucleus", pa.array([True, False])), mapping)
-        result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X[0, 0] == np.float32(maximum)
 
@@ -160,18 +171,18 @@ class TestReadNucleusTable:
             del source["matrix/data"]
             source.create_dataset("matrix/data", data=np.array([value, value], dtype=np.uint64))
         with pytest.raises(ReaderFormatError, match="float64 exact-sum bound"):
-            read_nucleus_table(raw, mapping, population, pd.Index([1]))
+            read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
 
     def test_float64_sum_preserves_unit_above_float32_precision(self, tmp_path: Path) -> None:
         raw, mapping, population = _sources(tmp_path, (2**24, 1))
-        result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X.dtype == np.dtype(np.float64)
         assert int(result.X[0, 0]) == 2**24 + 1
 
     def test_decoded_float32_input_is_not_reinterpreted_as_original_integer(self, tmp_path: Path) -> None:
         raw, mapping, population = _sources(tmp_path, (2**24 + 1, 0))
-        result = read_nucleus_table(raw, mapping, population, pd.Index([1]))
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
         assert isinstance(result.X, csr_array)
         assert int(result.X[0, 0]) == 2**24
 
@@ -187,7 +198,7 @@ class TestReadNucleusTable:
             source["square_002um"][1] = "bin0" if fault == "duplicate" else "absent"
         pq.write_table(pa.table(source), mapping)
         with pytest.raises(ReaderFormatError, match=r"mapping|mapped|barcode"):
-            read_nucleus_table(raw, mapping, population, pd.Index([1]))
+            read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
 
     @pytest.mark.parametrize("field", ["id", "genome", "feature_type"])
     def test_feature_mismatch(self, tmp_path: Path, field: str) -> None:
@@ -195,4 +206,4 @@ class TestReadNucleusTable:
         with h5py.File(raw, "a") as handle:
             handle[f"matrix/features/{field}"][0] = b"wrong"
         with pytest.raises(ReaderFormatError, match="feature IDs"):
-            read_nucleus_table(raw, mapping, population, pd.Index([1]))
+            read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)

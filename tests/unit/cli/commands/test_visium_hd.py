@@ -34,13 +34,13 @@ class TestVisiumHdCommand:
             include_nucleus_boundaries=None,
             include_nucleus_table=False,
             cell_counts_kind="filtered",
+            make_var_names_unique=True,
             invalid_geometries="keep",
             include_images=True,
             include_cytassist_image=False,
             fullres_image_file=None,
             data_axes=None,
             tiff_series=None,
-            make_var_names_unique=True,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
             path_policy="strict",
@@ -73,11 +73,7 @@ class TestVisiumHdCommand:
             "raw",
             "--include-images",
             "--data-axes",
-            "c",
-            "--data-axes",
-            "y",
-            "--data-axes",
-            "x",
+            "CYX",
             "--tiff-series",
             "1",
         ]
@@ -86,7 +82,7 @@ class TestVisiumHdCommand:
         result = runner.invoke(visium_hd_command, args)
         assert result.exit_code == 0, result.output
         assert reader.call_args.kwargs["bin_sizes"] == ((2, 8) if selection[0] == "8" else ())
-        assert reader.call_args.kwargs["data_axes"] == ("c", "y", "x")
+        assert reader.call_args.kwargs["data_axes"] == "CYX"
         assert reader.call_args.kwargs["include_cell_boundaries"] is False
         assert reader.call_args.kwargs["include_nucleus_table"] is True
         assert reader.call_args.kwargs["include_images"] is True

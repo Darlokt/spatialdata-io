@@ -19,6 +19,7 @@ from spatialdata.models import get_table_keys
 from spatialdata_io.readers._utils.counts import read_10x_h5
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
+from spatialdata_io.readers.xenium._analysis import Analysis
 from spatialdata_io.readers.xenium._cells import read_cells_store
 from spatialdata_io.readers.xenium._layout import H5Counts, MtxArchive, MtxDirectory, TabularSource
 from spatialdata_io.readers.xenium._metadata import ProteinPanel, ProteinTarget
@@ -39,9 +40,14 @@ if TYPE_CHECKING:
     import anndata as ad
     from pytest_mock import MockerFixture
 
+    from spatialdata_io.readers.xenium._cells import CellStore
     from spatialdata_io.readers.xenium._layout import TableTarget
     from spatialdata_io.readers.xenium._tables import FeatureSelection
+    from spatialdata_io.readers.xenium._version import Family
 
+COUNTS = ReaderErrorContext("xenium", "cell-feature matrix", "6.0.0")
+CELLS = ReaderErrorContext("xenium", "cells table", "6.0.0")
+TABLE = ReaderErrorContext("xenium", "table", "6.0.0")
 PANEL = ProteinPanel(
     {"name": "panel"},
     {"TXP000019": ProteinTarget("PD-1 protein", "n/a", 16), "TXP000023": ProteinTarget("VISTA protein", "c2", 17)},
@@ -69,7 +75,7 @@ class TestReadCounts:
             del handle["matrix/data"]
             handle["matrix/data"] = values
         with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            read_counts(source, "all", None)
+            read_counts(source, "all", None, context=COUNTS)
         assert caught.value.path == source.file
 
     @pytest.mark.parametrize("feature_types", [None, "all", ("Protein Expression", "Gene Expression")])
@@ -86,7 +92,7 @@ class TestReadCounts:
             else np.isin(bundle.feature_types, ("Gene Expression", "Protein Expression"))
         )
 
-        counts = read_counts(_h5(bundle), feature_types, panel)
+        counts = read_counts(_h5(bundle), feature_types, panel, context=COUNTS)
         var = cast("pd.DataFrame", counts.table.var)
 
         pd.testing.assert_frame_equal(var[source_var.columns], source_var.loc[selected])
@@ -107,9 +113,22 @@ class TestReadCounts:
         expected = cast("pd.DataFrame", source.var).iloc[:3]
         mocker.patch("spatialdata_io.readers.xenium._tables.read_10x_h5", return_value=source)
 
-        table = read_counts(_h5(bundle), None, None).table
+        table = read_counts(_h5(bundle), None, None, context=COUNTS).table
 
         pd.testing.assert_frame_equal(cast("pd.DataFrame", table.var), expected)
+
+    def test_unusable_feature_annotation_names_are_renamed(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"))
+        source.var["probe set"] = "v1"
+        source.var["Long_Name"] = "x"
+        mocker.patch("spatialdata_io.readers.xenium._tables.read_10x_h5", return_value=source)
+
+        with pytest.warns(UserWarning, match=r"using 'probe set' -> 'probe_set', 'Long_Name' -> 'Long_Name_1'"):
+            var = cast("pd.DataFrame", read_counts(_h5(bundle), None, PANEL, context=COUNTS).table.var)
+
+        assert list(var.columns[-5:]) == ["probe_set", "Long_Name_1", "long_name", "clone", "codeword_index"]
+        assert var["long_name"].tolist()[3:] == ["PD-1 protein", "VISTA protein"]
 
     @pytest.mark.parametrize("column", ["long_name", "clone", "codeword_index"])
     def test_panel_annotations_never_overwrite_source_columns(self, tmp_path: Path, column: str) -> None:
@@ -119,18 +138,20 @@ class TestReadCounts:
             handle["matrix/features"].create_dataset(column, data=values)
 
         with pytest.raises(ReaderFormatError, match=f"reserved protein annotation columns.*{column}"):
-            read_counts(_h5(bundle), None, PANEL)
+            read_counts(_h5(bundle), None, PANEL, context=COUNTS)
 
         # These names are source annotations when no panel enrichment takes place.
-        np.testing.assert_array_equal(read_counts(_h5(bundle), "all", None).table.var[column], values.astype(np.str_))
-        genes = read_counts(_h5(bundle), ("Gene Expression",), PANEL).table
+        np.testing.assert_array_equal(
+            read_counts(_h5(bundle), "all", None, context=COUNTS).table.var[column], values.astype(np.str_)
+        )
+        genes = read_counts(_h5(bundle), ("Gene Expression",), PANEL, context=COUNTS).table
         np.testing.assert_array_equal(genes.var[column], values[:3].astype(np.str_))
 
     def test_default_selects_gene_expression_and_protein(self, tmp_path: Path, mocker: MockerFixture) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
         _forbid_densification(mocker)
 
-        counts = read_counts(_h5(bundle), None, PANEL)
+        counts = read_counts(_h5(bundle), None, PANEL, context=COUNTS)
         mocker.stopall()
 
         table = counts.table
@@ -157,24 +178,24 @@ class TestReadCounts:
     def test_all_and_explicit_selections(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
 
-        everything = read_counts(_h5(bundle), "all", None).table
-        controls = read_counts(_h5(bundle), ("Negative Control Probe", "Genomic Control"), None).table
+        everything = read_counts(_h5(bundle), "all", None, context=COUNTS).table
+        controls = read_counts(_h5(bundle), ("Negative Control Probe", "Genomic Control"), None, context=COUNTS).table
 
         assert everything.var_names.tolist() == list(bundle.features)
         np.testing.assert_array_equal(_dense(everything.X), bundle.counts.astype(np.float32))
         assert controls.var_names.tolist() == ["NegControlProbe_00001", "Intergenic_Region_1"]
         with pytest.raises(ReaderFormatError, match=r"feature types \['Protein Expression'\] absent"):
-            read_counts(_h5(bundle), ("Protein Expression",), None)
+            read_counts(_h5(bundle), ("Protein Expression",), None, context=COUNTS)
 
     def test_matrix_market_twins_equal_the_h5(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(counts=("h5", "mtx", "mtx_archive")))
-        reference = read_counts(_h5(bundle), "all", None).table
+        reference = read_counts(_h5(bundle), "all", None, context=COUNTS).table
 
         for source in (
             MtxDirectory(ArtifactDirectory(tmp_path / "cell_feature_matrix")),
             MtxArchive(ArtifactFile(tmp_path / "cell_feature_matrix.tar.gz")),
         ):
-            table = read_counts(source, "all", None).table
+            table = read_counts(source, "all", None, context=COUNTS).table
             np.testing.assert_array_equal(_dense(table.X), _dense(reference.X))
             assert table.obs_names.equals(reference.obs_names)
             assert table.var_names.equals(reference.var_names)
@@ -189,29 +210,29 @@ class TestReadCounts:
         mtx = MtxDirectory(ArtifactDirectory(tmp_path / "cell_feature_matrix"))
 
         with pytest.raises(ReaderFormatError, match="MatrixMarket matrix without the scaling factor"):
-            read_counts(mtx, None, None)
-        assert read_counts(mtx, ("Gene Expression",), None).protein is None
+            read_counts(mtx, None, None, context=COUNTS)
+        assert read_counts(mtx, ("Gene Expression",), None, context=COUNTS).protein is None
 
         with h5py.File(tmp_path / "cell_feature_matrix.h5", "r+") as handle:
             handle.attrs["protein_metric"] = "MEDIAN"
         with pytest.raises(ReaderFormatError, match="MEAN_PER_CELL_STAIN"):
-            read_counts(_h5(bundle), None, None)
+            read_counts(_h5(bundle), None, None, context=COUNTS)
         with h5py.File(tmp_path / "cell_feature_matrix.h5", "r+") as handle:
             handle.attrs["protein_metric"] = b"MEAN_PER_CELL_STAIN"
             handle.attrs["protein_scaling_factor"] = 0
         with pytest.raises(ReaderFormatError, match="positive integer"):
-            read_counts(_h5(bundle), None, None)
+            read_counts(_h5(bundle), None, None, context=COUNTS)
         with h5py.File(tmp_path / "cell_feature_matrix.h5", "r+") as handle:
             del handle.attrs["protein_scaling_factor"]
         with pytest.raises(ReaderFormatError, match="positive integer"):
-            read_counts(_h5(bundle), None, None)
+            read_counts(_h5(bundle), None, None, context=COUNTS)
 
     def test_protein_panel_must_cover_every_protein(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
         partial = ProteinPanel({}, {"TXP000019": ProteinTarget("a", "b", 1)})
 
         with pytest.raises(ReaderFormatError, match=r"no targets for \['TXP000023'\]"):
-            read_counts(_h5(bundle), None, partial)
+            read_counts(_h5(bundle), None, partial, context=COUNTS)
 
     @pytest.mark.filterwarnings("ignore:Variable names are not unique")
     def test_repeated_features_raise(self, tmp_path: Path) -> None:
@@ -222,7 +243,7 @@ class TestReadCounts:
             handle["matrix/features/name"][...] = names
 
         with pytest.raises(ReaderFormatError, match="repeated feature names or barcodes"):
-            read_counts(_h5(bundle), None, None)
+            read_counts(_h5(bundle), None, None, context=COUNTS)
 
     @pytest.mark.parametrize("member", ["../escape.tsv.gz", "cell_feature_matrix/link.tsv.gz", None])
     def test_unsafe_or_incomplete_archives_raise(self, tmp_path: Path, member: str | None) -> None:
@@ -244,10 +265,10 @@ class TestReadCounts:
         source_spec = MtxArchive(ArtifactFile(archive))
         if member is None:
             with pytest.raises(ReaderFormatError, match="cell_feature_matrix/"):
-                read_counts(source_spec, None, None)
+                read_counts(source_spec, None, None, context=COUNTS)
         else:
             # Unrelated members are never extracted.
-            read_counts(source_spec, None, None)
+            read_counts(source_spec, None, None, context=COUNTS)
             assert not (tmp_path / "escape.tsv.gz").exists()
 
 
@@ -273,14 +294,14 @@ class TestReadFeatureIndex:
                     archive.addfile(info, io.BytesIO(payload))
         source = MtxArchive(ArtifactFile(path))
         with pytest.raises(ReaderFormatError, match="exactly one"):
-            read_feature_index(source)
+            read_feature_index(source, context=COUNTS)
         with pytest.raises(ReaderFormatError, match="exactly one"):
-            read_counts(source, None, None)
+            read_counts(source, None, None, context=COUNTS)
 
     def test_metadata_only_archive_reads_never_extract_matrix(self, tmp_path: Path, mocker: MockerFixture) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(counts=("mtx_archive",)))
         extract = mocker.spy(tarfile.TarFile, "extractall")
-        index = read_feature_index(MtxArchive(ArtifactFile(tmp_path / "cell_feature_matrix.tar.gz")))
+        index = read_feature_index(MtxArchive(ArtifactFile(tmp_path / "cell_feature_matrix.tar.gz")), context=COUNTS)
         assert index.features.tolist() == list(bundle.features)
         assert index.barcodes.tolist() == list(bundle.barcodes)
         members = extract.call_args.kwargs["members"]
@@ -297,7 +318,7 @@ class TestReadFeatureIndex:
             MtxDirectory(ArtifactDirectory(tmp_path / "cell_feature_matrix")),
             MtxArchive(ArtifactFile(tmp_path / "cell_feature_matrix.tar.gz")),
         ):
-            index = read_feature_index(source)
+            index = read_feature_index(source, context=COUNTS)
             assert index.features.tolist() == list(bundle.features)
             assert index.barcodes.tolist() == list(bundle.barcodes)
 
@@ -309,8 +330,12 @@ class TestReadCells:
     def test_parquet_and_csv_twins_agree(self, tmp_path: Path, profile: fx.Profile) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, profile, fx.Options(csv_twins=True))
 
-        parquet = read_cells(TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), profile.family)
-        csv = read_cells(TabularSource(ArtifactFile(tmp_path / "cells.csv.gz"), "csv_gz"), profile.family)
+        parquet = read_cells(
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), profile.family, context=CELLS
+        )
+        csv = read_cells(
+            TabularSource(ArtifactFile(tmp_path / "cells.csv.gz"), "csv_gz"), profile.family, context=CELLS
+        )
 
         assert parquet.ids.tolist() == list(bundle.cell_ids)
         assert parquet.ids.dtype == (np.int64 if profile.family == "integer_ids" else "str")
@@ -326,7 +351,9 @@ class TestReadCells:
         )
         assert pq.read_table(tmp_path / "cells.parquet")["nucleus_area"].null_count == 1
 
-        cells = read_cells(TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets")
+        cells = read_cells(
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+        )
 
         values = cells.frame["nucleus_area"].to_numpy(dtype=np.float64, na_value=np.nan)
         assert np.isnan(values[3])
@@ -357,17 +384,19 @@ class TestReadCells:
         )
 
         with pytest.raises(ReaderFormatError, match=match):
-            read_cells(TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets")
+            read_cells(
+                TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+            )
 
     def test_csv_header_contracts(self, tmp_path: Path) -> None:
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,cell_id\n")
         with pytest.raises(ReaderFormatError, match="unique nonempty"):
-            read_cells(TabularSource(ArtifactFile(path), "csv"), "hex_ids")
+            read_cells(TabularSource(ArtifactFile(path), "csv"), "hex_ids", context=CELLS)
 
         path.write_text('"cell_id\n')
         with pytest.raises(ReaderFormatError, match="malformed CSV header"):
-            read_header(TabularSource(ArtifactFile(path), "csv"))
+            read_header(TabularSource(ArtifactFile(path), "csv"), context=CELLS)
 
     def test_csv_record_width(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv"))
@@ -375,22 +404,29 @@ class TestReadCells:
         path.write_text(path.read_text() + "extra,1\n")
 
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_cells(TabularSource(ArtifactFile(path), "csv"), "polygon_sets")
+            read_cells(TabularSource(ArtifactFile(path), "csv"), "polygon_sets", context=CELLS)
 
 
 def _assemble(
     tmp_path: Path, profile: fx.Profile, options: fx.Options | None = None
 ) -> tuple[fx.XeniumFixture, ad.AnnData]:
     bundle = fx.write_xenium_bundle(tmp_path, profile, options)
-    cells = read_cells(TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), profile.family)
+    cells = read_cells(
+        TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), profile.family, context=CELLS
+    )
     store = read_cells_store(
         ArtifactFile(tmp_path / "cells.zarr.zip"),
         profile.family,
         pixel_size=fx.PIXEL_SIZE,
         context=ReaderErrorContext("xenium", "cells.zarr.zip"),
     )
-    counts = read_counts(_h5(bundle), None, None)
-    return bundle, build_table(cells, counts, store, path=tmp_path)
+    counts = read_counts(_h5(bundle), None, None, context=COUNTS)
+    return bundle, build_table(cells, counts, store, None, path=tmp_path, context=CELLS)
+
+
+def _store(root: Path, family: Family) -> CellStore:
+    context = ReaderErrorContext("xenium", "cells.zarr.zip")
+    return read_cells_store(ArtifactFile(root / "cells.zarr.zip"), family, pixel_size=fx.PIXEL_SIZE, context=context)
 
 
 def _dense(matrix: object) -> np.ndarray:
@@ -424,8 +460,10 @@ class TestBuildTable:
 
     def test_identity_mismatches_raise(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
-        cells = read_cells(TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets")
-        counts = read_counts(_h5(bundle), None, None)
+        cells = read_cells(
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+        )
+        counts = read_counts(_h5(bundle), None, None, context=COUNTS)
         store = read_cells_store(
             ArtifactFile(tmp_path / "cells.zarr.zip"),
             "polygon_sets",
@@ -435,19 +473,74 @@ class TestBuildTable:
 
         reordered = Cells(cells.frame.iloc[::-1].reset_index(drop=True), cells.ids[::-1])
         with pytest.raises(ReaderFormatError, match="differing from the count barcodes"):
-            build_table(reordered, counts, None, path=tmp_path)
+            build_table(reordered, counts, None, None, path=tmp_path, context=CELLS)
 
         shuffled_store = replace(store, cell_ids=store.cell_ids[::-1])
-        with pytest.raises(ReaderFormatError, match="differing from the cells table"):
-            build_table(cells, counts, shuffled_store, path=tmp_path)
+        with pytest.raises(ReaderFormatError, match=r"differing from cells\.zarr\.zip"):
+            build_table(cells, counts, shuffled_store, None, path=tmp_path, context=CELLS)
 
         frame = cells.frame.assign(label_id=1)
         with pytest.raises(ReaderFormatError, match=r"reserved columns \['label_id'\]"):
-            build_table(Cells(frame, cells.ids), counts, store, path=tmp_path)
+            build_table(Cells(frame, cells.ids), counts, store, None, path=tmp_path, context=CELLS)
 
         frame = cells.frame.assign(segmentation_method="other")
-        with pytest.raises(ReaderFormatError, match="methods differing"):
-            build_table(Cells(frame, cells.ids), counts, store, path=tmp_path)
+        with pytest.raises(ReaderFormatError, match="segmentation_method differing"):
+            build_table(Cells(frame, cells.ids), counts, store, None, path=tmp_path, context=CELLS)
+
+    def test_unusable_column_names_are_renamed(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        cells = read_cells(
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+        )
+        counts = read_counts(_h5(bundle), None, None, context=COUNTS)
+        store = _store(tmp_path, "polygon_sets")
+        # A case variant listed before a reader-relied-on column must not displace it.
+        frame = pd.concat(
+            [
+                pd.DataFrame({"Cell_Area": 1.0, "my note": "x", "Label_ID": 2, "_index": 3}, index=cells.frame.index),
+                cells.frame,
+            ],
+            axis=1,
+        )
+
+        with pytest.warns(UserWarning, match=r"xenium: the cells table header has column names") as caught:
+            table = build_table(Cells(frame, cells.ids), counts, store, None, path=tmp_path, context=CELLS)
+
+        assert str(caught[0].message) == (
+            "xenium: the cells table header has column names that a SpatialData table does not accept; using "
+            "'Cell_Area' -> 'Cell_Area_1', 'my note' -> 'my_note', 'Label_ID' -> 'Label_ID_1', '_index' -> 'index'. "
+            "Rename the source columns to choose the names explicitly."
+        )
+        obs = cast("pd.DataFrame", table.obs)
+        assert list(obs.columns[:4]) == ["Cell_Area_1", "my_note", "Label_ID_1", "index"]
+        np.testing.assert_array_equal(obs["cell_area"], cells.frame["cell_area"])
+        np.testing.assert_array_equal(obs["label_id"], [1, 2, 3, 4])
+        assert list(cells.frame.columns) == list(frame.columns[4:])
+
+    def test_analysis_annotates_the_table(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        cells = read_cells(
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+        )
+        counts = read_counts(_h5(bundle), None, None, context=COUNTS)
+        clusters = pd.Categorical.from_codes([0, 1, 0, -1], categories=pd.Index(["1", "2"], dtype="str"))
+        projection = np.arange(8, dtype=np.float64).reshape(4, 2)
+        analysis = Analysis({"graphclust": clusters, "Region": clusters, "_index": clusters}, {"pca_m": projection})
+
+        with pytest.warns(UserWarning, match=r"'Region' -> 'Region_1', '_index' -> 'index'"):
+            table = build_table(cells, counts, None, analysis, path=tmp_path, context=CELLS)
+
+        obs = cast("pd.DataFrame", table.obs)
+        assert list(obs.columns[-3:]) == ["graphclust", "Region_1", "index"]
+        assert obs["graphclust"].cat.codes.tolist() == [0, 1, 0, -1]
+        np.testing.assert_array_equal(table.obsm["pca_m"], projection)
+
+        shadowing = Analysis({"cell_area": clusters}, {})
+        with pytest.raises(
+            ReaderFormatError, match=r"clusterings \['cell_area'\] named like cell annotations"
+        ) as error:
+            build_table(cells, counts, None, shadowing, path=tmp_path, context=CELLS)
+        assert error.value.context == ReaderErrorContext("xenium", "analysis", "6.0.0")
 
     def test_integer_ids_compare_as_canonical_decimal(self, tmp_path: Path) -> None:
         _, table = _assemble(tmp_path, fx.XOA_1_0)
@@ -471,7 +564,7 @@ class TestLinkTable:
 
         native = table.obsm["spatial"]
         expression = table.X
-        linked = link_table(table, target, expected)
+        linked = link_table(table, target, expected, context=TABLE)
         assert linked is table
         assert linked.obsm["spatial"] is native
         assert linked.X is expression
@@ -484,7 +577,7 @@ class TestLinkTable:
     def test_unlinked(self, tmp_path: Path) -> None:
         _, table = _assemble(tmp_path, fx.XOA_3_0)
 
-        unlinked = link_table(table, None, None)
+        unlinked = link_table(table, None, None, context=TABLE)
 
         assert "spatialdata_attrs" not in unlinked.uns
         assert "region" not in unlinked.obs
@@ -493,4 +586,4 @@ class TestLinkTable:
         _, table = _assemble(tmp_path, fx.XOA_3_0)
 
         with pytest.raises(ReaderFormatError, match="exact target-instance membership"):
-            link_table(table, "cell_labels", pd.Index(np.arange(1, 4, dtype=np.uint32)))
+            link_table(table, "cell_labels", pd.Index(np.arange(1, 4, dtype=np.uint32)), context=TABLE)

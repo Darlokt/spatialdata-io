@@ -10,9 +10,12 @@ observation columns:
   consist only of ASCII digits. Parsed IDs are exact Python integers, stored as
   int64, or uint64 when an ID needs it, so values above ``2**53`` stay exact.
 
-Imported ``obs`` and ``var`` column names that a SpatialData table does not
-accept (``my note``) are sanitized with one warning per frame before the
-linkage columns are added; ``region`` and the instance column keep their names.
+Imported ``obs`` and ``var`` column names and top-level ``uns`` keys that a
+SpatialData table does not accept (``my note``) are sanitized with one warning
+per frame or mapping before the linkage columns are added; ``region``, the
+instance column and the ``uns`` keys ``spatialdata_io_positions`` and
+``spatialdata_attrs`` keep their names. ``uns`` values, their order and nested
+keys stay as stored.
 Feature names are made unique (``GeneB``, ``GeneB-1``) in their source order,
 and an imported ``obsm["spatial"]`` moves to ``spatial_source`` unchanged,
 because its axes and units are unknown. Expression is normalized later by the
@@ -29,7 +32,9 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from spatialdata.models import TableModel
 
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.experimental.iss._schemas import (
     DEFAULT_INSTANCE_KEY,
     MIN_INSTANCE_BITS,
@@ -41,12 +46,14 @@ from spatialdata_io.experimental.iss._schemas import (
     validate_table,
 )
 from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.names import sanitize_column_names
+from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers._utils.table import prepare_anndata_dataframe
 
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
+# uns keys reserved for positions and linkage; imported case variants are renamed.
+_RESERVED_UNS = (POSITIONS_KEY, TableModel.ATTRS_KEY)
 _DUPLICATE_VARIABLES_WARNING = (
     re.escape("Variable names are not unique. To make them unique, call `.var_names_make_unique`.") + r"\Z"
 )
@@ -73,6 +80,7 @@ def read_table(
         list(obs.columns), source="iss: the H5AD obs", reserved=(REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY)
     )
     var.columns = sanitize_column_names(list(var.columns), source="iss: the H5AD var")
+    sanitize_uns_keys(table, source="iss: the H5AD uns", reserved=_RESERVED_UNS)
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")
     table.var_names_make_unique()

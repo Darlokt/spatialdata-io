@@ -1,4 +1,13 @@
-"""Read native GEF pitch metadata for image-only selections without count I/O."""
+"""Read the grid pitch for image-only reads from the sample's GEF attributes.
+
+Images carry no physical calibration. When no count or analysis product is
+selected, the pitch comes from the ``resolution`` attributes of the sample's
+square or cell GEFs in the producer count directories (not in flat exports);
+only attributes are read, never count or coordinate arrays. All found pitches
+must agree. Without such a GEF the images stay in the ``image_pixels`` frame.
+These GEFs only calibrate images, so their schema ``version`` is not read and
+an image-only result records no format version.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +31,9 @@ def _pitches(handle: h5py.File, source: SquareSource | CellSource) -> tuple[int,
     group = _schemas.require_group(handle, "geneExp", path)
     bins = [name for name in group if name.startswith("bin") and name[3:].isdigit() and int(name[3:]) > 0]
     if not bins:
-        raise _schemas.format_error(path, "image calibration", "no stored square bins", "GEF expression pitch metadata")
+        raise _schemas.schema_error(
+            path, "image calibration", found="no stored square bins", expected="GEF expression pitch metadata"
+        )
     return tuple(
         _schemas.integer_attribute(
             _schemas.require_dataset(_schemas.require_group(group, name, path), "expression", path).attrs,
@@ -44,16 +55,19 @@ def read_image_pitch(sources: tuple[SquareSource | CellSource, ...], *, sample_i
                 _schemas.validate_transcriptomics(handle.attrs, source.file)
                 sample = _schemas.sample_id(handle, source.file)
                 if sample is not None and sample != sample_id:
-                    raise _schemas.format_error(
-                        source.file, "image calibration", f"GEF sample {sample!r}", f"selected sample {sample_id!r}"
+                    raise _schemas.schema_error(
+                        source.file,
+                        "image calibration",
+                        found=f"GEF sample {sample!r}",
+                        expected=f"selected sample {sample_id!r}",
                     )
                 for value in _pitches(handle, source):
                     if pitch is not None and pitch != value:
-                        raise _schemas.format_error(
+                        raise _schemas.schema_error(
                             source.file,
                             "image calibration",
-                            f"conflicting pitch {value} nm",
-                            f"common grid pitch {pitch} nm",
+                            found=f"conflicting pitch {value} nm",
+                            expected=f"common grid pitch {pitch} nm",
                         )
                     pitch = value
         except OSError as error:

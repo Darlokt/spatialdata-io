@@ -1,4 +1,27 @@
-"""Cell identities and exact sparse aggregation of raw bins into nuclei."""
+"""Read Space Ranger 4 cell matrices and aggregate raw 2 µm bins into nucleus counts.
+
+Segmentation writes one cell-feature matrix per population::
+
+    segmented_outputs/
+    ├── filtered_feature_cell_matrix.h5    # cells passing Space Ranger's filter
+    └── raw_feature_cell_matrix.h5         # every segmented cell
+
+Cell barcodes are ``cellid_<id:09d>-1``; the positive integer ``id`` equals the
+GeoJSON ``cell_id`` of the cell and nucleus polygons and becomes the table's
+``instance_id``.
+
+10x writes no nucleus matrix. A nucleus table sums the raw 2 µm counts
+(``binned_outputs/square_002um/raw_feature_bc_matrix.h5``) over every 2 µm
+square that ``barcode_mappings.parquet`` marks ``in_nucleus`` for a cell,
+including squares outside the tissue mask, in the order and population of the
+selected cell matrix. Every raw 2 µm barcode must be mapped exactly once, and
+the raw and cell matrices must list the same features.
+
+Sums run in float32 when a Python-integer bound (largest decoded count times
+the most squares contributing to one nucleus) is at most 2**24, otherwise in
+float64 when at most 2**53, so every partial sum of nonnegative integers is
+exact; a larger bound raises. Counts stay sparse throughout.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +35,7 @@ from scipy.sparse import csr_array
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import as_csr_array, count_accumulation_dtype, finalize_count_arrays
-from spatialdata_io.readers.visium_hd._schemas import validate_mapping_schema, validate_mappings
+from spatialdata_io.readers.visium_hd._schemas import MAPPINGS_SCHEMA, validate_mappings, validate_schema
 from spatialdata_io.readers.visium_hd._tables import read_counts
 
 if TYPE_CHECKING:
@@ -20,17 +43,17 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_MAPPING_COLUMNS = ("square_002um", "cell_id", "in_cell", "in_nucleus")
 _BATCH_SIZE = 65_536
 
 
-def cell_ids(names: pd.Index, path: ArtifactFile) -> NDArray[np.int64]:
+def cell_ids(names: pd.Index, path: ArtifactFile, *, version: str | None) -> NDArray[np.int64]:
     """Decode canonical positive cell barcodes without accepting alternate spellings."""
+    context = ReaderErrorContext("visium_hd", "cell barcodes", version)
     strings = names.astype("string")
     valid = strings.str.fullmatch(r"cellid_[0-9]{9}-1", na=False)
     if not valid.all():
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "cell barcodes"),
+            context=context,
             path=path,
             found="noncanonical cell barcode",
             expected="cellid_{positive_id:09d}-1",
@@ -39,7 +62,7 @@ def cell_ids(names: pd.Index, path: ArtifactFile) -> NDArray[np.int64]:
     values = strings.str.slice(7, 16).to_numpy(dtype=np.int64)
     if np.any(values == 0):
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "cell barcodes"),
+            context=context,
             path=path,
             found="zero cell ID",
             expected="positive cell IDs",
@@ -48,22 +71,24 @@ def cell_ids(names: pd.Index, path: ArtifactFile) -> NDArray[np.int64]:
     return values
 
 
-def read_cell_table(path: ArtifactFile, *, make_var_names_unique: bool) -> ad.AnnData:
+def read_cell_table(path: ArtifactFile, *, make_var_names_unique: bool, version: str | None) -> ad.AnnData:
     """Preserve the chosen raw or filtered cell population and source order."""
-    table = read_counts(path)
-    table.obs["instance_id"] = cell_ids(table.obs_names, path)
+    table = read_counts(path, version=version)
+    table.obs["instance_id"] = cell_ids(table.obs_names, path, version=version)
     if make_var_names_unique:
         table.var_names_make_unique()
 
     return table
 
 
-def _aggregate_counts(
+def _aggregate_counts(  # noqa: PLR0913, RUF100 - Explicit operands, target size, source and version.
     counts: csr_array,
     rows: NDArray[np.int64],
     columns: NDArray[np.int64],
     observations: int,
     path: ArtifactFile,
+    *,
+    version: str | None,
 ) -> csr_array:
     """Choose floating arithmetic that preserves every nonnegative partial sum."""
     if not rows.size:
@@ -74,7 +99,7 @@ def _aggregate_counts(
     dtype = count_accumulation_dtype(bound)
     if dtype is None:
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "nucleus aggregation"),
+            context=ReaderErrorContext("visium_hd", "nucleus aggregation", version),
             path=path,
             found="float64 exact-sum bound exceeds 2**53",
             expected="maximum decoded count times maximum contributing bins at most 2**53",
@@ -92,11 +117,17 @@ def _aggregate_counts(
 
 
 def read_nucleus_table(
-    raw_file: ArtifactFile, mapping_file: ArtifactFile, population: ad.AnnData, known_cell_ids: pd.Index
+    raw_file: ArtifactFile,
+    mapping_file: ArtifactFile,
+    population: ad.AnnData,
+    known_cell_ids: pd.Index,
+    *,
+    version: str | None,
 ) -> ad.AnnData:
     """Sum raw 2 µm bins, including out-of-tissue bins, in selected cell order."""
-    context = ReaderErrorContext("visium_hd", "nucleus aggregation")
-    raw = read_counts(raw_file)
+    context = ReaderErrorContext("visium_hd", "nucleus aggregation", version)
+    mapping_context = ReaderErrorContext("visium_hd", "barcode mappings", version)
+    raw = read_counts(raw_file, version=version)
     if any(
         not np.array_equal(raw.var[column].to_numpy(), population.var[column].to_numpy())
         for column in ("gene_ids", "genome", "feature_types")
@@ -115,9 +146,9 @@ def read_nucleus_table(
     seen = np.zeros(raw.n_obs, dtype=np.bool_)
 
     with pq.ParquetFile(mapping_file) as source:
-        validate_mapping_schema(source.schema_arrow, mapping_file)
-        for batch in source.iter_batches(batch_size=_BATCH_SIZE, columns=list(_MAPPING_COLUMNS)):
-            validate_mappings(batch, mapping_file)
+        validate_schema(source.schema_arrow, MAPPINGS_SCHEMA, mapping_file, context=mapping_context)
+        for batch in source.iter_batches(batch_size=_BATCH_SIZE, columns=MAPPINGS_SCHEMA.names):
+            validate_mappings(batch, mapping_file, context=mapping_context)
             barcodes = batch.column("square_002um").to_pandas()
             indices = raw.obs_names.get_indexer(barcodes)
             if np.any(indices < 0) or np.unique(indices).size != indices.size or np.any(seen[indices]):
@@ -132,7 +163,7 @@ def read_nucleus_table(
             members = batch.column("in_nucleus").to_numpy(zero_copy_only=False)
             assigned = batch.column("cell_id").to_pandas()
             nonnull = assigned.dropna()
-            if not pd.Index(cell_ids(pd.Index(nonnull), mapping_file)).isin(known_cell_ids).all():
+            if not pd.Index(cell_ids(pd.Index(nonnull), mapping_file, version=version)).isin(known_cell_ids).all():
                 raise ReaderFormatError(
                     context=context,
                     path=mapping_file,
@@ -156,7 +187,7 @@ def read_nucleus_table(
 
     rows = np.concatenate(target_rows) if target_rows else np.empty(0, dtype=np.int64)
     columns = np.concatenate(source_rows) if source_rows else np.empty(0, dtype=np.int64)
-    aggregated = _aggregate_counts(imported, rows, columns, population.n_obs, raw_file)
+    aggregated = _aggregate_counts(imported, rows, columns, population.n_obs, raw_file, version=version)
     completed = finalize_count_arrays((aggregated,), context=context, path=raw_file)[0]
     # Both annotations are eager frames from the shared count boundary, never Dataset2D.
     return ad.AnnData(

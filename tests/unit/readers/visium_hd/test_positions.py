@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd._positions import (
     fit_slide_frame,
@@ -20,12 +20,14 @@ from spatialdata_io.readers.visium_hd._positions import (
     read_positions,
 )
 from spatialdata_io.readers.visium_hd._transforms import SlideFrame, apply_projective
-from tests.integration.readers.visium_hd._fixtures import GRID_SHAPE, HOMOGRAPHY, write_bundle
+from tests.integration.readers.visium_hd._fixtures import GRID_SHAPE, HOMOGRAPHY, VERSION, write_bundle
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from pytest_mock import MockerFixture
+
+_CONTEXT = ReaderErrorContext("visium_hd", "test coordinates", "4.1.0")
 
 
 def _positions(root: Path) -> ArtifactFile:
@@ -42,13 +44,13 @@ class TestReadGridShape:
     def test_footer_statistics(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_bundle(tmp_path, sizes=(2,), segmented=False)
         mocker.patch.object(pq.ParquetFile, "iter_batches", side_effect=AssertionError("unexpected positions decoding"))
-        assert read_grid_shape(_positions(tmp_path)) == (17, 17)
+        assert read_grid_shape(_positions(tmp_path), version=VERSION) == (17, 17)
 
     def test_projected_fallback(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, sizes=(2,), segmented=False)
         path = _positions(tmp_path)
         pq.write_table(pq.read_table(path), path, write_statistics=False)
-        assert read_grid_shape(path) == (17, 17)
+        assert read_grid_shape(path, version=VERSION) == (17, 17)
 
     @pytest.mark.parametrize("invalid", ["empty", "null"])
     def test_invalid(self, tmp_path: Path, invalid: str) -> None:
@@ -63,13 +65,13 @@ class TestReadGridShape:
             )
         pq.write_table(table, path, write_statistics=False)
         with pytest.raises(ReaderFormatError):
-            read_grid_shape(path)
+            read_grid_shape(path, version=VERSION)
 
     def test_malformed_parquet(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "positions.parquet")
         path.write_bytes(b"not parquet")
         with pytest.raises(ReaderFormatError, match="positions Parquet"):
-            read_grid_shape(path)
+            read_grid_shape(path, version=VERSION)
 
 
 class TestIterPositionBatches:
@@ -80,7 +82,7 @@ class TestIterPositionBatches:
         path = _positions(tmp_path)
         table = pq.read_table(path).take(np.arange(288, -1, -1)).append_column("extra", pa.array([True] * 289))
         pq.write_table(table, path)
-        batches = list(iter_position_batches(path, (17, 17)))
+        batches = list(iter_position_batches(path, (17, 17), version=VERSION))
         assert sum(batch.num_rows for batch in batches) == 289
         assert "extra" not in batches[0].schema.names
 
@@ -104,7 +106,7 @@ class TestIterPositionBatches:
             table = table.set_column(table.schema.get_field_index(name), table.schema.field(name), pa.array(column))
         pq.write_table(table, path)
         with pytest.raises(ReaderFormatError):
-            list(iter_position_batches(path, (17, 17)))
+            list(iter_position_batches(path, (17, 17), version=VERSION))
 
     def test_projected_batches_close_on_grid_failure(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_bundle(tmp_path, sizes=(2,), segmented=False)
@@ -122,14 +124,14 @@ class TestIterPositionBatches:
             side_effect=AssertionError("unbounded positions read"),
         )
         with pytest.raises(ReaderFormatError, match="duplicate grid"):
-            list(iter_position_batches(path, (17, 17)))
+            list(iter_position_batches(path, (17, 17), version=VERSION))
         assert source.closed
 
     def test_malformed_parquet(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "positions.parquet")
         path.write_bytes(b"not parquet")
         with pytest.raises(ReaderFormatError, match="positions Parquet"):
-            list(iter_position_batches(path, (17, 17)))
+            list(iter_position_batches(path, (17, 17), version=VERSION))
 
 
 class TestReadPositions:
@@ -139,12 +141,12 @@ class TestReadPositions:
         write_bundle(tmp_path, sizes=(2,), segmented=False)
         path = _positions(tmp_path)
         names = pd.Index(["s_002um_00001_00003-1", "s_002um_00000_00000-1"])
-        result = read_positions(path, (17, 17), names, 2, _frame())
+        result = read_positions(path, (17, 17), names, 2, _frame(), version=VERSION)
         assert result.index.equals(names)
         assert_array_equal(result["array_row"], [1, 0])
         assert_array_equal(result["array_col"], [3, 0])
         assert str(result["pxl_col_in_fullres"].dtype) == "double[pyarrow]"
-        assert read_positions(path, (17, 17), pd.Index([], dtype=str), 2, _frame()).empty
+        assert read_positions(path, (17, 17), pd.Index([], dtype=str), 2, _frame(), version=VERSION).empty
 
     @pytest.mark.parametrize("size", [2, 6, 8, 16])
     def test_producer_registration_and_partial_edges(self, tmp_path: Path, size: int) -> None:
@@ -154,13 +156,13 @@ class TestReadPositions:
         names = pd.Index(source["barcode"].to_pylist())
         factor = size // 2
         extent = (17 + factor - 1) // factor
-        result = read_positions(path, (extent, extent), names[::-1], size, _frame())
+        result = read_positions(path, (extent, extent), names[::-1], size, _frame(), version=VERSION)
         assert result.index.equals(names[::-1])
         assert_array_equal(result["pxl_col_in_fullres"], source["pxl_col_in_fullres"].to_numpy()[::-1])
         assert_array_equal(result["pxl_row_in_fullres"], source["pxl_row_in_fullres"].to_numpy()[::-1])
         # Even the partial far corner uses the whole bin's origin offset.
-        corners = apply_projective(HOMOGRAPHY, np.array([[0.0, 0.0], [factor - 1.0, factor - 1.0]]))
-        last = apply_projective(HOMOGRAPHY, np.array([[factor * (extent - 1.0)] * 2]))[0]
+        corners = apply_projective(HOMOGRAPHY, np.array([[0.0, 0.0], [factor - 1.0, factor - 1.0]]), context=_CONTEXT)
+        last = apply_projective(HOMOGRAPHY, np.array([[factor * (extent - 1.0)] * 2]), context=_CONTEXT)[0]
         assert_allclose(
             result.iloc[0][["pxl_col_in_fullres", "pxl_row_in_fullres"]].to_numpy(dtype=np.float64),
             last + (corners[1] - corners[0]) / 2,
@@ -178,10 +180,10 @@ class TestReadPositions:
         pq.write_table(source.set_column(5, source.schema.field(5), pa.array(values)), path)
         names = pd.Index(["s_008um_00000_00000-1"])
         if shift < 1e-9:
-            assert len(read_positions(path, (5, 5), names, 8, _frame())) == 1
+            assert len(read_positions(path, (5, 5), names, 8, _frame(), version=VERSION)) == 1
         else:
             with pytest.raises(ReaderFormatError, match=r"1e-09.*cross-bin registration residual"):
-                read_positions(path, (5, 5), names, 8, _frame())
+                read_positions(path, (5, 5), names, 8, _frame(), version=VERSION)
 
     @pytest.mark.parametrize("mode", ["mixed", "clipped-edge", "projected-centre"])
     def test_wrong_registration_in_unselected_bins(self, tmp_path: Path, mode: str) -> None:
@@ -195,10 +197,10 @@ class TestReadPositions:
             # The last partial bin contains only spot (16, 16). Neither its
             # captured centre nor the projected nominal centre is the vendor offset.
             point = 16.0 if mode == "clipped-edge" else 17.5
-            values[-1] = apply_projective(HOMOGRAPHY, np.array([[point, point]]))[0, 0]
+            values[-1] = apply_projective(HOMOGRAPHY, np.array([[point, point]]), context=_CONTEXT)[0, 0]
         pq.write_table(source.set_column(5, source.schema.field(5), pa.array(values)), path)
         with pytest.raises(ReaderFormatError, match="cross-bin registration"):
-            read_positions(path, (5, 5), pd.Index(["s_008um_00000_00000-1"]), 8, _frame())
+            read_positions(path, (5, 5), pd.Index(["s_008um_00000_00000-1"]), 8, _frame(), version=VERSION)
 
     def test_registration_failure_closes_source(self, tmp_path: Path, mocker: MockerFixture) -> None:
         write_bundle(tmp_path, segmented=False)
@@ -207,7 +209,7 @@ class TestReadPositions:
         mocker.patch("spatialdata_io.readers.visium_hd._positions.pq.ParquetFile", return_value=source)
         frame = SlideFrame(np.eye(3), np.eye(3), np.eye(3), 0, 0)
         with pytest.raises(ReaderFormatError, match="cross-bin registration"):
-            read_positions(path, (5, 5), pd.Index(["s_008um_00000_00000-1"]), 8, frame)
+            read_positions(path, (5, 5), pd.Index(["s_008um_00000_00000-1"]), 8, frame, version=VERSION)
         assert source.closed
 
     def test_selected_barcode_mismatch(self, tmp_path: Path) -> None:
@@ -218,7 +220,7 @@ class TestReadPositions:
         names[0] = "wrong"
         pq.write_table(table.set_column(0, table.schema.field(0), pa.array(names)), path)
         with pytest.raises(ReaderFormatError, match="barcode differs"):
-            read_positions(path, (17, 17), pd.Index(["s_002um_00000_00000-1"]), 2, _frame())
+            read_positions(path, (17, 17), pd.Index(["s_002um_00000_00000-1"]), 2, _frame(), version=VERSION)
 
 
 class TestFitSlideFrame:
@@ -227,7 +229,7 @@ class TestFitSlideFrame:
     def test_all_positions_reference(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, segmented=False)
         path = ArtifactFile(tmp_path / "binned_outputs/square_002um/spatial/tissue_positions.parquet")
-        frame = fit_slide_frame(path, GRID_SHAPE)
+        frame = fit_slide_frame(path, GRID_SHAPE, version=VERSION)
         source = pq.read_table(path)
         grid = np.column_stack((source["array_col"].to_numpy(), source["array_row"].to_numpy())).astype(float)
         pixels = np.column_stack((source["pxl_col_in_fullres"].to_numpy(), source["pxl_row_in_fullres"].to_numpy()))
@@ -258,7 +260,7 @@ class TestFitSlideFrame:
         table = table.set_column(table.column_names.index("pxl_col_in_fullres"), "pxl_col_in_fullres", pa.array(values))
         pq.write_table(table, path)
         with pytest.raises(ReaderFormatError, match=r"residual.*1e-09"):
-            fit_slide_frame(path, GRID_SHAPE)
+            fit_slide_frame(path, GRID_SHAPE, version=VERSION)
 
     def test_singular_affine_registration(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, segmented=False)
@@ -269,4 +271,4 @@ class TestFitSlideFrame:
         table = table.set_column(index, "pxl_row_in_fullres", table["pxl_col_in_fullres"])
         pq.write_table(table, path)
         with pytest.raises(ReaderFormatError, match=r"rank|singular"):
-            fit_slide_frame(path, GRID_SHAPE)
+            fit_slide_frame(path, GRID_SHAPE, version=VERSION)

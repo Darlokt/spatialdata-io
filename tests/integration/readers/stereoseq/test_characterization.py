@@ -168,6 +168,10 @@ class TestStereoseq:
         )
         for elements in (result.images, result.labels, result.points, result.shapes):
             for element in elements.values():
+                # A calibrated read has only the micrometre frame.
+                transformations = get_transformation(element, get_all=True)
+                assert isinstance(transformations, dict)
+                assert set(transformations) == {"global"}
                 transform = get_transformation(element, to_coordinate_system="global")
                 assert not isinstance(transform, dict)
                 assert_array_equal(
@@ -188,7 +192,12 @@ class TestStereoseq:
         result = stereoseq(fixture.root, image_roles=("registered",))
 
         read.assert_not_called()
+        # The companion GEF only calibrates the images; no GEF product is read.
+        assert "spatialdata_io_format_version" not in result.attrs
         image = next(iter(result.images.values()))
+        transformations = get_transformation(image, get_all=True)
+        assert isinstance(transformations, dict)
+        assert set(transformations) == {"global"}
         transform = get_transformation(image, to_coordinate_system="global")
         assert not isinstance(transform, dict)
         assert_array_equal(
@@ -249,6 +258,7 @@ class TestStereoseq:
             assert _counts(table).has_canonical_format
             assert isinstance(table.X, sparray)
             assert not isinstance(table.X, spmatrix)
+        assert result.attrs["spatialdata_io_format_version"] == ("gef-2" if profile == "name_only" else "gef-4")
 
     def test_overflow_has_independent_integer_oracle(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, overflow=True, products=("square",))
@@ -291,6 +301,7 @@ class TestStereoseq:
         result = stereoseq(fixture.root, analysis_files=(fixture.analysis,))
         assert set(result.tables) == {"cells_analysis_r0_5_table"}
         assert set(result.points) == {"cells_analysis_r0_5_points"}
+        assert "spatialdata_io_format_version" not in result.attrs
 
     def test_filtered_analysis_retains_its_independent_target(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, family="outs", profile="id_and_name", products=("cells", "analysis"))
@@ -441,14 +452,15 @@ class TestStereoseq:
         for image in result.images.values():
             assert image.dims == ("c", "y", "x")
             assert image.shape == (1, 16, 24)
-            assert isinstance(get_transformation(image), Identity)
+            # Without any GEF or H5AD pitch, rasters keep a pixel frame and no `global`.
+            assert get_transformation(image, get_all=True) == {"image_pixels": Identity()}
             with Callback(posttask=record):
                 computed = image.data[:, 2:4, 5:8].compute()
             assert_array_equal(computed, source[None, 2:4, 5:8])
         for name, labels in result.labels.items():
             assert labels.dims == ("y", "x")
             assert labels.shape == (16, 24)
-            assert isinstance(get_transformation(labels), Identity)
+            assert get_transformation(labels, get_all=True) == {"image_pixels": Identity()}
             expected = source if name == f"{stain}tissue_cut" else binary
             assert labels.dtype == expected.dtype
             with Callback(posttask=record):

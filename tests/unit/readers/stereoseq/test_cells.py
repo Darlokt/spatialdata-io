@@ -77,6 +77,24 @@ class TestReadCells:
         assert (result.borders is not None) is read_borders
         assert result.origin == (0, 0)
         assert result.resolution == 500
+        assert result.format_version == ("gef-2" if profile == "name_only" else "gef-4")
+
+    def test_absent_version_is_unknown(self, tmp_path: Path) -> None:
+        path = write_cell_gef(tmp_path / "s.gef")
+        with h5py.File(path, "a") as handle:
+            del handle.attrs["version"]
+
+        result = read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+        assert result.format_version is None
+
+    def test_malformed_version_fails(self, tmp_path: Path) -> None:
+        path = write_cell_gef(tmp_path / "s.gef")
+        with h5py.File(path, "a") as handle:
+            handle.attrs["version"] = np.array([3, 4], dtype=np.uint32)
+
+        with pytest.raises(ReaderFormatError, match="GEF version") as caught:
+            read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+        assert caught.value.path == path
 
     def test_unsorted_features_keep_exon_alignment_and_exact_float64_counts(self, tmp_path: Path) -> None:
         path = write_cell_gef(tmp_path / "s.gef")

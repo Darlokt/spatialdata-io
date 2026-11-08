@@ -1,4 +1,32 @@
-"""Named source contracts for positions and segmentation mappings."""
+"""Source schemas of the Visium HD position and barcode-mapping Parquet files.
+
+Every bin size has one ``spatial/tissue_positions.parquet`` with one row per
+grid square, including squares outside the tissue and without counts::
+
+    column              Arrow type  meaning
+    barcode             string      s_<size:03d>um_<row:05d>_<col:05d>-1
+    in_tissue           uint8       0 or 1, the tissue mask
+    array_row           uint32      bin row on the grid of that size
+    array_col           uint32      bin column on the grid of that size
+    pxl_row_in_fullres  float64     image y of the bin, full-resolution pixels
+    pxl_col_in_fullres  float64     image x of the bin, full-resolution pixels
+
+Space Ranger 4.0 and later also write ``barcode_mappings.parquet``, one row per
+2 µm square, assigning it to a segmented cell::
+
+    column        Arrow type  meaning
+    square_002um  string      the 2 µm barcode
+    cell_id       string      cellid_<id:09d>-1, null outside cells
+    in_cell       bool        the square lies in a cell
+    in_nucleus    bool        the square lies in that cell's nucleus
+
+Further ``square_XXXum`` columns name the coarser bins of the same square and
+are not read. Named fields may appear in any order beside extra columns;
+duplicate column names are rejected. Values must be nonnull (``cell_id``
+exactly where ``in_cell`` holds), pixel positions finite, and a nucleus square
+must lie in a cell. See
+https://www.10xgenomics.com/support/software/space-ranger/latest/analysis/outputs/spatial-outputs
+"""
 
 from __future__ import annotations
 
@@ -26,14 +54,21 @@ POSITIONS_SCHEMA = pa.schema(
         pa.field("pxl_col_in_fullres", pa.float64(), nullable=False),
     ]
 )
-MAPPINGS_TYPES = {"square_002um": pa.string(), "cell_id": pa.string(), "in_cell": pa.bool_(), "in_nucleus": pa.bool_()}
+MAPPINGS_SCHEMA = pa.schema(
+    [
+        pa.field("square_002um", pa.string()),
+        pa.field("cell_id", pa.string()),
+        pa.field("in_cell", pa.bool_()),
+        pa.field("in_nucleus", pa.bool_()),
+    ]
+)
 
 
-def validate_schema(schema: pa.Schema, required: pa.Schema, path: Path, artifact: str) -> None:
+def validate_schema(schema: pa.Schema, required: pa.Schema, path: Path, *, context: ReaderErrorContext) -> None:
     """Require unique names and supported named fields; extra fields are allowed."""
     if len(set(schema.names)) != len(schema.names):
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", artifact),
+            context=context,
             path=path,
             found="duplicate column names",
             expected="unique column names",
@@ -42,7 +77,7 @@ def validate_schema(schema: pa.Schema, required: pa.Schema, path: Path, artifact
     for field in required:
         if field.name not in schema.names or schema.field(field.name).type != field.type:
             raise ReaderFormatError(
-                context=ReaderErrorContext("visium_hd", artifact),
+                context=context,
                 path=path,
                 found=str(schema),
                 expected=f"column {field.name!r} with type {field.type}",
@@ -50,10 +85,10 @@ def validate_schema(schema: pa.Schema, required: pa.Schema, path: Path, artifact
 
 
 def parse_bin_barcodes(
-    names: pd.Index[str], size_um: int, shape: tuple[int, int], path: Path
+    names: pd.Index[str], size_um: int, shape: tuple[int, int], path: Path, *, version: str | None
 ) -> tuple[NDArray[np.uint32], NDArray[np.uint32]]:
     """Parse exact vendor barcodes without changing source observation order."""
-    context = ReaderErrorContext("visium_hd", "matrix barcodes")
+    context = ReaderErrorContext("visium_hd", "matrix barcodes", version)
     pattern = re.compile(rf"s_{size_um:03d}um_([0-9]{{5}})_([0-9]{{5}})-1")
     rows = np.empty(len(names), dtype=np.uint32)
     cols = np.empty(len(names), dtype=np.uint32)
@@ -74,9 +109,8 @@ def parse_bin_barcodes(
     return rows, cols
 
 
-def validate_position_batch(batch: pa.RecordBatch, path: Path) -> None:
+def validate_position_batch(batch: pa.RecordBatch, path: Path, *, context: ReaderErrorContext) -> None:
     """Validate nonnull source values and finite pixel coordinates."""
-    context = ReaderErrorContext("visium_hd", "tissue positions")
     if any(column.null_count for column in batch.columns):
         raise ReaderFormatError(context=context, path=path, found="null positions", expected="nonnull position fields")
 
@@ -93,16 +127,8 @@ def validate_position_batch(batch: pa.RecordBatch, path: Path) -> None:
             )
 
 
-def validate_mapping_schema(schema: pa.Schema, path: Path) -> None:
-    """Require projected 2 µm-to-cell mapping fields with their source types."""
-    validate_schema(
-        schema, pa.schema([pa.field(name, dtype) for name, dtype in MAPPINGS_TYPES.items()]), path, "barcode mappings"
-    )
-
-
-def validate_mappings(batch: pa.RecordBatch | pa.Table, path: Path) -> None:
+def validate_mappings(batch: pa.RecordBatch, path: Path, *, context: ReaderErrorContext) -> None:
     """Check mapping nullability and nucleus/cell membership relationships."""
-    context = ReaderErrorContext("visium_hd", "barcode mappings")
     for name in ("square_002um", "in_cell", "in_nucleus"):
         if batch.column(name).null_count:
             raise ReaderFormatError(

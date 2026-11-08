@@ -1,16 +1,36 @@
-"""Build lazy registered images and mask labels through the shared TIFF boundary."""
+"""Read SAW registered images and masks lazily through the shared TIFF boundary.
+
+SAW writes every image product as a single-series TIFF registered to the DNB
+expression grid: one pixel is one bin-1 grid position, so images share the
+coordinates of the count products and their transformations.
+
+- ``<stain>_regist.tif`` (registered microscopy) and ``bin1_img.tif``
+  (expression intensity) become ``(c, y, x)`` images with the source dtype and
+  channel order. Their channels are ``r, g, b(, a)`` only when the TIFF
+  declares an RGB colour model for its samples axis (the shared rule in
+  ``readers._utils.image``); otherwise they are positional. A grayscale image
+  gains one channel.
+- ``*_mask.tif``, ``*_tissue_cut.tif``, ``*_mask_edm_dis_<d>.tif`` and
+  ``bin1_img_tissue_cut.tif`` become ``(y, x)`` labels with the source boolean
+  or integer values. A non-singleton channel or samples axis fails.
+
+Only the first full-resolution level is read; pyramids are generated from
+``scale_factors``, by nearest neighbour for labels.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel, Labels2DModel
-from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
+from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, raster_channel_names, read_tiff
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
     from spatialdata_io.readers._utils.image import LazyRaster, RasterOptions
@@ -32,33 +52,32 @@ def _read(source: ImageSource) -> LazyRaster:
     return read_tiff(metadata, series=0, level=0, context=context)
 
 
-def read_image(source: ImageSource, *, raster: RasterOptions) -> DataArray | DataTree:
+def read_image(
+    source: ImageSource, *, raster: RasterOptions, transformations: Mapping[str, BaseTransformation]
+) -> DataArray | DataTree:
     """Read one 2D microscopy or expression image lazily as CYX."""
     lazy = _read(source)
-    # TIFF samples carry RGB(A) semantics; scientific C axes retain channel order.
-    axes = tuple("c" if axis.lower() == "s" else axis.lower() for axis in lazy.axes)
+    declared = tuple(axis.lower() for axis in lazy.axes)
+    # Interleaved samples and scientific channels both become the channel axis.
+    axes = tuple("c" if axis == "s" else axis for axis in declared)
     data = normalize_raster_axes(lazy.data, axes, target_axes=("c", "y", "x"), add_missing=("c",))
+    raster.validate_image_pyramid(data, element=f"Stereo-seq image {source.name!r}")
 
-    channel_count = int(data.shape[0])
-    rgb_samples = "s" in tuple(axis.lower() for axis in lazy.axes) and channel_count in (3, 4)
-    channels = ["r", "g", "b", "a"][:channel_count] if rgb_samples else None
     return Image2DModel.parse(
         data,
         dims=("c", "y", "x"),
-        c_coords=channels,
+        c_coords=raster_channel_names(lazy.color, samples="s" in declared, ome=None),
         rgb=False,
         scale_factors=raster.model_scale_factors,
         chunks=raster.image_chunks(),
-        transformations={"global": Identity()},
+        transformations=dict(transformations),
     )
 
 
-def read_mask(source: ImageSource, *, raster: RasterOptions) -> DataArray | DataTree:
-    """Read one single-channel mask lazily as YX labels with its source values.
-
-    Labels pyramids downsample by nearest neighbour, so every level keeps only
-    source mask values.
-    """
+def read_mask(
+    source: ImageSource, *, raster: RasterOptions, transformations: Mapping[str, BaseTransformation]
+) -> DataArray | DataTree:
+    """Read one single-channel mask lazily as YX labels with its source values."""
     lazy = _read(source)
     # Masks have no channel semantics; a non-singleton C or S axis fails.
     data = normalize_raster_axes(lazy.data, lazy.axes, target_axes=("y", "x"))
@@ -76,5 +95,5 @@ def read_mask(source: ImageSource, *, raster: RasterOptions) -> DataArray | Data
         dims=("y", "x"),
         scale_factors=raster.model_scale_factors,
         chunks=raster.label_chunks(),
-        transformations={"global": Identity()},
+        transformations=dict(transformations),
     )

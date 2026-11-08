@@ -6,6 +6,7 @@ import pickle
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pytest
 from dask.callbacks import Callback
 from spatialdata.transformations import Scale, get_transformation
 from xarray import DataArray, DataTree
@@ -50,7 +51,7 @@ class TestReadLabels:
         tasks: list[object] = []
 
         with Callback(posttask=lambda *args: tasks.append(args)):
-            labels = read_labels(source, pixel_size=fx.PIXEL_SIZE, raster=make_raster_options())
+            labels = read_labels(source, pixel_size=fx.PIXEL_SIZE, raster=make_raster_options(), element="cell labels")
 
         assert tasks == []
         assert isinstance(labels, DataArray)
@@ -66,7 +67,7 @@ class TestReadLabels:
 
     def test_graph_holds_no_open_store(self, tmp_path: Path) -> None:
         source, _ = _source(tmp_path)
-        labels = read_labels(source, pixel_size=fx.PIXEL_SIZE, raster=NATIVE_CHUNKS)
+        labels = read_labels(source, pixel_size=fx.PIXEL_SIZE, raster=NATIVE_CHUNKS, element="cell labels")
 
         graph = dict(labels.data.__dask_graph__())
 
@@ -74,7 +75,7 @@ class TestReadLabels:
 
     def test_partial_read_opens_only_intersecting_chunks(self, tmp_path: Path, mocker: MockerFixture) -> None:
         source, bundle = _source(tmp_path)
-        labels = read_labels(source, pixel_size=fx.PIXEL_SIZE, raster=NATIVE_CHUNKS)
+        labels = read_labels(source, pixel_size=fx.PIXEL_SIZE, raster=NATIVE_CHUNKS, element="cell labels")
         opened = mocker.spy(_labels, "ZipStore")
 
         window = labels.data[0:8, 8:16].compute()
@@ -85,10 +86,21 @@ class TestReadLabels:
     def test_raster_options(self, tmp_path: Path) -> None:
         source, bundle = _source(tmp_path)
 
-        labels = read_labels(source, pixel_size=fx.PIXEL_SIZE, raster=make_raster_options((2,), (1, 4, 16)))
+        labels = read_labels(
+            source, pixel_size=fx.PIXEL_SIZE, raster=make_raster_options((2,), (1, 4, 16)), element="cell labels"
+        )
 
         assert isinstance(labels, DataTree)
         scale0 = labels["scale0"]["image"]
         assert scale0.data.chunksize == (4, 16)
         np.testing.assert_array_equal(scale0.data.compute(), bundle.cell_mask)
         assert labels["scale1"]["image"].shape == (12, 16)
+
+    def test_scale_factors_must_fit_the_mask(self, tmp_path: Path) -> None:
+        source, _ = _source(tmp_path)
+
+        # 24 rows cannot be halved three times and then quartered.
+        with pytest.raises(ValueError, match=r"exceed the spatial extent of cell labels \(24 x 32 pixels\)"):
+            read_labels(
+                source, pixel_size=fx.PIXEL_SIZE, raster=make_raster_options((2, 2, 2, 4)), element="cell labels"
+            )

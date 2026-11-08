@@ -1,4 +1,13 @@
-"""Exact nominal bin-grid label rasters in physical slide coordinates."""
+"""Build exact bin-grid label rasters in global micrometres.
+
+With ``bin_geometry="labels"`` each bin size becomes one ``uint32`` label image
+with one pixel per bin: pixel ``(row, col)`` holds the table-order
+``instance_id`` (1..n) of bin ``s_<size>um_<row>_<col>-1`` and 0 marks bins
+absent from the selected matrix. The transform ``grid_um_to_global @ Scale(size)``
+maps pixel corners to the nominal bin corners, so pixel centres are the bin
+centres of ``obsm["spatial"]`` without a half-bin shift. The grid is eager
+(4 bytes per bin: 45 MB for the 3350 x 3350 native grid), then chunked.
+"""
 
 from __future__ import annotations
 

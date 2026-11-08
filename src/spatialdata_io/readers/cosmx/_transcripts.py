@@ -7,7 +7,8 @@ physical line. Points are placed at the global pixel position
 and ``cell`` fields are annotations. Construction reads only the header; every
 partition is parsed and validated when computed.
 
-Plain CSV is split by Dask into newline-delimited byte blocks of about 8 MiB.
+Plain CSV is split by the shared CSV block reader into newline-delimited byte
+blocks of about 8 MiB, its default.
 
 Gzip sources (``.csv.gz``) are read member by member. AtoMx writes
 concatenated, independently compressed members, each ending at a record
@@ -32,21 +33,21 @@ Coordinate systems: ``global_pixels`` (identity) without ``pixel_size_um``, or
 
 from __future__ import annotations
 
-import glob
 import warnings
 import zlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, BinaryIO, cast
+from typing import TYPE_CHECKING, BinaryIO
 
 import dask.dataframe as dd
 import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
 from dask import delayed
-from dask.bytes import read_bytes
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity, Scale
 
+from spatialdata_io.readers._utils.csv import read_csv_blocks
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers.cosmx._schemas import (
     CELL,
     CELL_ID,
@@ -63,7 +64,7 @@ from spatialdata_io.readers.cosmx._tables import read_header
 from spatialdata_io.readers.cosmx._transforms import fov_frame, global_frame
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     import numpy as np
     import numpy.typing as npt
@@ -73,7 +74,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.cosmx._transforms import Placement
 
-_BLOCK_BYTES = 8 * 1024 * 1024
 _GZIP_RANGE_BYTES = 8 * 1024 * 1024
 _READ_BYTES = 1024 * 1024
 
@@ -125,7 +125,7 @@ class _Projection:
 
 
 def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
-    """Parse projected lexical fields while checking the full source record width."""
+    """Parse decoded gzip records like the shared plain-CSV block reader."""
     names, columns, path = projection.names, projection.columns, projection.path
     if not payload:
         # A compressed range crossed by an earlier member owns no records.
@@ -144,14 +144,19 @@ def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
             )
     except pa.ArrowInvalid as error:
         raise schema_error(
-            path, TRANSCRIPTS, found=f"malformed transcript CSV: {error}", expected="one field per header column"
+            path,
+            TRANSCRIPTS,
+            found=f"malformed CSV records ({error})",
+            expected="records with one field per header column",
         ) from error
     return _normalize(table, features=projection.features, path=path)
 
 
-def _plain_block(block: bytes, projection: _Projection, *, first: bool) -> pd.DataFrame:
-    """Parse one newline-delimited byte block of an uncompressed source."""
-    return _parse(block.partition(b"\n")[2] if first else block, projection)
+def _normalize_block(block: pd.DataFrame, projection: _Projection) -> pd.DataFrame:
+    """Validate one parsed plain-CSV block."""
+    # Arrow-backed columns convert without copying; a thread pool would only add start-up time.
+    table = pa.Table.from_pandas(block, preserve_index=False, nthreads=1)
+    return _normalize(table, features=projection.features, path=projection.path)
 
 
 def _decode_member(
@@ -203,25 +208,22 @@ def _gzip_range(projection: _Projection, offset: int, *, start: int, stop: int) 
     return offset, _parse(payload, projection)
 
 
-def _partitions(projection: _Projection) -> list[Delayed]:
-    """Return one delayed parser per plain block or compressed member range."""
+def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
+    """Return one partition per plain-CSV block or compressed member range."""
     path = projection.path
-    if path.name.endswith(".gz"):
-        size = path.stat().st_size
-        offset: int | Delayed = 0
-        partitions: list[Delayed] = []
-        for start in range(0, size, _GZIP_RANGE_BYTES):
-            task = delayed(_gzip_range, nout=2)(
-                projection, offset, start=start, stop=min(start + _GZIP_RANGE_BYTES, size)
-            )
-            offset, partition = task
-            partitions.append(partition)
-        return partitions
+    if not path.name.endswith(".gz"):
+        context = ReaderErrorContext("cosmx", TRANSCRIPTS)
+        blocks = read_csv_blocks(path, header=projection.names, columns=projection.columns, context=context)
+        return blocks.map_partitions(_normalize_block, projection, meta=meta)
 
-    # read_bytes has no typed signature; this is its documented result when include_path is false.
-    read_blocks = cast("Callable[..., tuple[bytes | bool, list[list[Delayed]]]]", read_bytes)
-    _, blocks = read_blocks([glob.escape(str(path))], delimiter=b"\n", blocksize=_BLOCK_BYTES, sample=False)
-    return [delayed(_plain_block)(block, projection, first=index == 0) for index, block in enumerate(blocks[0])]
+    size = path.stat().st_size
+    offset: int | Delayed = 0
+    partitions: list[Delayed] = []
+    for start in range(0, size, _GZIP_RANGE_BYTES):
+        task = delayed(_gzip_range, nout=2)(projection, offset, start=start, stop=min(start + _GZIP_RANGE_BYTES, size))
+        offset, partition = task
+        partitions.append(partition)
+    return dd.from_delayed(partitions, meta=meta)
 
 
 def read_transcripts(
@@ -240,7 +242,7 @@ def read_transcripts(
     columns = transcript_columns(names, path)
     empty = pa.table({name: pa.array([], pa.string()) for name in columns})
     meta = _normalize(empty, features=features, path=path)
-    frame = dd.from_delayed(_partitions(_Projection(names, columns, features, path)), meta=meta)
+    frame = _frame(_Projection(names, columns, features, path), meta)
 
     transformations: dict[str, BaseTransformation] = {
         global_frame(pixel_size_um): (

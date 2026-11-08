@@ -143,12 +143,14 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
             - The redundant ``obs["Image"]`` column is dropped (it must equal
               ``obs["image"]``). ``Final Concentration / Dilution`` becomes
               ``Final_Concentration``, and other imported ``obs`` and ``var``
-              column names that a SpatialData table does not accept are
-              sanitized with a warning (``Channel Name`` becomes
-              ``Channel_Name``; a name that then collides, ignoring letter
-              case, with another column or a reader-owned one such as
-              ``region`` gets a ``_1``, ``_2``, ... suffix). Everything else,
-              including other layers, mappings and ``raw``, is kept unchanged.
+              column names and top-level ``uns`` keys that a SpatialData table
+              does not accept are sanitized with a warning (``Channel Name``
+              becomes ``Channel_Name``; a name that then collides, ignoring
+              letter case, with another one or a reader-owned one such as
+              ``region`` or ``spatialdata_io_positions`` gets a ``_1``,
+              ``_2``, ... suffix). Everything else, including ``uns`` values
+              and their nested keys, other layers, mappings and ``raw``, is
+              kept unchanged.
 
         Coordinate systems: a sample's image and mask share one frame with
         its native pixel origin. A calibrated sample is scaled to
@@ -171,8 +173,8 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
     UserWarning
         Once per call if duplicate sparse entries of ``X`` or ``counts`` were
         summed, naming the affected slots and dtype changes; once per
-        sanitized sample name; once per frame if ``obs`` or ``var`` column
-        names were sanitized.
+        sanitized sample name; once each if ``obs`` or ``var`` column names or
+        top-level ``uns`` keys were sanitized.
 
     Raises
     ------

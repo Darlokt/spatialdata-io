@@ -1,4 +1,11 @@
-"""Native cell-GEF spans, exact expression and optional source borders."""
+"""Read one cell-bin GEF into an exact sparse table, cell IDs, centres and contours.
+
+``cellBin/cell`` rows give each cell's ID, centre and span of ``cellBin/cellExp``
+records, whose ``geneID`` indexes ``cellBin/gene``. A feature may occur at most
+once per cell. Observations keep the source cell order and are named by the
+decimal source ID; ``cellTypeID`` and ``clusterID`` become categories. Contours
+(``cellBorder``) are read only when polygons are requested.
+"""
 
 from __future__ import annotations
 
@@ -37,6 +44,8 @@ class CellCounts:
     origin: tuple[int, int]
     resolution: int
     sample_id: str | None
+    # GEF schema version ``gef-<n>`` of the source file, ``None`` when absent.
+    format_version: str | None
 
 
 def _canonical_native(
@@ -49,8 +58,8 @@ def _canonical_native(
     matrix = csr_array((counts, feature_indices, indptr), shape=(len(indptr) - 1, features))
     matrix.sort_indices()
     if not matrix.has_canonical_format:
-        raise _schemas.format_error(
-            path, "cellExp", "repeated feature within a cell", "unique native cell-feature records"
+        raise _schemas.schema_error(
+            path, "cellExp", found="repeated feature within a cell", expected="unique native cell-feature records"
         )
 
     return as_csr_array(matrix)
@@ -74,8 +83,8 @@ def _read_expression(
         counts[start:stop] = block["count"]
         feature_indices[start:stop] = block["geneID"]
         if np.any(feature_indices[start:stop] >= feature_count):
-            raise _schemas.format_error(
-                path, expression.name, "out-of-range feature index", f"indices below {feature_count}"
+            raise _schemas.schema_error(
+                path, expression.name, found="out-of-range feature index", expected=f"indices below {feature_count}"
             )
         if exons is not None and exon_values is not None:
             exon_values[start:stop] = exons[start:stop]
@@ -104,7 +113,7 @@ def _borders(group: h5py.Group, cell_count: int, path: ArtifactFile) -> npt.NDAr
         or value.shape != (cell_count, _BORDER_VERTICES, _SPATIAL_DIMENSIONS)
         or value.dtype != np.dtype(np.int16)
     ):
-        raise _schemas.format_error(path, "cellBorder", str(value), f"int16 shape ({cell_count}, 32, 2)")
+        raise _schemas.schema_error(path, "cellBorder", found=str(value), expected=f"int16 shape ({cell_count}, 32, 2)")
     # The complete eager contour representation is required only in polygon mode.
     return cast("npt.NDArray[np.int16]", value[:])
 
@@ -125,6 +134,7 @@ def _read_cells(handle: h5py.File, source: CellSource, *, read_borders: bool) ->
     )
     resolution = _schemas.integer_attribute(handle.attrs, "resolution", path, "cell resolution", positive=True)
     sample = _schemas.sample_id(handle, path)
+    version = _schemas.format_version(handle.attrs, path)
 
     # Named dtypes were validated before materializing required cell/feature metadata.
     cells = cast("npt.NDArray[np.void]", cells_dataset[:])
@@ -134,7 +144,9 @@ def _read_cells(handle: h5py.File, source: CellSource, *, read_borders: bool) ->
     )
     ids = cells["id"].astype(np.uint64)
     if len(np.unique(ids)) != len(ids):
-        raise _schemas.format_error(path, cells_dataset.name, "duplicate cell IDs", "unique source cell IDs")
+        raise _schemas.schema_error(
+            path, cells_dataset.name, found="duplicate cell IDs", expected="unique source cell IDs"
+        )
     coordinates = np.column_stack((cells["x"], cells["y"])).astype(np.int64)
 
     observations = pd.DataFrame(index=pd.Index([str(identity) for identity in ids]))
@@ -160,11 +172,13 @@ def _read_cells(handle: h5py.File, source: CellSource, *, read_borders: bool) ->
     if "cellTypeList" in group:
         names = _schemas.require_dataset(group, "cellTypeList", path)
         if names.dtype.kind != "S":
-            raise _schemas.format_error(path, names.name, str(names.dtype), "fixed-width UTF-8 category text")
+            raise _schemas.schema_error(
+                path, names.name, found=str(names.dtype), expected="fixed-width UTF-8 category text"
+            )
         metadata["cell_type_names"] = _schemas.decode_strings(names[:], path, names.name)
 
     borders = _borders(group, len(cells), path) if read_borders else None
-    return CellCounts(table, coordinates, ids, borders, origin, resolution, sample)
+    return CellCounts(table, coordinates, ids, borders, origin, resolution, sample, version)
 
 
 def read_cells(source: CellSource, *, read_borders: bool) -> CellCounts:

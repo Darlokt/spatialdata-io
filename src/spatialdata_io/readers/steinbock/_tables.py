@@ -20,10 +20,11 @@ object, so expression, layers, ``raw`` and annotations are not copied.
   ``obsm["spatial"]`` of unknown meaning moves unchanged to ``spatial_source``.
 - The redundant ``Image`` column is dropped. The legacy feature column
   ``Final Concentration / Dilution`` becomes ``Final_Concentration``. Other
-  ``obs`` and ``var`` column names that SpatialData does not accept
-  (``Channel Name``, ``my note``) are sanitized with one warning per frame
-  (``Channel_Name``), before the reader adds its own columns, which keep their
-  names.
+  ``obs`` and ``var`` column names and top-level ``uns`` keys that SpatialData
+  does not accept (``Channel Name``, ``my note``) are sanitized with one
+  warning per frame or mapping (``Channel_Name``), before the reader adds its
+  own columns and keys, which keep their names. ``uns`` values, their order and
+  nested keys stay as stored.
 """
 
 from __future__ import annotations
@@ -33,10 +34,11 @@ from typing import TYPE_CHECKING, cast
 import anndata as ad
 import numpy as np
 import pandas as pd
+from spatialdata.models import TableModel
 
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
 from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_context
-from spatialdata_io.readers._utils.names import sanitize_column_names
+from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers.steinbock._layout import NATIVE_FRAME_SUFFIX
 from spatialdata_io.readers.steinbock._schemas import (
     CELL_TABLE_CONTEXT,
@@ -61,6 +63,7 @@ if TYPE_CHECKING:
 # Columns the reader reads by name or generates; imported columns that equal
 # one ignoring letter case are renamed rather than these.
 _READER_OBS_COLUMNS = (*REQUIRED_OBSERVATION_COLUMNS, "cell_id", "region", "spatial_frame", "spatial_pixel_frame")
+_READER_UNS_KEYS = (POSITIONS_KEY, TableModel.ATTRS_KEY)
 _NATIVE_POSITION = "source_regionprops_centroid_zero_based_pixel_index_centres"
 _PHYSICAL_POSITION = "source_regionprops_centroid_in_raster_corner_frame"
 
@@ -85,6 +88,7 @@ def read_table(path: ArtifactFile, grids: Mapping[str, SampleGrid]) -> ad.AnnDat
         list(obs.columns), source="steinbock: the observation metadata of the cell table", reserved=_READER_OBS_COLUMNS
     )
     var.columns = sanitize_column_names(columns, source="steinbock: the feature metadata of the cell table")
+    sanitize_uns_keys(table, source="steinbock: the unstructured metadata of the cell table", reserved=_READER_UNS_KEYS)
 
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")

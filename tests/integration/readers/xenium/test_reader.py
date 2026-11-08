@@ -8,6 +8,7 @@ import anndata as ad
 import h5py
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import shapely
@@ -522,6 +523,51 @@ class TestXenium:
         assert labels["scale1"]["image"].shape == (12, 16)
         np.testing.assert_array_equal(labels["scale0"]["image"].data.compute(), bundle.cell_mask)
 
+    def test_scale_factors_must_fit_every_raster(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+
+        # The 24 x 32 pixel fixture cannot be reduced by 32.
+        with pytest.raises(ValueError, match=r"exceed the spatial extent of cell labels \(24 x 32 pixels\)"):
+            xenium(bundle.root, include_morphology_focus=False, scale_factors=(4, 8))
+        with pytest.raises(ValueError, match=r"exceed the spatial extent of the morphology image"):
+            xenium(
+                bundle.root,
+                table_target=None,
+                include_cell_labels=False,
+                include_nucleus_labels=False,
+                scale_factors=(4, 8),
+            )
+
+    def test_unusable_cells_columns_are_renamed(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_3_0, fx.Options(analysis="archive"))
+        cells = pq.read_table(bundle.root / "cells.parquet")
+        cells = cells.append_column("CD45 RO", pa.array(["low", "high", "low", "high"]))
+        pq.write_table(cells.append_column("Region", pa.array([1, 2, 3, 4])), bundle.root / "cells.parquet")
+
+        with pytest.warns(UserWarning, match=r"using 'CD45 RO' -> 'CD45_RO', 'Region' -> 'Region_1'"):
+            result = xenium(bundle.root, include_transcripts=False, include_analysis=True)
+
+        table = result.tables["table"]
+        assert table.obs["CD45_RO"].tolist() == ["low", "high", "low", "high"]
+        assert table.obs["Region_1"].tolist() == [1, 2, 3, 4]
+        assert table.obs["region"].tolist() == ["cell_labels"] * 4
+        output = tmp_path / "output.zarr"
+        result.write(output)
+        restored = read_zarr(output).tables["table"]
+        assert restored.obs["CD45_RO"].tolist() == ["low", "high", "low", "high"]
+        assert get_table_keys(restored) == ("cell_labels", "region", "label_id")
+
+    def test_errors_name_the_detected_format_version(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        cells = pq.read_table(bundle.root / "cells.parquet")
+        pq.write_table(cells.drop_columns(["cell_area"]), bundle.root / "cells.parquet")
+
+        with pytest.raises(ReaderFormatError, match=r"missing columns \['cell_area'\]") as caught:
+            xenium(bundle.root)
+
+        assert caught.value.context.artifact == "cells table"
+        assert caught.value.context.detected_version == "6.0.0"
+
     @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
     def test_annotations_and_positions_survive_table_storage(self, tmp_path: Path, storage: str) -> None:
         bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_4_0)
@@ -589,6 +635,18 @@ class TestXeniumPathPolicy:
             "gene_panel.json",
         ):
             link_outside_root(bundle.root / name)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            xenium(bundle.root)
+
+        assert_spatial_data_objects_are_identical(xenium(bundle.root, path_policy="relaxed"), expected)
+
+    def test_relaxed_policy_reads_an_annexed_single_file_focus_image(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_2)
+        expected = xenium(bundle.root)
+        link_outside_root(bundle.root / "morphology_focus.ome.tif")
 
         with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
             xenium(bundle.root)

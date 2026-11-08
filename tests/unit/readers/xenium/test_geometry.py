@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 
 type Change = Callable[[list[object]], list[object]]
 
+CONTEXT = ReaderErrorContext("xenium", "boundaries", "5.0.0")
+
 # Each change of one column breaks a structural rule that no invalid-geometry
 # policy may repair. Every polygon of the fixture has five vertex rows.
 STRUCTURAL_DEFECTS: dict[str, tuple[str, Change, str]] = {
@@ -77,7 +79,7 @@ class TestReadPolygons:
     def test_cells_match_their_rectangles_and_labels(self, tmp_path: Path, profile: fx.Profile) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, profile)
 
-        polygons = read_polygons(_source(bundle, "cell"), profile.family, "cell", _store(bundle))
+        polygons = read_polygons(_source(bundle, "cell"), profile.family, "cell", _store(bundle), context=CONTEXT)
 
         assert polygons.cell_ids.tolist() == list(bundle.cell_ids)
         np.testing.assert_array_equal(polygons.labels, bundle.cell_labels)
@@ -90,7 +92,7 @@ class TestReadPolygons:
     def test_nuclei_of_polygon_sets_follow_label_id(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
 
-        polygons = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
+        polygons = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle), context=CONTEXT)
 
         # Cell 2 has two nuclei, cell 3 none.
         assert polygons.cell_ids.tolist() == [fx.HEX_IDS[0], fx.HEX_IDS[1], fx.HEX_IDS[2], fx.HEX_IDS[2]]
@@ -100,7 +102,7 @@ class TestReadPolygons:
     def test_nuclei_of_one_to_one_families_carry_cell_labels(self, tmp_path: Path, profile: fx.Profile) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, profile)
 
-        polygons = read_polygons(_source(bundle, "nucleus"), profile.family, "nucleus", _store(bundle))
+        polygons = read_polygons(_source(bundle, "nucleus"), profile.family, "nucleus", _store(bundle), context=CONTEXT)
 
         np.testing.assert_array_equal(polygons.labels, [1, 2, 3, 4])
 
@@ -112,15 +114,15 @@ class TestReadPolygons:
         labels = pa.array(np.repeat([1, 2, 3, 4], 5), type=pa.int64())
         pq.write_table(table.append_column("label_id", labels), path)
 
-        polygons = read_polygons(_source(bundle, "nucleus"), profile.family, "nucleus", _store(bundle))
+        polygons = read_polygons(_source(bundle, "nucleus"), profile.family, "nucleus", _store(bundle), context=CONTEXT)
 
         np.testing.assert_array_equal(polygons.labels, [1, 2, 3, 4])
 
     def test_csv_twins_equal_parquet(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(csv_twins=True))
 
-        parquet = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", None)
-        csv = read_polygons(_source(bundle, "nucleus", "csv.gz"), "polygon_sets", "nucleus", None)
+        parquet = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", None, context=CONTEXT)
+        csv = read_polygons(_source(bundle, "nucleus", "csv.gz"), "polygon_sets", "nucleus", None, context=CONTEXT)
 
         assert parquet.cell_ids.equals(csv.cell_ids)
         np.testing.assert_array_equal(parquet.labels, csv.labels)
@@ -131,15 +133,18 @@ class TestReadPolygons:
         hexadecimal = fx.write_xenium_bundle(tmp_path / "hex", fx.XOA_1_9)
 
         np.testing.assert_array_equal(
-            read_polygons(_source(integer, "nucleus"), "integer_ids", "nucleus", None).labels, [1, 2, 3, 4]
+            read_polygons(_source(integer, "nucleus"), "integer_ids", "nucleus", None, context=CONTEXT).labels,
+            [1, 2, 3, 4],
         )
-        assert read_polygons(_source(hexadecimal, "nucleus"), "hex_ids", "nucleus", None).labels is None
+        assert (
+            read_polygons(_source(hexadecimal, "nucleus"), "hex_ids", "nucleus", None, context=CONTEXT).labels is None
+        )
 
     def test_early_xoa_2_0_nuclei_without_label_id(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(nucleus_label_id=False))
 
         with pytest.raises(ReaderFormatError, match="without label_id"):
-            read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
+            read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle), context=CONTEXT)
 
     @pytest.mark.parametrize(
         ("label", "replacement"), [(1, 2), (4, 2), (4, 9)], ids=["first-owner", "last-owner", "outside-owner-range"]
@@ -152,7 +157,7 @@ class TestReadPolygons:
         changed_labels = {label: replacement, replacement: label}
         _rewrite(path, "label_id", [changed_labels.get(value, value) for value in labels])
         with pytest.raises(ReaderFormatError, match="owned by other cells"):
-            read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
+            read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle), context=CONTEXT)
 
     def test_nonempty_boundaries_reject_empty_nucleus_owners(self, tmp_path: Path) -> None:
         imported = fx.write_xenium_bundle(tmp_path / "import", fx.XOA_3_0, fx.Options(import_kind="cells_only"))
@@ -160,15 +165,17 @@ class TestReadPolygons:
         source = _source(nuclei, "nucleus")
 
         with pytest.raises(ReaderFormatError, match="owned by other cells") as caught:
-            read_polygons(source, "polygon_sets", "nucleus", _store(imported))
+            read_polygons(source, "polygon_sets", "nucleus", _store(imported), context=CONTEXT)
 
-        assert caught.value.context == ReaderErrorContext("xenium", "nucleus boundaries")
+        assert caught.value.context == CONTEXT
         assert caught.value.path == source.file
 
     def test_empty_boundaries_agree_with_empty_nucleus_owners(self, tmp_path: Path) -> None:
         imported = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(import_kind="cells_only"))
 
-        polygons = read_polygons(_source(imported, "nucleus"), "polygon_sets", "nucleus", _store(imported))
+        polygons = read_polygons(
+            _source(imported, "nucleus"), "polygon_sets", "nucleus", _store(imported), context=CONTEXT
+        )
 
         assert polygons.cell_ids.empty
         assert polygons.labels is not None
@@ -183,12 +190,12 @@ class TestReadPolygons:
         _rewrite(path, "cell_id", ["zzzzzzzz-1" if value == ids[0] else value for value in ids])
 
         with pytest.raises(ReaderFormatError, match=r"absent from cells\.zarr\.zip"):
-            read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle))
+            read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle), context=CONTEXT)
 
         imported = fx.write_xenium_bundle(tmp_path / "import", fx.XOA_3_0, fx.Options(import_kind="transcripts"))
         nuclei = fx.write_xenium_bundle(tmp_path / "nuclei", fx.XOA_3_0)
         with pytest.raises(ReaderFormatError, match="no nucleus polygon set"):
-            read_polygons(_source(nuclei, "nucleus"), "polygon_sets", "nucleus", _store(imported))
+            read_polygons(_source(nuclei, "nucleus"), "polygon_sets", "nucleus", _store(imported), context=CONTEXT)
 
     @pytest.mark.parametrize(
         ("column", "change", "match"), list(STRUCTURAL_DEFECTS.values()), ids=list(STRUCTURAL_DEFECTS)
@@ -201,7 +208,7 @@ class TestReadPolygons:
         _rewrite(path, column, change(pq.read_table(path)[column].to_pylist()))
 
         with pytest.raises(ReaderFormatError, match=match):
-            read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", None)
+            read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", None, context=CONTEXT)
 
 
 class TestApplyPolicy:
@@ -209,37 +216,37 @@ class TestApplyPolicy:
 
     def test_keep_drop_raise_for_invalid_polygons(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(bowtie_cells=(1,)))
-        polygons = read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle))
+        polygons = read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle), context=CONTEXT)
 
-        np.testing.assert_array_equal(apply_policy(polygons, "keep", "cell"), [True] * 4)
-        np.testing.assert_array_equal(apply_policy(polygons, "drop", "cell"), [True, False, True, True])
+        np.testing.assert_array_equal(apply_policy(polygons, "keep"), [True] * 4)
+        np.testing.assert_array_equal(apply_policy(polygons, "drop"), [True, False, True, True])
         with pytest.raises(ReaderFormatError, match=r"1 invalid geometries .*\['ffkpbaba-1'\]"):
-            apply_policy(polygons, "raise", "cell")
+            apply_policy(polygons, "raise")
 
     def test_keep_does_not_classify_topology_or_materialize_cell_identifiers(
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(bowtie_cells=(1,)))
-        polygons = read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle))
+        polygons = read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle), context=CONTEXT)
         topology = mocker.spy(_geometry, "invalid_geometry_mask")
         identifiers = mocker.spy(pd.Index, "tolist")
-        np.testing.assert_array_equal(apply_policy(polygons, "keep", "cell"), [True] * 4)
+        np.testing.assert_array_equal(apply_policy(polygons, "keep"), [True] * 4)
         topology.assert_not_called()
         identifiers.assert_not_called()
 
     def test_degenerate_rings(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(short_nuclei=(0,)))
-        polygons = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
+        polygons = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle), context=CONTEXT)
 
         assert polygons.degenerate.tolist() == [True, False, False, False]
         assert polygons.geometries[0] is None
         with pytest.raises(
             ReaderFormatError, match=r"'drop' removes them.*found 1 rings with fewer than four coordinates, e.g. \[1\]"
         ):
-            apply_policy(polygons, "keep", "nucleus")
-        np.testing.assert_array_equal(apply_policy(polygons, "drop", "nucleus"), [False, True, True, True])
+            apply_policy(polygons, "keep")
+        np.testing.assert_array_equal(apply_policy(polygons, "drop"), [False, True, True, True])
         with pytest.raises(ReaderFormatError, match=r"1 invalid geometries"):
-            apply_policy(polygons, "raise", "nucleus")
+            apply_policy(polygons, "raise")
 
 
 class TestElements:
@@ -247,7 +254,7 @@ class TestElements:
 
     def test_cell_polygons_index_and_registration(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
-        polygons = read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle))
+        polygons = read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", _store(bundle), context=CONTEXT)
 
         shapes = make_cell_polygons(polygons, np.array([True, False, True, True]), fx.PIXEL_SIZE)
 
@@ -267,7 +274,7 @@ class TestElements:
 
     def test_nucleus_polygons_index_by_label(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
-        polygons = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle))
+        polygons = read_polygons(_source(bundle, "nucleus"), "polygon_sets", "nucleus", _store(bundle), context=CONTEXT)
 
         shapes = make_nucleus_polygons(polygons, np.ones(4, dtype=bool), fx.PIXEL_SIZE)
 
@@ -278,16 +285,20 @@ class TestElements:
 
     def test_hex_nuclei_need_the_store_and_empty_elements_raise(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_9)
-        polygons = read_polygons(_source(bundle, "nucleus"), "hex_ids", "nucleus", None)
+        nuclei = read_polygons(_source(bundle, "nucleus"), "hex_ids", "nucleus", None, context=CONTEXT)
+        cells = read_polygons(_source(bundle, "cell"), "hex_ids", "cell", None, context=CONTEXT)
 
-        with pytest.raises(ReaderFormatError, match="seg_mask_value labels"):
-            make_nucleus_polygons(polygons, np.ones(4, dtype=bool), fx.PIXEL_SIZE)
+        with pytest.raises(ReaderFormatError, match="seg_mask_value labels") as caught:
+            make_nucleus_polygons(nuclei, np.ones(4, dtype=bool), fx.PIXEL_SIZE)
+        assert caught.value.context == CONTEXT
         with pytest.raises(ReaderFormatError, match="include_cell_boundaries=False; found no polygons to return"):
-            make_cell_polygons(polygons, np.zeros(4, dtype=bool), fx.PIXEL_SIZE)
+            make_cell_polygons(cells, np.zeros(4, dtype=bool), fx.PIXEL_SIZE)
 
     def test_circles_have_the_exact_mask_area(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
-        cells = read_cells(TabularSource(ArtifactFile(bundle.root / "cells.parquet"), "parquet"), "polygon_sets")
+        cells = read_cells(
+            TabularSource(ArtifactFile(bundle.root / "cells.parquet"), "parquet"), "polygon_sets", context=CONTEXT
+        )
 
         circles = make_circles(cells, np.array([True, True, False, True]))
 

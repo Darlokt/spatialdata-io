@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import anndata as ad
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -101,7 +102,7 @@ class TestStereoseqAnalysisResolution:
 class TestStereoseqAnalysisExpression:
     """Imported duplicates retain exact values and the declared numerical dtype."""
 
-    def test_one_warning_across_multiple_imported_tables_and_slots(self, tmp_path: Path) -> None:
+    def test_one_warning_per_imported_file_naming_its_slots(self, tmp_path: Path) -> None:
         paths = [write_analysis(tmp_path / f"sample.cellbin_{resolution}.h5ad") for resolution in ("0.5", "0.6")]
         for path in paths:
             source = ad.read_h5ad(path)
@@ -113,10 +114,12 @@ class TestStereoseqAnalysisExpression:
             source.write_h5ad(path)
         with pytest.warns(UserWarning, match="combined") as reported:
             result = stereoseq(tmp_path, analysis_files=tuple(paths))
-        assert len(reported) == 1
-        message = str(reported[0].message)
-        assert all(path.name in message for path in paths)
-        assert "layers['counts']" in message
+        assert [str(warning.message) for warning in reported] == [
+            f"stereoseq {path.name}: combined 1 duplicate sparse entry in X; promoted int8 to float32 to preserve "
+            "exact sums; combined 1 duplicate sparse entry in layers['counts']; promoted int8 to float32 to "
+            "preserve exact sums"
+            for path in paths
+        ]
         assert len(result.tables) == 2
         for table in result.tables.values():
             assert isinstance(table.X, sparse.csr_array)
@@ -223,3 +226,90 @@ class TestStereoseqAnalysisExpression:
         np.testing.assert_array_equal(restored.X.data, [127, 22])
         np.testing.assert_array_equal(restored.X.indices, [0, 1])
         np.testing.assert_array_equal(restored.X.indptr, [0, 1, 2])
+
+
+class TestStereoseqAnalysisAnnotations:
+    """Imported column names follow SpatialData's rules; reader columns keep their names."""
+
+    def test_invalid_obs_and_var_names_are_sanitized(self, tmp_path: Path) -> None:
+        path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
+        source = ad.read_h5ad(path)
+        source.obs["my note"] = ["a", "b"]
+        source.obs["Region"] = ["r1", "r2"]
+        source.var["gene type"] = ["coding", "noncoding"]
+        source.write_h5ad(path)
+
+        with pytest.warns(UserWarning, match="SpatialData table does not accept") as reported:
+            result = stereoseq(tmp_path, analysis_files=(path,))
+
+        assert sorted(str(warning.message) for warning in reported) == [
+            (
+                "stereoseq: the obs of sample.cellbin_0.5.h5ad has column names that a SpatialData table does not "
+                "accept; using 'my note' -> 'my_note', 'Region' -> 'Region_1'. Rename the source columns to choose the "
+                "names explicitly."
+            ),
+            (
+                "stereoseq: the var of sample.cellbin_0.5.h5ad has column names that a SpatialData table does not "
+                "accept; using 'gene type' -> 'gene_type'. Rename the source columns to choose the names explicitly."
+            ),
+        ]
+        table = result.tables["cells_analysis_r0_5_table"]
+        assert table.obs.columns.tolist() == [
+            "id",
+            "x",
+            "y",
+            "analysis_annotation",
+            "my_note",
+            "Region_1",
+            "region",
+            "instance_id",
+        ]
+        assert table.obs["my_note"].tolist() == ["a", "b"]
+        assert table.obs["Region_1"].tolist() == ["r1", "r2"]
+        assert table.var.columns.tolist() == ["analysis_feature", "gene_type"]
+        assert get_table_keys(table) == ("cells_analysis_r0_5_points", "region", "instance_id")
+
+        destination = tmp_path / "result.zarr"
+        result.write(destination)
+        restored = read_zarr(destination).tables["cells_analysis_r0_5_table"]
+        assert restored.obs.columns.tolist() == table.obs.columns.tolist()
+        assert restored.var["gene_type"].tolist() == ["coding", "noncoding"]
+
+    def test_invalid_uns_key_is_sanitized_and_linked(self, tmp_path: Path) -> None:
+        path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
+        source = ad.read_h5ad(path)
+        source.uns["my key"] = {"nested key": "kept"}
+        source.write_h5ad(path)
+
+        with pytest.warns(UserWarning, match="as uns keys") as reported:
+            result = stereoseq(tmp_path, analysis_files=(path,))
+
+        assert [str(warning.message) for warning in reported] == [
+            (
+                "stereoseq: the uns of sample.cellbin_0.5.h5ad has names that a SpatialData table does not accept as "
+                "uns keys; using 'my key' -> 'my_key'. Rename them in the source to choose the names explicitly."
+            )
+        ]
+        table = result.tables["cells_analysis_r0_5_table"]
+        assert "my key" not in table.uns
+        assert table.uns["my_key"] == {"nested key": "kept"}
+        assert get_table_keys(table) == ("cells_analysis_r0_5_points", "region", "instance_id")
+        result.write(tmp_path / "result.zarr")
+        restored = read_zarr(tmp_path / "result.zarr").tables["cells_analysis_r0_5_table"]
+        assert restored.uns["my_key"] == {"nested key": "kept"}
+
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    def test_malformed_sparse_storage_fails_at_linkage_with_context(self, tmp_path: Path, slot: str) -> None:
+        path = write_analysis(tmp_path / "sample.cellbin_0.5.h5ad")
+        source = ad.read_h5ad(path)
+        source.layers["counts"] = sparse.csr_array(np.eye(2, dtype=np.float32))
+        source.write_h5ad(path)
+        with h5py.File(path, "r+") as handle:
+            group = handle["X"] if slot == "X" else handle["layers/counts"]
+            group["indices"][0] = 7
+
+        with pytest.raises(ValueError, match="indices") as caught:
+            stereoseq(tmp_path, analysis_files=(path,))
+        notes = caught.value.__notes__
+        assert notes[0] == ("while normalizing adata.X" if slot == "X" else "while normalizing adata.layers['counts']")
+        assert notes[1] == f"While handling reader 'stereoseq', artifact 'analysis table', path '{path.resolve()}'."

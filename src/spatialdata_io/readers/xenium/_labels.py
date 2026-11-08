@@ -50,11 +50,16 @@ class MaskSource:
             return np.asarray(array[selection])
 
 
-def read_labels(source: MaskSource, *, pixel_size: float, raster: RasterOptions) -> DataArray | DataTree:
+def read_labels(source: MaskSource, *, pixel_size: float, raster: RasterOptions, element: str) -> DataArray | DataTree:
     """Return one mask as a lazy ``(y, x)`` labels element in the micrometre frame.
 
     Tasks follow the native Zarr chunks, about one eighth of the image per axis in
     vendor stores, so even a small selection decodes whole vendor chunks.
+
+    Raises
+    ------
+    ValueError
+        If ``raster`` requests more downsampling than the mask extent allows.
     """
     data = da.from_array(
         source,
@@ -64,6 +69,7 @@ def read_labels(source: MaskSource, *, pixel_size: float, raster: RasterOptions)
         fancy=False,
         meta=np.empty((0, 0), dtype=source.dtype),
     )
+    raster.validate_label_pyramid(data, element=element)
     return Labels2DModel.parse(
         data,
         dims=("y", "x"),

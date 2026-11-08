@@ -18,7 +18,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers.xenium._version import Family
 
 STRING = pa.string()
@@ -44,6 +45,11 @@ CELL_OPTIONAL_COUNTS = (
     "nucleus_count",
 )
 CELL_REQUIRED = (CELL_ID, *CELL_FLOATS, *CELL_REQUIRED_COUNTS)
+# Documented cells-table columns the reader relies on by name; XOA 2.0+ adds the
+# segmentation method.
+CELL_COLUMNS = (*CELL_REQUIRED, *CELL_OPTIONAL_COUNTS, "segmentation_method")
+# Observation columns the reader adds; a cells table must not already have them.
+READER_OBS = ("label_id", "nucleus_centroid_x", "nucleus_centroid_y", "region")
 
 VERTICES = ("vertex_x", "vertex_y")
 LABEL_ID = "label_id"
@@ -74,30 +80,31 @@ TRANSCRIPT_OPTIONAL: dict[str, pa.DataType] = {
 }
 
 
-def schema_error(path: Path, artifact: str, *, found: str, expected: str) -> ReaderFormatError:
-    """Describe one Xenium artifact contract violation."""
-    return ReaderFormatError(context=ReaderErrorContext("xenium", artifact), path=path, found=found, expected=expected)
-
-
-def validate_header(names: Sequence[str], required: Sequence[str], *, path: Path, artifact: str) -> None:
+def validate_header(names: Sequence[str], required: Sequence[str], *, path: Path, context: ReaderErrorContext) -> None:
     """Reject empty, duplicate or missing required column names."""
     if any(not name for name in names) or len(set(names)) != len(names):
-        raise schema_error(path, artifact, found=f"columns {list(names)!r}", expected="unique nonempty column names")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"columns {list(names)!r}", expected="unique nonempty column names"
+        )
     missing = [name for name in required if name not in names]
     if missing:
-        raise schema_error(path, artifact, found=f"missing columns {missing!r}", expected=f"columns {list(required)!r}")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"missing columns {missing!r}", expected=f"columns {list(required)!r}"
+        )
 
 
-def validate_analysis_header(names: list[str], kind: str, *, path: Path) -> None:
+def validate_analysis_header(names: list[str], kind: str, *, path: Path, context: ReaderErrorContext) -> None:
     """Require exact clustering fields or consecutive PCA/UMAP component fields."""
     if kind == "clustering":
         if names != [BARCODE, CLUSTER]:
-            raise schema_error(path, "analysis", found=f"header {names!r}", expected="Barcode,Cluster")
+            raise ReaderFormatError(context=context, path=path, found=f"header {names!r}", expected="Barcode,Cluster")
         return
     prefix = _ANALYSIS_PROJECTION_PREFIXES[kind]
     expected = [BARCODE, *(f"{prefix}-{index}" for index in range(1, len(names)))]
     if len(names) < _MIN_PROJECTION_COLUMNS or names != expected:
-        raise schema_error(path, "analysis", found=f"header {names!r}", expected=f"Barcode,{prefix}-1,...")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"header {names!r}", expected=f"Barcode,{prefix}-1,..."
+        )
 
 
 def id_type(family: Family) -> pa.DataType:
@@ -114,13 +121,15 @@ def cell_types(names: Sequence[str], family: Family) -> dict[str, pa.DataType]:
     return types
 
 
-def transcript_types(names: Sequence[str], *, path: Path) -> dict[str, pa.DataType]:
+def transcript_types(names: Sequence[str], *, path: Path, context: ReaderErrorContext) -> dict[str, pa.DataType]:
     """Return the projected documented transcript columns and their output types."""
-    validate_header(names, tuple(TRANSCRIPT_REQUIRED), path=path, artifact="transcripts")
+    validate_header(names, tuple(TRANSCRIPT_REQUIRED), path=path, context=context)
     return TRANSCRIPT_REQUIRED | {name: kind for name, kind in TRANSCRIPT_OPTIONAL.items() if name in names}
 
 
-def cast_column(column: pa.ChunkedArray, kind: pa.DataType, name: str, *, path: Path, artifact: str) -> pa.ChunkedArray:
+def cast_column(
+    column: pa.ChunkedArray, kind: pa.DataType, name: str, *, path: Path, context: ReaderErrorContext
+) -> pa.ChunkedArray:
     """Cast to the vendor type with Arrow's checked casts.
 
     Floating coordinates intentionally normalize to the declared float32 type;
@@ -131,12 +140,12 @@ def cast_column(column: pa.ChunkedArray, kind: pa.DataType, name: str, *, path: 
     try:
         return pc.cast(column, kind)
     except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as error:
-        raise schema_error(
-            path, artifact, found=f"{name} of type {column.type}", expected=f"{name} as {kind}"
+        raise ReaderFormatError(
+            context=context, path=path, found=f"{name} of type {column.type}", expected=f"{name} as {kind}"
         ) from error
 
 
-def normalize_text(column: pa.ChunkedArray, name: str, *, path: Path, artifact: str) -> pa.ChunkedArray:
+def normalize_text(column: pa.ChunkedArray, name: str, *, path: Path, context: ReaderErrorContext) -> pa.ChunkedArray:
     """Return non-null ``string`` values; binary text is decoded strictly as UTF-8."""
     kind = column.type
     if not (
@@ -145,28 +154,37 @@ def normalize_text(column: pa.ChunkedArray, name: str, *, path: Path, artifact: 
         or pa.types.is_binary(kind)
         or pa.types.is_large_binary(kind)
     ):
-        raise schema_error(path, artifact, found=f"{name} of type {kind}", expected=f"{name} as UTF-8 text")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"{name} of type {kind}", expected=f"{name} as UTF-8 text"
+        )
     try:
         # Arrow validates UTF-8 when casting binary to text.
         values = column if kind == STRING else pc.cast(column, STRING)
     except pa.ArrowInvalid as error:
-        raise schema_error(
-            path, artifact, found=f"{name} that is not UTF-8", expected=f"{name} as UTF-8 text"
+        raise ReaderFormatError(
+            context=context, path=path, found=f"{name} that is not UTF-8", expected=f"{name} as UTF-8 text"
         ) from error
     if values.null_count:
-        raise schema_error(path, artifact, found=f"missing {name} values", expected=f"complete {name} values")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"missing {name} values", expected=f"complete {name} values"
+        )
     return values
 
 
-def normalize_ids(column: pa.ChunkedArray, family: Family, *, path: Path, artifact: str) -> pa.ChunkedArray:
+def normalize_ids(
+    column: pa.ChunkedArray, family: Family, *, path: Path, context: ReaderErrorContext
+) -> pa.ChunkedArray:
     """Return non-null int64 identifiers (integer family) or UTF-8 text identifiers."""
     if family != "integer_ids":
-        return normalize_text(column, CELL_ID, path=path, artifact=artifact)
+        return normalize_text(column, CELL_ID, path=path, context=context)
     if not pa.types.is_integer(column.type) or column.null_count:
-        raise schema_error(
-            path, artifact, found=f"identifiers of type {column.type}", expected="non-null integer identifiers"
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"identifiers of type {column.type}",
+            expected="non-null integer identifiers",
         )
-    return cast_column(column, INT64, CELL_ID, path=path, artifact=artifact)
+    return cast_column(column, INT64, CELL_ID, path=path, context=context)
 
 
 def text_series(column: pa.Array | pa.ChunkedArray) -> pd.Series:
@@ -181,21 +199,23 @@ def id_index(column: pa.Array | pa.ChunkedArray) -> pd.Index:
     return pd.Index(text_series(column), dtype="str")
 
 
-def integer_ids(text: pd.Index, *, path: Path, artifact: str) -> pd.Index:
+def integer_ids(text: pd.Index, *, path: Path, context: ReaderErrorContext) -> pd.Index:
     """Parse canonical decimal identifiers (XOA 1.0-1.2 barcodes) to int64 exactly."""
     try:
         values = pd.Index(text.to_numpy(dtype=np.str_).astype(np.int64))
     except (ValueError, OverflowError) as error:
-        raise schema_error(path, artifact, found="non-integer cell IDs", expected="decimal integer cell IDs") from error
+        raise ReaderFormatError(
+            context=context, path=path, found="non-integer cell IDs", expected="decimal integer cell IDs"
+        ) from error
     if not values.astype("str").equals(text.astype("str")):
-        raise schema_error(
-            path, artifact, found="non-canonical integer cell IDs", expected="canonical decimal cell IDs"
+        raise ReaderFormatError(
+            context=context, path=path, found="non-canonical integer cell IDs", expected="canonical decimal cell IDs"
         )
     return values
 
 
 def vocabulary_codes(
-    values: pd.Series, vocabulary: pd.Index, name: str, *, path: Path, artifact: str
+    values: pd.Series, vocabulary: pd.Index, name: str, *, path: Path, context: ReaderErrorContext
 ) -> NDArray[np.intp]:
     """Return the vocabulary position of every value; unknown values raise.
 
@@ -208,23 +228,30 @@ def vocabulary_codes(
     unknown = positions < 0
     if unknown.any():
         examples = uniques[unknown][:5].tolist()
-        raise schema_error(
-            path, artifact, found=f"unknown {name} values {examples!r}", expected=f"{name} values from the count matrix"
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"unknown {name} values {examples!r}",
+            expected=f"{name} values from the count matrix",
         )
     return positions[codes]
 
 
 def require_finite(
-    values: NDArray[np.floating], name: str, *, path: Path, artifact: str, allow_nan: bool = False
+    values: NDArray[np.floating], name: str, *, path: Path, context: ReaderErrorContext, allow_nan: bool = False
 ) -> None:
     """Reject infinite values, and NaN unless the column documents it."""
     invalid = np.isinf(values) if allow_nan else ~np.isfinite(values)
     if invalid.any():
-        raise schema_error(path, artifact, found=f"nonfinite {name} values", expected=f"finite {name} values")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"nonfinite {name} values", expected=f"finite {name} values"
+        )
 
 
-def require_no_nulls(table: pa.Table, *, path: Path, artifact: str) -> None:
+def require_no_nulls(table: pa.Table, *, path: Path, context: ReaderErrorContext) -> None:
     """Reject nulls; Xenium writes none in the projected columns."""
     missing = [name for name in table.column_names if table.column(name).null_count]
     if missing:
-        raise schema_error(path, artifact, found=f"missing values in {missing!r}", expected="complete source records")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"missing values in {missing!r}", expected="complete source records"
+        )

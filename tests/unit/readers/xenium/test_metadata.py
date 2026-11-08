@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._metadata import (
     read_experiment,
@@ -38,6 +38,9 @@ EXPERIMENT = {
 }
 
 
+PANEL = ReaderErrorContext("xenium", "panel", "6.0.0")
+
+
 def _json(path: Path, payload: object) -> ArtifactFile:
     path.write_text(json.dumps(payload))
     return ArtifactFile(path)
@@ -49,9 +52,8 @@ class TestReadExperiment:
     def test_version_family_calibration_and_attrs(self, tmp_path: Path) -> None:
         experiment = read_experiment(_json(tmp_path / "experiment.xenium", EXPERIMENT))
 
-        assert str(experiment.version) == "5.2.0"
+        assert experiment.version == "5.2.0"
         assert experiment.family == "polygon_sets"
-        assert experiment.software == "xenium-3.0.0.15"
         assert experiment.pixel_size == 0.2125
         assert experiment.images == {"morphology_focus_filepath": "morphology_focus/morphology_focus_0000.ome.tif"}
         # Path blocks and the Ranger command line (local paths) are excluded.
@@ -81,8 +83,12 @@ class TestReadExperiment:
         ],
     )
     def test_rejects_malformed_keys(self, tmp_path: Path, key: str, value: object, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
+        with pytest.raises(ReaderFormatError, match=match) as caught:
             read_experiment(_json(tmp_path / "experiment.xenium", EXPERIMENT | {key: value}))
+
+        # The software version is checked before the format version is known.
+        version = None if key == "analysis_sw_version" else "5.2.0"
+        assert caught.value.context == ReaderErrorContext("xenium", "experiment.xenium", version)
 
     def test_missing_pixel_size(self, tmp_path: Path) -> None:
         experiment = {key: value for key, value in EXPERIMENT.items() if key != "pixel_size"}
@@ -106,7 +112,7 @@ class TestReadMetrics:
         path = tmp_path / "metrics_summary.csv"
         path.write_text('run_name,num_cells_detected,fraction,empty,label\n"run, 1",7275,0.875,,1e-3x\n')
 
-        metrics = read_metrics(ArtifactFile(path))
+        metrics = read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
 
         assert metrics == {
             "run_name": "run, 1",
@@ -134,13 +140,13 @@ class TestReadMetrics:
         path.write_text(text)
 
         with pytest.raises(ReaderFormatError, match="one unique header and one record"):
-            read_metrics(ArtifactFile(path))
+            read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
 
     def test_rejects_non_utf8(self, tmp_path: Path) -> None:
         path = tmp_path / "metrics_summary.csv"
         path.write_bytes(b"a\n\xff\n")
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_metrics(ArtifactFile(path))
+            read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
 
 
 class TestReadGenePanel:
@@ -161,7 +167,7 @@ class TestReadGenePanel:
             },
         }
 
-        identity = read_gene_panel(_json(tmp_path / "gene_panel.json", panel))
+        identity = read_gene_panel(_json(tmp_path / "gene_panel.json", panel), context=PANEL)
 
         assert identity == {
             "design_id": "hBreast_v1",
@@ -175,7 +181,7 @@ class TestReadGenePanel:
 
     def test_requires_payload_panel(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match=r"payload\.panel as a JSON object"):
-            read_gene_panel(_json(tmp_path / "gene_panel.json", {"payload": {"panel": []}}))
+            read_gene_panel(_json(tmp_path / "gene_panel.json", {"payload": {"panel": []}}), context=PANEL)
 
 
 class TestReadProteinPanel:
@@ -204,7 +210,7 @@ class TestReadProteinPanel:
             "codeword_index": 16,
         }
 
-        panel = read_protein_panel(_json(tmp_path / "protein_panel.json", self._panel([target])))
+        panel = read_protein_panel(_json(tmp_path / "protein_panel.json", self._panel([target])), context=PANEL)
 
         assert panel.targets["TXP000019"].long_name == "PD 1"
         assert panel.targets["TXP000019"].codeword_index == 16
@@ -233,4 +239,4 @@ class TestReadProteinPanel:
     )
     def test_rejects_malformed_targets(self, tmp_path: Path, targets: list[object] | str, match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match):
-            read_protein_panel(_json(tmp_path / "protein_panel.json", self._panel(targets)))
+            read_protein_panel(_json(tmp_path / "protein_panel.json", self._panel(targets)), context=PANEL)

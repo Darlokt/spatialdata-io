@@ -46,14 +46,11 @@ class TestReadCsvBlocks:
         assert list(frame.columns) == ["gene", "x"]
         assert frame.dtypes.tolist() == [pd.ArrowDtype(pa.string())] * 2
 
-    def test_partitions_follow_newline_aligned_blocks_in_file_order(
-        self, tmp_path: Path, mocker: MockerFixture
-    ) -> None:
+    def test_partitions_follow_newline_aligned_blocks_in_file_order(self, tmp_path: Path) -> None:
         rows = [f"{index},G{index},{index}.5\n".encode() for index in range(6)]
         path = _file(tmp_path, b"id,gene,x\n" + b"".join(rows))
-        mocker.patch.object(_blocks, "CSV_BLOCK_BYTES", 24)
 
-        frame = read_csv_blocks(path, header=_HEADER, columns=("id", "gene"), context=_CONTEXT)
+        frame = read_csv_blocks(path, header=_HEADER, columns=("id", "gene"), context=_CONTEXT, block_bytes=24)
         partitions = _partitions(frame)
 
         assert frame.npartitions == len(partitions) > 1
@@ -61,6 +58,34 @@ class TestReadCsvBlocks:
         combined = pd.concat(partitions, ignore_index=True)
         assert combined["id"].tolist() == [str(index) for index in range(6)]
         assert combined["gene"].tolist() == [f"G{index}" for index in range(6)]
+
+    def test_default_block_size_is_the_shared_constant(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = _file(tmp_path, b"id,gene,x\n1,A,0\n")
+        blocks = mocker.spy(_blocks, "read_bytes")
+
+        read_csv_blocks(path, header=_HEADER, columns=("gene",), context=_CONTEXT)
+
+        assert blocks.call_args.kwargs["blocksize"] == _blocks.CSV_BLOCK_BYTES == 8 * 1024 * 1024
+
+    # A 10-byte header line and 100 records of 12 bytes: max(1, 1210 // block_bytes) blocks.
+    @pytest.mark.parametrize(("block_bytes", "npartitions"), [(2000, 1), (1210, 1), (605, 2), (121, 10), (64, 18)])
+    def test_block_size_sets_the_partition_count_without_changing_records(
+        self, tmp_path: Path, block_bytes: int, npartitions: int
+    ) -> None:
+        rows = [f"{index:03d},G{index:02d},{index % 7}.5\n".encode() for index in range(100)]
+        path = _file(tmp_path, b"id,gene,x\n" + b"".join(rows))
+        types = {"x": pa.float64()}
+        whole = read_csv_blocks(path, header=_HEADER, columns=_HEADER, context=_CONTEXT, column_types=types)
+
+        frame = read_csv_blocks(
+            path, header=_HEADER, columns=_HEADER, context=_CONTEXT, column_types=types, block_bytes=block_bytes
+        )
+        partitions = _partitions(frame)
+
+        assert path.stat().st_size == 1210
+        assert frame.npartitions == len(partitions) == npartitions
+        assert all(partition.index.tolist() == list(range(len(partition))) for partition in partitions)
+        pd.testing.assert_frame_equal(pd.concat(partitions, ignore_index=True), whole.compute(), check_exact=True)
 
     def test_keeps_quoted_delimiters_empty_strings_and_exact_text(self, tmp_path: Path) -> None:
         path = _file(tmp_path, b'id,gene,x\n9007199254740993,"A,B",\n0012,"",0.10000000000000002\n')
@@ -91,23 +116,19 @@ class TestReadCsvBlocks:
         assert result.empty
         assert list(result.columns) == ["gene"]
 
-    def test_record_longer_than_a_block_leaves_empty_partitions(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_record_longer_than_a_block_leaves_empty_partitions(self, tmp_path: Path) -> None:
         path = _file(tmp_path, b"id,gene,x\n1,A,0\n2," + b"G" * 100 + b",1\n3,C,2\n")
-        mocker.patch.object(_blocks, "CSV_BLOCK_BYTES", 16)
 
-        frame = read_csv_blocks(path, header=_HEADER, columns=("id",), context=_CONTEXT)
+        frame = read_csv_blocks(path, header=_HEADER, columns=("id",), context=_CONTEXT, block_bytes=16)
         partitions = _partitions(frame)
 
         assert any(partition.empty for partition in partitions)
         assert pd.concat(partitions)["id"].tolist() == ["1", "2", "3"]
 
     @pytest.mark.parametrize("record", [b"1,A\n", b"1,A,0,extra\n"])
-    def test_unprojected_record_width_errors_only_when_its_partition_runs(
-        self, tmp_path: Path, mocker: MockerFixture, record: bytes
-    ) -> None:
+    def test_unprojected_record_width_errors_only_when_its_partition_runs(self, tmp_path: Path, record: bytes) -> None:
         path = _file(tmp_path, b"id,gene,x\n" + b"0,A,0\n" * 4 + record)
-        mocker.patch.object(_blocks, "CSV_BLOCK_BYTES", 16)
-        frame = read_csv_blocks(path, header=_HEADER, columns=("gene",), context=_CONTEXT)
+        frame = read_csv_blocks(path, header=_HEADER, columns=("gene",), context=_CONTEXT, block_bytes=16)
 
         first = frame.partitions[0].compute()["gene"].tolist()
         assert first

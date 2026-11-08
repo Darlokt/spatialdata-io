@@ -515,6 +515,22 @@ class TestDbit:
         result.write(tmp_path / "output.zarr")
         assert read_zarr(tmp_path / "output.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
 
+    def test_invalid_h5ad_uns_key_is_sanitized_and_linked(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        source = ad.read_h5ad(tmp_path / "sample.h5ad")
+        source.uns["my key"] = {"nested key": "kept"}
+        source.write_h5ad(tmp_path / "sample.h5ad")
+
+        with pytest.warns(UserWarning, match="as uns keys; using 'my key' -> 'my_key'"):
+            result = dbit(tmp_path)
+
+        table = result.tables["table"]
+        assert "my key" not in table.uns
+        assert table.uns["my_key"] == {"nested key": "kept"}
+        assert get_table_keys(table) == ("sample", "region", "pixel_id")
+        result.write(tmp_path / "output.zarr")
+        assert read_zarr(tmp_path / "output.zarr").tables["table"].uns["my_key"] == {"nested key": "kept"}
+
     @pytest.mark.parametrize("kind", ["equal", "conflicting", "null", "categorical"])
     def test_reserved_output_columns_are_overwritten(self, tmp_path: Path, kind: str) -> None:
         """Replace all generated columns and prior linkage while preserving imported state."""

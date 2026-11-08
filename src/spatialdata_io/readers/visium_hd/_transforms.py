@@ -1,4 +1,25 @@
-"""Position-derived physical slide coordinates and registration diagnostics."""
+"""Coordinate maps between the 2 µm barcode grid, image pixels and ``global`` micrometres.
+
+Three coordinate spaces meet in a Visium HD output::
+
+    spot (col, row)      2 µm barcode grid indices; spot (0, 0) is the first square
+    image (x, y) px      full-resolution microscope pixels (``pxl_col/row_in_fullres``)
+    global (x, y) µm     the returned physical frame
+
+The slide is a manufactured continuous grid of 2 x 2 µm squares, so grid
+micrometres are ``2 * (index + 0.5)`` at a square's centre. Space Ranger
+registers the grid to the microscope image with one homography ``H``
+(spot -> image pixels), which the reader refits from the 2 µm positions.
+
+``global`` is grid micrometres, rigidly rotated (and, if the image is mirrored
+relative to the slide, reflected) so that the tissue appears as in the
+microscope image, with its origin at the fitted position of image pixel
+``(0, 0)``. Distances and areas in ``global`` are therefore exact slide
+micrometres. Image pixels reach ``global`` exactly through ``H^-1`` (vectors)
+or approximately through the least-squares affine of ``SlideFrame`` (rasters,
+whose residual is recorded). All maps act on homogeneous ``(x, y, 1)``
+columns; SpatialData's pixel-corner convention is used throughout.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +28,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
 
 SPOT_PITCH_UM = 2.0
 _PROJECTIVE_COEFFICIENTS = 8
@@ -31,12 +54,17 @@ class SlideFrame:
     rms_residual_um: float
 
 
-def apply_projective(matrix: NDArray[np.float64], xy: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Evaluate a validated homogeneous map on an N-by-2 coordinate array."""
+def apply_projective(
+    matrix: NDArray[np.float64], xy: NDArray[np.float64], *, context: ReaderErrorContext
+) -> NDArray[np.float64]:
+    """Evaluate a validated homogeneous map on an N-by-2 coordinate array.
+
+    ``context`` names the artifact whose coordinates are transformed.
+    """
     denominator = xy @ matrix[2, :2] + matrix[2, 2]
     if np.any(denominator == 0) or not np.all(np.isfinite(denominator)):
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "coordinate transformation"),
+            context=context,
             found="zero or nonfinite projective denominator",
             expected="finite coordinates away from the projective horizon",
         )
@@ -49,15 +77,15 @@ def grid_to_global(frame: SlideFrame, xy: NDArray[np.float64]) -> NDArray[np.flo
     return xy @ frame.grid_um_to_global[:2, :2].T + frame.grid_um_to_global[:2, 2]
 
 
-def image_to_global(frame: SlideFrame, xy: NDArray[np.float64]) -> NDArray[np.float64]:
+def image_to_global(frame: SlideFrame, xy: NDArray[np.float64], *, context: ReaderErrorContext) -> NDArray[np.float64]:
     """Exactly reproject full-resolution image coordinates into global micrometres."""
     # Finite external vertices and centroids can still overflow during reprojection.
     with np.errstate(over="ignore", invalid="ignore"):
-        spots = apply_projective(np.linalg.inv(frame.spot_to_image), xy)
+        spots = apply_projective(np.linalg.inv(frame.spot_to_image), xy, context=context)
         transformed = grid_to_global(frame, SPOT_PITCH_UM * (spots + 0.5))
     if not np.isfinite(transformed).all():
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "coordinate transformation"),
+            context=context,
             found="nonfinite transformed coordinates",
             expected="finite global coordinates representable in float64",
         )
@@ -75,13 +103,15 @@ def bin_centers(
     return grid_to_global(frame, pitch * (grid + 0.5))
 
 
-def fit_homography(source: NDArray[np.float64], target: NDArray[np.float64]) -> NDArray[np.float64]:
+def fit_homography(
+    source: NDArray[np.float64], target: NDArray[np.float64], *, context: ReaderErrorContext
+) -> NDArray[np.float64]:
     """Fit a normalized projective map from well-spread validated correspondences."""
     source_mean, target_mean = source.mean(axis=0), target.mean(axis=0)
     source_scale, target_scale = source.std(axis=0), target.std(axis=0)
     if np.any(source_scale == 0) or np.any(target_scale == 0):
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "2 micrometre positions"),
+            context=context,
             found="degenerate coordinate extent",
             expected="a two-dimensional grid and invertible registration",
         )
@@ -99,7 +129,7 @@ def fit_homography(source: NDArray[np.float64], target: NDArray[np.float64]) -> 
     solution, _, rank, _ = np.linalg.lstsq(design, normalized_target.ravel(), rcond=None)
     if rank != _PROJECTIVE_COEFFICIENTS:
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "2 micrometre positions"),
+            context=context,
             found=f"projective fit rank {rank}",
             expected="eight independent projective coefficients",
         )
@@ -113,7 +143,7 @@ def fit_homography(source: NDArray[np.float64], target: NDArray[np.float64]) -> 
     target_denormalizer[:2, 2] = target_mean
     if np.linalg.matrix_rank(normalized_matrix) != normalized_matrix.shape[0]:
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "2 micrometre positions"),
+            context=context,
             found="singular fitted homography",
             expected="an invertible two-dimensional registration",
         )

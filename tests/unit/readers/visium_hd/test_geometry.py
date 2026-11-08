@@ -15,6 +15,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd import _geometry as geometry
 from spatialdata_io.readers.visium_hd._transforms import SlideFrame
+from tests.integration.readers.visium_hd._fixtures import VERSION
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -46,7 +47,7 @@ class TestReadBoundaries:
 
     def test_order_vertices_ids_centroids_and_unprojected_columns(self, tmp_path: Path) -> None:
         path = _write(tmp_path, [_feature(3), _feature(1)])
-        result = geometry.read_boundaries(path, _frame(), kind="cell")
+        result = geometry.read_boundaries(path, _frame(), kind="cell", version=VERSION)
         assert_array_equal(result.shapes.index, [3, 1])
         assert result.shapes.index.dtype == np.dtype(np.int64)
         assert result.centroids is not None
@@ -57,24 +58,24 @@ class TestReadBoundaries:
         assert result.shapes.crs is None
 
     def test_absent_nucleus_centroid(self, tmp_path: Path) -> None:
-        result = geometry.read_boundaries(_write(tmp_path, [_feature()]), _frame(), kind="nucleus")
+        result = geometry.read_boundaries(_write(tmp_path, [_feature()]), _frame(), kind="nucleus", version=VERSION)
         assert result.centroids is None
 
     @pytest.mark.parametrize("identifier", [None, True, 0, -1, 1.5, "1", 1_000_000_000, 2**53 + 1])
     def test_bad_ids(self, tmp_path: Path, identifier: object) -> None:
         with pytest.raises(ReaderFormatError, match="cell_id"):
-            geometry.read_boundaries(_write(tmp_path, [_feature(identifier)]), _frame(), kind="cell")
+            geometry.read_boundaries(_write(tmp_path, [_feature(identifier)]), _frame(), kind="cell", version=VERSION)
 
     def test_duplicate_ids(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="duplicate"):
-            geometry.read_boundaries(_write(tmp_path, [_feature(), _feature()]), _frame(), kind="cell")
+            geometry.read_boundaries(_write(tmp_path, [_feature(), _feature()]), _frame(), kind="cell", version=VERSION)
 
     def test_missing_id(self, tmp_path: Path) -> None:
         feature = _feature()
         properties: dict[str, object] = {}
         feature["properties"] = properties
         with pytest.raises(ReaderFormatError, match="missing cell_id"):
-            geometry.read_boundaries(_write(tmp_path, [feature]), _frame(), kind="cell")
+            geometry.read_boundaries(_write(tmp_path, [feature]), _frame(), kind="cell", version=VERSION)
 
     @pytest.mark.parametrize("mode", ["holes", "multi", "point", "null", "empty", "nonfinite", "z", "unclosed"])
     def test_malformed_geometry(self, tmp_path: Path, mode: str) -> None:
@@ -97,11 +98,13 @@ class TestReadBoundaries:
         elif mode == "unclosed":
             feature["geometry"] = {"type": "Polygon", "coordinates": [ring[:-1]]}
         with pytest.raises(ReaderFormatError):
-            geometry.read_boundaries(_write(tmp_path, [feature]), _frame(), kind="cell")
+            geometry.read_boundaries(_write(tmp_path, [feature]), _frame(), kind="cell", version=VERSION)
 
     def test_preserves_invalid_geometry(self, tmp_path: Path) -> None:
         ring = [[0, 0], [1, 1], [0, 1], [1, 0], [0, 0]]
-        result = geometry.read_boundaries(_write(tmp_path, [_feature(coordinates=[ring])]), _frame(), kind="cell")
+        result = geometry.read_boundaries(
+            _write(tmp_path, [_feature(coordinates=[ring])]), _frame(), kind="cell", version=VERSION
+        )
         assert not result.shapes.geometry.is_valid.iloc[0]
         assert_allclose(shapely.get_coordinates(result.shapes.geometry.to_numpy()), 2 * np.array(ring) + 1)
 
@@ -110,16 +113,16 @@ class TestReadBoundaries:
         feature = _feature()
         feature["properties"] = {"cell_id": 1, "cell_centroid": value}
         with pytest.raises(ReaderFormatError, match="centroid"):
-            geometry.read_boundaries(_write(tmp_path, [feature]), _frame(), kind="cell")
+            geometry.read_boundaries(_write(tmp_path, [feature]), _frame(), kind="cell", version=VERSION)
 
     def test_malformed_file_and_io(self, tmp_path: Path) -> None:
         path = _write(tmp_path, [_feature()])
         path.write_text("not geojson")
         with pytest.raises(ReaderFormatError, match="malformed"):
-            geometry.read_boundaries(path, _frame(), kind="cell")
+            geometry.read_boundaries(path, _frame(), kind="cell", version=VERSION)
         path.unlink()
         with pytest.raises(FileNotFoundError) as error:
-            geometry.read_boundaries(path, _frame(), kind="cell")
+            geometry.read_boundaries(path, _frame(), kind="cell", version=VERSION)
         assert error.value.__notes__
 
 

@@ -1,4 +1,13 @@
-"""Bounded primitive square-GEF reads and exact sparse construction."""
+"""Read selected square bins of one GEF into exact sparse tables.
+
+Expression records of ``geneExp/bin<N>/expression`` are grouped by feature
+(spans given by ``gene.offset`` and ``gene.count``) and read in slices of about
+8 MiB. Each distinct ``(x, y)`` becomes one observation, numbered in order of
+first occurrence; records of the same position and feature are summed, because
+bin-1 files may repeat them while coarser producer bins already sum them
+(geftools ``bin_task.cpp``). Sums use float32 or float64 only when every partial
+sum is exactly representable; otherwise exact integers are summed first.
+"""
 
 from __future__ import annotations
 
@@ -34,12 +43,15 @@ _EXPRESSION_BUFFER_BYTES = 8 * 1024 * 1024
 class SquareCounts:
     """Own one stored-bin table and its normalized-grid coordinates."""
 
+    file: ArtifactFile
     table: ad.AnnData
     coordinates: npt.NDArray[np.int64]
     bin_size: int
     origin: tuple[int, int]
     resolution: int
     sample_id: str | None
+    # GEF schema version ``gef-<n>`` of the source file, ``None`` when absent.
+    format_version: str | None
 
 
 def _aggregate_counts(
@@ -65,7 +77,9 @@ def _aggregate_counts(
     try:
         return normalize_sparse_duplicates(csc_array((values, observation_indices, feature_indptr), shape=shape))
     except ValueError as error:
-        raise _schemas.format_error(path, "square count aggregation", str(error), "lossless completed sums") from error
+        raise _schemas.schema_error(
+            path, "square count aggregation", found=str(error), expected="lossless completed sums"
+        ) from error
 
 
 def _coordinate_rows(coordinates: npt.NDArray[np.int64]) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
@@ -76,11 +90,12 @@ def _coordinate_rows(coordinates: npt.NDArray[np.int64]) -> tuple[npt.NDArray[np
     keys = coordinates[:, 0].astype(np.uint64)
     keys <<= 32
     keys |= coordinates[:, 1].astype(np.uint32)
-    _, first_occurrence_indices, inverse_rows = np.unique(keys, return_index=True, return_inverse=True)
-    first_occurrence_order = np.argsort(first_occurrence_indices)
-    row_ids_by_unique_key = np.empty(len(first_occurrence_indices), dtype=np.int64)
-    row_ids_by_unique_key[first_occurrence_order] = np.arange(len(first_occurrence_indices), dtype=np.int64)
-    return coordinates[first_occurrence_indices[first_occurrence_order]], row_ids_by_unique_key[inverse_rows]
+
+    # Unsorted factorization numbers keys in order of first appearance, so a
+    # record starts a new row exactly where the running maximum code grows.
+    codes, _ = pd.factorize(keys, sort=False)
+    first = np.flatnonzero(np.diff(np.maximum.accumulate(codes), prepend=-1))
+    return coordinates[first], codes.astype(np.int64, copy=False)
 
 
 def _read_records(
@@ -111,7 +126,9 @@ def _read_records(
     return coordinates, counts, exon_counts
 
 
-def _read_bin(group: h5py.Group, bin_size: int, path: ArtifactFile, sample_id: str | None) -> SquareCounts:
+def _read_bin(
+    group: h5py.Group, bin_size: int, path: ArtifactFile, sample_id: str | None, format_version: str | None
+) -> SquareCounts:
     genes = _schemas.require_dataset(group, "gene", path)
     expression = _schemas.require_dataset(group, "expression", path)
     schema = _schemas.feature_schema(genes, path, kind="square")
@@ -150,7 +167,7 @@ def _read_bin(group: h5py.Group, bin_size: int, path: ArtifactFile, sample_id: s
 
     table.obsm["spatial"] = coordinates
     table.uns["stereoseq"] = {"origin": list(origin), "resolution": resolution}
-    return SquareCounts(table, coordinates, bin_size, origin, resolution, sample_id)
+    return SquareCounts(path, table, coordinates, bin_size, origin, resolution, sample_id, format_version)
 
 
 def read_square(source: SquareSource) -> tuple[SquareCounts, ...]:
@@ -166,18 +183,26 @@ def read_square(source: SquareSource) -> tuple[SquareCounts, ...]:
                     continue
                 size = int(name[3:])
                 if size in available:
-                    raise _schemas.format_error(source.file, "geneExp", repr(list(group)), "unique numeric bin names")
+                    raise _schemas.schema_error(
+                        source.file, "geneExp", found=repr(list(group)), expected="unique numeric bin names"
+                    )
                 available[size] = name
 
             selected = tuple(sorted(available)) if source.bins == "all" else source.bins
             if not selected or any(size not in available for size in selected):
-                raise _schemas.format_error(
-                    source.file, "geneExp", f"available bins {sorted(available)}", f"selected stored bins {selected}"
+                raise _schemas.schema_error(
+                    source.file,
+                    "geneExp",
+                    found=f"available bins {sorted(available)}",
+                    expected=f"selected stored bins {selected}",
                 )
             sample = _schemas.sample_id(handle, source.file)
+            version = _schemas.format_version(handle.attrs, source.file)
 
             return tuple(
-                _read_bin(_schemas.require_group(group, available[size], source.file), size, source.file, sample)
+                _read_bin(
+                    _schemas.require_group(group, available[size], source.file), size, source.file, sample, version
+                )
                 for size in selected
             )
     except OSError as error:

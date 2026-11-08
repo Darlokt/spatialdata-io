@@ -26,7 +26,7 @@ import shapely
 from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity, Translation
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
 from spatialdata_io.readers.xenium._schemas import (
     CELL_ID,
@@ -39,7 +39,6 @@ from spatialdata_io.readers.xenium._schemas import (
     id_type,
     normalize_ids,
     require_no_nulls,
-    schema_error,
     validate_header,
 )
 from spatialdata_io.readers.xenium._tables import read_csv_table, read_header
@@ -49,7 +48,9 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
+    from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.xenium._cells import CellStore
     from spatialdata_io.readers.xenium._layout import TabularSource
     from spatialdata_io.readers.xenium._tables import Cells
@@ -68,14 +69,17 @@ class Polygons:
 
     ``labels`` are mask labels when known and ``None`` for hexadecimal-ID nuclei
     without ``cells.zarr.zip``. ``geometries`` is ``None`` where a ring has fewer
-    than four coordinates (``degenerate``).
+    than four coordinates (``degenerate``). ``path`` and ``context`` identify the
+    source in later policy and model errors.
     """
 
+    kind: BoundaryKind
     cell_ids: pd.Index
     labels: NDArray[np.uint32] | None
     geometries: NDArray[np.object_]
     degenerate: NDArray[np.bool_]
-    source: TabularSource
+    path: ArtifactFile
+    context: ReaderErrorContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,36 +91,63 @@ class _Vertices:
     coordinates: NDArray[np.float64]
 
 
-def _read_vertices(source: TabularSource, family: Family, kind: BoundaryKind) -> _Vertices:
-    path, artifact = source.file, f"{kind} boundaries"
-    names = pq.read_schema(path).names if source.kind == "parquet" else read_header(source)
-    validate_header(names, (CELL_ID, *VERTICES), path=path, artifact=artifact)
+def _read_vertices(source: TabularSource, family: Family, context: ReaderErrorContext) -> _Vertices:
+    path = source.file
+    names = pq.read_schema(path).names if source.kind == "parquet" else read_header(source, context=context)
+    validate_header(names, (CELL_ID, *VERTICES), path=path, context=context)
     columns = [CELL_ID, *VERTICES, *((LABEL_ID,) if LABEL_ID in names else ())]
     types = {CELL_ID: id_type(family), VERTICES[0]: FLOAT32, VERTICES[1]: FLOAT32, LABEL_ID: INT64}
     table = (
         pq.read_table(path, columns=columns)
         if source.kind == "parquet"
-        else read_csv_table(source, names, types, columns=columns)
+        else read_csv_table(source, names, types, columns=columns, context=context)
     )
-    require_no_nulls(table, path=path, artifact=artifact)
+    require_no_nulls(table, path=path, context=context)
 
-    ids = id_index(normalize_ids(table[CELL_ID], family, path=path, artifact=artifact))
+    ids = id_index(normalize_ids(table[CELL_ID], family, path=path, context=context))
     # float32 vertices are exact in the float64 coordinates Shapely uses.
     coordinates = np.column_stack(
         [
-            np.asarray(
-                cast_column(table[name], FLOAT32, name, path=path, artifact=artifact).to_numpy(), dtype=np.float64
-            )
+            np.asarray(cast_column(table[name], FLOAT32, name, path=path, context=context).to_numpy(), dtype=np.float64)
             for name in VERTICES
         ]
     )
     labels = None
     if LABEL_ID in columns:
-        labels = np.asarray(cast_column(table[LABEL_ID], INT64, LABEL_ID, path=path, artifact=artifact).to_numpy())
+        labels = np.asarray(cast_column(table[LABEL_ID], INT64, LABEL_ID, path=path, context=context).to_numpy())
     return _Vertices(ids, labels, coordinates)
 
 
-def read_polygons(source: TabularSource, family: Family, kind: BoundaryKind, store: CellStore | None) -> Polygons:
+def _runs(vertices: _Vertices, path: Path, context: ReaderErrorContext) -> tuple[NDArray[np.intp], NDArray[np.intp]]:
+    """Return the first row and the row count of every polygon, checking contiguity and closure."""
+
+    def error(*, found: str, expected: str) -> ReaderFormatError:
+        return ReaderFormatError(context=context, path=path, found=found, expected=expected)
+
+    if not np.isfinite(vertices.coordinates).all():
+        raise error(found="nonfinite vertices", expected="finite micrometre vertices")
+    # A polygon is one run of equal keys: label_id when present, otherwise cell_id.
+    id_codes = vertices.ids.factorize()[0]
+    keys = id_codes if vertices.labels is None else vertices.labels
+    starts = np.flatnonzero(np.concatenate([[True], keys[1:] != keys[:-1]])) if len(keys) else np.empty(0, np.intp)
+    if len(np.unique(keys[starts])) != len(starts):
+        raise error(found="interleaved polygon rows", expected="contiguous rows per polygon")
+    lengths = np.diff(np.append(starts, len(keys)))
+    if (id_codes != np.repeat(id_codes[starts], lengths)).any():
+        raise error(found="a polygon spanning several cells", expected="one cell per label_id")
+    if not (vertices.coordinates[starts] == vertices.coordinates[starts + lengths - 1]).all():
+        raise error(found="open rings", expected="rings repeating their first vertex")
+    return starts, lengths
+
+
+def read_polygons(
+    source: TabularSource,
+    family: Family,
+    kind: BoundaryKind,
+    store: CellStore | None,
+    *,
+    context: ReaderErrorContext,
+) -> Polygons:
     """Group contiguous vertex rows into polygons and check them against the cell store.
 
     Raises
@@ -126,29 +157,16 @@ def read_polygons(source: TabularSource, family: Family, kind: BoundaryKind, sto
         finite, a ``label_id`` polygon spans several cells, polygon-set nuclei lack
         ``label_id``, labels disagree with ``cells.zarr.zip``, or IDs are unknown.
     """
-    path, artifact = source.file, f"{kind} boundaries"
-    vertices = _read_vertices(source, family, kind)
+    path = source.file
+    vertices = _read_vertices(source, family, context)
     if family == "polygon_sets" and kind == "nucleus" and vertices.labels is None:
-        raise schema_error(
-            path,
-            artifact,
+        raise ReaderFormatError(
+            context=context,
+            path=path,
             found="nucleus boundaries without label_id (early XOA 2.0 builds)",
             expected="label_id to separate the nuclei of multinucleate cells; use include_nucleus_boundaries=False",
         )
-    if not np.isfinite(vertices.coordinates).all():
-        raise schema_error(path, artifact, found="nonfinite vertices", expected="finite micrometre vertices")
-
-    # A polygon is one run of equal keys: label_id when present, otherwise cell_id.
-    id_codes, unique_ids = vertices.ids.factorize()
-    keys = id_codes if vertices.labels is None else vertices.labels
-    starts = np.flatnonzero(np.concatenate([[True], keys[1:] != keys[:-1]])) if len(keys) else np.empty(0, np.intp)
-    if len(np.unique(keys[starts])) != len(starts):
-        raise schema_error(path, artifact, found="interleaved polygon rows", expected="contiguous rows per polygon")
-    lengths = np.diff(np.append(starts, len(keys)))
-    if (id_codes != np.repeat(id_codes[starts], lengths)).any():
-        raise schema_error(path, artifact, found="a polygon spanning several cells", expected="one cell per label_id")
-    if not (vertices.coordinates[starts] == vertices.coordinates[starts + lengths - 1]).all():
-        raise schema_error(path, artifact, found="open rings", expected="rings repeating their first vertex")
+    starts, lengths = _runs(vertices, path, context)
 
     degenerate = lengths < _MIN_RING_COORDINATES
     geometries = np.full(len(starts), None, dtype=object)
@@ -161,62 +179,69 @@ def read_polygons(source: TabularSource, family: Family, kind: BoundaryKind, sto
             (offsets, np.arange(built.sum() + 1)),
         )
 
-    cell_ids = pd.Index(unique_ids)[id_codes[starts]]
+    cell_ids = vertices.ids[starts]
     file_labels = None if vertices.labels is None else vertices.labels[starts]
     if store is not None:
-        labels = _store_labels(file_labels, cell_ids, kind, store, path)
+        labels = _store_labels(file_labels, cell_ids, kind, store, path=path, context=context)
     elif file_labels is not None:
-        labels = _uint32_labels(file_labels, path, artifact)
+        labels = _uint32_labels(file_labels, path, context)
     elif family == "integer_ids":
         # Integer cell IDs are their own mask labels; nuclei carry their cell's label.
-        labels = _uint32_labels(cell_ids.to_numpy(dtype=np.int64), path, artifact)
+        labels = _uint32_labels(cell_ids.to_numpy(dtype=np.int64), path, context)
     else:
         labels = None
-    return Polygons(cell_ids, labels, geometries, degenerate, source)
+    return Polygons(kind, cell_ids, labels, geometries, degenerate, path, context)
 
 
-def _uint32_labels(values: NDArray[np.int64], path: Path, artifact: str) -> NDArray[np.uint32]:
+def _uint32_labels(values: NDArray[np.int64], path: Path, context: ReaderErrorContext) -> NDArray[np.uint32]:
     if (values <= 0).any() or values.max(initial=0) > np.iinfo(np.uint32).max:
-        raise schema_error(path, artifact, found="nonpositive or oversized labels", expected="uint32 labels from 1")
+        raise ReaderFormatError(
+            context=context, path=path, found="nonpositive or oversized labels", expected="uint32 labels from 1"
+        )
     return values.astype(np.uint32)
 
 
-def _store_labels(
+def _store_labels(  # noqa: PLR0913, RUF100 - Labels, owners and the error origin.
     file_labels: NDArray[np.int64] | None,
     cell_ids: pd.Index,
     kind: BoundaryKind,
     store: CellStore,
+    *,
     path: Path,
+    context: ReaderErrorContext,
 ) -> NDArray[np.uint32]:
     """Return polygon mask labels whose owning cells agree with ``cells.zarr.zip``."""
-    artifact = f"{kind} boundaries"
     rows = store.cell_ids.get_indexer(cell_ids)
     if (rows < 0).any():
-        raise schema_error(path, artifact, found="cell IDs absent from cells.zarr.zip", expected="known cell IDs")
+        raise ReaderFormatError(
+            context=context, path=path, found="cell IDs absent from cells.zarr.zip", expected="known cell IDs"
+        )
     if file_labels is None:
         # Integer and hexadecimal families: a nucleus carries its cell's label.
         return store.cell_labels[rows]
 
     # Polygon sets: label = polygon index + 1 of the named set, owned by cell_index.
-    labels = _uint32_labels(file_labels, path, artifact)
+    labels = _uint32_labels(file_labels, path, context)
     if kind == "cell":
         agrees = np.array_equal(labels, store.cell_labels[rows])
     elif store.nucleus_cells is None:
-        raise schema_error(path, artifact, found="no nucleus polygon set in cells.zarr.zip", expected="a nucleus set")
+        raise ReaderFormatError(
+            context=context, path=path, found="no nucleus polygon set in cells.zarr.zip", expected="a nucleus set"
+        )
     else:
         owners = store.nucleus_cells
         agrees = not (labels > len(owners)).any() and np.array_equal(owners[labels - 1], rows)
     if not agrees:
-        raise schema_error(
-            path,
-            artifact,
+        raise ReaderFormatError(
+            context=context,
+            path=path,
             found="label_id values owned by other cells in cells.zarr.zip",
             expected="label_id = polygon index + 1 of the stored set, owned by the polygon's cell",
         )
     return labels
 
 
-def apply_policy(polygons: Polygons, policy: InvalidGeometryPolicy, kind: BoundaryKind) -> NDArray[np.bool_]:
+def apply_policy(polygons: Polygons, policy: InvalidGeometryPolicy) -> NDArray[np.bool_]:
     """Return which polygons remain; rings too short to build count as invalid entities.
 
     Raises
@@ -226,15 +251,14 @@ def apply_policy(polygons: Polygons, policy: InvalidGeometryPolicy, kind: Bounda
         ``"keep"`` for degenerate rings, which cannot be represented.
     """
     built = ~polygons.degenerate
-    context = ReaderErrorContext("xenium", f"{kind} boundaries")
     # Report the identifiers that index the returned element, only when needed.
-    identifiers = polygons.labels if kind == "nucleus" and polygons.labels is not None else polygons.cell_ids
+    identifiers = polygons.labels if polygons.kind == "nucleus" and polygons.labels is not None else polygons.cell_ids
     if policy == "keep":
         if polygons.degenerate.any():
             examples = identifiers[np.flatnonzero(polygons.degenerate)[:10]].tolist()
             raise ReaderFormatError(
-                context=context,
-                path=polygons.source.file,
+                context=polygons.context,
+                path=polygons.path,
                 found=f"{int(polygons.degenerate.sum())} rings with fewer than four coordinates, e.g. {examples!r}",
                 expected="buildable polygons; invalid_geometries='drop' removes them as invalid entities",
             )
@@ -243,17 +267,17 @@ def apply_policy(polygons: Polygons, policy: InvalidGeometryPolicy, kind: Bounda
     invalid = polygons.degenerate.copy()
     invalid[built] = invalid_geometry_mask(polygons.geometries[built])
     if policy == "raise" and invalid.any():
-        raise_invalid_geometries(invalid, identifiers.tolist(), context=context, path=polygons.source.file)
+        raise_invalid_geometries(invalid, identifiers.tolist(), context=polygons.context, path=polygons.path)
     return ~invalid
 
 
-def _parse(frame: gpd.GeoDataFrame, source: TabularSource, kind: BoundaryKind, pixel_size: float) -> gpd.GeoDataFrame:
+def _parse(frame: gpd.GeoDataFrame, polygons: Polygons, pixel_size: float) -> gpd.GeoDataFrame:
     if frame.empty:
-        raise schema_error(
-            source.file,
-            f"{kind} boundaries",
+        raise ReaderFormatError(
+            context=polygons.context,
+            path=polygons.path,
             found="no polygons to return",
-            expected=f"at least one polygon; use include_{kind}_boundaries=False",
+            expected=f"at least one polygon; use include_{polygons.kind}_boundaries=False",
         )
     # Register pixel-index vertices in the corner frame without changing them.
     half = pixel_size / 2
@@ -264,22 +288,22 @@ def make_cell_polygons(polygons: Polygons, kept: NDArray[np.bool_], pixel_size: 
     """Index cell polygons by ``cell_id`` in the registered micrometre frame."""
     index = polygons.cell_ids[kept].rename(CELL_ID)
     frame = gpd.GeoDataFrame(geometry=gpd.GeoSeries(polygons.geometries[kept], index=index))
-    return _parse(frame, polygons.source, "cell", pixel_size)
+    return _parse(frame, polygons, pixel_size)
 
 
 def make_nucleus_polygons(polygons: Polygons, kept: NDArray[np.bool_], pixel_size: float) -> gpd.GeoDataFrame:
     """Index nucleus polygons by nucleus mask label, with their owning ``cell_id``."""
     if polygons.labels is None:
-        raise schema_error(
-            polygons.source.file,
-            "nucleus boundaries",
+        raise ReaderFormatError(
+            context=polygons.context,
+            path=polygons.path,
             found="hexadecimal-ID nuclei without cells.zarr.zip",
             expected="seg_mask_value labels from cells.zarr.zip; use include_nucleus_boundaries=False",
         )
     index = pd.Index(polygons.labels[kept], name=LABEL_ID)
     cell_ids = pd.Series(polygons.cell_ids[kept].array, index=index)
     frame = gpd.GeoDataFrame({CELL_ID: cell_ids}, geometry=gpd.GeoSeries(polygons.geometries[kept], index=index))
-    return _parse(frame, polygons.source, "nucleus", pixel_size)
+    return _parse(frame, polygons, pixel_size)
 
 
 def make_circles(cells: Cells, kept: NDArray[np.bool_]) -> gpd.GeoDataFrame:

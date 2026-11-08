@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import shutil
+from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
@@ -24,6 +25,7 @@ from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Identity, get_transformation
 
 from spatialdata_io import __version__
+from spatialdata_io.readers._utils.csv import read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers.merscope import merscope
@@ -458,7 +460,9 @@ class TestMerscope:
                 "ignored": ['a comma, and a "quote"'] * 80,
             }
         ).to_csv(fixture.root / "detected_transcripts.csv", index=False)
-        mocker.patch("spatialdata_io.readers._utils.csv._blocks.CSV_BLOCK_BYTES", 256)
+        mocker.patch(
+            "spatialdata_io.readers.merscope._transcripts.read_csv_blocks", partial(read_csv_blocks, block_bytes=256)
+        )
         completed: list[str] = []
         with Callback(posttask=lambda key, *_: completed.append(str(key))):
             result = merscope(fixture.root)

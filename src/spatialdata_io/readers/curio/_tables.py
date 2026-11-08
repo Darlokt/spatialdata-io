@@ -15,9 +15,11 @@ slot stay as stored. The text files add:
   features the file does not list. Statistic names that a SpatialData table
   does not accept (``MoransI observed``) are sanitized with one warning.
 
-H5AD ``obs`` and ``var`` column names that a SpatialData table does not accept
-(``my note``) are sanitized with one warning per frame before the reader adds
-its own columns, which keep their names.
+H5AD ``obs`` and ``var`` column names and top-level ``uns`` keys that a
+SpatialData table does not accept (``my note``) are sanitized with one warning
+per frame or mapping before the reader adds its own columns and keys, which
+keep their names; ``uns`` values, their order and nested keys stay as stored.
+Metric categories are then sanitized against the sanitized ``uns`` keys.
 
 Text files are UTF-8, optionally with a byte-order mark. pandas' Python parser
 is used because it keeps NUL characters for rejection, distinguishes a missing
@@ -34,7 +36,7 @@ import pandas as pd
 
 from spatialdata_io.readers._utils.csv import read_csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.names import sanitize_column_names
+from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers.curio._layout import CLUSTER_FEATURES, CLUSTERS, COUNTS, METRICS, MORAN_FEATURES
 from spatialdata_io.readers.curio._schemas import (
     CLUSTER_COLUMNS,
@@ -69,6 +71,7 @@ def read_table(layout: CurioLayout) -> ad.AnnData:
     obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
     obs.columns = sanitize_column_names(list(obs.columns), source="curio: the H5AD obs", reserved=RESERVED_OBS)
     var.columns = sanitize_column_names(list(var.columns), source="curio: the H5AD var")
+    sanitize_uns_keys(table, source="curio: the H5AD uns", reserved=RESERVED_UNS)
 
     clusters = _read_rows(layout.clusters, CLUSTERS, delimiter="\t", columns=CLUSTER_COLUMNS, header=False)
     validate_clusters(clusters, table.obs_names, layout.clusters)

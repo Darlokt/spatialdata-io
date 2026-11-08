@@ -69,6 +69,22 @@ class TestCurio:
         assert restored.obs.columns.tolist() == table.obs.columns.tolist()
         assert restored.uns["Run_Metrics"] == {"Reads": "100", "Spots": "4"}
 
+    def test_invalid_h5ad_uns_key_is_sanitized_and_linked(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        source = ad.read_h5ad(tmp_path / "sample_anndata.h5ad")
+        source.uns["my key"] = {"nested key": "kept"}
+        source.write_h5ad(tmp_path / "sample_anndata.h5ad")
+
+        with pytest.warns(UserWarning, match="as uns keys; using 'my key' -> 'my_key'"):
+            result = curio(tmp_path)
+
+        table = result.tables["table"]
+        assert "my key" not in table.uns
+        assert table.uns["my_key"] == {"nested key": "kept"}
+        assert get_table_keys(table) == ("cells", "region", "instance_id")
+        result.write(tmp_path / "output.zarr")
+        assert SpatialData.read(tmp_path / "output.zarr").tables["table"].uns["my_key"] == {"nested key": "kept"}
+
     def test_moran_statistic_names_are_sanitized(self, tmp_path: Path) -> None:
         write_curio(tmp_path)
         (tmp_path / "sample_variable_features_spatial_moransi.txt").write_text(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ import pytest
 
 from spatialdata_io._cli.commands.stereoseq import stereoseq_command
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers.stereoseq import stereoseq
 
 if TYPE_CHECKING:
     from unittest.mock import MagicMock
@@ -150,3 +152,11 @@ class TestStereoseqCommand:
         assert options["chunks"].default == DEFAULT_CHUNKS
         assert options["cell_bins"].default == "none"
         assert options["cell_geometry"].default == "centroids"
+        assert options["invalid_geometries"].default == "keep"
+        assert options["path_policy"].default == "strict"
+
+    def test_option_order_matches_the_reader_signature(self) -> None:
+        reader = list(inspect.signature(stereoseq).parameters)
+        command = [parameter.name for parameter in stereoseq_command.params]
+
+        assert command == ["input_path", "output_path", *reader[1:]]

@@ -12,8 +12,10 @@ XOA writes an extracted ``analysis/`` directory (1.0.x) or ``analysis.tar.gz``
   ``obsm["pca_<method>"]`` and ``obsm["umap_<method>"]``.
 
 10x omits cells it filtered before clustering; they become missing values.
-Differential expression, PCA loadings and protein z-score summaries are not
-per-cell data and stay unread.
+Each kind and method must name exactly one CSV. Methods are compared ignoring
+letter case, as SpatialData compares annotation names. Differential expression,
+PCA loadings and protein z-score summaries are not per-cell data and stay
+unread.
 """
 
 from __future__ import annotations
@@ -31,10 +33,10 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 
 from spatialdata_io.readers._utils.csv import parse_csv_header
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import list_directory
 from spatialdata_io.readers.xenium._layout import AnalysisDirectory
-from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, schema_error, text_series, validate_analysis_header
+from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, text_series, validate_analysis_header
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -43,13 +45,13 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers.xenium._layout import AnalysisSource
 
 _MEMBER = re.compile(
     r"(?:analysis/)?(?P<kind>clustering|pca|umap)/(?P<method>[A-Za-z0-9_.-]+)/(?P<file>clusters|projection)\.csv"
 )
 _FILES = {"clustering": "clusters", "pca": "projection", "umap": "projection"}
-_CONTEXT = ReaderErrorContext("xenium", "analysis")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,30 +62,35 @@ class Analysis:
     projections: dict[str, NDArray[np.float64]]
 
 
-def _identity(name: str, seen: set[tuple[str, str]], path: Path) -> tuple[str, str] | None:
+def _identity(name: str, seen: set[tuple[str, str]], path: Path, context: ReaderErrorContext) -> tuple[str, str] | None:
     """Reject ambiguous semantic artifacts before reading any selected payload."""
     match = _MEMBER.fullmatch(name)
     if match is None or match["file"] != _FILES[match["kind"]]:
         return None
     identity = match["kind"], match["method"]
-    if identity in seen:
-        raise schema_error(
-            path, "analysis", found=f"repeated analysis identity {identity!r}", expected="one CSV per kind and method"
+    if (match["kind"], match["method"].lower()) in seen:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"repeated analysis identity {identity!r}",
+            expected="one CSV per kind and method, ignoring letter case",
         )
-    seen.add(identity)
+    seen.add((match["kind"], match["method"].lower()))
     return identity
 
 
-def _members(source: AnalysisSource) -> Generator[tuple[str, str, IO[bytes], Path], None, None]:
+def _members(
+    source: AnalysisSource, context: ReaderErrorContext
+) -> Generator[tuple[str, str, IO[bytes], Path], None, None]:
     """Own selected CSV streams after rejecting repeated semantic identities."""
     seen: set[tuple[str, str]] = set()
     if isinstance(source, AnalysisDirectory):
         files: list[tuple[str, str, Path]] = []
         path: Path
         # Path order (component-wise) fixes the order of the returned annotations.
-        listing = list_directory(source.directory, context=_CONTEXT, recursive=True)
+        listing = list_directory(source.directory, context=context, recursive=True)
         for path in sorted(path for path in listing if path.name.endswith(".csv")):
-            identity = _identity(path.relative_to(source.directory).as_posix(), seen, path)
+            identity = _identity(path.relative_to(source.directory).as_posix(), seen, path, context)
             if identity is not None:
                 files.append((*identity, path))
         for kind, method, path in files:
@@ -93,25 +100,29 @@ def _members(source: AnalysisSource) -> Generator[tuple[str, str, IO[bytes], Pat
     with tarfile.open(source.file, "r:gz") as archive:
         members: list[tuple[str, str, tarfile.TarInfo]] = []
         for member in sorted((member for member in archive if member.isfile()), key=lambda member: member.name):
-            identity = _identity(str(PurePosixPath(member.name)), seen, source.file)
+            identity = _identity(str(PurePosixPath(member.name)), seen, source.file, context)
             if identity is not None:
                 members.append((*identity, member))
         for kind, method, member in members:
             member_handle = archive.extractfile(member)
             if member_handle is None:  # pragma: no cover - isfile() members always have a payload
-                raise schema_error(source.file, member.name, found="no payload", expected="a regular analysis CSV")
+                raise ReaderFormatError(
+                    context=context, path=source.file, found=f"{member.name} without payload", expected="a regular CSV"
+                )
             with member_handle:
                 yield kind, method, member_handle, source.file
 
 
-def _header(handle: IO[bytes], path: Path) -> list[str]:
-    header = parse_csv_header(handle.readline(), context=_CONTEXT, path=path)
+def _header(handle: IO[bytes], path: Path, context: ReaderErrorContext) -> list[str]:
+    header = parse_csv_header(handle.readline(), context=context, path=path)
     # Arrow reads the header itself; no encoded body buffer is retained.
     handle.seek(0)
     return header
 
 
-def _table(handle: IO[bytes], header: list[str], value: pa.DataType, path: Path) -> pa.Table:
+def _table(
+    handle: IO[bytes], header: list[str], value: pa.DataType, path: Path, context: ReaderErrorContext
+) -> pa.Table:
     """Parse an owned CSV stream directly with text barcodes and typed values."""
     try:
         return pacsv.read_csv(
@@ -123,39 +134,47 @@ def _table(handle: IO[bytes], header: list[str], value: pa.DataType, path: Path)
             ),
         )
     except pa.ArrowInvalid as error:
-        raise schema_error(path, "analysis", found=f"malformed CSV: {error}", expected=f"columns {header!r}") from error
+        raise ReaderFormatError(
+            context=context, path=path, found=f"malformed CSV: {error}", expected=f"columns {header!r}"
+        ) from error
 
 
-def _rows(table: pa.Table, barcodes: pd.Index, path: Path) -> NDArray[np.intp]:
+def _rows(table: pa.Table, barcodes: pd.Index, path: Path, context: ReaderErrorContext) -> NDArray[np.intp]:
     """Return the cell row of every record; barcodes must be unique and known."""
     rows = barcodes.get_indexer(pd.Index(text_series(table[BARCODE])))
     if (rows < 0).any() or not pd.Index(rows).is_unique:
-        raise schema_error(
-            path, "analysis", found="unknown or repeated barcodes", expected="unique barcodes of known cells"
+        raise ReaderFormatError(
+            context=context, path=path, found="unknown or repeated barcodes", expected="unique barcodes of known cells"
         )
     return rows
 
 
-def _clusters(table: pa.Table, barcodes: pd.Index, path: Path) -> pd.Categorical:
+def _clusters(table: pa.Table, barcodes: pd.Index, path: Path, context: ReaderErrorContext) -> pd.Categorical:
     values = np.asarray(table[CLUSTER].to_numpy(), dtype=np.int64)
     if (values <= 0).any():
-        raise schema_error(path, "analysis", found="nonpositive clusters", expected="positive integer clusters")
+        raise ReaderFormatError(
+            context=context, path=path, found="nonpositive clusters", expected="positive integer clusters"
+        )
     categories = np.unique(values)
     codes = np.full(len(barcodes), -1, dtype=np.int64)
-    codes[_rows(table, barcodes, path)] = np.searchsorted(categories, values)
+    codes[_rows(table, barcodes, path, context)] = np.searchsorted(categories, values)
     return pd.Categorical.from_codes(codes, categories=pd.Index(categories.astype(np.str_), dtype="str"))
 
 
-def _projection(table: pa.Table, header: list[str], barcodes: pd.Index, path: Path) -> NDArray[np.float64]:
+def _projection(
+    table: pa.Table, header: list[str], barcodes: pd.Index, path: Path, context: ReaderErrorContext
+) -> NDArray[np.float64]:
     values = np.column_stack([np.asarray(table[name].to_numpy(), dtype=np.float64) for name in header[1:]])
     if not np.isfinite(values).all():
-        raise schema_error(path, "analysis", found="nonfinite projections", expected="finite projections")
+        raise ReaderFormatError(
+            context=context, path=path, found="nonfinite projections", expected="finite projections"
+        )
     matrix = np.full((len(barcodes), len(header) - 1), np.nan)
-    matrix[_rows(table, barcodes, path)] = values
+    matrix[_rows(table, barcodes, path, context)] = values
     return matrix
 
 
-def read_analysis(source: AnalysisSource, barcodes: pd.Index) -> Analysis:
+def read_analysis(source: AnalysisSource, barcodes: pd.Index, *, context: ReaderErrorContext) -> Analysis:
     """Align every clustering and projection to ``barcodes``; absent cells are missing.
 
     Raises
@@ -167,15 +186,14 @@ def read_analysis(source: AnalysisSource, barcodes: pd.Index) -> Analysis:
     """
     clusters: dict[str, pd.Categorical] = {}
     projections: dict[str, NDArray[np.float64]] = {}
-    with closing(_members(source)) as members:
+    with closing(_members(source, context)) as members:
         for kind, method, handle, path in members:
-            header = _header(handle, path)
-            validate_analysis_header(header, kind, path=path)
+            header = _header(handle, path, context)
+            validate_analysis_header(header, kind, path=path, context=context)
             if kind == "clustering":
-                clusters[method] = _clusters(_table(handle, header, pa.int64(), path), barcodes, path)
-                continue
-
-            projections[f"{kind}_{method}"] = _projection(
-                _table(handle, header, pa.float64(), path), header, barcodes, path
-            )
+                table = _table(handle, header, pa.int64(), path, context)
+                clusters[method] = _clusters(table, barcodes, path, context)
+            else:
+                table = _table(handle, header, pa.float64(), path, context)
+                projections[f"{kind}_{method}"] = _projection(table, header, barcodes, path, context)
     return Analysis(clusters, projections)

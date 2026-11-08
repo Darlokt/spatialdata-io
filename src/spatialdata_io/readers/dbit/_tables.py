@@ -11,8 +11,10 @@ and B the y axis; the one-based ordinals are written to ``obs["array_A"]``,
 ``obs["array_B"]`` and ``obsm["spatial_grid"]`` (int64, columns A then B), and
 ``uns["spatialdata_io_positions"]`` declares ``spatial_grid`` as one-based
 ordinals of the ``grid_pixels`` frame. Imported ``obs`` and ``var`` column
-names that a SpatialData table does not accept (``my note``) are sanitized with
-one warning per frame before these columns are added. An imported ``obsm["spatial"]`` is kept unchanged as
+names and top-level ``uns`` keys that a SpatialData table does not accept
+(``my note``) are sanitized with one warning per frame or mapping before these
+columns and keys are added; ``uns`` values, their order and nested keys stay as
+stored. An imported ``obsm["spatial"]`` is kept unchanged as
 ``obsm["spatial_source"]``; no physical ``spatial`` embedding is produced.
 
 The table may hold any subset of the grid. Rows stay in source order here: the
@@ -28,10 +30,11 @@ from typing import TYPE_CHECKING, cast
 import anndata as ad
 import numpy as np
 import pandas as pd
+from spatialdata.models import TableModel
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers._utils.names import sanitize_column_names
+from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers.dbit._schemas import (
     BARCODE_LENGTH,
     GRID_DTYPE,
@@ -51,6 +54,8 @@ _CONTEXT = ReaderErrorContext("dbit", "expression table")
 # Observation columns the reader writes; imported columns that equal one
 # ignoring letter case are renamed, and exact ones are replaced as before.
 READER_OBS_COLUMNS = ("array_A", "array_B", "region", "sample", "pixel_id")
+# uns keys the reader writes; an exact imported spatialdata_attrs is replaced.
+_READER_UNS_KEYS = (POSITIONS_KEY, TableModel.ATTRS_KEY)
 
 
 def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
@@ -69,6 +74,7 @@ def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
     obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
     obs.columns = sanitize_column_names(list(obs.columns), source="dbit: the H5AD obs", reserved=READER_OBS_COLUMNS)
     var.columns = sanitize_column_names(list(var.columns), source="dbit: the H5AD var")
+    sanitize_uns_keys(table, source="dbit: the H5AD uns", reserved=_READER_UNS_KEYS)
     if "spatial" in table.obsm:
         table.obsm["spatial_source"] = table.obsm.pop("spatial")
 

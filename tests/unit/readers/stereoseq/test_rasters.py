@@ -10,7 +10,7 @@ import pytest
 import tifffile
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Scale, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 DEFAULT_OPTIONS = make_raster_options()
+# The builders attach exactly the transformations the reader passes.
+FRAME = {"global": Scale([0.5, 0.5], axes=("x", "y"))}
 
 
 class TestReadImage:
@@ -42,7 +44,9 @@ class TestReadImage:
         # Chunks equal to the stored tiles; default tiles would merge them all.
         with Callback(posttask=tasks):
             image = read_image(
-                ImageSource(ArtifactFile(path), "registered", "image"), raster=make_raster_options(chunks=(1, 32, 32))
+                ImageSource(ArtifactFile(path), "registered", "image"),
+                raster=make_raster_options(chunks=(1, 32, 32)),
+                transformations=FRAME,
             )
         assert isinstance(image, DataArray)
         tasks.assert_not_called()
@@ -62,7 +66,9 @@ class TestReadImage:
         tifffile.imwrite(path, pixels, metadata={"axes": axes}, photometric="rgb" if axes == "YXS" else "minisblack")
 
         image = read_image(
-            ImageSource(ArtifactFile(path), "registered", "image"), raster=make_raster_options(chunks=(1, 8, 8))
+            ImageSource(ArtifactFile(path), "registered", "image"),
+            raster=make_raster_options(chunks=(1, 8, 8)),
+            transformations=FRAME,
         )
         assert isinstance(image, DataArray)
         expected = pixels.transpose(2, 0, 1) if axes == "YXS" else pixels[0] if axes == "TCYX" else pixels
@@ -71,12 +77,71 @@ class TestReadImage:
         if axes == "YXS":
             assert image.c.values.tolist() == ["r", "g", "b"]
 
+    @pytest.mark.parametrize(
+        ("samples", "photometric", "extrasamples", "expected"),
+        [
+            (3, "rgb", None, ["r", "g", "b"]),
+            (4, "rgb", ("unassalpha",), ["r", "g", "b", "a"]),
+            (3, "minisblack", None, [0, 1, 2]),
+            (4, "minisblack", None, [0, 1, 2, 3]),
+            (4, "rgb", ("unspecified",), [0, 1, 2, 3]),
+        ],
+        ids=["rgb", "rgba", "minisblack3", "minisblack4", "rgb_unspecified_extra"],
+    )
+    def test_channel_names_follow_the_declared_colour_model(
+        self,
+        tmp_path: Path,
+        samples: int,
+        photometric: str,
+        extrasamples: tuple[str, ...] | None,
+        expected: list[str] | list[int],
+    ) -> None:
+        path = tmp_path / "sample_regist.tif"
+        pixels = np.arange(16 * 24 * samples, dtype=np.uint8).reshape(16, 24, samples)
+        tifffile.imwrite(
+            path, pixels, photometric=photometric, planarconfig="contig", extrasamples=extrasamples, metadata=None
+        )
+        assert tifffile.TiffFile(path).series[0].axes == "YXS"
+
+        image = read_image(
+            ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS, transformations=FRAME
+        )
+        assert isinstance(image, DataArray)
+        assert image.c.values.tolist() == expected
+        assert_array_equal(image.data.compute(), pixels.transpose(2, 0, 1))
+
+    def test_three_scientific_channels_stay_positional(self, tmp_path: Path) -> None:
+        path = tmp_path / "sample_regist.tif"
+        tifffile.imwrite(path, np.zeros((3, 16, 24), dtype=np.uint8), metadata={"axes": "CYX"})
+
+        image = read_image(
+            ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS, transformations=FRAME
+        )
+        assert isinstance(image, DataArray)
+        assert image.c.values.tolist() == [0, 1, 2]
+
+    def test_rejects_scale_factors_beyond_the_image_extent(self, tmp_path: Path) -> None:
+        path = tmp_path / "sample_regist.tif"
+        tifffile.imwrite(path, np.zeros((16, 24), dtype=np.uint8), metadata={"axes": "YX"})
+
+        with pytest.raises(
+            ValueError,
+            match=r"scale factors \(4, 8\) exceed the spatial extent of Stereo-seq image 'registered' \(16 x 24",
+        ):
+            read_image(
+                ImageSource(ArtifactFile(path), "registered", "image"),
+                raster=make_raster_options((4, 8)),
+                transformations=FRAME,
+            )
+
     def test_default_options_are_single_scale_channel_chunks(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_regist.tif"
         pixels = np.arange(16 * 24 * 3, dtype=np.uint8).reshape(16, 24, 3)
         tifffile.imwrite(path, pixels, photometric="rgb", tile=(16, 16))
 
-        image = read_image(ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS)
+        image = read_image(
+            ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS, transformations=FRAME
+        )
 
         assert isinstance(image, DataArray)
         # Default tiles exceed the image, so each chunk is one whole channel.
@@ -89,7 +154,9 @@ class TestReadImage:
         tifffile.imwrite(path, pixels, metadata={"axes": "YX"})
 
         image = read_image(
-            ImageSource(ArtifactFile(path), "registered", "image"), raster=make_raster_options((2, 2), (1, 8, 8))
+            ImageSource(ArtifactFile(path), "registered", "image"),
+            raster=make_raster_options((2, 2), (1, 8, 8)),
+            transformations=FRAME,
         )
 
         assert isinstance(image, DataTree)
@@ -107,7 +174,9 @@ class TestReadImage:
             writer.write(np.zeros((6, 7), dtype=np.uint8), metadata={"axes": "YX"})
 
         with pytest.raises(ReaderFormatError, match="series"):
-            read_image(ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS)
+            read_image(
+                ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS, transformations=FRAME
+            )
 
     def test_rejects_unknown_nonsingleton_axis(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_regist.tif"
@@ -116,7 +185,9 @@ class TestReadImage:
         )
 
         with pytest.raises(ValueError, match=r"[Qq]"):
-            read_image(ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS)
+            read_image(
+                ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS, transformations=FRAME
+            )
 
 
 class TestReadMask:
@@ -131,7 +202,9 @@ class TestReadMask:
         tasks = mocker.Mock()
         with Callback(posttask=tasks):
             labels = read_mask(
-                ImageSource(ArtifactFile(path), "mask", "labels"), raster=make_raster_options(chunks=(1, 32, 32))
+                ImageSource(ArtifactFile(path), "mask", "labels"),
+                raster=make_raster_options(chunks=(1, 32, 32)),
+                transformations=FRAME,
             )
         assert isinstance(labels, DataArray)
         tasks.assert_not_called()
@@ -139,7 +212,7 @@ class TestReadMask:
         assert labels.dims == ("y", "x")
         assert labels.dtype == np.uint8
         assert labels.data.chunksize == (32, 32)
-        assert isinstance(get_transformation(labels), Identity)
+        assert get_transformation(labels, get_all=True) == FRAME
         assert_array_equal(labels.data[2:5, 3:7].compute(scheduler="synchronous"), pixels[2:5, 3:7])
         reads.assert_called_once()
 
@@ -150,7 +223,9 @@ class TestReadMask:
         tifffile.imwrite(path, pixels, metadata={"axes": "YX"})
 
         labels = read_mask(
-            ImageSource(ArtifactFile(path), "tissue_cut", "labels"), raster=make_raster_options((2, 2), (1, 8, 8))
+            ImageSource(ArtifactFile(path), "tissue_cut", "labels"),
+            raster=make_raster_options((2, 2), (1, 8, 8)),
+            transformations=FRAME,
         )
 
         assert isinstance(labels, DataTree)
@@ -171,7 +246,9 @@ class TestReadMask:
         tifffile.imwrite(path, pixels, metadata={"axes": "YX"})
 
         labels = read_mask(
-            ImageSource(ArtifactFile(path), "HE_distance_mask_10", "labels"), raster=make_raster_options((2,), 8)
+            ImageSource(ArtifactFile(path), "HE_distance_mask_10", "labels"),
+            raster=make_raster_options((2,), 8),
+            transformations=FRAME,
         )
 
         assert isinstance(labels, DataTree)
@@ -184,7 +261,9 @@ class TestReadMask:
         pixels = np.arange(16 * 24, dtype=np.uint16).reshape(1, 16, 24)
         tifffile.imwrite(path, pixels, metadata={"axes": "CYX"}, photometric="minisblack")
 
-        labels = read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS)
+        labels = read_mask(
+            ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS, transformations=FRAME
+        )
 
         assert isinstance(labels, DataArray)
         assert labels.dims == ("y", "x")
@@ -195,14 +274,14 @@ class TestReadMask:
         tifffile.imwrite(path, np.zeros((16, 24, 3), dtype=np.uint8), photometric="rgb")
 
         with pytest.raises(ValueError, match=r"[Ss]"):
-            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS)
+            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS, transformations=FRAME)
 
     def test_rejects_floating_point(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_mask.tif"
         tifffile.imwrite(path, np.zeros((16, 24), dtype=np.float32), metadata={"axes": "YX"})
 
         with pytest.raises(ReaderFormatError, match="float32"):
-            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS)
+            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS, transformations=FRAME)
 
     def test_64_bit_values_require_single_scale(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_mask.tif"
@@ -211,8 +290,8 @@ class TestReadMask:
         source = ImageSource(ArtifactFile(path), "mask", "labels")
 
         with pytest.raises(ValueError, match="32-bit"):
-            read_mask(source, raster=make_raster_options((2,), 8))
-        labels = read_mask(source, raster=DEFAULT_OPTIONS)
+            read_mask(source, raster=make_raster_options((2,), 8), transformations=FRAME)
+        labels = read_mask(source, raster=DEFAULT_OPTIONS, transformations=FRAME)
         assert isinstance(labels, DataArray)
         assert_array_equal(labels.data.compute(), pixels)
 
@@ -221,4 +300,8 @@ class TestReadMask:
         tifffile.imwrite(path, np.zeros((16, 24), dtype=np.uint32), metadata={"axes": "YX"})
 
         with pytest.raises(ValueError, match=r"exceed the spatial extent of Stereo-seq mask 'mask' \(16 x 24 pixels\)"):
-            read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=make_raster_options((4, 8), 8))
+            read_mask(
+                ImageSource(ArtifactFile(path), "mask", "labels"),
+                raster=make_raster_options((4, 8), 8),
+                transformations=FRAME,
+            )

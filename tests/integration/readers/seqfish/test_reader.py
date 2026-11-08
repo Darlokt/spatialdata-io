@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
+from functools import partial
 from itertools import product
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from spatialdata.transformations import Scale, get_transformation
 
 import spatialdata_io.readers.seqfish._rasters as raster_module
 import spatialdata_io.readers.seqfish._reader as reader_module
+from spatialdata_io.readers._utils.csv import read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers.seqfish import seqfish
@@ -114,7 +116,9 @@ class TestSeqfish:
             "name,x,y,cell\n" + "".join(f"GeneA,{row},2,{cell}\n" for row, cell in enumerate(assignments)),
             encoding="utf-8",
         )
-        mocker.patch("spatialdata_io.readers._utils.csv._blocks.CSV_BLOCK_BYTES", 96)
+        mocker.patch(
+            "spatialdata_io.readers.seqfish._transcripts.read_csv_blocks", partial(read_csv_blocks, block_bytes=96)
+        )
         result = seqfish(root)
         source_points = result.points["Roi1_TranscriptList"]
         assert source_points.npartitions > 3
@@ -529,7 +533,9 @@ class TestSeqfish:
             }
         )
         events.to_csv(root / "Roi1_TranscriptList.csv", index=False)
-        mocker.patch("spatialdata_io.readers._utils.csv._blocks.CSV_BLOCK_BYTES", 256)
+        mocker.patch(
+            "spatialdata_io.readers.seqfish._transcripts.read_csv_blocks", partial(read_csv_blocks, block_bytes=256)
+        )
         constructed: list[str] = []
         with Callback(posttask=lambda key, *_: constructed.append(str(key))):
             result = seqfish(root)

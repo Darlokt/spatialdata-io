@@ -1,4 +1,53 @@
-"""Discover documented SAW product paths without inferring a producer release."""
+"""Discover one Stereo-seq dataset: layout family, sample and the selected products.
+
+SAW (Stereo-seq Analysis Workflow) writes one of three directory families. The
+family is recognized from the immediate directory names; it is not a SAW
+release, and discovery detects no version. The recorded format version is the
+GEF schema version ``gef-<n>`` that the square and cell readers take from the
+GEF root attributes (see ``_schemas``). Only the selected products are
+resolved; ``<sample>`` is the chip serial (``SN``) and ``<stain>`` the
+microscopy stain (for example ``ssDNA``).
+
+Compact numbered workflow (pinned ``stereoPipeline.sh``)::
+
+    run/
+    ├── 02.count/           <sample>.raw.gef
+    ├── 03.register/        <sample>_regist.tif, <sample>_mask.tif
+    ├── 04.tissuecut/       <sample>.tissue.gef or <sample>.gef
+    ├── 041.cellcut/        <sample>.cellbin.gef
+    ├── 05.spatialcluster/  <sample>.spatial.cluster.h5ad
+    └── 051.cellcluster/    <sample>.cell.cluster.h5ad
+
+SAW 7.0 and 7.1 numbered layout (user manuals A8 and A9)::
+
+    run/
+    ├── 03.count/           <sample>.raw.gef
+    ├── 04.register/        <stain>_<sample>_regist.tif, _mask.tif, _tissue_cut.tif
+    ├── 05.tissuecut/       <sample>.tissue.gef, <sample>.gef
+    ├── 051.cellcut/        <sample>[.adjusted].cellbin.gef,
+    │                       <stain>_<sample>_mask_edm_dis_<distance>.tif
+    ├── 06.spatialcluster/  <sample>.bin<N>_<r>.spatial.cluster.h5ad
+    └── 061.cellcluster/    <sample>[.adjusted].cell.cluster.h5ad
+
+SAW 8.0 to 8.2 ``outs`` layout; the task root or ``outs`` itself may be passed::
+
+    task/outs/
+    ├── feature_expression/ <sample>{.gef,.raw.gef,.tissue.gef,.cellbin.gef,.adjusted.cellbin.gef}
+    ├── analysis/           <sample>.bin<N>_<r>.h5ad, <sample>.cellbin_<r>[.adjusted].h5ad
+    └── image/              <sample>_<stain>_{regist,tissue_cut,mask,mask_edm_dis_<distance>}.tif,
+                            bin1_img.tif, bin1_img_tissue_cut.tif
+
+A flat directory of exported files is the fourth family; its count files need
+explicit ``*_counts_file`` paths. ``<r>`` is the clustering resolution; older
+numbered exports may omit bin and resolution from analysis names.
+
+Discovery lists each recognized directory once, selects the sample (inferred
+when unique), resolves the default square source (the unique tissue or full
+GEF) and the cell GEFs, and maps image file names to element names
+(``<stain>_<role>``); stains that are not valid element names are sanitized
+with a warning. Caller overrides and analysis paths may lie anywhere; discovered
+artifacts must stay inside the dataset under ``path_policy``.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +57,7 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.names import sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
@@ -366,16 +416,18 @@ def _images(
             name = f"{stain}_{role}"
         else:
             name = "expression_tissue_cut" if file.name == "bin1_img_tissue_cut.tif" else role
-        source = ImageSource(file, name, "image" if role in ("registered", "expression") else "labels")
-        if source.name in selected:
-            raise _error(path, f"duplicate image {source.name!r}", "one image per stain/role/distance")
-        selected[source.name] = source
+        # The stain comes from the file name, so it may not be a valid element name.
+        name = sanitize_element_name(name, source="stereoseq: the image name from its file name", parameter=None)
+        # SpatialData compares element names case-insensitively.
+        if name.lower() in selected:
+            raise _error(path, f"duplicate image {name!r}", "one image per stain/role/distance")
+        selected[name.lower()] = ImageSource(file, name, "image" if role in ("registered", "expression") else "labels")
         found_roles.add(role)
 
     if missing := set(roles) - found_roles:
         raise _error(root.path, f"missing image roles {sorted(missing)}", "every selected image role")
 
-    return tuple(selected[name] for name in sorted(selected))
+    return tuple(sorted(selected.values(), key=lambda source: source.name))
 
 
 def _validate_override_samples(

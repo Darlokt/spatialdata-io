@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import shutil
+import warnings
 from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
 import h5py
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import tifffile
 from anndata.tests.helpers import assert_equal
 from numpy.testing import assert_allclose, assert_array_equal
 from scanpy import read_10x_h5
@@ -23,7 +26,7 @@ from spatialdata.transformations import get_transformation
 from xarray import DataArray
 
 from spatialdata_io import visium_hd
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.visium_hd import _metadata, _reader
 from tests.integration.readers.visium_hd._fixtures import CELL_IDS, write_bundle
 
@@ -359,7 +362,7 @@ class TestVisiumHD:
         assert "other-library" in message
         fit.assert_not_called()
 
-    @pytest.mark.parametrize("conflict", ["version", "library", "missing-version"])
+    @pytest.mark.parametrize("conflict", ["version", "library"])
     def test_consumed_feature_identity_before_calibration(
         self, tmp_path: Path, mocker: MockerFixture, conflict: str
     ) -> None:
@@ -369,7 +372,7 @@ class TestVisiumHD:
         if conflict == "library":
             _library(feature, "other-library")
         else:
-            _version(feature, "4.0.1" if conflict == "version" else None)
+            _version(feature, "4.0.1")
         fit = mocker.patch.object(_reader, "fit_slide_frame", side_effect=AssertionError("identity before fitting"))
         with pytest.raises(ReaderFormatError) as error:
             visium_hd(tmp_path, bin_sizes=(8,), include_images=False)
@@ -378,7 +381,7 @@ class TestVisiumHD:
         if conflict == "library":
             assert "expected-library" in message
             assert "other-library" in message
-        elif conflict == "version":
+        else:
             assert "4.0.1" in message
             assert "4.1.0" in message
         fit.assert_not_called()
@@ -455,15 +458,38 @@ class TestVisiumHD:
         assert result.attrs["visium_hd"]["library_id"] == "feature-library"
         assert result.attrs["spatialdata_io_format_version"] == "4.1.0"
 
-    @pytest.mark.parametrize("version", [None, "4.2.0"])
-    def test_count_free_feature_requires_supported_identity(self, tmp_path: Path, version: str | None) -> None:
+    def test_source_without_version_takes_no_part_in_agreement(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path, segmented=False)
+        _version(tmp_path / "feature_slice.h5", None)
+        result = visium_hd(tmp_path, bin_sizes=(8,), include_images=False)
+        assert result.attrs["spatialdata_io_format_version"] == "4.1.0"
+
+    def test_count_free_feature_without_version_records_none(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, segmented=False, images=True)
         _remove_counts(tmp_path)
-        feature = tmp_path / "feature_slice.h5"
-        _version(feature, version)
-        with pytest.raises(ReaderFormatError) as error:
-            visium_hd(tmp_path, bin_sizes=())
-        assert str(feature) in str(error.value)
+        _version(tmp_path / "feature_slice.h5", None)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message=".*untested")
+            result = visium_hd(tmp_path, bin_sizes=())
+        assert set(result.images) == {"hires_image", "lowres_image"}
+        assert result.attrs["spatialdata_io_reader"] == "visium_hd"
+        assert "spatialdata_io_format_version" not in result.attrs
+
+    @pytest.mark.parametrize("segmented", [False, True])
+    def test_untested_release_reads_with_warning(self, tmp_path: Path, *, segmented: bool) -> None:
+        write_bundle(tmp_path, version="4.2.0", segmented=segmented)
+        with pytest.warns(UserWarning, match="untested") as record:
+            result = visium_hd(tmp_path, include_images=False, include_nucleus_table=segmented)
+        untested = [str(warning.message) for warning in record if "untested" in str(warning.message)]
+        expected = (
+            "visium_hd: Space Ranger 4.2.0 is untested (tested releases: 3.0, 3.1, 4.0, 4.1); "
+            "its layout is read from the artifacts present."
+        )
+        assert untested == [expected]
+        assert result.attrs["spatialdata_io_format_version"] == "4.2.0"
+        assert set(result.tables) == {"square_002um_table", "square_008um_table", "square_016um_table"} | (
+            {"cell_table", "nucleus_table"} if segmented else set()
+        )
 
     @pytest.mark.parametrize("unused_counts", [False, True], ids=["no-count-files", "unused-count-files"])
     def test_count_free_read_requires_feature_identity(self, tmp_path: Path, *, unused_counts: bool) -> None:
@@ -500,7 +526,7 @@ class TestVisiumHD:
     def test_missing_requested_product_still_fails_without_counts(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, segmented=False, images=True)
         _remove_counts(tmp_path)
-        with pytest.raises(FileNotFoundError, match="cell_segmentations"):
+        with pytest.raises(FileNotFoundError, match="segmented_outputs"):
             visium_hd(tmp_path, bin_sizes=(), include_cell_boundaries=True)
 
     def test_empty_product_selection(self, tmp_path: Path) -> None:
@@ -582,6 +608,89 @@ class TestVisiumHD:
         result = visium_hd(tmp_path, bin_sizes=(), include_images=False, include_nucleus_boundaries=False)
         assert set(result.tables) == {"cell_table"}
         assert "spatial" not in result.tables["cell_table"].obsm
+
+
+class TestVisiumHDImagesAndLabels:
+    """Channel names, labels, frames and version context through the public reader."""
+
+    def test_channel_names_and_frames_end_to_end(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path / "outs", sizes=(2, 8), segmented=False, images=True, fullres="root")
+        names = ["DAPI", "CD3", "CD8", "PanCK"]
+        values = np.arange(4 * 96 * 96, dtype=np.uint16).reshape(4, 96, 96)
+        tifffile.imwrite(
+            bundle.root / "tissue_image.tif",
+            values,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "CYX", "Channel": {"Name": names}},
+        )
+        result = visium_hd(bundle.root, bin_sizes=(8,), include_cytassist_image=True)
+
+        expected = {
+            "full_image": names,
+            "hires_image": ["r", "g", "b"],
+            "lowres_image": ["r", "g", "b"],
+            "cytassist_image": ["r", "g", "b"],
+        }
+        assert {name: image.coords["c"].to_numpy().tolist() for name, image in result.images.items()} == expected
+        assert result.coordinate_systems == ["global"]
+        for element in (*result.images.values(), result.shapes["square_008um"]):
+            transforms = get_transformation(element, get_all=True)
+            assert isinstance(transforms, dict)
+            assert set(transforms) == {"global"}
+        assert_array_equal(result.images["full_image"].data.compute(), values)
+
+        result.write(tmp_path / "result.zarr")
+        restored = read_zarr(tmp_path / "result.zarr")
+        assert {name: image.coords["c"].to_numpy().tolist() for name, image in restored.images.items()} == expected
+
+    def test_labels_encode_table_order_bins(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2, 8), segmented=False)
+        squares = visium_hd(bundle.root, bin_sizes=(8,), include_images=False)
+        result = visium_hd(bundle.root, bin_sizes=(8,), bin_geometry="labels", include_images=False)
+        labels = result.labels["square_008um"]
+        assert isinstance(labels, DataArray)
+        assert labels.dtype == np.uint32
+        assert labels.shape == (5, 5)
+        table = result.tables["square_008um_table"]
+        obs = table.obs
+        assert isinstance(obs, pd.DataFrame)
+        rows = obs["array_row"].to_numpy(dtype=np.int64)
+        cols = obs["array_col"].to_numpy(dtype=np.int64)
+        values = labels.data.compute()
+        assert_array_equal(values[rows, cols], obs["instance_id"].to_numpy())
+        assert np.count_nonzero(values) == table.n_obs
+        assert_array_equal(table.obsm["spatial"], squares.tables["square_008um_table"].obsm["spatial"])
+        assert not result.shapes
+
+    def test_registration_error_names_detected_version(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2, 8), segmented=False, version="3.1.2")
+        path = tmp_path / "binned_outputs/square_008um/spatial/tissue_positions.parquet"
+        source = pq.read_table(path)
+        values = source["pxl_col_in_fullres"].to_numpy().copy()
+        values += 1_000_000
+        pq.write_table(source.set_column(5, source.schema.field(5), pa.array(values)), path)
+        with pytest.raises(ReaderFormatError, match="cross-bin registration residual") as error:
+            visium_hd(bundle.root, bin_sizes=(8,), include_images=False)
+        assert error.value.context == ReaderErrorContext("visium_hd", "8 micrometre positions", "3.1.2")
+        assert error.value.path == path
+
+    def test_cell_feature_names_can_stay_duplicated(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path)
+        result = visium_hd(tmp_path, bin_sizes=(), include_images=False, make_var_names_unique=False)
+        assert result.tables["cell_table"].var_names.tolist() == ["Gene", "Gene", "Other"]
+
+    def test_raise_policy_accepts_valid_geometry(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path)
+        result = visium_hd(tmp_path, bin_sizes=(), include_images=False, invalid_geometries="raise")
+        assert result.shapes["cell_boundaries"].index.tolist() == [2, 1]
+
+    def test_drop_rejects_geometry_without_matrix_cells(self, tmp_path: Path) -> None:
+        # Filtered counts hold cells 2 and 1; dropping both leaves only the matrix-free cell 3.
+        write_bundle(tmp_path)
+        _invalidate(tmp_path, "cell", (1, 2))
+        with pytest.raises(ReaderFormatError, match="empty selected population"):
+            visium_hd(tmp_path, bin_sizes=(), include_images=False, invalid_geometries="drop")
 
 
 class TestVisiumHDPathPolicy:

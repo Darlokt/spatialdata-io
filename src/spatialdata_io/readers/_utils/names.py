@@ -34,7 +34,9 @@ Names come from two kinds of source, with different policies:
 
 Table column names taken from file headers follow the second policy:
 :func:`sanitize_column_names` repairs the names of one ``obs`` or ``var``
-frame, or the top-level keys of ``uns``. SpatialData's ``TableModel`` and
+frame, or the top-level keys of ``uns``; :func:`sanitize_uns_keys` applies it
+to the ``uns`` of a reader-owned AnnData imported from a file. SpatialData's
+``TableModel`` and
 ``SpatialData.write`` call ``validate_table_attr_keys`` in
 ``spatialdata._core.validation`` (spatialdata 0.8.0). It checks every ``obs``
 and ``var`` column name with ``check_valid_dataframe_column_name`` (the
@@ -56,6 +58,8 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
+
+    import anndata as ad
 
 _RULE = "nonempty, only alphanumeric characters, '_', '-' or '.', not '.' or '..', and not starting with '__'"
 _FALLBACK = "unnamed"
@@ -308,3 +312,38 @@ def sanitize_column_names(
             skip_file_prefixes=(_PACKAGE_PREFIX,),
         )
     return result
+
+
+def sanitize_uns_keys(table: ad.AnnData, /, *, source: str, reserved: Collection[str] = ()) -> None:
+    """Rename the top-level ``uns`` keys of a reader-owned table that SpatialData does not accept.
+
+    Applies :func:`sanitize_column_names` with ``kind="uns"`` to the keys of
+    ``table.uns``. Only the keys change: every value stays the same object, the
+    key order is kept and nested mappings keep their keys, which SpatialData
+    does not check.
+
+    Parameters
+    ----------
+    table
+        Reader-owned AnnData, usually freshly read from an H5AD. Its ``uns``
+        mapping is modified in place; never pass a caller's object.
+    source
+        Description of where the keys come from, starting the warning, for
+        example ``"dbit: the H5AD uns"``.
+    reserved
+        ``uns`` keys the reader reads by name or adds itself. They keep their
+        spelling; another key equal to one of them ignoring letter case is
+        renamed.
+
+    Warns
+    -----
+    UserWarning
+        Once, listing every changed key as ``original -> repaired``, if any
+        key had to change.
+    """
+    keys = sanitize_column_names(list(table.uns), source=source, reserved=reserved, kind="uns")
+    if keys == list(table.uns):
+        return
+    values = list(table.uns.values())
+    table.uns.clear()
+    table.uns.update(zip(keys, values, strict=True))

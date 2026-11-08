@@ -18,20 +18,23 @@ from ome_types.model import UnitsLength
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
 
 if TYPE_CHECKING:
     from xarray import DataArray, DataTree
 
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.image import RasterOptions
-    from spatialdata_io.readers.xenium._layout import FocusImages
+    from spatialdata_io.readers.xenium._layout import MorphologyImage
 
 # Pixel sizes are decimal text in both experiment.xenium and the OME metadata.
 _PIXEL_SIZE_RTOL = 1e-9
 
 
-def read_morphology(images: FocusImages, *, pixel_size: float, raster: RasterOptions) -> DataArray | DataTree:
+def read_morphology(
+    image: MorphologyImage, *, pixel_size: float, raster: RasterOptions, context: ReaderErrorContext
+) -> DataArray | DataTree:
     """Return one CYX morphology image in the micrometre frame without reading pixels.
 
     Raises
@@ -40,12 +43,13 @@ def read_morphology(images: FocusImages, *, pixel_size: float, raster: RasterOpt
         If the file has not exactly one OME image series, has unnamed or repeated
         channels, a calibration other than ``pixel_size``, or a linked file set
         different from the OME-TIFF files beside it.
+    ValueError
+        If ``raster`` requests more downsampling than the image extent allows.
     """
-    context = ReaderErrorContext("xenium", images.entry.name)
-    metadata = inspect_tiff(images.entry, context=context)
+    metadata = inspect_tiff(image.entry, context=context)
 
     def error(*, found: str, expected: str) -> ReaderFormatError:
-        return ReaderFormatError(context=context, path=images.entry, found=found, expected=expected)
+        return ReaderFormatError(context=context, path=image.entry, found=found, expected=expected)
 
     if len(metadata.series) != 1 or metadata.ome is None or len(metadata.ome.images) != 1:
         raise error(found=f"{len(metadata.series)} series", expected="one OME image series")
@@ -65,23 +69,23 @@ def read_morphology(images: FocusImages, *, pixel_size: float, raster: RasterOpt
         ):
             raise error(found=f"physical pixel size {size} {unit}", expected=f"{pixel_size} µm from experiment.xenium")
 
-    # A block without a file reference lives in the entry file itself.
+    # A block without a file reference lives in the entry file itself. Names are
+    # compared, not resolved paths, so symlinked files keep their bundle names.
     linked = {
-        images.entry
-        if block.uuid is None or block.uuid.file_name is None
-        else images.entry.parent / block.uuid.file_name
+        image.name if block.uuid is None or block.uuid.file_name is None else block.uuid.file_name
         for block in pixels.tiff_data_blocks
     }
-    if {path.resolve() for path in linked} != set(images.files):
+    if linked != image.members:
         raise error(
-            found=f"OME-linked files {sorted(path.name for path in linked)}",
-            expected=f"exactly the OME-TIFF files {sorted(path.name for path in images.files)}",
+            found=f"OME-linked files {sorted(linked)}",
+            expected=f"exactly the OME-TIFF files {sorted(image.members)}",
         )
 
     lazy = read_tiff(metadata, series=0, level=0, context=context)
     data = normalize_raster_axes(lazy.data, lazy.axes, target_axes=("c", "y", "x"), add_missing=("c",))
     if data.shape[0] != len(names):
         raise error(found=f"{data.shape[0]} channels for {len(names)} names", expected="one OME name per channel")
+    raster.validate_image_pyramid(data, element="the morphology image")
     return Image2DModel.parse(
         data,
         dims=("c", "y", "x"),

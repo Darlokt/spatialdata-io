@@ -1,4 +1,31 @@
-"""Exact bin footprints and projected Space Ranger polygon ingestion."""
+"""Build bin squares and read Space Ranger 4 cell and nucleus polygons in global micrometres.
+
+Bins are nominal squares on the manufactured grid: bin ``(row, col)`` of size
+``s`` µm spans ``[col * s, (col + 1) * s] x [row * s, (row + 1) * s]`` grid
+micrometres, including the part of a last row or column that lies beyond the
+captured 2 µm squares. Their vertices are mapped rigidly into ``global``.
+
+Segmentation polygons are GeoJSON in full-resolution image pixels::
+
+    segmented_outputs / cell_segmentations.geojson  # also nucleus_segmentations.geojson
+    {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [[[x, y], ...]]},
+                "properties": {"cell_id": 1, "cell_centroid": [x, y]},
+            }  # nucleus_centroid in the nucleus file; 4.1+
+        ],
+    }
+
+``cell_id`` is a unique integer from 1 to 999999999, equal to the ``id`` of
+the ``cellid_<id:09d>-1`` matrix barcodes. Each feature is one Polygon without
+holes. Vertices and centroids are reprojected exactly through the inverse
+2 µm homography into ``global``; vertex order and topology are kept, so the
+validity policy sees source geometry. Only ``cell_id`` and the centroid are
+read (projected GDAL ingestion through pyogrio); other properties are ignored.
+"""
 
 from __future__ import annotations
 
@@ -33,7 +60,9 @@ class BoundaryData:
     centroids: NDArray[np.float64] | None
 
 
-def _validate_source(source: gpd.GeoDataFrame, path: ArtifactFile, context: ReaderErrorContext) -> NDArray[np.float64]:
+def _validate_source(
+    source: gpd.GeoDataFrame, path: ArtifactFile, *, context: ReaderErrorContext
+) -> NDArray[np.float64]:
     """Validate external IDs and ring representation independently of topology policy."""
 
     def fail(found: str, expected: str) -> ReaderFormatError:
@@ -68,13 +97,15 @@ def _validate_source(source: gpd.GeoDataFrame, path: ArtifactFile, context: Read
     return coordinates
 
 
-def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cell", "nucleus"]) -> BoundaryData:
+def read_boundaries(
+    path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cell", "nucleus"], version: str | None
+) -> BoundaryData:
     """Read projected GeoJSON without Python feature dictionaries or geometry repair.
 
     GDAL retains source order and ring vertices. Only Polygon exteriors are
     supported; malformed geometry is rejected independently of validity policy.
     """
-    context = ReaderErrorContext(reader="visium_hd", artifact=f"{kind} boundaries")
+    context = ReaderErrorContext("visium_hd", f"{kind} boundaries", version)
 
     def fail(found: str, expected: str) -> ReaderFormatError:
         return ReaderFormatError(context=context, found=found, expected=expected, path=path)
@@ -90,8 +121,8 @@ def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cel
         add_reader_context(error, context=context, path=path)
         raise
 
-    coordinates = _validate_source(source, path, context)
-    transformed = image_to_global(frame, coordinates)
+    coordinates = _validate_source(source, path, context=context)
+    transformed = image_to_global(frame, coordinates, context=context)
     geometry = shapely.set_coordinates(source.geometry.to_numpy(), transformed)
     index = pd.Index(source["cell_id"].to_numpy(dtype=np.int64), name="cell_id")
     shapes = gpd.GeoDataFrame({"geometry": geometry}, index=index)
@@ -107,7 +138,7 @@ def read_boundaries(path: ArtifactFile, frame: SlideFrame, *, kind: Literal["cel
         if centroids.shape != (len(source), 2) or not np.isfinite(centroids).all():
             msg = "missing or nonfinite centroid property"
             raise fail(msg, "one finite [x, y] centroid per polygon")
-        centroids = image_to_global(frame, centroids)
+        centroids = image_to_global(frame, centroids, context=context)
 
     return BoundaryData(ShapesModel.parse(shapes, transformations={"global": Identity()}), centroids)
 

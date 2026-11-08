@@ -22,13 +22,13 @@ if TYPE_CHECKING:
         include_nucleus_boundaries: bool | None
         include_nucleus_table: bool
         cell_counts_kind: Literal["filtered", "raw"]
+        make_var_names_unique: bool
         invalid_geometries: Literal["keep", "drop", "raise"]
         include_images: bool
         include_cytassist_image: bool
         fullres_image_file: Path | None
-        data_axes: tuple[str, ...] | None
+        data_axes: str | None
         tiff_series: int | None
-        make_var_names_unique: bool
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
         path_policy: Literal["strict", "relaxed"]
@@ -53,11 +53,6 @@ def _bin_sizes(
         raise click.BadParameter(message)
 
     return tuple(sorted(sizes))
-
-
-def _axes(_context: click.Context, _parameter: click.Parameter, values: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Treat an omitted axis override as metadata-driven selection."""
-    return values or None
 
 
 @click.command(name="visium-hd")
@@ -104,6 +99,12 @@ def _axes(_context: click.Context, _parameter: click.Parameter, values: tuple[st
     help="Select the cell matrix population.",
 )
 @click.option(
+    "--make-var-names-unique/--no-make-var-names-unique",
+    default=True,
+    show_default=True,
+    help="Make duplicate feature symbols unique in all tables.",
+)
+@click.option(
     "--invalid-geometries",
     type=click.Choice(["keep", "drop", "raise"]),
     default="keep",
@@ -125,13 +126,17 @@ def _axes(_context: click.Context, _parameter: click.Parameter, values: tuple[st
     default=None,
     help="Full-resolution image override relative to input or absolute.",
 )
-@click.option("--data-axes", multiple=True, default=(), callback=_axes, help="Repeat axis names in source array order.")
-@click.option("--tiff-series", type=click.IntRange(min=0), default=None, help="Full-resolution TIFF series index.")
 @click.option(
-    "--make-var-names-unique/--no-make-var-names-unique",
-    default=True,
-    show_default=True,
-    help="Make duplicate feature symbols unique in all tables.",
+    "--data-axes",
+    type=str,
+    default=None,
+    help="Source axes of the full-resolution TIFF as one string, for example CYX. Defaults to the file's axes.",
+)
+@click.option(
+    "--tiff-series",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Zero-based full-resolution TIFF series. Required when the TIFF contains multiple series.",
 )
 @scale_factors_option
 @chunks_option
@@ -149,13 +154,13 @@ def visium_hd_command(input_path: Path, output_path: Path, **options: Unpack[_Vi
         include_nucleus_boundaries=options["include_nucleus_boundaries"],
         include_nucleus_table=options["include_nucleus_table"],
         cell_counts_kind=options["cell_counts_kind"],
+        make_var_names_unique=options["make_var_names_unique"],
         invalid_geometries=options["invalid_geometries"],
         include_images=options["include_images"],
         include_cytassist_image=options["include_cytassist_image"],
         fullres_image_file=options["fullres_image_file"],
         data_axes=options["data_axes"],
         tiff_series=options["tiff_series"],
-        make_var_names_unique=options["make_var_names_unique"],
         scale_factors=options["scale_factors"],
         chunks=options["chunks"],
         path_policy=options["path_policy"],

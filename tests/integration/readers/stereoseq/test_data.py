@@ -331,7 +331,7 @@ class TestStereoseqData:
             finally:
                 store.close()
         np.testing.assert_array_equal(selected, expected.transpose(2, 0, 1))
-        assert "spatialdata_io_format_version" not in result.attrs
+        assert result.attrs["spatialdata_io_format_version"] == "gef-4"
 
     def test_vendor_saw7_complete_cells(
         self, require_test_dataset: Callable[[str], Path], mocker: MockerFixture
@@ -357,6 +357,7 @@ class TestStereoseqData:
         assert set(table.obs["region"]) == {"cells_centroids"}
         assert table.uns["stereoseq"]["origin"] == [0, 0]
         assert table.uns["stereoseq"]["resolution"] == 500
+        assert result.attrs["spatialdata_io_format_version"] == "gef-2"
 
     def test_vendor_complete_adjusted_cells(
         self, require_test_dataset: Callable[[str], Path], mocker: MockerFixture
@@ -381,6 +382,7 @@ class TestStereoseqData:
         np.testing.assert_array_equal(points[["x", "y"]], table.obsm["spatial_grid"])
         np.testing.assert_array_equal(points.index, table.obs["instance_id"])
         assert set(table.obs["region"]) == {"adjusted_cells_centroids"}
+        assert result.attrs["spatialdata_io_format_version"] == "gef-4"
 
     @pytest.mark.parametrize(
         "case",
@@ -545,4 +547,4 @@ class TestStereoseqData:
         _assert_native_square(result.tables["bin1_table"], root / "A01785D6.tissue.gef")
         first_points = result.points["bin1_genes"].head(5)
         np.testing.assert_array_equal(first_points[["x", "y"]], result.tables["bin1_table"].obsm["spatial_grid"][:5])
-        assert "spatialdata_io_format_version" not in result.attrs
+        assert result.attrs["spatialdata_io_format_version"] == "gef-2"

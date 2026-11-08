@@ -229,8 +229,9 @@ images, names and coordinate systems.
 The five-file Seeker export returns a bead table and circles named `cells`.
 Rows, names, feature order, expression meaning and dtype come from the H5AD.
 Imported observation and feature annotations retain their types and missingness;
-column names that a SpatialData table does not accept are sanitized with one
-warning per frame, and reader-owned names keep their spelling. Lexical categorical `cluster`, categorical `region="cells"` and textual `instance_id`
+column names and top-level `uns` keys that a SpatialData table does not accept
+are sanitized with one warning per frame or mapping, and reader-owned names keep
+their spelling. `uns` values, their order and nested keys stay as stored. Lexical categorical `cluster`, categorical `region="cells"` and textual `instance_id`
 are added. Cluster assignments align by exact bead name; cluster categories
 follow first occurrence in the final H5AD row order. The final circle index
 matches these names; the target is generated from the same bead population.
@@ -238,8 +239,8 @@ matches these names; the target is generated from the same bead population.
 Dynamic Moran statistics join into active `var` by feature ID and are missing
 for unlisted features. Their source order follows existing feature annotations.
 Metric categories become dictionaries of string values in `uns`; a category
-that is not a valid `uns` key, or equals an H5AD `uns` key ignoring letter case,
-is sanitized with one warning;
+that is not a valid `uns` key, or equals a sanitized H5AD `uns` key ignoring
+letter case, is sanitized with one warning;
 `Top_cluster_defining_features` is an eager DataFrame of nullable strings.
 Cluster labels, metric values and defining-feature annotations preserve their
 literal spelling, including leading zeros, booleans, numeric-looking text and
@@ -304,8 +305,9 @@ The explicit image/labels/H5AD layout retains imported row names/order,
 feature order and expression dtype. Active feature names are made unique;
 `raw` retains its own feature vocabulary and metadata. Imported annotations,
 embeddings, aligned mappings and ordinary `uns` survive unchanged, apart from
-validated reserved output fields; `obs` and `var` column names that a
-SpatialData table does not accept are sanitized with one warning per frame. Unknown imported `spatial` moves exactly to
+validated reserved output fields; `obs` and `var` column names and top-level
+`uns` keys that a SpatialData table does not accept are sanitized with one
+warning per frame or mapping, while `uns` values and nested keys stay as stored. Unknown imported `spatial` moves exactly to
 `spatial_source`; no physical position array is derived. Image/label OME spacing
 does not establish the imported table embedding's units or origin.
 
@@ -339,9 +341,10 @@ both names are reserved output destinations. The source `Image` column remains
 accepted only when equal to `image`.
 
 `Final Concentration / Dilution` becomes `Final_Concentration`. Other imported
-`obs` and `var` column names that a SpatialData table does not accept are
-sanitized with one warning per frame (`Channel Name` becomes `Channel_Name`),
-before the reader adds its own columns; values retain their source types. `obsm["spatial_pixels"]` contains XY source centroids in
+`obs` and `var` column names and top-level `uns` keys that a SpatialData table
+does not accept are sanitized with one warning per frame or mapping (`Channel Name`
+becomes `Channel_Name`), before the reader adds its own columns and keys; `uns`
+values and nested keys stay as stored; values retain their source types. `obsm["spatial_pixels"]` contains XY source centroids in
 `(centroid-1, centroid-0)` order with the supported source numerical width.
 A displaced imported embedding is retained exactly as `spatial_source`.
 Complete per-sample calibration creates float64 micrometre `spatial` using
@@ -363,8 +366,9 @@ The H5AD plus barcode-map layout sorts observations by A then B, retaining
 original names. Slicing aligns every observation mapping, both axes of `obsp`
 and the rows of `raw`; raw features retain their independent order.
 Imported expression dtype, unrelated annotations and missingness remain;
-`obs` and `var` column names that a SpatialData table does not accept are
-sanitized with one warning per frame.
+`obs` and `var` column names and top-level `uns` keys that a SpatialData table
+does not accept are sanitized with one warning per frame or mapping; `uns`
+values and nested keys stay as stored.
 `array_A` and `array_B` are one-based int64 grid coordinates; textual `sample` and
 categorical `region` contain the dataset name, and int64 `pixel_id` is the
 zero-based sorted row position. Float64 is not inferred as a physical unit:
@@ -533,8 +537,8 @@ layers and aligned mappings retain their storage. Final `region` and
 bounded final normalization with the H5AD path attached to the error.
 Compressed sparse pointers and indices are validated before duplicate
 reduction. Integer duplicates in X and declared expression layers promote
-directly to exact float32/f64 when their sums exceed source storage. One warning summarizes affected imported tables/slots,
-combined entries and dtype changes. An unsupported exact result fails with
+directly to exact float32/f64 when their sums exceed source storage. One warning per affected H5AD lists its slots,
+combined entries and dtype changes. `obs`/`var` column names and top-level `uns` keys that SpatialData rejects are sanitized with a warning; `uns` values and nested keys stay as stored. An unsupported exact result fails with
 H5AD/slot context. Expected raw square aggregation does not warn.
 
 ### Xenium

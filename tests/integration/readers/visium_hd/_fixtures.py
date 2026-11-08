@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
+VERSION = "4.1.0"
 GRID_SHAPE = (17, 17)
 MICRONS_PER_PIXEL = 0.5
 HOMOGRAPHY = np.array([[4.0, 0.03, 4.0], [0.02, -4.0, 80.0], [0.00001, -0.00002, 1.0]])
@@ -85,7 +86,7 @@ def _pixels(col: NDArray[np.float64], row: NDArray[np.float64]) -> NDArray[np.fl
 def write_bundle(  # noqa: PLR0913, RUF100 - Independently select supported fixture products.
     root: Path,
     *,
-    version: str = "4.1.0",
+    version: str = VERSION,
     sizes: tuple[int, ...] = (2, 8, 16),
     segmented: bool = True,
     prefix: str = "",

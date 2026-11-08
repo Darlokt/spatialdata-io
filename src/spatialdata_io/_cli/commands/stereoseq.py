@@ -73,6 +73,13 @@ def _bin_sizes(
     help="Stored centers or literal contours; polygons are never repaired.",
 )
 @click.option(
+    "--invalid-geometries",
+    type=click.Choice(["keep", "drop", "raise"]),
+    default="keep",
+    show_default=True,
+    help="Keep invalid contours, drop affected raw cells, or fail.",
+)
+@click.option(
     "--square-counts-file",
     type=click.Path(path_type=Path, dir_okay=False),
     default=None,
@@ -106,13 +113,6 @@ def _bin_sizes(
 )
 @scale_factors_option
 @chunks_option
-@click.option(
-    "--invalid-geometries",
-    type=click.Choice(["keep", "drop", "raise"]),
-    default="keep",
-    show_default=True,
-    help="Keep invalid contours, drop affected raw cells, or fail.",
-)
 @path_policy_option
 def stereoseq_command(input_path: Path, output_path: Path, **options: Unpack[_StereoseqOptions]) -> None:
     """Select products explicitly, read them, and write the resulting SpatialData."""

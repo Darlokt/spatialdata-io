@@ -1,16 +1,20 @@
 """Partition an uncompressed CSV lazily into newline-aligned byte blocks parsed by Arrow.
 
-Dask splits the file into byte blocks of about ``CSV_BLOCK_BYTES`` that start
-and end at a newline, so every record must occupy one physical line. Each
-block task reads its byte range from the path, removes the header line from
-the first block, and parses the requested columns with Arrow, which checks
-that every record has the header's width even for unprojected columns. A
-record longer than a block leaves the blocks it spans empty; they become empty
-partitions. Building the frame reads no record; the caller has already read
-the header with :func:`read_csv_header`.
+Dask splits the file into byte blocks that start and end at a newline, so
+every record must occupy one physical line. Readers choose the block size
+(``block_bytes``, default ``CSV_BLOCK_BYTES``): larger blocks mean fewer tasks
+and faster streaming of large files, smaller blocks less memory per computed
+partition. Each block task reads its byte range from the path, removes the
+header line from the first block, and parses the requested columns with Arrow,
+which checks that every record has the header's width even for unprojected
+columns. A record longer than a block leaves the blocks it spans empty; they
+become empty partitions. Building the frame reads no record; the caller has
+already read the header with :func:`read_csv_header`.
 
 Arrow does not reject every malformed quote; columns are text unless the
-caller supplies Arrow types, and empty fields are empty strings, never nulls.
+caller supplies Arrow types. No text is a null: empty fields are empty
+strings, and an empty field in a column with a non-text type is a malformed
+record.
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 CSV_BLOCK_BYTES = 8 * 1024 * 1024
-"""Approximate bytes per partition; one partition holds whole records only."""
+"""Default approximate bytes per partition; one partition holds whole records only."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +89,7 @@ def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
     return table.to_pandas(types_mapper=pd.ArrowDtype)
 
 
-def read_csv_blocks(
+def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error origin and partition size.
     path: ArtifactFile,
     /,
     *,
@@ -93,6 +97,7 @@ def read_csv_blocks(
     columns: Sequence[str],
     context: ReaderErrorContext,
     column_types: Mapping[str, pa.DataType] | None = None,
+    block_bytes: int = CSV_BLOCK_BYTES,
 ) -> dd.DataFrame:
     """Return projected CSV columns as lazy partitions of newline-aligned blocks.
 
@@ -109,13 +114,19 @@ def read_csv_blocks(
         partition is computed.
     column_types
         Arrow types of some returned columns; others are strings.
+    block_bytes
+        Target block size in bytes. Like the other arguments it is trusted: a
+        positive reader constant, not a public option. Larger blocks give
+        fewer partitions and less scheduling overhead, but each computed
+        partition holds more source bytes and parsed columns at once.
 
     Returns
     -------
     dask.dataframe.DataFrame
-        One partition per block, in file order, with unknown divisions and
-        a default index restarting in every partition. Columns use
-        :class:`pandas.ArrowDtype`.
+        One partition per block, in file order, with unknown divisions and a
+        default index restarting in every partition. A file of ``size`` bytes
+        has ``max(1, size // block_bytes)`` blocks of nearly equal size.
+        Columns use :class:`pandas.ArrowDtype`.
 
     Notes
     -----
@@ -128,6 +139,6 @@ def read_csv_blocks(
     # read_bytes has no typed signature; this is its documented result without
     # paths. Escaping keeps one literal path even with glob metacharacters.
     read_blocks = cast("Callable[..., tuple[bytes, list[list[Delayed]]]]", read_bytes)
-    _, blocks = read_blocks([glob.escape(str(path))], delimiter=b"\n", blocksize=CSV_BLOCK_BYTES, sample=False)
+    _, blocks = read_blocks([glob.escape(str(path))], delimiter=b"\n", blocksize=block_bytes, sample=False)
     parts = [delayed(_read_block)(block, spec, first=index == 0) for index, block in enumerate(blocks[0])]
     return dd.from_delayed(parts, meta=_empty(spec))

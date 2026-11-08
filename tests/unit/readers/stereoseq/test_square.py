@@ -65,6 +65,31 @@ class TestReadSquare:
         assert result.origin == (0, 0)
         assert result.resolution == 500
         assert result.sample_id is None
+        assert result.format_version == ("gef-2" if profile == "name_only" else "gef-4")
+
+    def test_root_version_applies_to_every_bin(self, tmp_path: Path) -> None:
+        path = write_square_gef(tmp_path / "s.gef", bins=(1, 50))
+        with h5py.File(path, "a") as handle:
+            handle.attrs["version"] = np.array([3], dtype=np.uint32)
+
+        results = read_square(SquareSource(ArtifactFile(path), "all"))
+        assert [result.format_version for result in results] == ["gef-3", "gef-3"]
+
+    def test_absent_version_is_unknown(self, tmp_path: Path) -> None:
+        path = write_square_gef(tmp_path / "s.gef", bins=(1,))
+        with h5py.File(path, "a") as handle:
+            del handle.attrs["version"]
+
+        (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
+        assert result.format_version is None
+
+    def test_malformed_version_fails(self, tmp_path: Path) -> None:
+        path = write_square_gef(tmp_path / "s.gef", bins=(1,))
+        with h5py.File(path, "a") as handle:
+            handle.attrs["version"] = np.uint32(0)
+
+        with pytest.raises(ReaderFormatError, match="GEF version"):
+            read_square(SquareSource(ArtifactFile(path), (1,)))
 
     def test_all_stored_bins_numeric_order(self, tmp_path: Path) -> None:
         path = write_square_gef(tmp_path / "s.gef", bins=(50, 1))

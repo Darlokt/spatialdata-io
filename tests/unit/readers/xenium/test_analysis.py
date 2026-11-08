@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
 from spatialdata_io.readers.xenium import _analysis
 from spatialdata_io.readers.xenium._analysis import read_analysis
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 BARCODES = pd.Index(["a-1", "b-1", "c-1"], dtype="str")
+CONTEXT = ReaderErrorContext("xenium", "analysis", "5.0.0")
 CLUSTERS = "clustering/graphclust/clusters.csv"
 PCA = "pca/gene_expression_2_components/projection.csv"
 
@@ -46,7 +47,7 @@ class TestReadAnalysis:
             else AnalysisArchive(ArtifactFile(tmp_path / "analysis.tar.gz"))
         )
 
-        analysis = read_analysis(source, pd.Index(bundle.barcodes, dtype="str"))
+        analysis = read_analysis(source, pd.Index(bundle.barcodes, dtype="str"), context=CONTEXT)
 
         clusters = analysis.clusters["gene_expression_graphclust"]
         assert clusters.categories.tolist() == ["1", "2"]
@@ -64,7 +65,7 @@ class TestReadAnalysis:
     def test_clusters_follow_numeric_order_and_rows_any_order(self, tmp_path: Path) -> None:
         source = _directory(tmp_path, {CLUSTERS: "Barcode,Cluster\nc-1,10\na-1,2\nb-1,1\n"})
 
-        clusters = read_analysis(source, BARCODES).clusters["graphclust"]
+        clusters = read_analysis(source, BARCODES, context=CONTEXT).clusters["graphclust"]
 
         assert clusters.categories.tolist() == ["1", "2", "10"]
         assert list(clusters) == ["2", "1", "10"]
@@ -79,7 +80,7 @@ class TestReadAnalysis:
             },
         )
 
-        analysis = read_analysis(source, BARCODES)
+        analysis = read_analysis(source, BARCODES, context=CONTEXT)
 
         assert analysis.clusters == {}
         assert analysis.projections == {}
@@ -109,7 +110,7 @@ class TestReadAnalysis:
     )
     def test_rejects_malformed_members(self, tmp_path: Path, members: dict[str, str], match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match):
-            read_analysis(_directory(tmp_path, members), BARCODES)
+            read_analysis(_directory(tmp_path, members), BARCODES, context=CONTEXT)
 
     @pytest.mark.parametrize("names", [(CLUSTERS, CLUSTERS), (CLUSTERS, f"analysis/{CLUSTERS}")])
     def test_duplicate_archive_identities_are_rejected_before_csv_parsing(
@@ -124,7 +125,7 @@ class TestReadAnalysis:
                 archive.addfile(info, io.BytesIO(payload))
         parse = mocker.spy(_analysis, "_table")
         with pytest.raises(ReaderFormatError, match="repeated analysis identity"):
-            read_analysis(AnalysisArchive(ArtifactFile(path)), BARCODES)
+            read_analysis(AnalysisArchive(ArtifactFile(path)), BARCODES, context=CONTEXT)
         parse.assert_not_called()
 
     def test_duplicate_extracted_identities_are_rejected(self, tmp_path: Path) -> None:
@@ -132,7 +133,22 @@ class TestReadAnalysis:
             tmp_path, {CLUSTERS: "Barcode,Cluster\na-1,1\n", f"analysis/{CLUSTERS}": "Barcode,Cluster\na-1,2\n"}
         )
         with pytest.raises(ReaderFormatError, match="repeated analysis identity"):
-            read_analysis(source, BARCODES)
+            read_analysis(source, BARCODES, context=CONTEXT)
+
+    def test_identities_ignore_letter_case(self, tmp_path: Path) -> None:
+        # SpatialData compares obs and obsm names ignoring case, so these would collide.
+        source = _directory(
+            tmp_path,
+            {
+                "pca/Method/projection.csv": "Barcode,PC-1\na-1,1.0\n",
+                "pca/method/projection.csv": "Barcode,PC-1\na-1,2.0\n",
+            },
+        )
+
+        with pytest.raises(ReaderFormatError, match=r"repeated analysis identity \('pca', 'method'\)") as caught:
+            read_analysis(source, BARCODES, context=CONTEXT)
+
+        assert caught.value.context == CONTEXT
 
     def test_extracted_csv_streams_directly_into_arrow(self, tmp_path: Path, mocker: MockerFixture) -> None:
         source = _directory(tmp_path, {CLUSTERS: "Barcode,Cluster\na-1,1\n"})
@@ -140,7 +156,7 @@ class TestReadAnalysis:
         read = mocker.spy(handle, "read")
         parsed = mocker.spy(_analysis, "_table")
         mocker.patch.object(type(source.directory), "open", return_value=handle)
-        result = read_analysis(source, BARCODES)
+        result = read_analysis(source, BARCODES, context=CONTEXT)
         assert parsed.call_args.args[0] is handle
         assert result.clusters["graphclust"].codes.tolist() == [0, -1, -1]
         assert all(call.args and call.args[0] > 0 for call in read.call_args_list)
@@ -149,7 +165,7 @@ class TestReadAnalysis:
     @pytest.mark.parametrize("kind", ["clusters", "projection"])
     def test_header_only_analysis_remains_empty(self, tmp_path: Path, kind: str) -> None:
         name, header = (CLUSTERS, "Barcode,Cluster\n") if kind == "clusters" else (PCA, "Barcode,PC-1,PC-2\n")
-        result = read_analysis(_directory(tmp_path, {name: header}), BARCODES)
+        result = read_analysis(_directory(tmp_path, {name: header}), BARCODES, context=CONTEXT)
         if kind == "clusters":
             assert result.clusters["graphclust"].codes.tolist() == [-1, -1, -1]
         else:
@@ -171,9 +187,9 @@ class TestReadAnalysis:
         source = AnalysisArchive(ArtifactFile(path))
         if malformed:
             with pytest.raises(ReaderFormatError, match="malformed CSV"):
-                read_analysis(source, BARCODES)
+                read_analysis(source, BARCODES, context=CONTEXT)
         else:
-            read_analysis(source, BARCODES)
+            read_analysis(source, BARCODES, context=CONTEXT)
         assert extract.spy_return is not None
         assert parsed.call_args.args[0] is extract.spy_return
         assert extract.spy_return.closed

@@ -1,6 +1,6 @@
 # Visium HD
 
-`spatialdata_io.visium_hd()` reads Space Ranger 3.0–4.1 HD outputs. All available
+`spatialdata_io.visium_hd()` reads Space Ranger HD outputs (tested with 3.0–4.1). All available
 bin sizes are selected by default. Cell and nucleus boundaries are included
 when present; nucleus counts are a separate opt-in. Expression remains sparse,
 and image pixels are decoded only when computed or written.
@@ -55,22 +55,35 @@ bins or segmentations are returned. Grid dimensions come from feature-slice
 metadata when present, otherwise from the position columns, followed by exact
 coverage validation. Only selected count populations must be present.
 
-Identity is reconciled before calibration from every distinct selected bin and
-cell matrix, the raw 2 µm matrix needed for nucleus counts, and any feature slice
-whose metadata is consumed. Each source must report a supported Space Ranger
-version, and their normalized **full versions must match exactly**. Mixing
-different supported versions raises. Multiple distinct known `library_ids` also
-raise; the sole known ID is retained regardless of selection order. Missing
-optional library IDs are allowed, and all-missing IDs yield no library ID.
-Agreement of missing IDs does not establish a common export origin.
+Identity is reconciled during discovery, before calibration, from every
+distinct selected bin and cell matrix, the raw 2 µm matrix needed for nucleus
+counts, and any feature slice whose metadata is consumed. A source's
+`software_version` attribute spelled `spaceranger-X.Y.Z` or `X.Y.Z` gives the
+detected format version `X.Y.Z`, recorded in provenance and in every later
+error. Other spellings (for example `spaceranger-4.0.1-rc1` or `4.1`) and a
+missing attribute give no version, as in the classic Visium reader. The layout
+is recognized from the artifacts present (`hd_feature_slice.h5`,
+`segmented_outputs/`, centroid properties), not from the version, so any
+release is read. The reader is tested with Space Ranger 3.0, 3.1, 4.0 and 4.1;
+another release reads with one `UserWarning` that it is untested.
+
+The detected **full versions must match exactly**; sources reporting different
+versions come from different runs and raise. A source without a detected
+version does not take part: the recorded version is the one the other sources
+agree on, or none if no source has one. Multiple distinct known `library_ids`
+also raise; the sole known ID is retained regardless of selection order.
+Missing optional library IDs are allowed, and all-missing IDs yield no library
+ID. Agreement of missing IDs does not establish a common export origin.
+HDF5 text attributes must be nonempty UTF-8, whether stored as fixed- or
+variable-length strings; invalid bytes raise.
 
 With no count product selected, an identity-bearing feature slice is required,
 including images-only and nucleus-boundary-only reads. Unselected raw or
 filtered matrices are never used as identity fallbacks. A selected count
-workflow can omit the feature slice unless CytAssist is requested. Feature-slice
-`sample_id` is sample text, distinct from `library_ids`. Feature-slice metadata
-validates the outer JSON and consumed grid/transform fields; the unused
-`hd_layout_json` annotation is ignored.
+workflow can omit the feature slice unless CytAssist is requested.
+Feature-slice metadata validates the outer JSON and the consumed grid and
+transform fields (`nrows`, `ncols`, `spot_pitch`, `transform_matrices`); other
+keys such as `sample_id` and `hd_layout_json` are ignored.
 
 A null microscope matrix pair does not prevent loading: the registration is
 fitted directly from 2 µm positions. This is tested synthetically; no real
@@ -148,6 +161,11 @@ projected during ingestion; the returned geometry vector is eager.
 
 ## Physical coordinates
 
+Every element is placed only in `global`; there is no pixel coordinate system.
+The physical calibration is verifiable: it comes from the manufactured 2 µm
+barcode grid, whose position in the image every 2 µm position row fixes, not
+from Space Ranger's estimated `microns_per_pixel`.
+
 `global` uses micrometres on the manufactured 2 µm grid, rigidly oriented like
 the microscope image. Its origin is the fitted affine position of full-resolution pixel `(0, 0)`;
 the exact projective position can differ by the reported registration residual.
@@ -197,10 +215,15 @@ Each final table describes float64 XY micrometres in `uns["spatialdata_io_positi
 
 Full-resolution images are discovered among root `tissue_image` TIFF names and
 supported files directly inside `microscope_image/`; more than one is ambiguous.
-`fullres_image_file` overrides this selection. TIFF content determines TIFF vs
-BigTIFF, including `.btf`; `data_axes` and `tiff_series` resolve explicit source
-selection. The full-resolution/hires longest-side dimensions are checked against
-the vendor scale factor.
+`fullres_image_file` overrides this selection. A file whose first bytes are a
+TIFF or BigTIFF signature is read as TIFF whatever its suffix (including
+`.btf`); otherwise `.png`, `.jpg` and `.jpeg` select those decoders. A TIFF
+must have one series unless `tiff_series` selects one; several series without
+a selection raise a contextual `ReaderFormatError`. `data_axes` overrides the
+TIFF's declared axes as one case-insensitive string such as `"CYX"`;
+`data_axes` and `tiff_series` raise for a PNG or JPEG image. The
+full-resolution/hires longest-side dimensions are checked against the vendor
+scale factor.
 
 Hires, lowres and requested CytAssist images are resolved independently. For
 each artifact, `spatial/` at the dataset root takes precedence over
@@ -212,15 +235,29 @@ in one of these two locations.
 
 All images use `(c, y, x)`, preserve source channel order and dtype, and use the
 shared [raster options](raster_options.md). `scale_factors` applies only to the
-full-resolution image. `chunks` controls image chunks and the spatial chunks of
-labels. TIFF tasks decode overlapping tiles/strips; PNG/JPEG may decode the
-whole encoded frame. Returned lazy sources must remain at their source paths.
-The reader never mutates caller containers or process-global decoder settings.
+full-resolution image and must not reduce it below one pixel. `chunks` controls
+image chunks and the spatial chunks of labels. TIFF tasks decode overlapping
+tiles/strips; PNG/JPEG may decode the whole encoded frame. Returned lazy
+sources must remain at their source paths. The reader never mutates caller
+containers or process-global decoder settings.
+
+Channel coordinates follow one rule for every image:
+
+| Source | Channel coordinates |
+| --- | --- |
+| Samples the file declares RGB: TIFF `PhotometricInterpretation` RGB (alpha through `ExtraSamples`) or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6, three-component JPEG | `r, g, b` or `r, g, b, a` |
+| OME-TIFF whose channel axis is the OME channel (or samples) axis, or a single-channel OME-TIFF | OME channel names when all are nonempty and unique, else OME channel IDs; `<name or ID>:sample:<k>` for an OME channel with several samples |
+| Anything else, including an axis reinterpreted as channels with `data_axes` | positions `0, 1, ...` |
+
+The channel count and dtype never make an image RGB: a four-channel
+fluorescence TIFF keeps its OME names (for example `DAPI, CD3, CD8, PanCK`) or
+positions. The Space Ranger PNGs and the CytAssist TIFF are RGB files and keep
+`r, g, b`.
 
 `include_cytassist_image=True` uses a lazy projective warp into a regular physical
 grid, with bounded source windows and bilinear SciPy interpolation. It preserves
-the source dtype (integer interpolation therefore rounds to that dtype). No image
-pixel tasks execute when the reader returns.
+the source dtype (integer interpolation therefore rounds to that dtype) and the
+source channel coordinates. No image pixel tasks execute when the reader returns.
 
 All-bin squares can require several GiB: the default includes every available
 size, and a full 6.5 mm grid has 11.2 million 2 µm bins. Labels require about 45 MB
@@ -239,8 +276,9 @@ spatialdata-io visium-hd --input outs --output slide.zarr \
 ```
 
 Repeat `--bin-sizes` for several sizes; `all` is the default and `none` skips
-bins. Inclusion flags use `--include-…` / `--no-include-…`. Reader and CLI names,
-choices and defaults agree.
+bins. Inclusion flags use `--include-…` / `--no-include-…`. `--data-axes` takes
+one string such as `CYX`. Reader and CLI names, choices, defaults and option
+order agree.
 
 | Removed option | Replacement |
 | --- | --- |
@@ -254,6 +292,19 @@ choices and defaults agree.
 | Generic decoder/model/count mappings | Explicit raster and count options |
 | `dataset_id` | Fixed element names; concatenate by sample |
 | `gex_only` | All source features retained |
+
+Changes to the reader's contract:
+
+| Change | Migration |
+| --- | --- |
+| `data_axes` is one string such as `"CYX"` (`--data-axes CYX`); a sequence raises `TypeError` | Join the axis letters |
+| Channels are `r, g, b(, a)` only for declared RGB, else OME names or positions; earlier releases labelled any 3- or 4-channel image RGB(A) | Select fluorescence channels by OME name or position |
+| A multi-series TIFF without `tiff_series` raises `ReaderFormatError` (a `ValueError`) | Pass `tiff_series` |
+| Wrongly typed options raise `TypeError`, invalid values `ValueError`, all before any file is read | — |
+| `make_var_names_unique` precedes `invalid_geometries` in the signature and the CLI | Keyword arguments are unaffected |
+| Invalid UTF-8 in HDF5 text attributes raises; feature-slice `sample_id` is no longer checked | — |
+| Requested boundaries without `segmented_outputs/` raise `FileNotFoundError` for that directory | — |
+| Any `[spaceranger-]X.Y.Z` release is read (a release other than 3.0, 3.1, 4.0 or 4.1 warns that it is untested); other spellings and a missing `software_version` record no format version instead of raising | — |
 
 Discovered artifacts that are symlinks to targets outside the dataset directory are now rejected by default; earlier releases accepted them. Pass `path_policy="relaxed"` for git-annex or DVC datasets ([Dataset paths and symlinks](dataset_paths.md)).
 

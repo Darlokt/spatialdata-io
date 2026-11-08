@@ -546,6 +546,40 @@ class TestImages:
             ("expression_tissue_cut", "labels"),
         ]
 
+    def test_invalid_stain_names_are_sanitized_with_a_warning(self, tmp_path: Path) -> None:
+        _file(tmp_path / "sample_H&E_regist.tif")
+        _file(tmp_path / "sample_DAPI_mask.tif")
+
+        with pytest.warns(UserWarning, match="not a usable SpatialData element name") as reported:
+            result = _discover(tmp_path, image_roles=("registered", "mask"))
+
+        message = (
+            "stereoseq: the image name from its file name 'H&E_registered' is not a usable SpatialData element "
+            "name; using 'H_E_registered'. Rename the source files to choose the name explicitly."
+        )
+        assert [str(warning.message) for warning in reported] == [message]
+        assert [(source.name, source.file.name) for source in result.images] == [
+            ("DAPI_mask", "sample_DAPI_mask.tif"),
+            ("H_E_registered", "sample_H&E_regist.tif"),
+        ]
+
+    def test_names_differing_only_in_letter_case_fail(self, tmp_path: Path) -> None:
+        _file(tmp_path / "sample_HE_regist.tif")
+        _file(tmp_path / "sample_he_regist.tif")
+
+        with pytest.raises(ReaderFormatError, match="duplicate image 'he_registered'"):
+            _discover(tmp_path, image_roles=("registered",))
+
+    def test_names_colliding_after_sanitizing_fail(self, tmp_path: Path) -> None:
+        _file(tmp_path / "sample_H E_regist.tif")
+        _file(tmp_path / "sample_H:E_regist.tif")
+
+        with (
+            pytest.warns(UserWarning, match="using 'H_E_registered'"),
+            pytest.raises(ReaderFormatError, match="duplicate image 'H_E_registered'"),
+        ):
+            _discover(tmp_path, image_roles=("registered",))
+
     @pytest.mark.parametrize(
         ("directory", "prefix", "name"),
         [

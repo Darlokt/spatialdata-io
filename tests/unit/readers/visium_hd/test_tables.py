@@ -16,7 +16,7 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd import _tables as tables
 from spatialdata_io.readers.visium_hd._layout import BinLayout
 from spatialdata_io.readers.visium_hd._transforms import SlideFrame
-from tests.integration.readers.visium_hd._fixtures import HOMOGRAPHY, write_bundle, write_counts
+from tests.integration.readers.visium_hd._fixtures import HOMOGRAPHY, VERSION, write_bundle, write_counts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,7 +40,7 @@ class TestReadCounts:
     """Preserve source populations through shared sparse count ingestion."""
 
     def test_values_dtype_and_order(self, tmp_path: Path) -> None:
-        result = tables.read_counts(_source(tmp_path))
+        result = tables.read_counts(_source(tmp_path), version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X.dtype == np.float32
         assert_array_equal(result.X.toarray(), [[0, 1, 2], [3, 0, 4]])
@@ -54,7 +54,7 @@ class TestReadCounts:
             ("indptr", np.array([0, 0, 0], dtype=np.int64)),
         ):
             _replace(path, name, values)
-        zero = tables.read_counts(path)
+        zero = tables.read_counts(path, version=VERSION)
         assert isinstance(zero.X, csr_array)
         assert zero.X.nnz == 0
 
@@ -62,7 +62,7 @@ class TestReadCounts:
     def test_normalized_source_coordinates(self, tmp_path: Path, entries: list[int]) -> None:
         path = _source(tmp_path)
         _replace(path, "indices", np.array(entries, dtype=np.int32))
-        result = tables.read_counts(path)
+        result = tables.read_counts(path, version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X.has_canonical_format
         expected = [[0, 3, 0], [3, 0, 4]] if entries[0] == 1 else [[0, 2, 1], [3, 0, 4]]
@@ -73,17 +73,17 @@ class TestReadCounts:
         path = _source(tmp_path)
         _replace(path, "data", np.array([value, 2, 3, 4], dtype=np.float64))
         with pytest.raises((ReaderFormatError, ValueError)):
-            tables.read_counts(path)
+            tables.read_counts(path, version=VERSION)
 
     def test_duplicate_barcodes(self, tmp_path: Path) -> None:
         path = _source(tmp_path)
         _replace(path, "barcodes", np.array([b"same", b"same"]))
         with pytest.raises(ReaderFormatError, match="duplicate barcodes"):
-            tables.read_counts(path)
+            tables.read_counts(path, version=VERSION)
 
     def test_missing_source(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
-            tables.read_counts(ArtifactFile(tmp_path / "absent.h5"))
+            tables.read_counts(ArtifactFile(tmp_path / "absent.h5"), version=VERSION)
 
 
 class TestLinkTable:
@@ -92,13 +92,20 @@ class TestLinkTable:
     def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
         path = _source(tmp_path)
         _replace(path, "data", np.array([2**53 + 1, 2, 3, 4], dtype=np.int64))
-        table = tables.read_counts(path)
+        table = tables.read_counts(path, version=VERSION)
         with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            tables.link_table(table, "boundaries", pd.Index([2, 5]), position="vendor cell centroid", counts_path=path)
+            tables.link_table(
+                table,
+                "boundaries",
+                pd.Index([2, 5]),
+                position="vendor cell centroid",
+                counts_path=path,
+                version=VERSION,
+            )
         assert caught.value.path == path
 
     def test_linkage_and_serializable_categories(self, tmp_path: Path) -> None:
-        result = tables.read_counts(_source(tmp_path))
+        result = tables.read_counts(_source(tmp_path), version=VERSION)
         result.obs["instance_id"] = pd.Series([2, 5], index=result.obs_names, dtype="int64[pyarrow]")
         result = tables.link_table(
             result,
@@ -106,13 +113,14 @@ class TestLinkTable:
             pd.Index([2, 5]),
             position="vendor cell centroid",
             counts_path=ArtifactFile(tmp_path / "matrix.h5"),
+            version=VERSION,
         )
         assert result.uns["spatialdata_attrs"]["region"] == "boundaries"
         assert result.obs["region"].cat.categories.tolist() == ["boundaries"]
         result.write_h5ad(tmp_path / "roundtrip.h5ad")
 
     def test_membership(self, tmp_path: Path) -> None:
-        result = tables.read_counts(_source(tmp_path))
+        result = tables.read_counts(_source(tmp_path), version=VERSION)
         result.obs["instance_id"] = [2, 5]
         with pytest.raises(ReaderFormatError):
             tables.link_table(
@@ -121,6 +129,7 @@ class TestLinkTable:
                 pd.Index([2, 3]),
                 position="vendor cell centroid",
                 counts_path=ArtifactFile(tmp_path / "matrix.h5"),
+                version=VERSION,
             )
 
 
@@ -139,7 +148,7 @@ class TestReadBinTable:
             ArtifactFile(directory / "spatial/scalefactors_json.json"),
         )
         frame = SlideFrame(HOMOGRAPHY, np.eye(3), np.eye(3), 0.0, 0.0)
-        table = tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=unique)
+        table = tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=unique, version=VERSION)
         assert isinstance(table.X, csr_array)
         assert not isinstance(table.X, spmatrix)
         expected = bundle.raw[2] if kind == "raw" else bundle.raw[2][bundle.filtered_rows[2]]
@@ -161,7 +170,7 @@ class TestReadBinTable:
         )
         mocker.patch.object(csr_array, "toarray", side_effect=AssertionError("expression densification"))
         frame = SlideFrame(HOMOGRAPHY, np.eye(3), np.eye(3), 0.0, 0.0)
-        table = tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=True)
+        table = tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=True, version=VERSION)
         assert isinstance(table.X, csr_array)
         assert table.X.nnz == 6
 
@@ -178,4 +187,4 @@ class TestReadBinTable:
         )
         frame = SlideFrame(HOMOGRAPHY, np.eye(3), np.eye(3), 0.0, 0.0)
         with pytest.raises(ReaderFormatError, match="positive observation and feature dimensions"):
-            tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=True)
+            tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=True, version=VERSION)

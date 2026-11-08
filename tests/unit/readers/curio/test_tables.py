@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -262,6 +263,97 @@ class TestReadTable:
 
         assert raised.value.context.artifact == artifact
         assert raised.value.path == path
+
+    def test_uns_keys_are_sanitized_with_one_warning(self, tmp_path: Path) -> None:
+        """Rename invalid and reader-colliding top-level keys only, keeping values and order."""
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["my key"] = {"inner key": "kept"}
+        source.uns["valid"] = "v"
+        source.uns["Spatialdata_io_positions"] = np.asarray([1, 2])
+        source.uns["top_cluster_defining_features"] = "t"
+        source.write_h5ad(path)
+
+        stored = list(ad.read_h5ad(path).uns)
+
+        with pytest.warns(UserWarning, match="uns keys") as caught:
+            table = read_table(discover_layout(tmp_path))
+
+        # HDF5 stores group members by name, so the stored order is alphabetical.
+        assert stored == ["Spatialdata_io_positions", "my key", "top_cluster_defining_features", "valid"]
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "curio: the H5AD uns has names that a SpatialData table does not accept as uns keys; using "
+                "'Spatialdata_io_positions' -> 'Spatialdata_io_positions_1', 'my key' -> 'my_key', "
+                "'top_cluster_defining_features' -> 'top_cluster_defining_features_1'. Rename them in the source to "
+                "choose the names explicitly."
+            )
+        ]
+        assert list(table.uns) == [
+            "Spatialdata_io_positions_1",
+            "my_key",
+            "top_cluster_defining_features_1",
+            "valid",
+            "Sequencing",
+            "Mapping",
+            "Top_cluster_defining_features",
+        ]
+        assert table.uns["my_key"] == {"inner key": "kept"}
+        assert table.uns["valid"] == "v"
+        np.testing.assert_array_equal(table.uns["Spatialdata_io_positions_1"], [1, 2])
+        assert table.uns["top_cluster_defining_features_1"] == "t"
+
+    def test_valid_uns_keys_are_untouched_without_warning(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["qc"] = {"inner key": 1}
+        source.write_h5ad(path)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            table = read_table(discover_layout(tmp_path))
+
+        assert list(table.uns)[:1] == ["qc"]
+        assert table.uns["qc"] == {"inner key": 1}
+
+    def test_metric_categories_are_reserved_against_sanitized_uns_keys(self, tmp_path: Path) -> None:
+        """Categories yield to the already sanitized H5AD keys, which keep their repaired names."""
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["run metrics"] = "h5ad"
+        source.write_h5ad(path)
+        (tmp_path / "sample_Metrics.csv").write_text("Metric,Value,Category\nReads,100,Run Metrics\n", encoding="utf-8")
+
+        with pytest.warns(UserWarning, match="uns keys") as caught:
+            table = read_table(discover_layout(tmp_path))
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "curio: the H5AD uns has names that a SpatialData table does not accept as uns keys; using "
+                "'run metrics' -> 'run_metrics'. Rename them in the source to choose the names explicitly."
+            ),
+            (
+                "curio: the Category column of the metrics file has names that a SpatialData table does not accept as "
+                "uns keys; using 'Run Metrics' -> 'Run_Metrics_1'. Rename them in the source to choose the names "
+                "explicitly."
+            ),
+        ]
+        assert table.uns["run_metrics"] == "h5ad"
+        assert table.uns["Run_Metrics_1"] == {"Reads": "100"}
+
+    def test_exact_reserved_uns_key_is_rejected(self, tmp_path: Path) -> None:
+        """An exact reader-owned key is not renamed: it still fails as an occupied destination."""
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["Top_cluster_defining_features"] = "t"
+        source.write_h5ad(path)
+
+        with pytest.raises(ReaderFormatError, match="reserved output annotations"):
+            read_table(discover_layout(tmp_path))
 
 
 class TestReadNamedRows:

@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from numpy.testing import assert_array_equal
 from shapely import Polygon
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Scale, get_transformation
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygons
@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     from typing import Literal
 
     from numpy.typing import NDArray
+
+# The builders attach exactly the transformations the reader passes.
+FRAME = {"global": Scale([0.5, 0.5], axes=("x", "y"))}
 
 
 def _border(vertices: list[tuple[int, int]]) -> NDArray[np.int16]:
@@ -33,15 +36,15 @@ class TestMakePoints:
     def test_preserves_exact_values_and_order(self) -> None:
         coordinates = np.array([[2**32 - 1, -(2**31)], [1, 2]], dtype=np.int64)
         index = pd.Index([200, 100], dtype=np.uint64)
-        points = make_points(coordinates, index)
+        points = make_points(coordinates, index, transformations=FRAME)
         computed = points.compute()
         assert_array_equal(computed[["x", "y"]], coordinates)
         assert_array_equal(computed.index, index)
         assert computed.x.dtype == np.int64
-        assert isinstance(get_transformation(points), Identity)
+        assert get_transformation(points, get_all=True) == FRAME
 
     def test_empty(self) -> None:
-        points = make_points(np.empty((0, 2), dtype=np.int64), pd.Index([], dtype=str))
+        points = make_points(np.empty((0, 2), dtype=np.int64), pd.Index([], dtype=str), transformations=FRAME)
         assert points.compute().empty
 
 
@@ -52,7 +55,9 @@ class TestMakePolygons:
         centers = np.array([[2**32 - 1, -(2**31)]], dtype=np.int64)
         border = _border([(-2, -1), (3, -1), (3, 2), (-2, 2)])
 
-        shapes = make_polygons(centers, border, pd.Index([800]), path=tmp_path / "cells.gef", policy="keep")
+        shapes = make_polygons(
+            centers, border, pd.Index([800]), path=tmp_path / "cells.gef", policy="keep", transformations=FRAME
+        )
         expected = np.array(
             [
                 [2**32 - 3, -(2**31) - 1],
@@ -67,7 +72,7 @@ class TestMakePolygons:
         assert isinstance(polygon, Polygon)
         assert_array_equal(polygon.exterior.coords, expected)
         assert shapes.index.tolist() == [800]
-        assert isinstance(get_transformation(shapes), Identity)
+        assert get_transformation(shapes, get_all=True) == FRAME
 
     @pytest.mark.parametrize("case", ["single_component", "interior", "too_short"])
     @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
@@ -82,7 +87,12 @@ class TestMakePolygons:
 
         with pytest.raises(ReaderFormatError, match="paired"):
             make_polygons(
-                np.zeros((1, 2), dtype=np.int64), border, pd.Index([7]), path=tmp_path / "cells.gef", policy=policy
+                np.zeros((1, 2), dtype=np.int64),
+                border,
+                pd.Index([7]),
+                path=tmp_path / "cells.gef",
+                policy=policy,
+                transformations=FRAME,
             )
 
     @pytest.mark.parametrize(
@@ -118,17 +128,35 @@ class TestMakePolygons:
                 pd.Index([55]),
                 path=tmp_path / "cells.gef",
                 policy="raise",
+                transformations=FRAME,
             )
 
     def test_keep_preserves_collinear_source_vertices(self, tmp_path: Path) -> None:
         border = _border([(0, 0), (1, 1), (2, 2)])
         shapes = make_polygons(
-            np.zeros((1, 2), dtype=np.int64), border, pd.Index([55]), path=tmp_path / "cells.gef", policy="keep"
+            np.zeros((1, 2), dtype=np.int64),
+            border,
+            pd.Index([55]),
+            path=tmp_path / "cells.gef",
+            policy="keep",
+            transformations=FRAME,
         )
         polygon = shapes.geometry.iloc[0]
         assert isinstance(polygon, Polygon)
         assert_array_equal(polygon.exterior.coords, [[0, 0], [1, 1], [2, 2], [0, 0]])
         assert not shapes.geometry.is_valid.iloc[0]
+
+    def test_drop_without_invalid_contours_keeps_every_cell(self, tmp_path: Path) -> None:
+        shapes = make_polygons(
+            np.array([[10, 20], [30, 40]], dtype=np.int64),
+            np.concatenate([_border([(-1, -1), (1, -1), (1, 1), (-1, 1)])] * 2),
+            pd.Index([7, 3], dtype=np.uint64),
+            path=tmp_path / "cells.gef",
+            policy="drop",
+            transformations=FRAME,
+        )
+        assert shapes.index.tolist() == [7, 3]
+        assert shapes.geometry.is_valid.all()
 
     def test_all_dropped_fails(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="all polygons dropped"):
@@ -138,6 +166,7 @@ class TestMakePolygons:
                 pd.Index([55]),
                 path=tmp_path / "cells.gef",
                 policy="drop",
+                transformations=FRAME,
             )
 
     def test_empty(self, tmp_path: Path) -> None:
@@ -148,4 +177,5 @@ class TestMakePolygons:
                 pd.Index([], dtype=np.uint64),
                 path=tmp_path / "cells.gef",
                 policy="keep",
+                transformations=FRAME,
             )

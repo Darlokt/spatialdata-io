@@ -128,11 +128,14 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
             - Other fields, layers, ``raw`` and ``uns`` entries are kept with
               their dtypes and missingness. Source fields named ``region`` or
               like the instance column must equal the generated values.
-              Other ``obs`` and ``var`` column names that a SpatialData table
-              does not accept (``my note``) are sanitized with a warning
-              (``my_note``; a name that then collides, ignoring letter case,
-              with another column, ``region`` or the instance column gets a
-              ``_1``, ``_2``, ... suffix). ``instance_key`` keeps its name.
+              Other ``obs`` and ``var`` column names and top-level ``uns``
+              keys that a SpatialData table does not accept (``my note``) are
+              sanitized with a warning (``my_note``; a name that then
+              collides, ignoring letter case, with another one, ``region``,
+              the instance column or the reserved ``uns`` keys
+              ``spatialdata_io_positions`` and ``spatialdata_attrs`` gets a
+              ``_1``, ``_2``, ... suffix). ``instance_key`` keeps its name;
+              ``uns`` values and nested keys stay as stored.
 
         Coordinate systems: image and labels share one coordinate system.
 
@@ -156,7 +159,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     UserWarning
         Once per call when duplicate sparse entries were summed, naming the
         affected expression slots and any dtype change; once each if ``obs``
-        or ``var`` column names were sanitized.
+        or ``var`` column names or top-level ``uns`` keys were sanitized.
 
     Raises
     ------

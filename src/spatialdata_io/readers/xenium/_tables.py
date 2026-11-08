@@ -5,7 +5,18 @@ Counts come from ``cell_feature_matrix.h5`` or its MatrixMarket twin (directory 
 normally returns float32 values, suitable for realistic count magnitudes. Protein
 Expression features (XOA 4.0+) store the mean stain intensity multiplied by the
 integer ``protein_scaling_factor`` of the HDF5 root attributes; the MatrixMarket
-twin lacks that factor.
+twin lacks that factor. Feature annotations become ``var`` columns; names
+that a SpatialData table does not accept are renamed with a warning.
+
+``cells.parquet`` (or its CSV twin) holds one row per cell in count-matrix
+barcode order: ``cell_id``, ``x_centroid``/``y_centroid`` and ``cell_area``/
+``nucleus_area`` in micrometres, per-cell transcript counts and, from XOA 2.0,
+``segmentation_method``. Its columns become ``obs`` in source order. Column
+names that a SpatialData table does not accept, including case variants of
+the documented and reader-added columns, are renamed with a warning; the
+documented columns keep their names. ``cells.zarr.zip`` adds ``label_id`` and
+the nucleus centroids, and secondary-analysis clusterings are added last under
+their method names.
 """
 
 from __future__ import annotations
@@ -14,7 +25,7 @@ import csv
 import gzip
 import io
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Literal, cast
@@ -30,7 +41,9 @@ import pyarrow.parquet as pq
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
 from spatialdata_io.readers._utils.csv import parse_csv_header, read_csv_header
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.metadata import decode_hdf5_text
+from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -41,17 +54,19 @@ from spatialdata_io.readers._utils.table import (
 )
 from spatialdata_io.readers.xenium._layout import H5Counts, MtxDirectory
 from spatialdata_io.readers.xenium._schemas import (
+    CELL_COLUMNS,
     CELL_FLOATS,
     CELL_ID,
     CELL_OPTIONAL_COUNTS,
     CELL_REQUIRED,
     CELL_REQUIRED_COUNTS,
+    READER_OBS,
+    STRING_DTYPE,
     cast_column,
     cell_types,
     id_index,
     normalize_ids,
     require_finite,
-    schema_error,
     validate_header,
 )
 
@@ -61,6 +76,8 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from scipy import sparse
 
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
+    from spatialdata_io.readers.xenium._analysis import Analysis
     from spatialdata_io.readers.xenium._cells import CellStore
     from spatialdata_io.readers.xenium._layout import CountSource, TableTarget, TabularSource
     from spatialdata_io.readers.xenium._metadata import ProteinPanel
@@ -68,11 +85,12 @@ if TYPE_CHECKING:
 
 type FeatureSelection = tuple[str, ...] | Literal["all"] | None
 
-GENE_EXPRESSION = "Gene Expression"
-PROTEIN_EXPRESSION = "Protein Expression"
-PROTEIN_METRIC = "MEAN_PER_CELL_STAIN"
-RESERVED_OBS = ("label_id", "nucleus_centroid_x", "nucleus_centroid_y", "region")
-STRING_DTYPE = pd.ArrowDtype(pa.string())
+_GENE_EXPRESSION = "Gene Expression"
+_PROTEIN_EXPRESSION = "Protein Expression"
+_PROTEIN_METRIC = "MEAN_PER_CELL_STAIN"
+# var columns the reader relies on or adds by name.
+_PANEL_COLUMNS = ("long_name", "clone", "codeword_index")
+_VAR_COLUMNS = ("gene_ids", "feature_types", *_PANEL_COLUMNS)
 _MTX_MEMBERS = frozenset({"barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz"})
 
 
@@ -105,15 +123,13 @@ class FeatureIndex:
     barcodes: pd.Index
 
 
-def _context(artifact: str) -> ReaderErrorContext:
-    return ReaderErrorContext("xenium", artifact)
-
-
 def _source_path(source: CountSource) -> Path:
     return source.directory if isinstance(source, MtxDirectory) else source.file
 
 
-def _extract_archive(file: ArtifactFile, destination: Path, *, metadata_only: bool = False) -> ArtifactDirectory:
+def _extract_archive(
+    file: ArtifactFile, destination: Path, *, context: ReaderErrorContext, metadata_only: bool = False
+) -> ArtifactDirectory:
     """Validate required members once and extract only the selected, contained products."""
     with tarfile.open(file, "r:gz") as archive:
         members = [
@@ -125,9 +141,9 @@ def _extract_archive(file: ArtifactFile, destination: Path, *, metadata_only: bo
         ]
         names = [PurePosixPath(member.name).name for member in members]
         if set(names) != _MTX_MEMBERS or len(names) != len(_MTX_MEMBERS):
-            raise schema_error(
-                file,
-                "cell_feature_matrix.tar.gz",
+            raise ReaderFormatError(
+                context=context,
+                path=file,
                 found=f"members {sorted(member.name for member in members)}",
                 expected="exactly one cell_feature_matrix/{barcodes,features}.tsv.gz and matrix.mtx.gz",
             )
@@ -136,73 +152,86 @@ def _extract_archive(file: ArtifactFile, destination: Path, *, metadata_only: bo
             member for member in members if not metadata_only or PurePosixPath(member.name).name != "matrix.mtx.gz"
         ]
         archive.extractall(destination, members=selected, filter="data")
-    return require_directory(destination / "cell_feature_matrix", context=_context("cell_feature_matrix.tar.gz"))
+    return require_directory(destination / "cell_feature_matrix", context=context)
 
 
-def _read_matrix(source: CountSource) -> ad.AnnData:
+def _read_matrix(source: CountSource, context: ReaderErrorContext) -> ad.AnnData:
     """Read every feature of a count source into an owned canonical CSR table."""
     if isinstance(source, H5Counts):
-        return read_10x_h5(source.file, context=_context("cell_feature_matrix.h5"))
+        return read_10x_h5(source.file, context=context)
     if isinstance(source, MtxDirectory):
-        return read_10x_mtx(source.directory, context=_context("cell_feature_matrix"), make_unique=False)
+        return read_10x_mtx(source.directory, context=context, make_unique=False)
     # The returned table holds only in-memory copies; the directory is removed.
     with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
-        directory = _extract_archive(source.file, Path(temporary))
-        return read_10x_mtx(directory, context=_context("cell_feature_matrix.tar.gz"), make_unique=False)
+        directory = _extract_archive(source.file, Path(temporary), context=context)
+        return read_10x_mtx(directory, context=context, make_unique=False)
 
 
-def _protein_scaling(source: CountSource) -> int:
+def _protein_scaling(source: CountSource, context: ReaderErrorContext) -> int:
     """Read and validate the HDF5 root protein attributes."""
     if not isinstance(source, H5Counts):
-        raise schema_error(
-            _source_path(source),
-            "protein scaling factor",
+        raise ReaderFormatError(
+            context=context,
+            path=_source_path(source),
             found="Protein Expression features in a MatrixMarket matrix without the scaling factor",
             expected="cell_feature_matrix.h5, or feature_types without 'Protein Expression'",
         )
     with h5py.File(source.file, "r") as handle:
         factor: object = handle.attrs.get("protein_scaling_factor")
         metric: object = handle.attrs.get("protein_metric")
-    metric = metric.decode() if isinstance(metric, bytes) else metric
     if not isinstance(factor, int | np.integer) or isinstance(factor, bool) or factor <= 0:
-        raise schema_error(source.file, "protein_scaling_factor", found=f"{factor!r}", expected="a positive integer")
-    if not np.isfinite(np.float32(factor)):
-        raise schema_error(
-            source.file, "protein_scaling_factor", found=f"{factor!r}", expected="a finite positive float32 divisor"
+        raise ReaderFormatError(
+            context=context,
+            path=source.file,
+            found=f"protein_scaling_factor {factor!r}",
+            expected="a positive integer protein_scaling_factor",
         )
-    if metric != PROTEIN_METRIC:
-        raise schema_error(source.file, "protein_metric", found=f"{metric!r}", expected=repr(PROTEIN_METRIC))
+    metric = decode_hdf5_text(metric, attribute="protein_metric", context=context, path=source.file)
+    if metric != _PROTEIN_METRIC:
+        raise ReaderFormatError(
+            context=context, path=source.file, found=f"protein_metric {metric!r}", expected=repr(_PROTEIN_METRIC)
+        )
     return int(factor)
 
 
-def _selected_types(available: tuple[str, ...], feature_types: FeatureSelection, path: Path) -> tuple[str, ...]:
+def _selected_types(
+    available: tuple[str, ...], feature_types: FeatureSelection, path: Path, context: ReaderErrorContext
+) -> tuple[str, ...]:
     if feature_types == "all":
         return available
     if feature_types is None:
-        return tuple(kind for kind in available if kind in (GENE_EXPRESSION, PROTEIN_EXPRESSION))
+        return tuple(kind for kind in available if kind in (_GENE_EXPRESSION, _PROTEIN_EXPRESSION))
     missing = [kind for kind in feature_types if kind not in available]
     if missing:
-        raise schema_error(
-            path, "feature_types", found=f"feature types {missing!r} absent", expected=f"types from {list(available)!r}"
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"feature types {missing!r} absent",
+            expected=f"feature_types from {list(available)!r}",
         )
     return feature_types
 
 
-def _protein_annotations(var: pd.DataFrame, is_protein: NDArray[np.bool_], panel: ProteinPanel, path: Path) -> None:
+def _protein_annotations(
+    var: pd.DataFrame, is_protein: NDArray[np.bool_], panel: ProteinPanel, path: Path, context: ReaderErrorContext
+) -> None:
     """Add 1:1 protein panel annotations; other features stay missing."""
-    conflicts = [name for name in ("long_name", "clone", "codeword_index") if name in var]
+    conflicts = [name for name in _PANEL_COLUMNS if name in var]
     if conflicts:
-        raise schema_error(
-            path,
-            "cell-feature matrix",
+        raise ReaderFormatError(
+            context=context,
+            path=path,
             found=f"reserved protein annotation columns {conflicts!r}",
             expected="no source columns named long_name, clone or codeword_index when adding protein panel annotations",
         )
     ids = var["gene_ids"].to_numpy(dtype=np.str_)
     missing = [str(identifier) for identifier in ids[is_protein] if identifier not in panel.targets]
     if missing:
-        raise schema_error(
-            path, "protein_panel.json", found=f"no targets for {missing!r}", expected="one target per protein feature"
+        raise ReaderFormatError(
+            context=replace(context, artifact="protein_panel.json"),
+            path=path,
+            found=f"no targets for {missing!r}",
+            expected="one target per protein feature",
         )
     targets = [
         panel.targets[identifier] if protein else None for identifier, protein in zip(ids, is_protein, strict=True)
@@ -214,7 +243,9 @@ def _protein_annotations(var: pd.DataFrame, is_protein: NDArray[np.bool_], panel
     )
 
 
-def read_counts(source: CountSource, feature_types: FeatureSelection, panel: ProteinPanel | None) -> Counts:
+def read_counts(
+    source: CountSource, feature_types: FeatureSelection, panel: ProteinPanel | None, *, context: ReaderErrorContext
+) -> Counts:
     """Read, select and scale expression; source feature and barcode order are kept.
 
     Raises
@@ -225,13 +256,13 @@ def read_counts(source: CountSource, feature_types: FeatureSelection, panel: Pro
         without a valid HDF5 factor and metric, a protein lacks a panel entry,
         or source columns conflict with the protein panel annotations.
     """
-    source_table = _read_matrix(source)
+    source_table = _read_matrix(source, context)
     path = _source_path(source)
     source_var = cast("pd.DataFrame", source_table.var)
     if not source_table.var_names.is_unique or not source_table.obs_names.is_unique:
-        raise schema_error(
-            path,
-            "cell-feature matrix",
+        raise ReaderFormatError(
+            context=context,
+            path=path,
             found="repeated feature names or barcodes",
             expected="unique names and barcodes",
         )
@@ -239,23 +270,27 @@ def read_counts(source: CountSource, feature_types: FeatureSelection, panel: Pro
     matrix = cast("sparse.csr_array", source_table.X)
 
     types = source_var["feature_types"].to_numpy(dtype=np.str_)
-    selected = np.isin(types, _selected_types(tuple(dict.fromkeys(types)), feature_types, path))
+    selected = np.isin(types, _selected_types(tuple(dict.fromkeys(types)), feature_types, path, context))
     if not selected.all():
         matrix = matrix[:, selected]
     var = source_var.loc[selected]
-    matrix = finalize_count_arrays((matrix,), context=_context("selected cell-feature counts"), path=path)[0]
+    # Additional HDF5 feature datasets become var columns under their stored names.
+    var.columns = sanitize_column_names(
+        list(var.columns), source="xenium: the cell-feature matrix features", reserved=_VAR_COLUMNS
+    )
+    matrix = finalize_count_arrays((matrix,), context=context, path=path)[0]
 
     protein: dict[str, object] | None = None
-    is_protein = types[selected] == PROTEIN_EXPRESSION
+    is_protein = types[selected] == _PROTEIN_EXPRESSION
     if is_protein.any():
-        factor = _protein_scaling(source)
+        factor = _protein_scaling(source, context)
         entries = is_protein[matrix.indices]
         # Preserve the existing float32 divisor contract. Ordinary float32
         # tables divide once; exceptional exact counts retain float64 storage.
         matrix.data[entries] /= np.float32(factor)
-        protein = {"scaling_factor": factor, "metric": PROTEIN_METRIC}
+        protein = {"scaling_factor": factor, "metric": _PROTEIN_METRIC}
         if panel is not None:
-            _protein_annotations(var, is_protein, panel, path)
+            _protein_annotations(var, is_protein, panel, path, context)
 
     table = ad.AnnData(X=matrix, obs=pd.DataFrame(index=source_table.obs_names), var=var)
     return Counts(table, source_table.var_names, protein)
@@ -266,7 +301,7 @@ def _tsv_column(payload: bytes, column: int) -> pd.Index:
     return pd.Index([row[column] for row in rows], dtype="str")
 
 
-def read_feature_index(source: CountSource) -> FeatureIndex:
+def read_feature_index(source: CountSource, *, context: ReaderErrorContext) -> FeatureIndex:
     """Read feature names and barcodes without the matrix values."""
     if isinstance(source, H5Counts):
         with h5py.File(source.file, "r") as handle:
@@ -278,15 +313,14 @@ def read_feature_index(source: CountSource) -> FeatureIndex:
         barcodes_file = (source.directory / "barcodes.tsv.gz").read_bytes()
     else:
         with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
-            directory = _extract_archive(source.file, Path(temporary), metadata_only=True)
+            directory = _extract_archive(source.file, Path(temporary), context=context, metadata_only=True)
             features = (directory / "features.tsv.gz").read_bytes()
             barcodes_file = (directory / "barcodes.tsv.gz").read_bytes()
     return FeatureIndex(_tsv_column(features, 1), _tsv_column(barcodes_file, 0))
 
 
-def read_header(source: TabularSource) -> list[str]:
+def read_header(source: TabularSource, *, context: ReaderErrorContext) -> list[str]:
     """Read only the first record of a CSV twin."""
-    context = ReaderErrorContext("xenium", source.file.name)
     if source.kind == "csv":
         return read_csv_header(source.file, context=context)
     with gzip.open(source.file, "rb") as handle:
@@ -298,6 +332,7 @@ def read_csv_table(
     names: list[str],
     types: Mapping[str, pa.DataType],
     *,
+    context: ReaderErrorContext,
     columns: Sequence[str] | None = None,
 ) -> pa.Table:
     """Read a CSV twin with its validated header and explicit types; empty fields are never null text.
@@ -319,12 +354,15 @@ def read_csv_table(
                 ),
             )
     except pa.ArrowInvalid as error:
-        raise schema_error(
-            source.file, source.file.name, found=f"malformed CSV: {error}", expected="typed records of the header width"
+        raise ReaderFormatError(
+            context=context,
+            path=source.file,
+            found=f"malformed CSV: {error}",
+            expected="typed records of the header width",
         ) from error
 
 
-def read_cells(source: TabularSource, family: Family) -> Cells:
+def read_cells(source: TabularSource, family: Family, *, context: ReaderErrorContext) -> Cells:
     """Read ``cells.parquet`` or its CSV twin as validated, Arrow-backed annotations.
 
     Raises
@@ -334,71 +372,90 @@ def read_cells(source: TabularSource, family: Family) -> Cells:
         centroids or ``cell_area`` are not finite, areas or counts are negative,
         or ``nucleus_area`` is infinite (NaN marks cells without a nucleus).
     """
-    path, artifact = source.file, source.file.name
+    path = source.file
     if source.kind == "parquet":
         table = pq.read_table(path)
         names = table.column_names
-        validate_header(names, CELL_REQUIRED, path=path, artifact=artifact)
+        validate_header(names, CELL_REQUIRED, path=path, context=context)
     else:
-        names = read_header(source)
-        validate_header(names, CELL_REQUIRED, path=path, artifact=artifact)
-        table = read_csv_table(source, names, cell_types(names, family))
+        names = read_header(source, context=context)
+        validate_header(names, CELL_REQUIRED, path=path, context=context)
+        table = read_csv_table(source, names, cell_types(names, family), context=context)
 
     types = cell_types(names, family)
     for name in (*CELL_FLOATS, *CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS):
         if name in names:
-            column = cast_column(table[name], types[name], name, path=path, artifact=artifact)
+            column = cast_column(table[name], types[name], name, path=path, context=context)
             if name == "nucleus_area":
                 # Cells without a nucleus have no area: fastparquet-written files
                 # store null, Polars-written files and CSV twins NaN. Both become NaN.
                 column = column.fill_null(float("nan"))
             table = table.set_column(names.index(name), name, column)
     table = table.set_column(
-        names.index(CELL_ID), CELL_ID, normalize_ids(table[CELL_ID], family, path=path, artifact=artifact)
+        names.index(CELL_ID), CELL_ID, normalize_ids(table[CELL_ID], family, path=path, context=context)
     )
 
     if any(table[name].null_count for name in CELL_REQUIRED):
-        raise schema_error(path, artifact, found="missing required values", expected="complete cell records")
-    for name in ("x_centroid", "y_centroid", "cell_area", "nucleus_area"):
-        require_finite(table[name].to_numpy(), name, path=path, artifact=artifact, allow_nan=name == "nucleus_area")
+        raise ReaderFormatError(
+            context=context, path=path, found="missing required values", expected="complete cell records"
+        )
+    for name in CELL_FLOATS:
+        require_finite(table[name].to_numpy(), name, path=path, context=context, allow_nan=name == "nucleus_area")
     for name in (*CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS, "cell_area", "nucleus_area"):
         # NaN comparisons are false, so cells without a nucleus pass.
         if name in names and (np.asarray(table[name].to_numpy()) < 0).any():
-            raise schema_error(path, artifact, found=f"negative {name} values", expected=f"nonnegative {name}")
+            raise ReaderFormatError(
+                context=context, path=path, found=f"negative {name} values", expected=f"nonnegative {name}"
+            )
 
     ids = id_index(table[CELL_ID])
     if not ids.is_unique:
-        raise schema_error(path, artifact, found="repeated cell IDs", expected="one row per cell")
+        raise ReaderFormatError(context=context, path=path, found="repeated cell IDs", expected="one row per cell")
     return Cells(table.to_pandas(types_mapper=pd.ArrowDtype), ids)
 
 
-def build_table(cells: Cells, counts: Counts, store: CellStore | None, *, path: Path) -> ad.AnnData:
-    """Combine counts and cell annotations after exact, complete identity checks.
+def build_table(  # noqa: PLR0913, RUF100 - Every table source and the error origin.
+    cells: Cells,
+    counts: Counts,
+    store: CellStore | None,
+    analysis: Analysis | None,
+    *,
+    path: Path,
+    context: ReaderErrorContext,
+) -> ad.AnnData:
+    """Combine counts, cell annotations and optional analysis after exact identity checks.
 
     Raises
     ------
     ReaderFormatError
         If cell IDs differ from the count barcodes or the cell store in value or
-        order, reserved annotation names already exist, or segmentation methods
-        disagree with the store.
+        order, reader-owned annotation names already exist, segmentation methods
+        disagree with the store, or a clustering is named like an annotation.
+
+    Warns
+    -----
+    UserWarning
+        If cells-table columns or clustering methods are not usable SpatialData
+        column names and are renamed.
     """
+
+    def error(*, found: str, expected: str) -> ReaderFormatError:
+        return ReaderFormatError(context=context, path=path, found=found, expected=expected)
+
     barcodes = counts.table.obs_names
     # Integer IDs (XOA 1.0-1.2) are written as canonical decimal barcodes.
     if not cells.ids.astype("str").equals(barcodes.astype("str")):
-        raise schema_error(
-            path, "cells table", found="cell IDs differing from the count barcodes", expected="identical IDs in order"
-        )
+        raise error(found="cell IDs differing from the count barcodes", expected="identical IDs in order")
     if store is not None and not store.cell_ids.equals(cells.ids):
-        raise schema_error(
-            path, "cells.zarr.zip", found="cell IDs differing from the cells table", expected="identical IDs in order"
-        )
-    conflicts = [name for name in RESERVED_OBS if name in cells.frame]
+        raise error(found="cell IDs differing from cells.zarr.zip", expected="identical IDs in order")
+    conflicts = [name for name in READER_OBS if name in cells.frame]
     if conflicts:
-        raise schema_error(
-            path, "cells table", found=f"reserved columns {conflicts!r}", expected="no reader-owned names"
-        )
+        raise error(found=f"reserved columns {conflicts!r}", expected="no reader-owned names")
 
     obs = cells.frame.set_axis(barcodes)
+    obs.columns = sanitize_column_names(
+        list(obs.columns), source="xenium: the cells table header", reserved=(*CELL_COLUMNS, *READER_OBS)
+    )
     if store is not None:
         obs["label_id"] = store.cell_labels
         obs["nucleus_centroid_x"] = store.nucleus_centroids[:, 0]
@@ -409,9 +466,7 @@ def build_table(cells: Cells, counts: Counts, store: CellStore | None, *, path: 
             if "segmentation_method" in obs and not np.array_equal(
                 obs["segmentation_method"].to_numpy(dtype=np.str_), store.cell_methods
             ):
-                raise schema_error(
-                    path, "segmentation_method", found="methods differing from cells.zarr.zip", expected="equal methods"
-                )
+                raise error(found="segmentation_method differing from cells.zarr.zip", expected="equal methods")
             obs["segmentation_method"] = pd.Series(store.cell_methods, index=obs.index, dtype=STRING_DTYPE)
 
     table = ad.AnnData(X=counts.table.X, obs=obs, var=cast("pd.DataFrame", counts.table.var))
@@ -429,12 +484,35 @@ def build_table(cells: Cells, counts: Counts, store: CellStore | None, *, path: 
         },
     }
     table.uns[POSITIONS_KEY] = positions
+    if analysis is not None:
+        _add_analysis(table, analysis, path, context)
     return table
 
 
-def link_table(table: ad.AnnData, target: TableTarget | None, expected: pd.Index | None) -> ad.AnnData:
+def _add_analysis(table: ad.AnnData, analysis: Analysis, path: Path, context: ReaderErrorContext) -> None:
+    """Add clusterings as ``obs`` columns and projections as ``obsm`` arrays."""
+    obs = cast("pd.DataFrame", table.obs)
+    shadowed = [method for method in analysis.clusters if method in obs]
+    if shadowed:
+        raise ReaderFormatError(
+            context=replace(context, artifact="analysis"),
+            path=path,
+            found=f"clusterings {shadowed!r} named like cell annotations",
+            expected="distinct analysis and annotation names",
+        )
+    methods = sanitize_column_names(
+        list(analysis.clusters), source="xenium: the analysis clustering methods", reserved=(*obs.columns, "region")
+    )
+    for name, values in zip(methods, analysis.clusters.values(), strict=True):
+        obs[name] = values
+    for name, values in analysis.projections.items():
+        table.obsm[name] = values
+
+
+def link_table(
+    table: ad.AnnData, target: TableTarget | None, expected: pd.Index | None, *, context: ReaderErrorContext
+) -> ad.AnnData:
     """Convert annotations once and link the final table to its target element."""
-    context = ReaderErrorContext("xenium", "table")
     obs = cast("pd.DataFrame", table.obs)
     if target is not None:
         region: str = target

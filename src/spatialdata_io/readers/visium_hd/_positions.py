@@ -1,7 +1,42 @@
-"""Bounded position ingestion, grid alignment and registration validation."""
+"""Bounded ingestion of Visium HD bin positions and the slide registration they define.
+
+Each bin size stores its positions beside its counts::
+
+    binned_outputs/
+    ├── square_002um/spatial/tissue_positions.parquet   # native 2 µm grid, calibrates every read
+    ├── square_008um/spatial/tissue_positions.parquet   # one row per 8 µm bin
+    └── square_XXXum/spatial/tissue_positions.parquet   # any stored even size
+
+A file has one row per square of its grid, in any order (schema in
+``_schemas``). The 2 µm grid is 3350 x 3350 squares (6.5 mm capture area) or
+5524 x 5524 (11 mm). A bin of ``size_um = 2k`` covers ``k x k`` native squares,
+so its grid has ``ceil(n / k)`` rows and columns and the last row and column
+may be partial.
+
+``pxl_col_in_fullres``/``pxl_row_in_fullres`` are image x/y in full-resolution
+pixels. For the 2 µm grid they are ``H(col, row)`` for one homography ``H``
+from spot indices to image pixels. For a bin of factor ``k`` Space Ranger
+writes ``H(k * col, k * row) + (H(k - 1, k - 1) - H(0, 0)) / 2``: the image
+position of the bin's first spot, shifted by half the image displacement across
+one full bin. Partial edge bins use the same offset. See
+https://github.com/10XGenomics/spaceranger/blob/0bc95c49e1c4db6247a97ed57998f7fe3719e2fa/lib/rust/spatial/src/stages/bin_count_matrix.rs#L99-L124
+
+The reader refits ``H`` from the 2 µm positions and validates it against every
+2 µm row and, for each selected coarser size, every row of that file
+(selected or not). The tolerance ``MAX_PROJECTIVE_ERROR_PX = 1e-9`` pixels is
+absolute: refitting the vendor matrix reproduces real 2 µm positions to about
+1e-12 pixels, and float64 resolves full-resolution coordinates (below 10^5
+pixels) to about 1e-11 pixels, so any larger residual means the files disagree
+rather than rounding. Physical coordinates come from the manufactured grid,
+not from ``pxl_*``; the pixel columns are returned in ``obs`` for traceability.
+
+Files are read in projected batches of ``POSITION_BATCH_SIZE`` rows; only one
+boolean per grid square (coverage) and the selected rows' values are kept.
+"""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,7 +54,7 @@ from spatialdata_io.readers.visium_hd._schemas import (
 from spatialdata_io.readers.visium_hd._transforms import SPOT_PITCH_UM, SlideFrame, apply_projective, fit_homography
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
     from numpy.typing import NDArray
 
@@ -29,28 +64,39 @@ MAX_PROJECTIVE_ERROR_PX = 1e-9
 POSITION_BATCH_SIZE = 131_072
 
 
-def read_grid_shape(positions: ArtifactFile) -> tuple[int, int]:
-    """Infer grid bounds from exact Parquet maxima, with a projected fallback.
+def _context(version: str | None) -> ReaderErrorContext:
+    return ReaderErrorContext("visium_hd", "tissue positions", version)
 
-    Footer statistics avoid a pixel-position scan when the optional feature
-    slice is absent. The consuming iterator independently proves complete,
-    nonnull, unique coverage inside these bounds.
-    """
+
+@contextmanager
+def _open(positions: ArtifactFile, *, version: str | None) -> Generator[pq.ParquetFile]:
+    """Open one positions file, validate its schema and close it on exit."""
     try:
         source = pq.ParquetFile(positions)
     except pa.ArrowInvalid as error:
         raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "tissue positions"),
+            context=_context(version),
             path=positions,
             found="malformed Parquet footer",
             expected="a readable positions Parquet artifact",
         ) from error
 
     with source:
-        validate_schema(source.schema_arrow, POSITIONS_SCHEMA, positions, "tissue positions")
+        validate_schema(source.schema_arrow, POSITIONS_SCHEMA, positions, context=_context(version))
+        yield source
+
+
+def read_grid_shape(positions: ArtifactFile, *, version: str | None) -> tuple[int, int]:
+    """Infer grid bounds from exact Parquet maxima, with a projected fallback.
+
+    Footer statistics avoid a pixel-position scan when the optional feature
+    slice is absent. The consuming iterator independently proves complete,
+    nonnull, unique coverage inside these bounds.
+    """
+    with _open(positions, version=version) as source:
         if source.metadata.num_rows == 0:
             raise ReaderFormatError(
-                context=ReaderErrorContext("visium_hd", "tissue positions"),
+                context=_context(version),
                 path=positions,
                 found="zero position rows",
                 expected="a nonempty rectangular grid",
@@ -78,7 +124,7 @@ def read_grid_shape(positions: ArtifactFile) -> tuple[int, int]:
                     column = batch.column(name)
                     if column.null_count:
                         raise ReaderFormatError(
-                            context=ReaderErrorContext("visium_hd", "tissue positions"),
+                            context=_context(version),
                             path=positions,
                             found=f"null {name}",
                             expected="nonnull grid indices",
@@ -88,25 +134,16 @@ def read_grid_shape(positions: ArtifactFile) -> tuple[int, int]:
         return maxima[0] + 1, maxima[1] + 1
 
 
-def iter_position_batches(positions: ArtifactFile, shape: tuple[int, int]) -> Iterator[pa.RecordBatch]:
+def iter_position_batches(
+    positions: ArtifactFile, shape: tuple[int, int], *, version: str | None
+) -> Iterator[pa.RecordBatch]:
     """Yield projected source batches, validating complete unique grid coverage.
 
     One boolean per grid site records coverage; decoded source columns have at
     most ``POSITION_BATCH_SIZE`` rows. No complete positions frame is built.
     """
-    context = ReaderErrorContext("visium_hd", "tissue positions")
-    try:
-        source = pq.ParquetFile(positions)
-    except pa.ArrowInvalid as error:
-        raise ReaderFormatError(
-            context=ReaderErrorContext("visium_hd", "tissue positions"),
-            path=positions,
-            found="malformed Parquet footer",
-            expected="a readable positions Parquet artifact",
-        ) from error
-
-    with source:
-        validate_schema(source.schema_arrow, POSITIONS_SCHEMA, positions, "tissue positions")
+    context = _context(version)
+    with _open(positions, version=version) as source:
         if source.metadata.num_rows != shape[0] * shape[1]:
             raise ReaderFormatError(
                 context=context,
@@ -117,7 +154,7 @@ def iter_position_batches(positions: ArtifactFile, shape: tuple[int, int]) -> It
 
         seen = np.zeros(shape[0] * shape[1], dtype=np.bool_)
         for batch in source.iter_batches(batch_size=POSITION_BATCH_SIZE, columns=POSITIONS_SCHEMA.names):
-            validate_position_batch(batch, positions)
+            validate_position_batch(batch, positions, context=context)
             rows = batch.column("array_row").to_numpy()
             cols = batch.column("array_col").to_numpy()
             if np.any(rows >= shape[0]) or np.any(cols >= shape[1]):
@@ -134,21 +171,35 @@ def iter_position_batches(positions: ArtifactFile, shape: tuple[int, int]) -> It
             yield batch
 
 
-def read_positions(
+def _pixels(batch: pa.RecordBatch) -> NDArray[np.float64]:
+    """Return the batch's image positions as x/y columns."""
+    return np.column_stack(
+        (batch.column("pxl_col_in_fullres").to_numpy(), batch.column("pxl_row_in_fullres").to_numpy())
+    )
+
+
+def _grid(batch: pa.RecordBatch) -> NDArray[np.float64]:
+    """Return the batch's grid indices as col/row (x/y) columns."""
+    return np.column_stack((batch.column("array_col").to_numpy(), batch.column("array_row").to_numpy())).astype(
+        np.float64
+    )
+
+
+def read_positions(  # noqa: PLR0913, RUF100 - Explicit file, grid, population, size, frame and version.
     positions: ArtifactFile,
     shape: tuple[int, int],
     names: pd.Index[str],
     size_um: int,
     frame: SlideFrame,
+    *,
+    version: str | None,
 ) -> pd.DataFrame:
     """Validate registration on every source bin and align selected matrix rows.
 
-    Space Ranger offsets the transformed lower grid index by half the image
-    displacement from spot (0, 0) to (factor - 1, factor - 1). This is neither
-    the projected nominal centre under a homography nor a mean of captured
-    spots; partial edge bins use the same full-bin offset.
+    Returns the selected rows' ``in_tissue``, grid indices and source pixel
+    positions in the order of ``names`` (the count matrix barcodes).
     """
-    rows, cols = parse_bin_barcodes(names, size_um, shape, positions)
+    rows, cols = parse_bin_barcodes(names, size_um, shape, positions, version=version)
     indices = rows.astype(np.int64) * shape[1] + cols
     # Search spatially sorted IDs, then scatter values back into matrix observation order.
     order = np.argsort(indices)
@@ -158,27 +209,24 @@ def read_positions(
     x = np.empty(len(names), dtype=np.float64)
     y = np.empty(len(names), dtype=np.float64)
 
+    registration = ReaderErrorContext("visium_hd", f"{size_um} micrometre positions", version)
     factor = size_um // 2
-    corners = apply_projective(frame.spot_to_image, np.array([[0, 0], [factor - 1, factor - 1]], dtype=np.float64))
+    corners = apply_projective(
+        frame.spot_to_image, np.array([[0, 0], [factor - 1, factor - 1]], dtype=np.float64), context=registration
+    )
     offset = (corners[1] - corners[0]) / 2
-    for batch in iter_position_batches(positions, shape):
-        batch_rows = batch.column("array_row").to_numpy()
-        batch_cols = batch.column("array_col").to_numpy()
-        xy = np.column_stack((batch_cols, batch_rows)).astype(np.float64)
-        pixels = np.column_stack(
-            (batch.column("pxl_col_in_fullres").to_numpy(), batch.column("pxl_row_in_fullres").to_numpy())
-        )
-        expected = apply_projective(frame.spot_to_image, factor * xy) + offset
-        error_px = np.max(np.linalg.norm(expected - pixels, axis=1), initial=0.0)
+    for batch in iter_position_batches(positions, shape, version=version):
+        expected = apply_projective(frame.spot_to_image, factor * _grid(batch), context=registration) + offset
+        error_px = np.max(np.linalg.norm(expected - _pixels(batch), axis=1), initial=0.0)
         if error_px > MAX_PROJECTIVE_ERROR_PX:
             raise ReaderFormatError(
-                context=ReaderErrorContext("visium_hd", f"{size_um} micrometre positions"),
+                context=registration,
                 path=positions,
                 found=f"cross-bin registration residual {error_px:.6g} pixels",
                 expected=f"the 2 micrometre registration with residual <= {MAX_PROJECTIVE_ERROR_PX:g} pixels",
             )
 
-        grid = batch_rows.astype(np.int64) * shape[1] + batch_cols
+        grid = batch.column("array_row").to_numpy().astype(np.int64) * shape[1] + batch.column("array_col").to_numpy()
         matches = np.searchsorted(sorted_indices, grid)
         valid = matches < len(indices)
         if not valid.any():
@@ -191,7 +239,7 @@ def read_positions(
         source_names = batch.column("barcode").take(pa.array(source_rows)).to_pylist()
         if source_names != names[destination].tolist():
             raise ReaderFormatError(
-                context=ReaderErrorContext("visium_hd", "tissue positions"),
+                context=_context(version),
                 path=positions,
                 found="barcode differs at selected grid index",
                 expected="exact matrix/positions barcode agreement",
@@ -208,7 +256,7 @@ def read_positions(
     return result
 
 
-def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int]) -> SlideFrame:
+def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int], *, version: str | None) -> SlideFrame:
     """Fit the physical image frame in two bounded scans of all 2 µm positions.
 
     A centered covariance reduction fits the affine using every source bin.
@@ -216,6 +264,7 @@ def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int]) -> SlideFra
     validates it on every bin and measures the affine's registration residual.
     No complete position array or string index is retained.
     """
+    registration = ReaderErrorContext("visium_hd", "2 micrometre positions", version)
     sample_rows = np.unique([0, shape[0] // 2, shape[0] - 1])
     sample_cols = np.unique([0, shape[1] // 2, shape[1] - 1])
     sample_source: list[NDArray[np.float64]] = []
@@ -225,15 +274,9 @@ def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int]) -> SlideFra
     covariance = np.zeros((4, 4), dtype=np.float64)
     count = 0
 
-    for batch in iter_position_batches(positions, shape):
-        row = batch.column("array_row").to_numpy()
-        col = batch.column("array_col").to_numpy()
-        pixels = np.column_stack(
-            (batch.column("pxl_col_in_fullres").to_numpy(), batch.column("pxl_row_in_fullres").to_numpy())
-        )
-        grid = np.column_stack((col, row)).astype(np.float64)
-
-        selected = np.isin(row, sample_rows) & np.isin(col, sample_cols)
+    for batch in iter_position_batches(positions, shape, version=version):
+        grid, pixels = _grid(batch), _pixels(batch)
+        selected = np.isin(grid[:, 1], sample_rows) & np.isin(grid[:, 0], sample_cols)
         sample_source.append(grid[selected])
         sample_target.append(pixels[selected])
 
@@ -248,7 +291,7 @@ def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int]) -> SlideFra
         mean += delta * (batch_count / total)
         count = total
 
-    homography = fit_homography(np.concatenate(sample_source), np.concatenate(sample_target))
+    homography = fit_homography(np.concatenate(sample_source), np.concatenate(sample_target), context=registration)
     linear = np.linalg.solve(covariance[:2, :2], covariance[:2, 2:]).T
     origin = mean[2:] - linear @ mean[:2]
     rigid, affine = _orient_frame(linear, origin)
@@ -256,17 +299,14 @@ def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int]) -> SlideFra
     maximum = 0.0
     squared_sum = 0.0
 
-    for batch in iter_position_batches(positions, shape):
-        grid = np.column_stack((batch.column("array_col").to_numpy(), batch.column("array_row").to_numpy())).astype(
-            np.float64
+    for batch in iter_position_batches(positions, shape, version=version):
+        grid, pixels = _grid(batch), _pixels(batch)
+        error_px = np.max(
+            np.linalg.norm(apply_projective(homography, grid, context=registration) - pixels, axis=1), initial=0.0
         )
-        pixels = np.column_stack(
-            (batch.column("pxl_col_in_fullres").to_numpy(), batch.column("pxl_row_in_fullres").to_numpy())
-        )
-        error_px = np.max(np.linalg.norm(apply_projective(homography, grid) - pixels, axis=1), initial=0.0)
         if error_px > MAX_PROJECTIVE_ERROR_PX:
             raise ReaderFormatError(
-                context=ReaderErrorContext("visium_hd", "2 micrometre positions"),
+                context=registration,
                 path=positions,
                 found=f"projective registration residual {error_px:.6g} pixels",
                 expected=f"one exact homography with residual <= {MAX_PROJECTIVE_ERROR_PX:g} pixels on every bin",

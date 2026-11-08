@@ -99,6 +99,27 @@ class TestSteinbock:
         result.write(tmp_path / "result.zarr")
         assert read_zarr(tmp_path / "result.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
 
+    def test_invalid_h5ad_uns_key_is_sanitized_and_linked(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        source = ad.read_h5ad(tmp_path / "cells.h5ad")
+        source.uns["my key"] = {"nested key": "kept"}
+        source.write_h5ad(tmp_path / "cells.h5ad")
+
+        with pytest.warns(UserWarning, match="SpatialData table does not accept") as caught:
+            result = steinbock(tmp_path)
+
+        assert (
+            "steinbock: the unstructured metadata of the cell table has names that a SpatialData table does not "
+            "accept as uns keys; using 'my key' -> 'my_key'. Rename them in the source to choose the names explicitly."
+        ) in [str(warning.message) for warning in caught]
+
+        table = result.tables["table"]
+        assert "my key" not in table.uns
+        assert table.uns["my_key"] == {"nested key": "kept"}
+        assert get_table_keys(table) == ("sample_labels", "region", "cell_id")
+        result.write(tmp_path / "result.zarr")
+        assert read_zarr(tmp_path / "result.zarr").tables["table"].uns["my_key"] == {"nested key": "kept"}
+
     def test_file_derived_sample_and_feature_column_names_are_sanitized(self, tmp_path: Path) -> None:
         _write_layout(tmp_path, name="sample 1")
         source = ad.read_h5ad(tmp_path / "cells.h5ad")

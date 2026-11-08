@@ -651,6 +651,24 @@ class TestIss:
         result.write(tmp_path / "output.zarr")
         assert read_zarr(tmp_path / "output.zarr").tables["table"].obs.columns.tolist() == table.obs.columns.tolist()
 
+    def test_invalid_h5ad_uns_key_is_sanitized_and_linked(self, iss_dataset: IssDataset, tmp_path: Path) -> None:
+        table_file = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(table_file)
+        source.uns["my key"] = {"nested key": "kept"}
+        source.write_h5ad(table_file)
+
+        with pytest.warns(UserWarning, match="as uns keys; using 'my key' -> 'my_key'"):
+            result = iss(
+                iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+            )
+
+        table = result.tables["table"]
+        assert "my key" not in table.uns
+        assert table.uns["my_key"] == {"nested key": "kept"}
+        assert get_table_keys(table) == ("region_labels_image", "region", "instance_id")
+        result.write(tmp_path / "output.zarr")
+        assert read_zarr(tmp_path / "output.zarr").tables["table"].uns["my_key"] == {"nested key": "kept"}
+
     def test_write_roundtrip(self, iss_dataset: IssDataset, tmp_path: Path) -> None:
         result = iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
         output = tmp_path / "out.zarr"

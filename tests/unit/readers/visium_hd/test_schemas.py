@@ -9,18 +9,21 @@ import pyarrow as pa
 import pytest
 from numpy.testing import assert_array_equal
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.visium_hd._schemas import (
+    MAPPINGS_SCHEMA,
     POSITIONS_SCHEMA,
     parse_bin_barcodes,
-    validate_mapping_schema,
     validate_mappings,
     validate_position_batch,
     validate_schema,
 )
+from tests.integration.readers.visium_hd._fixtures import VERSION
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_CONTEXT = ReaderErrorContext("visium_hd", "test artifact", VERSION)
 
 
 class TestValidateSchema:
@@ -31,7 +34,7 @@ class TestValidateSchema:
             pa.schema([pa.field("extra", pa.string()), *reversed(POSITIONS_SCHEMA)]),
             POSITIONS_SCHEMA,
             tmp_path,
-            "positions",
+            context=_CONTEXT,
         )
 
     @pytest.mark.parametrize(
@@ -48,8 +51,9 @@ class TestValidateSchema:
         ],
     )
     def test_invalid(self, tmp_path: Path, schema: pa.Schema) -> None:
-        with pytest.raises(ReaderFormatError):
-            validate_schema(schema, POSITIONS_SCHEMA, tmp_path, "positions")
+        with pytest.raises(ReaderFormatError) as error:
+            validate_schema(schema, POSITIONS_SCHEMA, tmp_path, context=_CONTEXT)
+        assert error.value.context == _CONTEXT
 
 
 class TestParseBinBarcodes:
@@ -57,7 +61,7 @@ class TestParseBinBarcodes:
 
     def test_preserves_order(self, tmp_path: Path) -> None:
         rows, cols = parse_bin_barcodes(
-            pd.Index(["s_008um_00002_00001-1", "s_008um_00000_00003-1"]), 8, (4, 4), tmp_path
+            pd.Index(["s_008um_00002_00001-1", "s_008um_00000_00003-1"]), 8, (4, 4), tmp_path, version=VERSION
         )
         assert_array_equal(rows, [2, 0])
         assert_array_equal(cols, [1, 3])
@@ -65,7 +69,7 @@ class TestParseBinBarcodes:
     @pytest.mark.parametrize("names", [["x"], ["s_008um_00004_00000-1"], ["s_008um_00000_00004-1"]])
     def test_invalid(self, tmp_path: Path, names: list[str]) -> None:
         with pytest.raises(ReaderFormatError):
-            parse_bin_barcodes(pd.Index(names), 8, (4, 4), tmp_path)
+            parse_bin_barcodes(pd.Index(names), 8, (4, 4), tmp_path, version=VERSION)
 
 
 class TestValidatePositionBatch:
@@ -93,23 +97,28 @@ class TestValidatePositionBatch:
             pa.array([value] if item.name == field else data[item.name], type=item.type) for item in POSITIONS_SCHEMA
         ]
         with pytest.raises(ReaderFormatError):
-            validate_position_batch(pa.RecordBatch.from_arrays(arrays, schema=POSITIONS_SCHEMA), tmp_path)
+            validate_position_batch(
+                pa.RecordBatch.from_arrays(arrays, schema=POSITIONS_SCHEMA), tmp_path, context=_CONTEXT
+            )
 
 
-class TestValidateMappingSchema:
-    """Projected barcode-mapping physical field types."""
+class TestMappingsSchema:
+    """Projected barcode-mapping physical field types, in any order beside extra columns."""
 
     def test_named_contract(self, tmp_path: Path) -> None:
-        validate_mapping_schema(
+        validate_schema(
             pa.schema(
                 [
+                    ("square_008um", pa.string()),
                     ("cell_id", pa.string()),
                     ("square_002um", pa.string()),
                     ("in_nucleus", pa.bool_()),
                     ("in_cell", pa.bool_()),
                 ]
             ),
+            MAPPINGS_SCHEMA,
             tmp_path,
+            context=_CONTEXT,
         )
 
 
@@ -118,7 +127,7 @@ class TestValidateMappings:
 
     def test_valid_nullable_cell(self, tmp_path: Path) -> None:
         validate_mappings(
-            pa.table(
+            pa.RecordBatch.from_pydict(
                 {
                     "square_002um": ["a", "b"],
                     "cell_id": [None, "cell"],
@@ -127,6 +136,7 @@ class TestValidateMappings:
                 }
             ),
             tmp_path,
+            context=_CONTEXT,
         )
 
     @pytest.mark.parametrize(
@@ -148,4 +158,4 @@ class TestValidateMappings:
         }
         data[column] = pa.array(values, type=data[column].type)
         with pytest.raises(ReaderFormatError):
-            validate_mappings(pa.table(data), tmp_path)
+            validate_mappings(pa.RecordBatch.from_pydict(data), tmp_path, context=_CONTEXT)

@@ -53,6 +53,46 @@ class TestReadTable:
         with pytest.raises(ReaderFormatError, match="spatial_source"):
             read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
 
+    def test_uns_keys_are_sanitized_with_one_warning(self, tmp_path: Path) -> None:
+        """Rename invalid and reserved-colliding top-level keys only, keeping values and stored order."""
+        write_iss_dataset(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["my key"] = {"inner key": "kept"}
+        source.uns["valid"] = "v"
+        source.uns["SpatialData_Attrs"] = np.asarray([1, 2])
+        source.write_h5ad(path)
+
+        with pytest.warns(UserWarning, match="uns keys") as caught:
+            table = read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
+
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "iss: the H5AD uns has names that a SpatialData table does not accept as uns keys; using "
+                "'SpatialData_Attrs' -> 'SpatialData_Attrs_1', 'my key' -> 'my_key'. Rename them in the source to "
+                "choose the names explicitly."
+            )
+        ]
+        # HDF5 stores group members by name, so the stored order is alphabetical.
+        assert list(table.uns) == ["SpatialData_Attrs_1", "my_key", "valid"]
+        assert table.uns["my_key"] == {"inner key": "kept"}
+        assert table.uns["valid"] == "v"
+        np.testing.assert_array_equal(table.uns["SpatialData_Attrs_1"], [1, 2])
+
+    def test_valid_uns_keys_are_untouched_without_warning(self, tmp_path: Path) -> None:
+        write_iss_dataset(tmp_path)
+        path = tmp_path / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        source.uns["qc"] = {"inner key": 1}
+        source.write_h5ad(path)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            table = read_table(ArtifactFile(path), region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
+
+        assert list(table.uns) == ["qc"]
+        assert table.uns["qc"] == {"inner key": 1}
+
     def test_read_failure_has_context(self, tmp_path: Path) -> None:
         path = tmp_path / "bad.h5ad"
         path.write_bytes(b"not HDF5")

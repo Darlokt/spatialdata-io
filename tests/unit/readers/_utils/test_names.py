@@ -11,7 +11,12 @@ import pandas as pd
 import pytest
 from spatialdata._core.validation import check_valid_dataframe_column_name, check_valid_name, validate_table_attr_keys
 
-from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_element_name, validate_element_name
+from spatialdata_io.readers._utils.names import (
+    sanitize_column_names,
+    sanitize_element_name,
+    sanitize_uns_keys,
+    validate_element_name,
+)
 
 _VALID = ["a", "sample", "Sample_1-2.3", "_x", "-", "...", "a..b", "_", "é-1", "échantillon", "样本", "x²", "tables"]
 _INVALID = [
@@ -375,3 +380,57 @@ class TestSanitizeColumnNames:
     def test_uns_duplicates_are_rejected(self) -> None:
         with pytest.raises(ValueError, match=re.escape("test: the categories has duplicate names ['a'].")):
             sanitize_column_names(["a", "a"], source="test: the categories", kind="uns")
+
+
+class TestSanitizeUnsKeys:
+    def test_renames_keys_in_place_keeping_value_identity_and_order(self) -> None:
+        nested = {"inner key": 1}
+        frame = pd.DataFrame({"sn": ["chip"]})
+        table = ad.AnnData(uns={"z key": nested, "_index": frame, "Positions": 3, "a": "kept"})
+        mapping = table.uns
+
+        with pytest.warns(UserWarning, match="uns keys") as caught:
+            sanitize_uns_keys(table, source="test: the H5AD uns", reserved=("positions",))
+
+        assert list(table.uns) == ["z_key", "_index", "Positions_1", "a"]
+        assert table.uns is mapping
+        assert table.uns["z_key"] is nested
+        assert table.uns["_index"] is frame
+        assert (table.uns["Positions_1"], table.uns["a"]) == (3, "kept")
+        assert [str(warning.message) for warning in caught] == [
+            (
+                "test: the H5AD uns has names that a SpatialData table does not accept as uns keys; using "
+                "'z key' -> 'z_key', 'Positions' -> 'Positions_1'. Rename them in the source to choose the names "
+                "explicitly."
+            )
+        ]
+        validate_table_attr_keys(table)
+
+    def test_exact_reserved_key_keeps_its_spelling(self) -> None:
+        table = ad.AnnData(uns={"spatialdata_attrs": {"region": "stale"}})
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            sanitize_uns_keys(table, source="test: the H5AD uns", reserved=("spatialdata_attrs",))
+
+        assert table.uns == {"spatialdata_attrs": {"region": "stale"}}
+
+    @pytest.mark.parametrize("uns", [{}, {"a": 1, "B.c-d": np.arange(2)}])
+    def test_valid_keys_are_untouched_without_warning(self, uns: dict[str, object]) -> None:
+        table = ad.AnnData(uns=uns)
+        values = list(table.uns.values())
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            sanitize_uns_keys(table, source="test: the H5AD uns")
+
+        assert list(table.uns) == list(uns)
+        assert all(new is old for new, old in zip(table.uns.values(), values, strict=True))
+
+    def test_warning_points_at_the_caller_outside_the_package(self) -> None:
+        table = ad.AnnData(uns={"bad key": 1})
+
+        with pytest.warns(UserWarning, match="'bad key'") as caught:
+            sanitize_uns_keys(table, source="test: the H5AD uns")
+
+        assert caught[0].filename == __file__
