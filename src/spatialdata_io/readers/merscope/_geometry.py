@@ -37,6 +37,7 @@ from spatialdata_io.readers.merscope._schemas import (
     STRING_DTYPE,
     boundary_columns,
     normalize_boundary_ids,
+    schema_error,
 )
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _SPATIAL_DIMENSIONS = 2
+_BOUNDARY_BATCH_ROWS = 4096
 _CONTEXT = ReaderErrorContext("merscope", BOUNDARIES)
 
 
@@ -58,37 +60,52 @@ class CellBoundaries:
 
 
 def _read_slices(path: ArtifactFile) -> tuple[pd.Index, NDArray[np.object_]]:
-    """Return slice identities and validated polygonal geometries in source row order."""
+    """Decode projected batches into the required eager geometry in source row order."""
+    identifiers: list[pd.Index] = []
     try:
         with pq.ParquetFile(path) as source:
             columns = boundary_columns(source.schema_arrow.names, path)
-            table = source.read(columns=list(columns))
+            if not source.metadata.num_rows:
+                raise schema_error(
+                    path, BOUNDARIES, found="no cell boundaries", expected="a nonempty cell footprint population"
+                )
+            geometry = np.empty(source.metadata.num_rows, dtype=object)
+            start = 0
+            for batch in source.iter_batches(batch_size=_BOUNDARY_BATCH_ROWS, columns=list(columns)):
+                identifiers.append(normalize_boundary_ids(batch, path))
+                try:
+                    slices = shapely.from_wkb(batch.column("Geometry").to_numpy(zero_copy_only=False))
+                except (TypeError, shapely.errors.GEOSException) as error:
+                    raise ReaderFormatError(
+                        context=_CONTEXT,
+                        path=path,
+                        found="malformed WKB geometry",
+                        expected="finite planar polygonal WKB slices",
+                    ) from error
+
+                # WKB and coordinate-validation temporaries live for one batch;
+                # final geometry remains eager for the whole-cell policy and union.
+                types = shapely.get_type_id(slices)
+                if not (
+                    (~shapely.is_missing(slices)).all()
+                    and (~shapely.is_empty(slices)).all()
+                    and (shapely.get_coordinate_dimension(slices) == _SPATIAL_DIMENSIONS).all()
+                    and ((types == shapely.GeometryType.POLYGON) | (types == shapely.GeometryType.MULTIPOLYGON)).all()
+                    and np.isfinite(shapely.get_coordinates(slices)).all()
+                ):
+                    raise ReaderFormatError(
+                        context=_CONTEXT,
+                        path=path,
+                        found="missing, empty, nonfinite or nonplanar geometry",
+                        expected="nonempty finite 2D Polygon or MultiPolygon slices",
+                    )
+                stop = start + batch.num_rows
+                geometry[start:stop] = slices
+                start = stop
     except (OSError, ValueError) as error:
         add_reader_context(error, context=_CONTEXT, path=path)
         raise
-    identifiers = normalize_boundary_ids(table, path)
-    try:
-        geometry = shapely.from_wkb(table["Geometry"].to_numpy())
-    except (TypeError, shapely.errors.GEOSException) as error:
-        raise ReaderFormatError(
-            context=_CONTEXT, path=path, found="malformed WKB geometry", expected="finite planar polygonal WKB slices"
-        ) from error
-    del table
-    types = shapely.get_type_id(geometry)
-    if not (
-        (~shapely.is_missing(geometry)).all()
-        and (~shapely.is_empty(geometry)).all()
-        and (shapely.get_coordinate_dimension(geometry) == _SPATIAL_DIMENSIONS).all()
-        and ((types == shapely.GeometryType.POLYGON) | (types == shapely.GeometryType.MULTIPOLYGON)).all()
-        and np.isfinite(shapely.get_coordinates(geometry)).all()
-    ):
-        raise ReaderFormatError(
-            context=_CONTEXT,
-            path=path,
-            found="missing, empty, nonfinite or nonplanar geometry",
-            expected="nonempty finite 2D Polygon or MultiPolygon slices",
-        )
-    return identifiers, geometry
+    return identifiers[0].append(identifiers[1:]), geometry
 
 
 def _union_footprints(frame: gpd.GeoDataFrame, path: ArtifactFile) -> gpd.GeoDataFrame:

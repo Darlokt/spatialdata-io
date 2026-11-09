@@ -19,7 +19,13 @@ from xarray import DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.stereoseq import stereoseq
-from tests.integration.readers.stereoseq._fixtures import Family, Profile, write_analysis, write_dataset
+from tests.integration.readers.stereoseq._fixtures import (
+    Family,
+    Profile,
+    write_analysis,
+    write_dataset,
+    write_numeric_gef,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,11 +47,84 @@ def _counts(table: ad.AnnData, *, layer: str | None = None) -> csr_array:
 class TestStereoseq:
     """Check supported compositions against explicit source values and identities."""
 
+    @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs", "flat"])
+    @pytest.mark.parametrize("profile", ["name_only", "id_and_name"])
+    @pytest.mark.parametrize("byteorder", ["<", ">"])
+    @pytest.mark.parametrize("wide", [False, True])
+    def test_native_byteorders_compose_counts_layers_categories_and_linkage(
+        self, tmp_path: Path, family: Family, profile: Profile, byteorder: Literal["<", ">"], *, wide: bool
+    ) -> None:
+        fixture = write_dataset(tmp_path, family=family, profile=profile, products=("square", "cells"))
+        write_numeric_gef(fixture.square, kind="square", byteorder=byteorder, profile=profile, wide=wide)
+        write_numeric_gef(fixture.cells, kind="cell", byteorder=byteorder, profile=profile, wide=wide)
+        result = stereoseq(
+            fixture.root,
+            bin_sizes=(1,),
+            cell_bins="unadjusted",
+            square_counts_file=fixture.square if family == "flat" else None,
+            cell_counts_file=fixture.cells if family == "flat" else None,
+        )
+        assert set(result.tables) == {"bin1_table", "cells_table"}
+        assert set(result.points) == {"bin1_genes", "cells_centroids"}
+        for name, values, exons, identifiers in (
+            ("bin1", [2**53 + 2 if wide else 6, 3], [2**53 + 4 if wide else 3, 1], [0, 1]),
+            ("cells", [12, 2**64 - 2048 if wide else 11, 22], [4, 2**64 - 4096 if wide else 7, 6], [200, 100]),
+        ):
+            table = result.tables[f"{name}_table"]
+            assert [int(value) for value in _counts(table).data] == values
+            assert [int(value) for value in _counts(table, layer="exon").data] == exons
+            assert (
+                _counts(table).dtype
+                == _counts(table, layer="exon").dtype
+                == np.dtype(np.float64 if wide else np.float32)
+            )
+            assert _counts(table).has_canonical_format
+            assert table.var_names.tolist() == (["z", "a"] if profile == "name_only" else ["g_z", "g_a"])
+            assert table.obs_names.tolist() == [str(identity) for identity in identifiers]
+            assert table.obs["instance_id"].tolist() == identifiers
+            target = str(table.obs["region"].iloc[0])
+            points = result.points[target]
+            frame = points.compute()
+            assert frame.index.tolist() == identifiers
+            assert frame.index.dtype == table.obs["instance_id"].dtype == np.uint64
+            assert frame["x"].dtype == frame["y"].dtype == np.int64
+            transformation = get_transformation(points, to_coordinate_system="global")
+            assert isinstance(transformation, Scale)
+            assert_array_equal(transformation.scale, [0.5, 0.5])
+        assert result.tables["cells_table"].obs["cellTypeID"].tolist() == [2**64 - 1, 0]
+        assert_array_equal(result.tables["cells_table"].obsm["spatial_grid"], [[10, 20], [30, 40]])
+        assert_array_equal(result.tables["cells_table"].obsm["spatial"], [[5, 10], [15, 20]])
+
     def test_image_only_ambiguous_calibration_companion_fails(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, family="outs", products=("square", "registered"))
         fixture.square.with_name("sample.gef").write_bytes(fixture.square.read_bytes())
         with pytest.raises(ReaderFormatError, match="image calibration companion"):
             stereoseq(fixture.root, image_roles=("registered",))
+
+    def test_non_native_exact_counts_and_categories_roundtrip(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path / "source", family="outs", products=("square", "cells"))
+        write_numeric_gef(fixture.square, kind="square", byteorder=">", wide=True)
+        write_numeric_gef(fixture.cells, kind="cell", byteorder=">", wide=True)
+        result = stereoseq(fixture.root, bin_sizes=(1,), cell_bins="unadjusted")
+        destination = tmp_path / "result.zarr"
+        result.write(destination)
+        restored = SpatialData.read(destination)
+        for name, expected in result.tables.items():
+            actual = restored.tables[name]
+            for slot in (None, "exon"):
+                source = _counts(expected, layer=slot)
+                # AnnData's disk reader currently restores CSR matrices.
+                target = actual.X if slot is None else actual.layers[slot]
+                assert isinstance(target, csr_array | csr_matrix)
+                assert source.dtype == target.dtype == np.dtype(np.float64)
+                for source_array, target_array in (
+                    (source.data, target.data),
+                    (source.indices, target.indices),
+                    (source.indptr, target.indptr),
+                ):
+                    assert_array_equal(source_array, target_array)
+            assert actual.obs["instance_id"].tolist() == expected.obs["instance_id"].tolist()
+        assert restored.tables["cells_table"].obs["cellTypeID"].tolist() == [2**64 - 1, 0]
 
     def test_polygon_drop_retains_exact_float64_count_and_exon_extremes(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, products=("cells",), invalid_cell_ids=(200,))
@@ -283,6 +362,8 @@ class TestStereoseq:
         assert_array_equal(table.obsm["spatial_grid"], source.obsm["spatial"])
         assert_array_equal(table.obsm["X_pca"], source.obsm["X_pca"])
         assert_array_equal(table.obs["id"], source.obs["id"])
+        assert table.obs["id"].dtype == source.obs["id"].dtype == np.uint32
+        assert table.obs["instance_id"].tolist() == source.obs_names.tolist()
         points = result.points["cells_analysis_r0_5_points"].compute()
         assert_array_equal(points[["x", "y"]], source.obsm["spatial"])
         assert set(table.obs["instance_id"]) == set(points.index)
@@ -354,6 +435,9 @@ class TestStereoseq:
         name = "bin50_analysis_table" if historical else "bin50_analysis_r0_5_table"
         assert set(result.tables) == {"bin50_table", name}
         assert_array_equal(_counts(result.tables[name]).toarray(), [[1.25, 2.5], [3.75, 5]])
+        assert result.tables[name].obs["instance_id"].tolist() == analysis.obs_names.tolist()
+        target = str(result.tables[name].obs["region"].iloc[0])
+        assert result.points[target].compute().index.tolist() == analysis.obs_names.tolist()
 
     def test_centroid_mode_does_not_read_unselected_borders(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, products=("cells",))
@@ -411,7 +495,7 @@ class TestStereoseq:
     def test_sparse_round_trip(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path / "source", family="outs", profile="id_and_name", products=("square", "cells"))
 
-        result = stereoseq(fixture.root, bin_sizes=(1,), cell_bins="unadjusted")
+        result = stereoseq(fixture.root, bin_sizes="all", cell_bins="unadjusted")
         destination = tmp_path / "result.zarr"
         result.write(destination)
         restored = SpatialData.read(destination)
@@ -422,6 +506,16 @@ class TestStereoseq:
             assert restored.tables[name].obs_names.tolist() == result.tables[name].obs_names.tolist()
             assert restored.tables[name].var_names.tolist() == result.tables[name].var_names.tolist()
             assert_array_equal(restored.tables[name].obs["instance_id"], result.tables[name].obs["instance_id"])
+            assert restored.tables[name].obs["instance_id"].dtype == np.uint64
+            target = str(result.tables[name].obs["region"].iloc[0])
+            restored_index = restored.points[target].compute().index
+            assert restored_index.dtype == np.uint64
+            assert_array_equal(restored_index, restored.tables[name].obs["instance_id"])
+            table_path = tmp_path / f"{name}.h5ad"
+            result.tables[name].write_h5ad(table_path)
+            h5ad = ad.read_h5ad(table_path)
+            assert h5ad.obs["instance_id"].dtype == np.uint64
+            assert_array_equal(h5ad.obs["instance_id"], result.tables[name].obs["instance_id"])
 
     @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs"])
     @pytest.mark.parametrize("profile", ["name_only", "id_and_name"])

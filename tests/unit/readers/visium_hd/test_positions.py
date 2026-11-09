@@ -14,6 +14,7 @@ from numpy.testing import assert_allclose, assert_array_equal
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd._positions import (
+    _grid,
     fit_slide_frame,
     iter_position_batches,
     read_grid_shape,
@@ -28,6 +29,21 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 _CONTEXT = ReaderErrorContext("visium_hd", "test coordinates", "4.1.0")
+
+
+class TestGrid:
+    """Unsigned grid coordinates convert exactly into the float64 XY boundary."""
+
+    @pytest.mark.parametrize("values", [[], [0, 2**31 + 1, 2**32 - 1]])
+    def test_exact_uint32_extent_and_order(self, values: list[int]) -> None:
+        batch = pa.record_batch(
+            {"array_row": pa.array(values, type=pa.uint32()), "array_col": pa.array(values[::-1], type=pa.uint32())}
+        )
+        result = _grid(batch)
+        assert result.dtype == np.dtype(np.float64)
+        assert result.shape == (len(values), 2)
+        assert_array_equal(result[:, 0], values[::-1])
+        assert_array_equal(result[:, 1], values)
 
 
 def _positions(root: Path) -> ArtifactFile:

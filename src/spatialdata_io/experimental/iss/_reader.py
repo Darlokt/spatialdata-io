@@ -119,7 +119,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
               promotes to float32 or float64 when exact, and raises otherwise.
             - ``obs["region"]``: the labels element name, categorical.
             - ``obs[instance_key]`` (kept, widened to 16 bits when narrower) or
-              ``obs["instance_id"]`` (int64, or uint64 when an ID needs it)
+              ``obs["instance_id"]`` (uint64)
               holds the label values. IDs must fit the labels dtype. Membership
               in the labels is not checked, so labels are never computed.
             - ``var_names``: duplicates are made unique (``GeneB``, ``GeneB-1``).

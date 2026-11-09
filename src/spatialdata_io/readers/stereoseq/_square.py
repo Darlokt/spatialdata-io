@@ -108,8 +108,10 @@ def _read_records(
 ]:
     """Read square records in byte-bounded slices into numerical buffers."""
     coordinates = np.empty((len(expression), 2), dtype=np.int64)
-    counts = np.empty(len(expression), dtype=expression.dtype["count"])
-    exon_counts = None if exons is None else np.empty(len(expression), dtype=exons.dtype)
+    # The exact-integer fallback also reaches SciPy, which needs native byte
+    # order. Convert source slices into native destinations without a full copy.
+    counts = np.empty(len(expression), dtype=expression.dtype["count"].newbyteorder("="))
+    exon_counts = None if exons is None else np.empty(len(expression), dtype=exons.dtype.newbyteorder("="))
 
     record_bytes = expression.dtype.itemsize + (0 if exons is None else exons.dtype.itemsize)
     records_per_slice = max(1, _EXPRESSION_BUFFER_BYTES // record_bytes)

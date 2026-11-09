@@ -52,13 +52,28 @@ class TestCellIds:
     """Accept only the documented fixed-width positive ID spelling."""
 
     def test_exact(self, tmp_path: Path) -> None:
-        np.testing.assert_array_equal(
-            cell_ids(pd.Index(["cellid_999999999-1", "cellid_000000001-1"]), ArtifactFile(tmp_path), version=VERSION),
-            [999999999, 1],
+        result = cell_ids(
+            pd.Index(["cellid_999999999-1", "cellid_000000001-1"]), ArtifactFile(tmp_path), version=VERSION
         )
+        np.testing.assert_array_equal(result, [999999999, 1])
+        assert result.dtype == np.uint32
+
+    def test_empty(self, tmp_path: Path) -> None:
+        result = cell_ids(pd.Index([], dtype=str), ArtifactFile(tmp_path), version=VERSION)
+        assert result.shape == (0,)
+        assert result.dtype == np.uint32
 
     @pytest.mark.parametrize(
-        "barcode", ["cellid_0-1", "cellid_000000000-1", "cellid_000000001-2", "cellid_00000001a-1"]
+        "barcode",
+        [
+            "cellid_0-1",
+            "cellid_000000000-1",
+            "cellid_000000001-2",
+            "cellid_00000001a-1",
+            "cellid_1000000000-1",
+            "cellid_-00000001-1",
+            "cellid_4294967297-1",
+        ],
     )
     def test_invalid(self, tmp_path: Path, barcode: str) -> None:
         with pytest.raises(ReaderFormatError, match="cell"):
@@ -116,6 +131,53 @@ class TestAggregateCounts:
 
 class TestReadNucleusTable:
     """Compare sparse summation and failure behavior without densification."""
+
+    def test_literal_barcodes_null_assignments_and_reordered_population(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        raw, mapping, _ = _sources(tmp_path)
+        names = ["007", "NA", "NULL", "bin3"]
+        write_counts(raw, np.array([[2, 0, 0], [0, 3, 0], [0, 0, 5], [7, 0, 0]], np.int32), names, VERSION)
+        cell = ArtifactFile(tmp_path / "cell.h5")
+        selected = ["cellid_999999999-1", "cellid_000000001-1"]
+        write_counts(cell, np.array([[1, 0, 0], [0, 1, 0]], np.int32), selected, VERSION)
+        population = read_cell_table(cell, make_var_names_unique=True, version=VERSION)
+        source = pa.table(
+            {
+                "square_002um": names,
+                "cell_id": [selected[1], None, selected[0], "cellid_000000002-1"],
+                "in_cell": [True, False, True, True],
+                "in_nucleus": [True, False, True, True],
+            }
+        )
+        pq.write_table(source.take(pa.array([3, 2, 0, 1])), mapping, row_group_size=1)
+        mocker.patch("spatialdata_io.readers.visium_hd._cells._BATCH_SIZE", 2)
+
+        result = read_nucleus_table(raw, mapping, population, pd.Index([1, 2, 999999999]), version=VERSION)
+
+        assert result.obs_names.tolist() == selected
+        assert result.obs["instance_id"].tolist() == [999999999, 1]
+        assert result.var_names.tolist() == ["Gene", "Gene-1", "Other"]
+        assert isinstance(result.X, csr_array)
+        assert result.X.dtype == np.dtype(np.float32)
+        np.testing.assert_array_equal(result.X.data, [5, 2])
+        np.testing.assert_array_equal(result.X.indices, [2, 0])
+        np.testing.assert_array_equal(result.X.indptr, [0, 1, 2])
+
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_mapping_source_closes(self, tmp_path: Path, mocker: MockerFixture, *, fail: bool) -> None:
+        raw, mapping, population = _sources(tmp_path)
+        source = pq.ParquetFile(mapping)
+        mocker.patch("spatialdata_io.readers.visium_hd._cells.pq.ParquetFile", return_value=source)
+        if fail:
+            mocker.patch(
+                "spatialdata_io.readers.visium_hd._cells.validate_mappings", side_effect=OSError("mapping read failed")
+            )
+            with pytest.raises(OSError, match="mapping read failed"):
+                read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
+        else:
+            read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
+        assert source.closed
 
     def test_multiple_genes_are_canonical_without_densification(self, tmp_path: Path, mocker: MockerFixture) -> None:
         raw, mapping, population = _sources(tmp_path)
@@ -199,6 +261,38 @@ class TestReadNucleusTable:
         pq.write_table(pa.table(source), mapping)
         with pytest.raises(ReaderFormatError, match=r"mapping|mapped|barcode"):
             read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
+
+    @pytest.mark.parametrize(
+        ("assigned", "message"),
+        [
+            ("cellid_000000002-1", "unknown mapped cell ID"),
+            ("cellid_00000000x-1", "noncanonical cell barcode"),
+            ("cellid_000000000-1", "zero cell ID"),
+        ],
+    )
+    def test_repeated_invalid_assignment_in_later_batch(
+        self, tmp_path: Path, mocker: MockerFixture, assigned: str, message: str
+    ) -> None:
+        raw, mapping, population = _sources(tmp_path)
+        names = [f"bin{i}" for i in range(4)]
+        write_counts(raw, np.ones((4, 3), np.int32), names, VERSION)
+        pq.write_table(
+            pa.table(
+                {
+                    "square_002um": names,
+                    "cell_id": ["cellid_000000001-1"] * 2 + [assigned] * 2,
+                    "in_cell": [True] * 4,
+                    "in_nucleus": [True] * 4,
+                }
+            ),
+            mapping,
+            row_group_size=2,
+        )
+        mocker.patch("spatialdata_io.readers.visium_hd._cells._BATCH_SIZE", 2)
+        with pytest.raises(ReaderFormatError, match=message) as error:
+            read_nucleus_table(raw, mapping, population, pd.Index([1]), version=VERSION)
+        assert str(mapping) in str(error.value)
+        assert VERSION in str(error.value)
 
     @pytest.mark.parametrize("field", ["id", "genome", "feature_type"])
     def test_feature_mismatch(self, tmp_path: Path, field: str) -> None:

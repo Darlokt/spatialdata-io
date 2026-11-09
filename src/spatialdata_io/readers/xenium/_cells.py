@@ -1,7 +1,8 @@
 """Materialize ``cells.zarr.zip`` identities, label mappings and summary columns.
 
-One ``ZipStore`` is opened, its small arrays are materialized and validated, and
-it is closed on success and failure. Masks are described, not read.
+One ``ZipStore`` is opened and closed on success and failure. The complete cell
+product materializes and validates its annotation arrays; mask-only reads inspect
+only structural metadata and calibration. Mask pixels remain lazy.
 
 Store layout by family (cells ``N``, polygons ``P_k`` in set ``k``)::
 
@@ -32,7 +33,7 @@ from zarr.storage import ZipStore
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.xenium._cell_ids import decode_cell_ids
 from spatialdata_io.readers.xenium._labels import MaskSource
-from spatialdata_io.readers.xenium._schemas import cast_column
+from spatialdata_io.readers.xenium._schemas import cast_column, summary_columns
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -83,6 +84,15 @@ class _Store:
 
     def error(self, *, found: str, expected: str) -> ReaderFormatError:
         return ReaderFormatError(context=self.context, path=self.path, found=found, expected=expected)
+
+    def validate_family(self, family: Family) -> None:
+        """Cross-check the native identity layout with experiment.xenium."""
+        markers = ("seg_mask_value" in self.group, "polygon_sets" in self.group)
+        if markers != (family == "hex_ids", family == "polygon_sets"):
+            raise self.error(
+                found=f"seg_mask_value/polygon_sets presence {markers}",
+                expected=f"the {family} layout of experiment.xenium",
+            )
 
     def array(self, key: str) -> zarr.Array[ArrayMetadata]:
         node = self.group.get(key)
@@ -179,16 +189,16 @@ def _polygon_sets(store: _Store, n_cells: int) -> tuple[NDArray[np.uint32], NDAr
 def _summary(store: _Store, n_cells: int) -> tuple[NDArray[np.float64], NDArray[np.uint64] | None]:
     """Return nucleus centroids (NaN without a nucleus) and, when stored, nucleus counts."""
     summary = store.array("cell_summary")
-    columns = summary.attrs.get("column_names")
-    if not isinstance(columns, list) or summary.shape != (n_cells, len(columns)):
-        raise store.error(
-            found=f"cell_summary of shape {summary.shape} with columns {columns!r}",
-            expected="one named column per value",
-        )
+    columns = summary_columns(
+        summary.shape,
+        np.dtype(summary.dtype),
+        summary.attrs.get("column_names"),
+        n_cells,
+        path=store.path,
+        context=store.context,
+    )
 
     def column(name: str) -> NDArray[np.float64]:
-        if name not in columns:
-            raise store.error(found=f"cell_summary columns {columns!r}", expected=f"a {name!r} column")
         return np.asarray(summary[:, columns.index(name)], dtype=np.float64)
 
     centroids = np.column_stack([column("nucleus_centroid_x"), column("nucleus_centroid_y")])
@@ -246,12 +256,7 @@ def read_cells_store(
     """
     with ZipStore(path, read_only=True) as zip_store:
         store = _Store(zarr.open_group(store=zip_store, mode="r", zarr_format=2), path, context)
-        markers = ("seg_mask_value" in store.group, "polygon_sets" in store.group)
-        if markers != (family == "hex_ids", family == "polygon_sets"):
-            raise store.error(
-                found=f"seg_mask_value/polygon_sets presence {markers}",
-                expected=f"the {family} layout of experiment.xenium",
-            )
+        store.validate_family(family)
 
         cell_methods = None
         nucleus_cells: NDArray[np.int64] | None = None
@@ -280,3 +285,21 @@ def read_cells_store(
         nucleus_centroids, nucleus_counts = _summary(store, len(cell_ids))
 
     return CellStore(cell_ids, cell_labels, nucleus_cells, cell_methods, nucleus_centroids, nucleus_counts, masks)
+
+
+def read_masks_store(
+    path: ArtifactFile, family: Family, *, pixel_size: float, context: ReaderErrorContext
+) -> Mapping[MaskRole, MaskSource]:
+    """Describe masks without loading identities, polygon memberships, methods or summary values.
+
+    Family markers and named polygon-set structure still determine mask eligibility.
+    Single-set transcript-assignment imports cannot supply usable masks. Present
+    masks retain their dtype, grid and calibration checks, and the store closes
+    before returning path-backed sources.
+    """
+    with ZipStore(path, read_only=True) as zip_store:
+        store = _Store(zarr.open_group(store=zip_store, mode="r", zarr_format=2), path, context)
+        store.validate_family(family)
+        has_nuclei = family != "polygon_sets" or "nucleus" in _polygon_set_roles(store)
+        masks = _masks(store, pixel_size)
+        return masks if has_nuclei else {}

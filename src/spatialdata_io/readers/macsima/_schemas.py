@@ -37,13 +37,14 @@ EXPOSURE_UNIT = "ms"
 # Columns of the channel table's ``var`` in output order. ``name`` holds the
 # marker (bleach images carry a ``_background`` suffix), ``exposure`` is in
 # milliseconds and NaN when absent; other optional values are missing as NA.
+# Cycles and ROI IDs are checked nonnegative uint64 values in the XML parser.
 CHANNEL_VAR_DTYPES: Mapping[str, str] = MappingProxyType(
     {
         "name": "string",
-        "cycle": "int64",
+        "cycle": "uint64",
         "imagetype": "string",
         "well": "string",
-        "ROI": "Int64",
+        "ROI": "UInt64",
         "fluorophore": "string",
         "clone": "string",
         "exposure": "float64",

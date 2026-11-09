@@ -222,7 +222,7 @@ def boundary_columns(names: Sequence[str], path: ArtifactFile) -> tuple[str, ...
     return (*columns, "Type") if "Type" in names else columns
 
 
-def normalize_boundary_ids(table: pa.Table, path: ArtifactFile) -> pd.Index:
+def normalize_boundary_ids(table: pa.Table | pa.RecordBatch, path: ArtifactFile) -> pd.Index:
     """Validate slice identities, planes and types, keeping repeated rows for the footprint union."""
     ids = table.column("EntityID")
     if not (pa.types.is_integer(ids.type) or pa.types.is_string(ids.type) or pa.types.is_large_string(ids.type)):

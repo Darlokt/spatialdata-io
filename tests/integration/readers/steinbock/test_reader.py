@@ -518,10 +518,13 @@ class TestSteinbock:
 
         assert "Image" not in result.tables["table"].obs
 
-    @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
-    def test_large_ids_and_written_store_remain_exact(self, tmp_path: Path, dtype: type[np.int64 | np.uint64]) -> None:
+    @pytest.mark.parametrize(
+        ("dtype", "identifier"),
+        [("int64", 7), ("int64", 2**53 + 1), ("int64", 2**63 - 1), ("uint64", 2**63), ("uint64", 2**64 - 1)],
+    )
+    def test_large_ids_and_written_store_remain_exact(self, tmp_path: Path, dtype: str, identifier: int) -> None:
         _write_layout(tmp_path)
-        identifiers = [2**53 + 1, np.iinfo(dtype).max]
+        identifiers = [identifier, 2]
         mask = np.zeros((4, 5), dtype=dtype)
         mask[1, 1], mask[3, 2] = identifiers
         tifffile.imwrite(tmp_path / "masks" / "sample.tiff", mask, photometric="minisblack")
@@ -530,14 +533,28 @@ class TestSteinbock:
         source.obs_names = [f"Object {identifier} in sample.tiff" for identifier in identifiers]
         source.write_h5ad(path)
 
-        result = steinbock(tmp_path)
-        np.testing.assert_array_equal(result.tables["table"].obs["cell_id"], np.asarray(identifiers, dtype=dtype))
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            result = steinbock(tmp_path)
+        assert tasks == []
+        table = result.tables["table"]
+        assert isinstance(table.obs, pd.DataFrame)
+        assert table.obs["cell_id"].tolist() == identifiers
+        assert table.obs["cell_id"].dtype == np.dtype(np.uint64)
         np.testing.assert_array_equal(result.labels["sample_labels"].data.compute(), mask)
 
+        table.write_h5ad(tmp_path / "linked.h5ad")
+        restored_table = ad.read_h5ad(tmp_path / "linked.h5ad")
+        assert isinstance(restored_table.obs, pd.DataFrame)
+        pd.testing.assert_series_equal(restored_table.obs["cell_id"], table.obs["cell_id"], check_exact=True)
+        assert get_table_keys(restored_table) == get_table_keys(table)
         target = tmp_path / "result.zarr"
         result.write(target)
         restored = read_zarr(target)
-        np.testing.assert_array_equal(restored.tables["table"].obs["cell_id"], np.asarray(identifiers, dtype=dtype))
+        restored_table = restored.tables["table"]
+        assert isinstance(restored_table.obs, pd.DataFrame)
+        pd.testing.assert_series_equal(restored_table.obs["cell_id"], table.obs["cell_id"], check_exact=True)
+        assert get_table_keys(restored_table) == get_table_keys(table)
         np.testing.assert_array_equal(restored.labels["sample_labels"].data.compute(), mask)
 
     def test_sparse_expression_layers_and_owned_metadata(self, tmp_path: Path, mocker: MockerFixture) -> None:

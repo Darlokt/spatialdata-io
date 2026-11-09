@@ -131,6 +131,12 @@ spatially unsorted filtered barcodes. Feature annotations retain `gene_ids`,
 `feature_types`, and `genome`. Duplicate symbols are made unique consistently
 unless `make_var_names_unique=False`.
 
+Cell and nucleus polygon indexes and their linked table `instance_id` columns
+use uint32 IDs from 1 through 999999999. These equal the positive nine-digit
+ID in the canonical `cellid_<id:09d>-1` barcodes; source order is preserved.
+Zero, alternate barcode spellings, duplicate polygon IDs and IDs outside that
+range raise before conversion.
+
 10x supplies cell matrices but no nucleus matrix. The nucleus table sums **raw
 2 µm counts** over bins with `in_nucleus=True`, including bins outside the tissue
 mask, in the selected cell population's order. Returned counts use float32
@@ -151,6 +157,13 @@ the actual returned shape indexes or derived grid-label IDs. Source count
 validation inherits Scanpy conversion and duplicate handling; the reader does
 not reject valid duplicate count entries or rescan counts before upstream
 conversion. See [table numerical limits](table_contracts.md#persistence-ownership-and-numerical-limits).
+
+Barcode mappings are projected in batches of at most 65,536 rows. Their string
+columns remain Arrow-backed during alignment, preserving literal barcodes and
+null cell assignments. An unassigned bin contributes to no nucleus; a valid
+cell outside the selected population also contributes to no returned nucleus.
+Grid coordinates convert directly from uint32 into float64 XY arrays before
+registration and nominal-centre arithmetic.
 
 `invalid_geometries="keep"` preserves source topology. `"drop"` removes an invalid
 returned cell polygon with its cell table row and associated nucleus; an invalid

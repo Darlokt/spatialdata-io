@@ -50,8 +50,8 @@ class TestReadChannel:
     """Interpret one channel file from a single inspection."""
 
     @pytest.mark.parametrize("version", [0, 1])
-    @pytest.mark.parametrize("value", [0, 2**53 + 1, 2**63 - 1])
-    def test_integer_annotations_preserve_int64_values(
+    @pytest.mark.parametrize("value", [0, 2**53 + 1, 2**63 - 1, 2**63, 2**64 - 1])
+    def test_integer_annotations_preserve_uint64_values(
         self, tmp_path: Path, version: SchemaVersion, value: int
     ) -> None:
         metadata = _read(tmp_path, ChannelSpec("CD3", value, "APC", roi=value), version)
@@ -226,8 +226,22 @@ class TestReadChannelRejects:
 
     @pytest.mark.parametrize("version", [0, 1])
     @pytest.mark.parametrize("field", ["cycle", "ROI ID"])
-    @pytest.mark.parametrize("text", [str(2**63), "9" * 5000], ids=["int64-overflow", "long-decimal"])
-    def test_integer_annotations_outside_int64(
+    @pytest.mark.parametrize("text", ["-1", "+1", "1.0", "1e0", "0x10", "1_0"])
+    def test_integer_annotations_require_nonnegative_decimal_text(
+        self, tmp_path: Path, version: SchemaVersion, field: str, text: str
+    ) -> None:
+        xml = _xml(ChannelSpec("CD3", 1, "APC"), version=version)
+        key = "Cycle" if field == "cycle" else ("ROI ID" if version == 0 else "RoiId")
+        old = "001" if key == "RoiId" else "1"
+        xml = xml.replace(f'<M K="{key}">{old}</M>', f'<M K="{key}">{text}</M>')
+
+        with pytest.raises(ReaderFormatError, match=r"non-negative decimal.*uint64"):
+            read_channel(_write_xml(tmp_path, xml))
+
+    @pytest.mark.parametrize("version", [0, 1])
+    @pytest.mark.parametrize("field", ["cycle", "ROI ID"])
+    @pytest.mark.parametrize("text", [str(2**64), "9" * 5000], ids=["uint64-overflow", "long-decimal"])
+    def test_integer_annotations_outside_uint64(
         self, tmp_path: Path, version: SchemaVersion, field: str, text: str
     ) -> None:
         xml = _xml(ChannelSpec("CD3", 1, "APC"), version=version)
@@ -238,7 +252,7 @@ class TestReadChannelRejects:
             xml = xml.replace(f'<M K="{key}">{value}</M>', f'<M K="{key}">{text}</M>')
         path = _write_xml(tmp_path, xml)
 
-        with pytest.raises(ReaderFormatError, match="signed int64") as caught:
+        with pytest.raises(ReaderFormatError, match="uint64") as caught:
             read_channel(path)
 
         message = str(caught.value)

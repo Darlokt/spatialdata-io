@@ -46,10 +46,10 @@ class TestReadBoundaries:
     """Verify read boundaries contracts."""
 
     def test_order_vertices_ids_centroids_and_unprojected_columns(self, tmp_path: Path) -> None:
-        path = _write(tmp_path, [_feature(3), _feature(1)])
+        path = _write(tmp_path, [_feature(999_999_999), _feature(1)])
         result = geometry.read_boundaries(path, _frame(), kind="cell", version=VERSION)
-        assert_array_equal(result.shapes.index, [3, 1])
-        assert result.shapes.index.dtype == np.dtype(np.int64)
+        assert_array_equal(result.shapes.index, [999_999_999, 1])
+        assert result.shapes.index.dtype == np.dtype(np.uint32)
         assert result.centroids is not None
         assert_allclose(result.centroids, [[3, 5], [3, 5]])
         assert_allclose(
@@ -61,7 +61,7 @@ class TestReadBoundaries:
         result = geometry.read_boundaries(_write(tmp_path, [_feature()]), _frame(), kind="nucleus", version=VERSION)
         assert result.centroids is None
 
-    @pytest.mark.parametrize("identifier", [None, True, 0, -1, 1.5, "1", 1_000_000_000, 2**53 + 1])
+    @pytest.mark.parametrize("identifier", [None, True, 0, -1, 1.5, "1", 1_000_000_000, 2**32 + 1, 2**53 + 1])
     def test_bad_ids(self, tmp_path: Path, identifier: object) -> None:
         with pytest.raises(ReaderFormatError, match="cell_id"):
             geometry.read_boundaries(_write(tmp_path, [_feature(identifier)]), _frame(), kind="cell", version=VERSION)

@@ -279,9 +279,10 @@ class TestSetInstanceIds:
         _set_instance_ids(obs, {name: _sample(name)}, ArtifactFile(tmp_path / "cells.h5ad"))
 
         assert obs["cell_id"].tolist() == [2, 7]
+        assert str(obs["cell_id"].dtype) == "uint64[pyarrow]"
         assert obs["region"].tolist() == [f"{name}_labels"] * 2
 
-    @pytest.mark.parametrize("identifier", [2**53 + 1, 2**63 + 1, 2**64 - 1])
+    @pytest.mark.parametrize("identifier", [2**53 + 1, 2**63, 2**64 - 1])
     def test_large_uint64_ids_exact(self, tmp_path: Path, identifier: int) -> None:
         """Large uint64 ids exact."""
         obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[f"Object {identifier} in sample.tiff"])
@@ -289,7 +290,7 @@ class TestSetInstanceIds:
         _set_instance_ids(obs, {"sample": _sample("sample", dtype="uint64")}, ArtifactFile(tmp_path / "cells.h5ad"))
 
         assert int(obs["cell_id"].iloc[0]) == identifier
-        assert str(obs["cell_id"].dtype) == ("uint64[pyarrow]" if identifier >= 2**63 else "int64[pyarrow]")
+        assert str(obs["cell_id"].dtype) == "uint64[pyarrow]"
 
 
 class TestSetPositions:

@@ -161,6 +161,63 @@ def write_cell_gef(
     return path
 
 
+def write_numeric_gef(
+    path: Path,
+    *,
+    kind: Literal["square", "cell"],
+    byteorder: Literal["<", ">"],
+    profile: Profile = "name_only",
+    wide: bool = False,
+) -> Path:
+    """Write both byte orders, unsorted cell features and exact wide-count cases."""
+    if kind == "square":
+        write_square_gef(path, bins=(1,), profile=profile)
+    else:
+        write_cell_gef(path, profile=profile)
+    with h5py.File(path, "a") as handle:
+        group = handle["geneExp/bin1" if kind == "square" else "cellBin"]
+        expression_name = "expression" if kind == "square" else "cellExp"
+        exon_name = "exon" if kind == "square" else "cellExpExon"
+        attributes = dict(group[expression_name].attrs)
+        del group[expression_name], group[exon_name]
+        count_dtype = byteorder + ("u8" if wide else "u2")
+        if kind == "square":
+            group[expression_name] = np.array(
+                [(5, 6, 2**53 if wide else 2), (5, 6, 2 if wide else 4), (1, 2, 3)],
+                dtype=[("x", byteorder + "i4"), ("y", byteorder + "u4"), ("count", count_dtype)],
+            )
+            exons = [2**53 if wide else 1, 4 if wide else 2, 1]
+        else:
+            cells = group["cell"][:]
+            cells["offset"], cells["geneCount"] = [0, 2], [2, 1]
+            group["cell"][:] = cells
+            group[expression_name] = np.array(
+                [(1, 2**64 - 2048 if wide else 11), (0, 12), (1, 22)],
+                dtype=[("geneID", byteorder + ("u2" if profile == "name_only" else "u4")), ("count", count_dtype)],
+            )
+            exons = [2**64 - 4096 if wide else 7, 4, 6]
+        group[expression_name].attrs.update(attributes)
+        group[exon_name] = np.array(exons, dtype=count_dtype)
+        for name in ("gene",) if kind == "square" else ("cell", "gene", "cellExon", "geneExon"):
+            original = group[name][:]
+            dtype = original.dtype.newbyteorder(byteorder)
+            if name == "cell":
+                # Categories exercise the full unsigned domain, including IDs
+                # that cannot pass through int64 or float64 losslessly.
+                dtype = np.dtype(
+                    [
+                        (field, byteorder + "u8" if field in {"cellTypeID", "clusterID"} else dtype[field])
+                        for field in original.dtype.names or ()
+                    ]
+                )
+            values = original.astype(dtype)
+            if name == "cell":
+                values["cellTypeID"], values["clusterID"] = [2**64 - 1, 0], [0, 2**64 - 1]
+            del group[name]
+            group[name] = values
+    return path
+
+
 def write_analysis(  # noqa: PLR0913, RUF100 - explicit fixture variants.
     path: Path,
     *,

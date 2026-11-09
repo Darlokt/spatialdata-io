@@ -68,10 +68,10 @@ class TestMakeChannelTable:
         expected = pd.DataFrame(
             {
                 "name": pd.array(["CD3", "DAPI_background"], dtype="string"),
-                "cycle": np.array([1, 15], dtype=np.int64),
+                "cycle": np.array([1, 15], dtype=np.uint64),
                 "imagetype": pd.array(["stain", "bleach"], dtype="string"),
                 "well": pd.array(["D01", pd.NA], dtype="string"),
-                "ROI": pd.array([1, pd.NA], dtype="Int64"),
+                "ROI": pd.array([1, pd.NA], dtype="UInt64"),
                 "fluorophore": pd.array(["APC", pd.NA], dtype="string"),
                 "clone": pd.array(["REA1151", pd.NA], dtype="string"),
                 "exposure": np.array([1212.52, np.nan]),
@@ -81,14 +81,14 @@ class TestMakeChannelTable:
         assert isinstance(table.var, pd.DataFrame)
         pd.testing.assert_frame_equal(table.var, expected)
 
-    @pytest.mark.parametrize("value", [2**53 + 1, 2**63 - 1])
+    @pytest.mark.parametrize("value", [0, 2**53 + 1, 2**63 - 1, 2**63, 2**64 - 1])
     def test_nullable_roi_preserves_large_integer_before_storage_inference(self, value: int) -> None:
         source = replace(_STAIN, cycle=value, roi=value)
         table = make_channel_table([_channel("stain", source), _channel("bleach", _BLEACH)])
         assert table.var["cycle"].iloc[0] == value
         assert table.var["ROI"].iloc[0] == value
         assert pd.isna(table.var["ROI"].iloc[1])
-        assert str(table.var["ROI"].dtype) == "Int64"
+        assert str(table.var["ROI"].dtype) == "UInt64"
 
     def test_annotates_no_element(self) -> None:
         table = make_channel_table([_channel("CD3", _STAIN)])

@@ -115,3 +115,21 @@ class TestBinCenters:
         rows = np.array([2**31 + 1, 0], dtype=np.uint32)
         cols = np.array([0, 2**31 + 2], dtype=np.uint32)
         np.testing.assert_array_equal(bin_centers(frame, rows, cols, 2), [[2**32 + 6, -4], [4, 2**32]])
+
+    @pytest.mark.parametrize("pitch", [2.0, 6.0, 0.37])
+    def test_float64_operation_order_at_uint32_limit(self, pitch: float) -> None:
+        matrix = np.array([[0.3, 0.7, 1.25], [-0.7, 0.3, -8.75], [0.0, 0.0, 1.0]])
+        frame = SlideFrame(np.eye(3), matrix, np.eye(3), 0, 0)
+        rows = np.array([2**32 - 1, 0, 2**31 + 1], dtype=np.uint32)
+        cols = np.array([0, 2**32 - 1, 17], dtype=np.uint32)
+        expected = np.array([[0.0, 2**32 - 1.0], [2**32 - 1.0, 0.0], [17.0, 2**31 + 1.0]])
+        expected = (pitch * (expected + 0.5)) @ matrix[:2, :2].T + matrix[:2, 2]
+        result = bin_centers(frame, rows, cols, pitch)
+        assert result.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_empty(self) -> None:
+        frame = SlideFrame(np.eye(3), np.eye(3), np.eye(3), 0, 0)
+        result = bin_centers(frame, np.array([], np.uint32), np.array([], np.uint32), 2)
+        assert result.shape == (0, 2)
+        assert result.dtype == np.dtype(np.float64)

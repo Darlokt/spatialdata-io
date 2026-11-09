@@ -17,7 +17,7 @@ from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.xenium._aligned import read_aligned
 from spatialdata_io.readers.xenium._analysis import read_analysis
-from spatialdata_io.readers.xenium._cells import read_cells_store
+from spatialdata_io.readers.xenium._cells import read_cells_store, read_masks_store
 from spatialdata_io.readers.xenium._geometry import (
     apply_policy,
     make_cell_polygons,
@@ -34,6 +34,7 @@ from spatialdata_io.readers.xenium._tables import build_table, link_table, read_
 from spatialdata_io.readers.xenium._transcripts import read_transcripts
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     import anndata as ad
@@ -42,7 +43,8 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
     from spatialdata_io.readers._utils.image import RasterOptions
-    from spatialdata_io.readers.xenium._cells import CellStore
+    from spatialdata_io.readers.xenium._cells import CellStore, MaskRole
+    from spatialdata_io.readers.xenium._labels import MaskSource
     from spatialdata_io.readers.xenium._layout import TableTarget, XeniumLayout
     from spatialdata_io.readers.xenium._metadata import ProteinPanel
     from spatialdata_io.readers.xenium._tables import Cells, Counts, FeatureSelection
@@ -210,13 +212,13 @@ def _shapes(
 
 
 def _labels(
-    layout: XeniumLayout, store: CellStore | None, selection: Selection, raster: RasterOptions
+    layout: XeniumLayout, masks: Mapping[MaskRole, MaskSource], selection: Selection, raster: RasterOptions
 ) -> dict[str, DataArray | DataTree]:
     labels: dict[str, DataArray | DataTree] = {}
     for role, requested in (("cell", selection.cell_labels), ("nucleus", selection.nucleus_labels)):
         if not requested:
             continue
-        mask = None if store is None else store.masks.get(role)
+        mask = masks.get(role)
         if mask is None:
             raise ReaderFormatError(
                 context=layout.experiment.context(f"{role} labels"),
@@ -375,7 +377,9 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         be returned. Ignored without a table.
     include_cell_labels, include_nucleus_labels
         Return the segmentation masks of ``cells.zarr.zip``, the exact 10x
-        segmentation. Labels are never derived from polygons.
+        segmentation. Labels are never derived from polygons. Without a table
+        or boundary polygons, native cell identities and summary arrays are
+        neither loaded nor validated; mask structure and calibration are checked.
     include_cell_boundaries
         Return cells as shapes in the representation chosen by ``cell_geometry``.
     cell_geometry
@@ -526,11 +530,18 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     experiment = layout.experiment
 
     store = None
+    masks: Mapping[MaskRole, MaskSource] = {}
     if layout.cells_store is not None:
         context = experiment.context("cells.zarr.zip")
-        store = read_cells_store(
-            layout.cells_store, experiment.family, pixel_size=experiment.pixel_size, context=context
-        )
+        if selection.table or selection.cell_polygons or selection.nucleus_polygons:
+            store = read_cells_store(
+                layout.cells_store, experiment.family, pixel_size=experiment.pixel_size, context=context
+            )
+            masks = store.masks
+        else:
+            masks = read_masks_store(
+                layout.cells_store, experiment.family, pixel_size=experiment.pixel_size, context=context
+            )
     cells = None if layout.cells is None else read_cells(layout.cells, context=experiment.context("cells table"))
     panel = None
     if layout.protein_panel is not None:
@@ -541,7 +552,7 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         counts = read_counts(layout.counts, options.feature_types, panel, context=context)
 
     shapes = _shapes(layout, store, cells, circles=selection.cell_circles, policy=options.invalid_geometries)
-    labels = _labels(layout, store, selection, options.raster)
+    labels = _labels(layout, masks, selection, options.raster)
     images = _images(layout, options.raster)
     morphology = {name: image for name, image in images.items() if name.startswith("morphology")}
     _check_grid(labels | morphology, layout.root.path, experiment.context("pixel grid"))

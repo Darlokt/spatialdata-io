@@ -166,9 +166,11 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
           are the channel names and the table annotates no element. Columns:
           ``name`` (the marker, with ``_background`` for bleach images) and
           ``imagetype`` (``stain``, ``bleach`` or ``autofluorescence``)
-          strings; ``cycle`` int64; ``well``, ``fluorophore`` and ``clone``
-          strings and ``ROI`` nullable Int64, NA when absent; ``exposure``
-          float64 milliseconds, NaN when absent.
+          strings; ``cycle`` uint64; ``well``, ``fluorophore`` and ``clone``
+          strings and ``ROI`` nullable UInt64, NA when absent; ``exposure``
+          float64 milliseconds, NaN when absent. Cycles and ROI IDs range
+          from zero through ``2**64 - 1`` and retain exact values in H5AD
+          and Zarr storage.
         - ``images["<stack>_nuclei_image"]`` and
           ``tables["<stack>_nuclei_table"]`` when the nuclei stack is split
           off. A channel has the same name in both images.

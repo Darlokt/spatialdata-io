@@ -34,7 +34,7 @@ Exposure     ``Exposure time``, ``Exposure time unit``               ``ExposureT
   instrument and the objective). Both version keys may be present when they
   name the same version, with or without a leading ``v``.
 - Marker, cycle and acquisition type are required. Cycles and ROI IDs are
-  non-negative decimal integers within signed int64; exposures are finite,
+  non-negative decimal integers within uint64; exposures are finite,
   non-negative milliseconds whose nonzero source text stays nonzero in float64.
 - The pixel size must be square, declared in µm or nm, and finite and
   positive in µm. Plane positions are optional; when present they must be
@@ -203,15 +203,15 @@ def _software_version(annotations: _Annotations) -> tuple[str, SchemaMajor]:
 
 
 def _non_negative_int(text: str, field: str, origin: _Origin) -> int:
-    """Parse a non-negative decimal cycle or ROI ID for signed-int64 table storage."""
-    expected = f"a non-negative decimal {field} in signed int64 range [0, {2**63 - 1}]"
+    """Parse a non-negative decimal cycle or ROI ID for uint64 table storage."""
+    expected = f"a non-negative decimal {field} in uint64 range [0, {2**64 - 1}]"
     if not text.strip().isdecimal():
         raise origin.error(found=f"{field} {text!r}", expected=expected)
     try:
         value = int(text)
     except ValueError as error:
         raise origin.error(found=f"{field} {text!r}", expected=expected) from error
-    if value > 2**63 - 1:
+    if value > 2**64 - 1:
         raise origin.error(found=f"{field} {text!r}", expected=expected)
     return value
 

@@ -4,9 +4,8 @@ The table is read eagerly with AnnData, validated against the schema in
 ``_schemas`` and then changed in place: the reader owns the freshly read
 object, so expression, layers, ``raw`` and annotations are not copied.
 
-- ``obs["cell_id"]`` is the mask label parsed from the observation name
-  (int64, or uint64 when a label needs it) and ``obs["region"]`` the
-  categorical ``<sample>_labels`` of ``obs["image"]``.
+- ``obs["cell_id"]`` is the uint64 mask label parsed from the observation name.
+  ``obs["region"]`` is the categorical ``<sample>_labels`` of ``obs["image"]``.
 - ``obsm["spatial_pixels"]`` holds the regionprops centroids as XY
   (``centroid-1``, ``centroid-0``) in their source dtype. Regionprops averages
   zero-based pixel indices, so these are pixel-index positions: the centre of
@@ -41,11 +40,10 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_c
 from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers.steinbock._layout import NATIVE_FRAME_SUFFIX
 from spatialdata_io.readers.steinbock._schemas import (
+    CELL_ID_DTYPE,
     CELL_TABLE_CONTEXT,
     POSITIONS_CONTEXT,
     REQUIRED_OBSERVATION_COLUMNS,
-    SIGNED_CELL_ID_DTYPE,
-    UNSIGNED_CELL_ID_DTYPE,
     centroid_columns,
     instance_identifiers,
     metadata_columns,
@@ -103,8 +101,7 @@ def read_table(path: ArtifactFile, grids: Mapping[str, SampleGrid]) -> ad.AnnDat
 def _set_instance_ids(obs: pd.DataFrame, grids: Mapping[str, SampleGrid], path: ArtifactFile) -> None:
     """Add the exact ``cell_id`` and the categorical ``region`` of every row."""
     identifiers = instance_identifiers(obs, grids, path)
-    dtype = UNSIGNED_CELL_ID_DTYPE if max(identifiers) > np.iinfo(np.int64).max else SIGNED_CELL_ID_DTYPE
-    obs["cell_id"] = pd.Series(identifiers, index=obs.index, dtype=dtype)
+    obs["cell_id"] = pd.Series(identifiers, index=obs.index, dtype=CELL_ID_DTYPE)
     obs["region"] = pd.Categorical(
         obs["image"].map({grid.image_name: f"{name}_labels" for name, grid in grids.items()})
     )

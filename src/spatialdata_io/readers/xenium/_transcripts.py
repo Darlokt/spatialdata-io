@@ -98,12 +98,14 @@ def _normalize(table: pa.Table, spec: _Partitioning) -> pd.DataFrame:
             columns[name] = arrow_series(normalize_text(column, name, path=path, context=spec.context))
         else:
             values = cast_column(column, kind, name, path=path, context=spec.context)
-            if pa.types.is_floating(kind):
-                require_finite(values.to_numpy(), name, path=path, context=spec.context)
             if name in _COORDINATES:
-                # PointsModel accepts only NumPy coordinate columns.
-                columns[_COORDINATES[name]] = values.to_numpy()
+                # Reuse the required NumPy coordinate vector for validation and PointsModel.
+                coordinates = values.to_numpy()
+                require_finite(coordinates, name, path=path, context=spec.context)
+                columns[_COORDINATES[name]] = coordinates
             else:
+                if pa.types.is_floating(kind):
+                    require_finite(values.to_numpy(), name, path=path, context=spec.context)
                 columns[name] = arrow_series(values)
     return pd.DataFrame(columns)
 

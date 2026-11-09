@@ -565,13 +565,13 @@ class TestIss:
         np.testing.assert_array_equal(result.labels["region_labels_image"].data.compute(), dataset.labels)
 
     @pytest.mark.parametrize("instance_key", [None, "segmentation_id"])
-    @pytest.mark.parametrize("large", [2**53 + 1, 2**63 + 1])
+    @pytest.mark.parametrize("large", [7, 2**53 + 1, 2**63, 2**64 - 1])
     def test_large_integer_ids_remain_exact(
-        self, iss_dataset: IssDataset, instance_key: str | None, large: int
+        self, iss_dataset: IssDataset, tmp_path: Path, instance_key: str | None, large: int
     ) -> None:
         table_file = iss_dataset.root / "cells.h5ad"
         table = ad.read_h5ad(table_file)
-        identifiers = np.asarray([large, large + 2], dtype=np.uint64)
+        identifiers = np.asarray([large, 2], dtype=np.uint64)
         assert isinstance(table.obs, pd.DataFrame)
         table.obs["segmentation_id"] = identifiers
         table.obs_names = [str(value) for value in identifiers]
@@ -580,15 +580,33 @@ class TestIss:
         labels[:, 1:4], labels[:, 24:28] = identifiers[0], identifiers[1]
         tifffile.imwrite(iss_dataset.root / "labels.tiff", labels, photometric="minisblack")
 
-        result = iss(
-            iss_dataset.root,
-            raw_image_file="raw.tiff",
-            labels_file="labels.tiff",
-            table_file="cells.h5ad",
-            instance_key=instance_key,
-        )
-        np.testing.assert_array_equal(result.tables["table"].obs[instance_key or "instance_id"], identifiers)
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            result = iss(
+                iss_dataset.root,
+                raw_image_file="raw.tiff",
+                labels_file="labels.tiff",
+                table_file="cells.h5ad",
+                instance_key=instance_key,
+            )
+        assert tasks == []
+        actual = result.tables["table"]
+        assert isinstance(actual.obs, pd.DataFrame)
+        key = instance_key or "instance_id"
+        assert actual.obs[key].dtype == np.dtype(np.uint64)
+        assert actual.obs[key].tolist() == [large, 2]
         np.testing.assert_array_equal(result.labels["region_labels_image"].data.compute(), labels)
+
+        actual.write_h5ad(tmp_path / "linked.h5ad")
+        restored = ad.read_h5ad(tmp_path / "linked.h5ad")
+        assert isinstance(restored.obs, pd.DataFrame)
+        pd.testing.assert_series_equal(restored.obs[key], actual.obs[key], check_exact=True)
+        assert get_table_keys(restored) == get_table_keys(actual)
+        result.write(tmp_path / "linked.zarr")
+        restored = read_zarr(tmp_path / "linked.zarr").tables["table"]
+        assert isinstance(restored.obs, pd.DataFrame)
+        pd.testing.assert_series_equal(restored.obs[key], actual.obs[key], check_exact=True)
+        assert get_table_keys(restored) == get_table_keys(actual)
 
     def test_explicit_instance_column_preserves_opaque_names(self, iss_dataset: IssDataset) -> None:
         table_file = iss_dataset.root / "cells.h5ad"

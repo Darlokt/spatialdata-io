@@ -20,8 +20,9 @@ Segmentation polygons are GeoJSON in full-resolution image pixels::
     }
 
 ``cell_id`` is a unique integer from 1 to 999999999, equal to the ``id`` of
-the ``cellid_<id:09d>-1`` matrix barcodes. Each feature is one Polygon without
-holes. Vertices and centroids are reprojected exactly through the inverse
+the ``cellid_<id:09d>-1`` matrix barcodes, and becomes a uint32 shape index.
+Each feature is one Polygon without holes. Vertices and centroids are
+reprojected exactly through the inverse
 2 µm homography into ``global``; vertex order and topology are kept, so the
 validity policy sees source geometry. Only ``cell_id`` and the centroid are
 read (projected GDAL ingestion through pyogrio); other properties are ignored.
@@ -124,7 +125,7 @@ def read_boundaries(
     coordinates = _validate_source(source, path, context=context)
     transformed = image_to_global(frame, coordinates, context=context)
     geometry = shapely.set_coordinates(source.geometry.to_numpy(), transformed)
-    index = pd.Index(source["cell_id"].to_numpy(dtype=np.int64), name="cell_id")
+    index = pd.Index(source["cell_id"].to_numpy(dtype=np.uint32), name="cell_id")
     shapes = gpd.GeoDataFrame({"geometry": geometry}, index=index)
 
     centroid_name = f"{kind}_centroid"

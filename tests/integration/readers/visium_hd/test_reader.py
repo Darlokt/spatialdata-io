@@ -216,6 +216,9 @@ class TestVisiumHD:
         if segmented:
             table = result.tables["cell_table"]
             assert table.obs_names.tolist() == [CELL_IDS[1], CELL_IDS[0]]
+            assert table.obs["instance_id"].dtype == np.uint32
+            assert result.shapes["cell_boundaries"].index.dtype == np.uint32
+            assert result.shapes["nucleus_boundaries"].index.dtype == np.uint32
             assert isinstance(table.X, csr_array)
             assert_array_equal(table.X.toarray(), bundle.cells[[1, 0]])
 
@@ -233,6 +236,41 @@ class TestVisiumHD:
         cell_x = result.tables["cell_table"].X
         assert isinstance(cell_x, csr_array)
         assert_array_equal(cell_x.toarray(), bundle.cells[indices])
+
+    @pytest.mark.parametrize("version", ["4.0.1", "4.1.0"])
+    def test_reordered_nullable_mapping_with_bin_labels(self, tmp_path: Path, version: str) -> None:
+        bundle = write_bundle(tmp_path, version=version, sizes=(2,))
+        mapping = tmp_path / "segmented_outputs/barcode_mappings.parquet"
+        source = pq.read_table(mapping)
+        # Remove the first cell's sole nucleus assignment without removing its
+        # cell population; the second cell still receives its out-of-tissue bin.
+        assigned = source["cell_id"].to_pylist()
+        assigned[1] = None
+        source = source.set_column(source.schema.get_field_index("cell_id"), "cell_id", pa.array(assigned))
+        for name in ("in_cell", "in_nucleus"):
+            values = source[name].to_numpy().copy()
+            values[1] = False
+            source = source.set_column(source.schema.get_field_index(name), name, pa.array(values))
+        pq.write_table(source.take(pa.array(list(reversed(range(source.num_rows))))), mapping, row_group_size=13)
+
+        result = visium_hd(
+            bundle.root, bin_sizes=(2,), bin_geometry="labels", include_images=False, include_nucleus_table=True
+        )
+
+        assert set(result.tables) == {"square_002um_table", "cell_table", "nucleus_table"}
+        assert set(result.labels) == {"square_002um"}
+        assert result.coordinate_systems == ["global"]
+        table = result.tables["nucleus_table"]
+        assert table.obs_names.tolist() == [CELL_IDS[1], CELL_IDS[0]]
+        assert table.obs["instance_id"].tolist() == [2, 1]
+        assert table.var_names.tolist() == ["Gene", "Gene-1", "Other"]
+        assert get_table_keys(table) == ("nucleus_boundaries", "region", "instance_id")
+        assert isinstance(table.X, csr_array)
+        assert table.X.dtype == np.dtype(np.float32)
+        assert_array_equal(table.X.toarray(), [[0, 0, 4], [0, 0, 0]])
+        bins = result.tables["square_002um_table"]
+        assert bins.obsm["spatial"].dtype == np.dtype(np.float64)
+        assert_array_equal(bins.obs["instance_id"], [1, 2, 3, 4])
 
     def test_raw_bin_order_and_selection(self, tmp_path: Path) -> None:
         bundle = write_bundle(tmp_path, segmented=False)
@@ -266,7 +304,12 @@ class TestVisiumHD:
         restored = read_zarr(destination)
         assert set(restored.tables) == set(result.tables)
         assert set(restored.shapes) == set(result.shapes)
+        for name, shapes in result.shapes.items():
+            assert restored.shapes[name].index.dtype == shapes.index.dtype == np.uint32
+            assert_array_equal(restored.shapes[name].index, shapes.index)
         for name, table in result.tables.items():
+            assert restored.tables[name].obs["instance_id"].dtype == table.obs["instance_id"].dtype == np.uint32
+            assert_array_equal(restored.tables[name].obs["instance_id"], table.obs["instance_id"])
             assert_equal(
                 restored.tables[name].uns["spatialdata_io_positions"], table.uns["spatialdata_io_positions"], exact=True
             )
@@ -285,6 +328,8 @@ class TestVisiumHD:
                     exact=True,
                 )
                 assert_equal(restored_positions.obsm, source_table.obsm, exact=True)
+                assert restored_positions.obs["instance_id"].dtype == np.uint32
+                assert_array_equal(restored_positions.obs["instance_id"], table.obs["instance_id"])
             assert isinstance(table.X, csr_array)
             restored_x = restored.tables[name].X
             assert isinstance(restored_x, (csr_array, csr_matrix))

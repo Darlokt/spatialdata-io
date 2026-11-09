@@ -95,6 +95,15 @@ class TestFormatError:
 class TestInstanceIdentifiers:
     """Validate source schema invariants at their owning boundary."""
 
+    @pytest.mark.parametrize("identifier", [0, 2**64])
+    def test_uint64_background_and_overflow_are_rejected(self, tmp_path: Path, identifier: int) -> None:
+        obs = pd.DataFrame({"image": ["sample.tiff"]}, index=[f"Object {identifier} in sample.tiff"])
+
+        with pytest.raises(ReaderFormatError, match="positive ID fitting its mask dtype"):
+            instance_identifiers(
+                obs, {"sample": _grid("sample", (8, 12), np.dtype("uint64"))}, ArtifactFile(tmp_path / "cells.h5ad")
+            )
+
     @pytest.mark.parametrize(
         "observation",
         [
@@ -104,6 +113,7 @@ class TestInstanceIdentifiers:
             "sample 2",
             "Object 2 in wrong.tiff",
             "Object 65536 in sample.tiff",
+            "Object 18446744073709551616 in sample.tiff",
         ],
     )
     def test_malformed_or_out_of_range_ids(self, tmp_path: Path, observation: str) -> None:

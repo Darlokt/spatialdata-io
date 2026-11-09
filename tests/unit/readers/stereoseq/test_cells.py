@@ -15,7 +15,7 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.stereoseq import _cells, _schemas
 from spatialdata_io.readers.stereoseq._cells import read_cells
 from spatialdata_io.readers.stereoseq._layout import CellSource
-from tests.integration.readers.stereoseq._fixtures import write_cell_gef
+from tests.integration.readers.stereoseq._fixtures import write_cell_gef, write_numeric_gef
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,6 +26,27 @@ if TYPE_CHECKING:
 class TestReadCells:
     """Check semantic IDs independently of row position and alternate traversal."""
 
+    @pytest.mark.parametrize("byteorder", ["<", ">"])
+    @pytest.mark.parametrize("wide", [False, True])
+    def test_byteorder_preserves_categories_and_unsorted_layers(
+        self, tmp_path: Path, byteorder: Literal["<", ">"], *, wide: bool
+    ) -> None:
+        path = write_numeric_gef(tmp_path / "s.gef", kind="cell", byteorder=byteorder, wide=wide)
+        result = read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+        table = result.table
+        assert isinstance(table.X, csr_array)
+        assert table.X.dtype == np.dtype(np.float64 if wide else np.float32)
+        assert_array_equal(table.X.data, [12, 2**64 - 2048 if wide else 11, 22])
+        assert_array_equal(table.X.indices, [0, 1, 1])
+        assert_array_equal(table.X.indptr, [0, 2, 3])
+        assert_array_equal(table.layers["exon"].data, [4, 2**64 - 4096 if wide else 7, 6])
+        assert table.obs["cellTypeID"].tolist() == [2**64 - 1, 0]
+        assert table.obs["clusterID"].tolist() == [0, 2**64 - 1]
+        for name in ("cellTypeID", "clusterID"):
+            assert table.obs[name].cat.categories.tolist() == [0, 2**64 - 1]
+        assert_array_equal(result.coordinates, [[10, 20], [30, 40]])
+        assert result.coordinates.dtype == np.dtype(np.int64)
+
     def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
         path = write_cell_gef(tmp_path / "s.gef")
         with h5py.File(path, "a") as handle:
@@ -34,6 +55,38 @@ class TestReadCells:
         with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
             read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
         assert caught.value.path == path
+
+    @pytest.mark.parametrize("slot", ["cellExp", "cellExpExon"])
+    def test_non_native_count_precision_failure_closes_source(
+        self, tmp_path: Path, mocker: MockerFixture, slot: str
+    ) -> None:
+        path = write_cell_gef(tmp_path / "s.gef")
+        with h5py.File(path, "a") as handle:
+            group = handle["cellBin"]
+            del group[slot]
+            if slot == "cellExp":
+                group[slot] = np.array([(0, 2**53 + 1), (1, 22)], dtype=[("geneID", ">u4"), ("count", ">u8")])
+            else:
+                group[slot] = np.array([2**53 + 1, 6], dtype=">u8")
+        handle = h5py.File(path, "r")
+        mocker.patch.object(h5py, "File", return_value=handle)
+        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+        assert caught.value.path == path
+        assert not handle.id.valid
+
+    def test_mixed_signedness_coordinates_are_widened_exactly(self, tmp_path: Path) -> None:
+        path = write_cell_gef(tmp_path / "s.gef")
+        with h5py.File(path, "a") as handle:
+            original = handle["cellBin/cell"][:]
+            fields = [(name, ">i4" if name == "x" else original.dtype[name]) for name in original.dtype.names or ()]
+            cells = original.astype(fields)
+            cells["x"], cells["y"] = [-(2**31), 2**31 - 1], [2**32 - 1, 0]
+            del handle["cellBin/cell"]
+            handle["cellBin/cell"] = cells
+        result = read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+        assert result.coordinates.dtype == np.dtype(np.int64)
+        assert_array_equal(result.coordinates, [[-(2**31), 2**32 - 1], [2**31 - 1, 0]])
 
     def test_unsupported_modality_fails_before_cell_payload_discovery(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "protein.gef")
@@ -289,3 +342,30 @@ class TestReadCells:
 
         with pytest.raises(ReaderFormatError, match="category text"):
             read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
+
+
+class TestReadExpression:
+    """Normalize each storage buffer before sparse consumers see it."""
+
+    @pytest.mark.parametrize("count_order", ["<", ">"])
+    @pytest.mark.parametrize("exon_order", ["<", ">"])
+    @pytest.mark.parametrize("width", [1, 2, 4, 8])
+    def test_independent_count_and_exon_byteorders(
+        self, tmp_path: Path, count_order: str, exon_order: str, width: int
+    ) -> None:
+        path = ArtifactFile(tmp_path / "s.gef")
+        with h5py.File(path, "w") as handle:
+            expression = handle.create_dataset(
+                "cellExp",
+                data=np.array(
+                    [(1, 11), (0, 12), (1, 22)], dtype=[("geneID", ">u4"), ("count", f"{count_order}u{width}")]
+                ),
+            )
+            exons = handle.create_dataset("cellExpExon", data=np.array([7, 4, 6], dtype=f"{exon_order}u{width}"))
+            matrix, exon_matrix = _cells._read_expression(expression, exons, np.array([0, 2, 3]), 2, path)
+        assert_array_equal(matrix.data, [12, 11, 22])
+        assert exon_matrix is not None
+        assert_array_equal(exon_matrix.data, [4, 7, 6])
+        assert matrix.dtype == exon_matrix.dtype == np.dtype(np.float32)
+        assert not np.shares_memory(matrix.indices, exon_matrix.indices)
+        assert not np.shares_memory(matrix.indptr, exon_matrix.indptr)

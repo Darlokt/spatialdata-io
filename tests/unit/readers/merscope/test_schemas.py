@@ -238,9 +238,11 @@ class TestNormalizeBoundaryIds:
         table = pa.table({"EntityID": ["a", "a"], "ZIndex": planes, "Type": ["Cell", "Cell"]})
         assert normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet")).tolist() == ["a", "a"]
 
-    def test_uint64_planes(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("batch", [False, True])
+    def test_uint64_planes(self, tmp_path: Path, *, batch: bool) -> None:
         table = pa.table({"EntityID": ["a"], "ZIndex": pa.array([2**64 - 1], pa.uint64())})
-        assert normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet")).tolist() == ["a"]
+        source = table.to_batches()[0] if batch else table
+        assert normalize_boundary_ids(source, ArtifactFile(tmp_path / "cells.parquet")).tolist() == ["a"]
 
     def test_repeated_planes_and_large_ids(self, tmp_path: Path) -> None:
         table = pa.table({"EntityID": [2**63 - 1, 2**63 - 1], "ZIndex": [0, 0], "Type": ["cell", "Cell"]})

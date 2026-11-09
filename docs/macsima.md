@@ -47,7 +47,7 @@ Every channel file must contain exactly one OME image with one plane (`SizeC`, `
 | ROI | `ROI ID` | `RoiId` |
 | Exposure | `Exposure time`, `Exposure time unit` | `ExposureTime`, `ExposureTimeUnit` |
 
-The well is the external identifier of the OME plate well; a file may record at most one well and, for software major 0, at most one screen reagent. Acquisition types become `stain`, `bleach` or `autofluorescence`; bleach images append `_background` to the marker name. The marker name, cycle and acquisition type are required. Cycles and ROI IDs are non-negative decimal integers from 0 through 9,223,372,036,854,775,807 (the signed int64 maximum; `001` is ROI 1), and exposure times are finite, non-negative milliseconds. Nonzero exposure text that becomes zero in float64 is rejected, including negative values whose sign would otherwise disappear. A key the reader uses must not carry different values in different annotation groups; both version keys may be present when they name the same version, with or without a leading `v`. Unsupported software majors, units or values, including integers above this bound, fail with `ReaderFormatError` carrying the reader, artifact and file path, and the detected software version once it is known.
+The well is the external identifier of the OME plate well; a file may record at most one well and, for software major 0, at most one screen reagent. Acquisition types become `stain`, `bleach` or `autofluorescence`; bleach images append `_background` to the marker name. The marker name, cycle and acquisition type are required. Cycles and ROI IDs are non-negative decimal integers from 0 through 18,446,744,073,709,551,615 (the uint64 maximum; `001` is ROI 1), and exposure times are finite, non-negative milliseconds. Nonzero exposure text that becomes zero in float64 is rejected, including negative values whose sign would otherwise disappear. A key the reader uses must not carry different values in different annotation groups; both version keys may be present when they name the same version, with or without a leading `v`. Unsupported software majors, units or values, including integers above this bound, fail with `ReaderFormatError` carrying the reader, artifact and file path, and the detected software version once it is known.
 
 ## Elements and coordinates
 
@@ -73,10 +73,10 @@ Each table has no observations, `X=None` and one `var` row per image channel, wi
 | Column | Type | Content |
 | --- | --- | --- |
 | `name` | string | Marker name; bleach images end in `_background`. |
-| `cycle` | int64 | Acquisition cycle from 0 through the signed int64 maximum. |
+| `cycle` | uint64 | Acquisition cycle from 0 through the uint64 maximum. |
 | `imagetype` | string | `stain`, `bleach` or `autofluorescence`. |
 | `well` | string | Plate well, or missing. |
-| `ROI` | nullable Int64 | Exact ROI number from 0 through the signed int64 maximum, or missing; integers retain precision alongside missing values. |
+| `ROI` | nullable UInt64 | Exact ROI number from 0 through the uint64 maximum, or missing; integers retain precision alongside missing values. |
 | `fluorophore` | string | Fluorophore, or missing. |
 | `clone` | string | Antibody clone, or missing. |
 | `exposure` | float64 | Exposure time in milliseconds, or NaN. |
@@ -123,6 +123,7 @@ Corrections and contract changes that change results:
 - Nuclear channels are matched by exact marker name among stain images.
 - `split_threshold_nuclei_channel=0` now splits whenever a nuclear stain channel exists; use `None` to never split.
 - The `name` column of the channel table holds the marker; numbered or cycle-prefixed channel names remain in `var_names`.
+- `cycle` and `ROI` use uint64 and nullable UInt64, respectively, extending their former signed int64 range through `2**64 - 1`. Missing ROI values stay missing through H5AD and Zarr storage.
 - Multiple-folder results keep their provenance.
 - Malformed metadata now fails instead of being skipped or silently becoming missing.
 - A dangling `.tif` or `.tiff` symlink now fails instead of being skipped.

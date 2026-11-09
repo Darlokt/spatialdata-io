@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
 from spatialdata.transformations import Identity, Scale
@@ -142,9 +143,9 @@ def _population(source: CellSource) -> Literal["cells", "adjusted_cells"]:
 def _square_products(
     square: SquareCounts, transformations: Mapping[str, BaseTransformation]
 ) -> tuple[dd.DataFrame, ad.AnnData]:
-    """Build one square bin's points and linked table; the IDs are the row positions."""
+    """Build square points and their linked table with uint64 row-position IDs."""
     name = f"bin{square.bin_size}"
-    index = pd.RangeIndex(len(square.coordinates))
+    index = pd.Index(np.arange(len(square.coordinates), dtype=np.uint64))
     context = ReaderErrorContext("stereoseq", "square counts", square.format_version)
     finalize_positions(
         square.table,
@@ -358,9 +359,9 @@ def stereoseq(  # noqa: PLR0913 - every product selection is an explicit public 
 
         - square bin ``N``: points ``bin<N>_genes`` and table ``bin<N>_table``.
           Rows are the distinct stored positions in order of first occurrence,
-          with IDs ``0, 1, ...``; records with the same position and feature
-          are summed. Features keep the GEF order, including features without
-          counts.
+          with uint64 IDs ``0, 1, ...`` in the points index and table linkage.
+          Records with the same position and feature are summed. Features keep
+          the GEF order, including features without counts.
         - cells: points ``cells_centroids`` or shapes ``cells_polygons`` and
           table ``cells_table``, in source cell order with the source integer
           cell IDs; ``adjusted_cells_*`` for adjusted cells.

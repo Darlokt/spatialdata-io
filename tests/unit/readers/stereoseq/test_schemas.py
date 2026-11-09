@@ -92,6 +92,15 @@ class TestFeatureSchema:
             assert schema.count == "cellcount"
 
 
+class TestIntegerDtype:
+    """Document the storage schema independently of downstream native buffers."""
+
+    @pytest.mark.parametrize("byteorder", ["<", ">"])
+    @pytest.mark.parametrize("width", [1, 2, 4, 8])
+    def test_unsigned_widths_accept_either_byteorder(self, tmp_path: Path, byteorder: str, width: int) -> None:
+        _schemas.integer_dtype(np.dtype(f"{byteorder}u{width}"), ArtifactFile(tmp_path), "count")
+
+
 class TestExpressionSchema:
     """Require exact supported coordinate and feature-index storage widths."""
 

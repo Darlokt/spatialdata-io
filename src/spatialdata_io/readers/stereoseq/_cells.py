@@ -72,9 +72,11 @@ def _read_expression(
     feature_count: int,
     path: ArtifactFile,
 ) -> tuple[csr_array, csr_array | None]:
-    counts = np.empty(len(expression), dtype=expression.dtype["count"])
+    # Sparse numerical consumers require native byte order. Assignment converts
+    # each bounded source slice directly into its final integer destination.
+    counts = np.empty(len(expression), dtype=expression.dtype["count"].newbyteorder("="))
     feature_indices = np.empty(len(expression), dtype=np.int64)
-    exon_values = None if exons is None else np.empty(len(expression), dtype=exons.dtype)
+    exon_values = None if exons is None else np.empty(len(expression), dtype=exons.dtype.newbyteorder("="))
     record_bytes = expression.dtype.itemsize + (0 if exons is None else exons.dtype.itemsize)
     records_per_slice = max(1, _EXPRESSION_BUFFER_BYTES // record_bytes)
     for start in range(0, len(expression), records_per_slice):
@@ -147,12 +149,14 @@ def _read_cells(handle: h5py.File, source: CellSource, *, read_borders: bool) ->
         raise _schemas.schema_error(
             path, cells_dataset.name, found="duplicate cell IDs", expected="unique source cell IDs"
         )
-    coordinates = np.column_stack((cells["x"], cells["y"])).astype(np.int64)
+    coordinates = np.stack((cells["x"], cells["y"]), axis=1, dtype=np.int64)
 
     observations = pd.DataFrame(index=pd.Index([str(identity) for identity in ids]))
     for name in columns:
         observations[name] = (
-            pd.Categorical(cells[name]) if name in {"cellTypeID", "clusterID"} else _schemas.arrow_column(cells[name])
+            pd.Categorical(cells[name].astype(cells.dtype[name].newbyteorder("="), copy=False))
+            if name in {"cellTypeID", "clusterID"}
+            else _schemas.arrow_column(cells[name])
         )
     annotations = _schemas.feature_annotations(genes, schema, path)
 

@@ -14,8 +14,9 @@ with ``label="Image"`` and ``index_unique=" in "``. The fields the reader uses::
 Named fields may come in any order; every other ``obs``/``var`` column, layer,
 mapping and ``raw`` is kept with its dtype and missingness. Column names and
 observation/feature IDs must be unique, and feature IDs nonempty. ``<id>`` is a
-positive decimal integer within the mask dtype (zero is background); IDs repeat
-across images but not within one. Centroids follow scikit-image's ``(row,
+positive decimal integer within the mask dtype (zero is background), stored as
+uint64 in the generated ``cell_id`` column; IDs repeat across images but not
+within one. Centroids follow scikit-image's ``(row,
 col)`` order and may be any integer or floating dtype, including nullable and
 Arrow ones without missing values; integer and float centroids must combine
 without rounding. The destinations the reader generates (``cell_id``,
@@ -68,8 +69,7 @@ CELL_TABLE_CONTEXT = ReaderErrorContext("steinbock", "cell table")
 IMAGE_METADATA_CONTEXT = ReaderErrorContext("steinbock", "images.csv")
 POSITIONS_CONTEXT = ReaderErrorContext("steinbock", "positions")
 REQUIRED_OBSERVATION_COLUMNS = frozenset({"image", "centroid-0", "centroid-1"})
-SIGNED_CELL_ID_DTYPE = pd.ArrowDtype(pa.int64())
-UNSIGNED_CELL_ID_DTYPE = pd.ArrowDtype(pa.uint64())
+CELL_ID_DTYPE = pd.ArrowDtype(pa.uint64())
 
 _OBJECT_NAME = re.compile(r"Object ([0-9]+) in (.+)")
 _IMAGE_FIELDS = frozenset({"image", "width_px", "height_px"})

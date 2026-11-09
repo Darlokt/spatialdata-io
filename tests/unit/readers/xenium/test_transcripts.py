@@ -71,6 +71,25 @@ def _rewrite(path: Path, column: str, values: pa.Array) -> None:
 class TestReadTranscripts:
     """Points stay lazy and reproduce every projected source row in file order."""
 
+    @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_1_3, fx.XOA_3_0])
+    def test_multichunk_normalization_preserves_exact_columns(self, tmp_path: Path, profile: fx.Profile) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+        source = TabularSource(
+            ArtifactFile(bundle.root / "transcripts.parquet"), "parquet", transcript_types(profile.family)
+        )
+        table = pq.read_table(source.file)
+        spec = _transcripts._Partitioning(
+            source,
+            tuple((name, source.types.field(name).type) for name in table.column_names),
+            pd.Index(bundle.features, dtype="str"),
+            _cells(bundle),
+            -1 if profile.family == "integer_ids" else "UNASSIGNED",
+            CONTEXT,
+        )
+        expected = _read(bundle).compute()
+        result = _transcripts._normalize(pa.concat_tables([table, table]), spec)
+        pd.testing.assert_frame_equal(result, pd.concat([expected, expected], ignore_index=True))
+
     def test_csv_declared_types_preserve_numeric_text_and_single_rounding(self, tmp_path: Path) -> None:
         path = tmp_path / "transcripts.csv"
         path.write_text(

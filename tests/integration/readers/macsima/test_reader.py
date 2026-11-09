@@ -214,16 +214,46 @@ class TestMacsima:
 
         assert get_channel_names(result.images["run_image"]) == ["CD3"]
 
-    def test_roi_ids_beyond_float64_precision_stay_exact(self, tmp_path: Path) -> None:
-        roi = 2**53 + 1
-        write_stack(tmp_path / "run", tuple(replace(spec, roi=roi) for spec in V1_CHANNELS[:2]), version=1)
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    @pytest.mark.parametrize("version", [0, 1])
+    def test_uint64_metadata_and_missing_roi_survive_storage(
+        self, tmp_path: Path, storage: str, version: SchemaVersion
+    ) -> None:
+        values = [0, 2**53 + 1, 2**63 - 1, 2**63, 2**64 - 1]
+        roi_key = "ROI ID" if version == 0 else "RoiId"
+        channels = tuple(
+            ChannelSpec(
+                f"marker_{index}",
+                value,
+                "APC",
+                roi=2**64 - 1,
+                extra_annotations={roi_key: ""} if index == len(values) - 1 else {},
+            )
+            for index, value in enumerate(values)
+        )
+        pixels = write_stack(tmp_path / "run", channels, version=version)
+        executed: list[object] = []
+        with Callback(posttask=lambda *args: executed.append(args)):
+            result = macsima(tmp_path / "run", include_cycle_in_channel_names=True)
+        assert not executed
+        table = result.tables["run_table"]
+        if storage == "h5ad":
+            table.write_h5ad(tmp_path / "out.h5ad", convert_strings_to_categoricals=False)
+            restored = ad.read_h5ad(tmp_path / "out.h5ad")
+        else:
+            result.write(tmp_path / "out.zarr")
+            restored = read_zarr(tmp_path / "out.zarr").tables["run_table"]
 
-        result = macsima(tmp_path / "run")
-        result.write(tmp_path / "out.zarr")
-
-        for table in (result.tables["run_table"], read_zarr(tmp_path / "out.zarr").tables["run_table"]):
-            assert str(table.var["ROI"].dtype) == "Int64"
-            assert table.var["ROI"].tolist() == [roi, roi]
+        for actual in (table, restored):
+            assert actual.X is None
+            assert actual.shape == (0, len(values))
+            assert str(actual.var["cycle"].dtype) == "uint64"
+            assert actual.var["cycle"].tolist() == values
+            assert str(actual.var["ROI"].dtype) == "UInt64"
+            assert actual.var["ROI"].iloc[:-1].tolist() == [2**64 - 1] * (len(values) - 1)
+            assert pd.isna(actual.var["ROI"].iloc[-1])
+            assert actual.var_names.tolist() == [f"R{value} marker_{index}" for index, value in enumerate(values)]
+        np.testing.assert_array_equal(_image(result, "run_image").data.compute(), np.stack(pixels))
 
     @pytest.mark.skipif(
         not hasattr(os, "geteuid") or os.geteuid() == 0, reason="directory permissions do not restrict root"
@@ -301,11 +331,11 @@ class TestMacsimaRejects:
     @pytest.mark.parametrize(
         "channel",
         [
-            pytest.param(replace(V1_CHANNELS[0], cycle=2**63), id="cycle"),
-            pytest.param(replace(V1_CHANNELS[0], roi=2**63), id="roi"),
+            pytest.param(replace(V1_CHANNELS[0], cycle=2**64), id="cycle"),
+            pytest.param(replace(V1_CHANNELS[0], roi=2**64), id="roi"),
         ],
     )
-    def test_integer_metadata_above_int64_fails_with_artifact_context(
+    def test_integer_metadata_above_uint64_fails_with_artifact_context(
         self, tmp_path: Path, channel: ChannelSpec
     ) -> None:
         source = tmp_path / "run" / "channel.tif"
@@ -320,7 +350,7 @@ class TestMacsimaRejects:
         assert caught.value.context.artifact == "channel image"
         assert caught.value.context.detected_version == "1.1.1"
         assert caught.value.path == source
-        assert str(2**63) in caught.value.found
+        assert str(2**64) in caught.value.found
 
     def test_stacks_mixing_wells(self, tmp_path: Path) -> None:
         write_stack(tmp_path / "run" / "a", V1_CHANNELS[:2], version=1)

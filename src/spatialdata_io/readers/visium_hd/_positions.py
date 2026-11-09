@@ -180,8 +180,8 @@ def _pixels(batch: pa.RecordBatch) -> NDArray[np.float64]:
 
 def _grid(batch: pa.RecordBatch) -> NDArray[np.float64]:
     """Return the batch's grid indices as col/row (x/y) columns."""
-    return np.column_stack((batch.column("array_col").to_numpy(), batch.column("array_row").to_numpy())).astype(
-        np.float64
+    return np.stack(
+        (batch.column("array_col").to_numpy(), batch.column("array_row").to_numpy()), axis=1, dtype=np.float64
     )
 
 

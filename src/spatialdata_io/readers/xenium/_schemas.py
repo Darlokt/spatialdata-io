@@ -8,7 +8,9 @@ them. Cells/boundary identifiers are positive ``uint64`` in the integer-ID famil
 families use text IDs; binary text (XOA 1.0 feature names, XOA 1.3 cell IDs) is decoded
 strictly as UTF-8. Parquet columns are cast to the declared types; CSV twins are
 parsed by Arrow directly into them, so numbers follow Arrow's CSV grammar.
-Secondary analysis instead requires exact clustering headers and ordered,
+Native cell summaries require float64 storage with unique nonempty string column
+names and the required nucleus centroid columns. Secondary analysis instead
+requires exact clustering headers and ordered,
 consecutive PCA/UMAP component columns after its barcode field.
 """
 
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from numpy.typing import NDArray
+    from zarr.core.common import JSON
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers.xenium._version import Family
@@ -96,6 +99,36 @@ def validate_header(names: Sequence[str], required: Sequence[str], *, path: Path
         raise ReaderFormatError(
             context=context, path=path, found=f"missing columns {missing!r}", expected=f"columns {list(required)!r}"
         )
+
+
+def summary_columns(  # noqa: PLR0913, RUF100 - Native metadata and the external error boundary.
+    shape: tuple[int, ...],
+    dtype: np.dtype[np.generic],
+    columns: JSON,
+    n_cells: int,
+    *,
+    path: Path,
+    context: ReaderErrorContext,
+) -> tuple[str, ...]:
+    """Require named float64 native summary storage before reading or converting values."""
+    if not isinstance(columns, list) or shape != (n_cells, len(columns)):
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"cell_summary of shape {shape} with columns {columns!r}",
+            expected="one named column per value",
+        )
+    if any(not isinstance(name, str) for name in columns):
+        raise ReaderFormatError(
+            context=context, path=path, found=f"cell_summary columns {columns!r}", expected="string column names"
+        )
+    names = tuple(name for name in columns if isinstance(name, str))
+    validate_header(names, ("nucleus_centroid_x", "nucleus_centroid_y"), path=path, context=context)
+    if dtype.kind != "f" or dtype.itemsize != np.dtype(np.float64).itemsize:
+        raise ReaderFormatError(
+            context=context, path=path, found=f"cell_summary dtype {dtype}", expected="float64 cell_summary storage"
+        )
+    return names
 
 
 def validate_analysis_header(names: Sequence[str], kind: str, *, path: Path, context: ReaderErrorContext) -> None:

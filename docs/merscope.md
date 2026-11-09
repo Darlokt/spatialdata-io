@@ -84,6 +84,12 @@ Boundary Parquet requires `EntityID`, `ZIndex` and WKB `Geometry`, with optional
 be nonempty finite planar Polygon or MultiPolygon, and source IDs and plane
 annotations must be valid under every policy. `ZIndex` may be null, as permitted by the [VPT geometry schema](https://vizgen.github.io/vizgen-postprocessing/output_data_formats/geometry_file_format.html); populated values must be nonnegative uint64 plane indexes. Every slice participates in the XY footprint independently of its plane annotation. This applies to the supported instrument, Cellpose and Watershed layouts; it does not add support for other entity types. No geometry is repaired.
 
+Projected boundary records are decoded and validated in batches of at most
+4,096 rows. WKB and coordinate-validation temporaries therefore cover one batch;
+the complete decoded geometry remains eager for whole-cell policies and unions.
+This row limit is not a byte or total-memory ceiling: one geometry can contain
+arbitrarily many vertices, and Parquet decoding has its own buffers.
+
 `invalid_geometries="keep"` retains ordinary all-z union footprints for cells
 whose source slices are valid. If any slice is invalid, that cell instead
 retains every literal Polygon component from all of its slices, flattening

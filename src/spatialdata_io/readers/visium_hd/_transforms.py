@@ -99,7 +99,7 @@ def bin_centers(
     pitch: float,
 ) -> NDArray[np.float64]:
     """Return exact nominal bin centres, preserving the source table order."""
-    grid = np.column_stack((cols, rows)).astype(np.float64)
+    grid = np.stack((cols, rows), axis=1, dtype=np.float64)
     return grid_to_global(frame, pitch * (grid + 0.5))
 
 

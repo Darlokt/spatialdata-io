@@ -27,6 +27,7 @@ from spatialdata_io.readers.xenium._schemas import (
     normalize_text,
     require_finite,
     require_no_nulls,
+    summary_columns,
     transcript_columns,
     transcript_types,
     validate_analysis_header,
@@ -35,6 +36,8 @@ from spatialdata_io.readers.xenium._schemas import (
 )
 
 if TYPE_CHECKING:
+    from zarr.core.common import JSON
+
     from spatialdata_io.readers.xenium._version import Family
 
 PATH = Path("bundle/cells.parquet")
@@ -388,3 +391,40 @@ class TestRequireNoNulls:
 
         with pytest.raises(ReaderFormatError, match=r"missing values in \['b'\]"):
             require_no_nulls(pa.table({"a": [1], "b": [None]}), path=PATH, context=CONTEXT)
+
+
+class TestSummaryColumns:
+    """Native summaries declare unique string names and float64 storage before any read."""
+
+    @pytest.mark.parametrize("dtype", ["float64", ">f8"])
+    def test_reordered_named_columns_and_extras(self, dtype: str) -> None:
+        names = ["nucleus_count", "extra", "nucleus_centroid_y", "nucleus_centroid_x"]
+        assert summary_columns((3, 4), np.dtype(dtype), names, 3, path=PATH, context=CONTEXT) == tuple(names)
+
+    @pytest.mark.parametrize(
+        ("shape", "columns", "match"),
+        [
+            ((3, 2), None, "one named column per value"),
+            ((3,), ["nucleus_centroid_x", "nucleus_centroid_y"], "one named column per value"),
+            ((2, 2), ["nucleus_centroid_x", "nucleus_centroid_y"], "one named column per value"),
+            ((3, 2), ["nucleus_centroid_x", 1], "string column names"),
+            ((3, 2), ["nucleus_centroid_x", ""], "unique nonempty"),
+            ((3, 2), ["nucleus_centroid_x", "nucleus_centroid_x"], "unique nonempty"),
+            ((3, 2), ["nucleus_centroid_x", "other"], "missing columns"),
+        ],
+    )
+    def test_rejects_metadata(self, shape: tuple[int, ...], columns: JSON, match: str) -> None:
+        with pytest.raises(ReaderFormatError, match=match):
+            summary_columns(shape, np.dtype("float64"), columns, 3, path=PATH, context=CONTEXT)
+
+    @pytest.mark.parametrize("dtype", ["bool", "int64", "uint64", "float32", "complex128", "U10"])
+    def test_rejects_unsupported_storage(self, dtype: str) -> None:
+        with pytest.raises(ReaderFormatError, match="float64 cell_summary storage"):
+            summary_columns(
+                (3, 2),
+                np.dtype(dtype),
+                ["nucleus_centroid_x", "nucleus_centroid_y"],
+                3,
+                path=PATH,
+                context=CONTEXT,
+            )

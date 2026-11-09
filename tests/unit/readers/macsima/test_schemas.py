@@ -45,10 +45,10 @@ class TestChannelVarDtypes:
     def test_columns_and_types_in_output_order(self) -> None:
         assert list(CHANNEL_VAR_DTYPES.items()) == [
             ("name", "string"),
-            ("cycle", "int64"),
+            ("cycle", "uint64"),
             ("imagetype", "string"),
             ("well", "string"),
-            ("ROI", "Int64"),
+            ("ROI", "UInt64"),
             ("fluorophore", "string"),
             ("clone", "string"),
             ("exposure", "float64"),

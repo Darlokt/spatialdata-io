@@ -118,9 +118,8 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
         ``tables["table"]``
             The imported table with its row and feature order, linked to the
             labels by categorical ``obs["region"]`` (``<sample>_labels``) and
-            ``obs["cell_id"]`` (the mask label; int64, or uint64 when a label
-            needs it). IDs may repeat across samples, not within one; mask
-            pixels are never read to check them.
+            ``obs["cell_id"]`` (the mask label; uint64). IDs may repeat across
+            samples, not within one; mask pixels are never read to check them.
 
             - ``X`` and an optional ``counts`` layer: canonical CSR sparse
               arrays with their source values and dtypes; duplicate sparse

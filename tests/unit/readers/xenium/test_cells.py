@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import zipfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pytest
@@ -13,7 +13,7 @@ from zarr.storage import LocalStore
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium import _cells
-from spatialdata_io.readers.xenium._cells import read_cells_store
+from spatialdata_io.readers.xenium._cells import read_cells_store, read_masks_store
 from tests.integration.readers.xenium import _fixtures as fx
 
 if TYPE_CHECKING:
@@ -96,7 +96,7 @@ STORE_DEFECTS: dict[str, tuple[fx.Profile, Mutation, str]] = {
     "summary-column": (
         fx.XOA_2_0,
         _rename_summary_columns,
-        "a 'nucleus_centroid_x' column",
+        "missing columns",
     ),
 }
 
@@ -286,6 +286,34 @@ class TestReadCellsStore:
         assert store.nucleus_counts[0] == int(value)
         assert store.nucleus_counts.dtype == np.uint64
 
+    @pytest.mark.parametrize("defect", ["duplicate-count", "uint64"])
+    def test_rejects_summary_schema_before_reading_values(
+        self, tmp_path: Path, mocker: MockerFixture, defect: str
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+
+        def mutate(group: zarr.Group) -> None:
+            summary = group["cell_summary"]
+            assert isinstance(summary, zarr.Array)
+            if defect == "duplicate-count":
+                names = summary.attrs["column_names"]
+                assert isinstance(names, list)
+                names = list(names)
+                names[0] = "nucleus_count"
+                summary.attrs["column_names"] = names
+            else:
+                values = np.ones(summary.shape, dtype=np.uint64)
+                values[0, 7] = 2**53 + 1
+                _replace(group, "cell_summary", values)
+
+        _rewrite(bundle.root / "cells.zarr.zip", mutate)
+        reads = mocker.spy(zarr.Array, "__getitem__")
+        close = mocker.spy(_cells.ZipStore, "close")
+        with pytest.raises(ReaderFormatError, match=r"unique nonempty|float64 cell_summary"):
+            _read(bundle)
+        assert all(call.args[0].path != "cell_summary" for call in reads.call_args_list)
+        assert close.call_count >= 1
+
     def test_transcript_assignment_import_has_no_nuclei_or_labels(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(import_kind="transcripts"))
 
@@ -373,4 +401,68 @@ class TestReadCellsStore:
         else:
             _read(bundle)
 
+        assert close.call_count >= 1
+
+
+class TestReadMasksStore:
+    """Labels alone need mask metadata and family checks, with no eager cell products."""
+
+    @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_1_9, fx.XOA_2_0])
+    def test_reads_only_transform_values(self, tmp_path: Path, mocker: MockerFixture, profile: fx.Profile) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+        reads = mocker.spy(zarr.Array, "__getitem__")
+        close = mocker.spy(_cells.ZipStore, "close")
+        masks = read_masks_store(
+            ArtifactFile(bundle.root / "cells.zarr.zip"), profile.family, pixel_size=fx.PIXEL_SIZE, context=CONTEXT
+        )
+        assert set(masks) == {"cell", "nucleus"}
+        assert masks["cell"].shape == fx.SHAPE
+        assert masks["cell"].chunks == fx.MASK_CHUNKS
+        assert [call.args[0].path for call in reads.call_args_list] == ["masks/homogeneous_transform"]
+        assert close.call_count >= 1
+
+    @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_1_9, fx.XOA_2_0])
+    def test_unrelated_cell_arrays_are_not_required(self, tmp_path: Path, profile: fx.Profile) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+
+        def remove(group: zarr.Group) -> None:
+            del group["cell_id"]
+            del group["cell_summary"]
+            if profile.family == "polygon_sets":
+                for key in ("polygon_sets/0/cell_index", "polygon_sets/1/cell_index", "polygon_sets/1/method"):
+                    del group[key]
+
+        path = ArtifactFile(bundle.root / "cells.zarr.zip")
+        _rewrite(path, remove)
+        masks = read_masks_store(path, profile.family, pixel_size=fx.PIXEL_SIZE, context=CONTEXT)
+        assert set(masks) == {"cell", "nucleus"}
+        with pytest.raises(ReaderFormatError, match="cell_id"):
+            _read(bundle)
+
+    @pytest.mark.parametrize("import_kind", ["transcripts", "cells_only"])
+    def test_import_mask_eligibility(self, tmp_path: Path, import_kind: Literal["transcripts", "cells_only"]) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(import_kind=import_kind))
+        masks = read_masks_store(
+            ArtifactFile(bundle.root / "cells.zarr.zip"), "polygon_sets", pixel_size=fx.PIXEL_SIZE, context=CONTEXT
+        )
+        assert set(masks) == (set() if import_kind == "transcripts" else {"cell", "nucleus"})
+
+    @pytest.mark.parametrize("failure", ["family", "roles", "transform", "injected"])
+    def test_closes_on_failure(self, tmp_path: Path, mocker: MockerFixture, failure: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+        path = ArtifactFile(bundle.root / "cells.zarr.zip")
+        if failure == "roles":
+            _rewrite(path, lambda group: group.attrs.update({"polygon_set_names": ["cell"]}))
+        elif failure == "transform":
+            _rewrite(path, _assign("masks/homogeneous_transform", (0, 0), 0))
+        elif failure == "injected":
+            mocker.patch.object(_cells, "_masks", side_effect=RuntimeError("injected"))
+        close = mocker.spy(_cells.ZipStore, "close")
+        with pytest.raises(RuntimeError if failure == "injected" else ReaderFormatError):
+            read_masks_store(
+                path,
+                "hex_ids" if failure == "family" else "polygon_sets",
+                pixel_size=fx.PIXEL_SIZE,
+                context=CONTEXT,
+            )
         assert close.call_count >= 1

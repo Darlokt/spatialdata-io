@@ -390,10 +390,10 @@ def read_cells(source: TabularSource, *, context: ReaderErrorContext) -> Cells:
             context=context, path=path, found="missing required values", expected="complete cell records"
         )
     for name in CELL_FLOATS:
-        require_finite(table[name].to_numpy(), name, path=path, context=context, allow_nan=name == "nucleus_area")
-    for name in ("cell_area", "nucleus_area"):
+        values = table[name].to_numpy()
+        require_finite(values, name, path=path, context=context, allow_nan=name == "nucleus_area")
         # NaN comparisons are false, so cells without a nucleus pass.
-        if name in names and (np.asarray(table[name].to_numpy()) < 0).any():
+        if name in ("cell_area", "nucleus_area") and (values < 0).any():
             raise ReaderFormatError(
                 context=context, path=path, found=f"negative {name} values", expected=f"nonnegative {name}"
             )

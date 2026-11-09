@@ -8,7 +8,7 @@ observation columns:
 - the instance column: the caller's ``instance_key`` (integers kept, widened to
   16 bits when narrower), or ``instance_id`` parsed from observation names that
   consist only of ASCII digits. Parsed IDs are exact Python integers, stored as
-  int64, or uint64 when an ID needs it, so values above ``2**53`` stay exact.
+  uint64, so values through ``2**64 - 1`` stay exact, including above ``2**53``.
 
 Imported ``obs`` and ``var`` column names and top-level ``uns`` keys that a
 SpatialData table does not accept (``my note``) are sanitized with one warning
@@ -37,6 +37,7 @@ from spatialdata.models import TableModel
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.experimental.iss._schemas import (
     DEFAULT_INSTANCE_KEY,
+    INSTANCE_ID_DTYPE,
     MIN_INSTANCE_BITS,
     REGION_KEY,
     TABLE_CONTEXT,
@@ -113,8 +114,7 @@ def _set_instance_ids(
         values = [int(name) for name in names]
         validate_index_ids(values, label_dtype=label_dtype, path=path)
 
-        index_dtype = np.uint64 if values and max(values) > np.iinfo(np.int64).max else np.int64
-        column = pd.Series(values, index=obs.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(index_dtype)))
+        column = pd.Series(values, index=obs.index, dtype=INSTANCE_ID_DTYPE)
         validate_output_column(obs, DEFAULT_INSTANCE_KEY, column, path=path)
         obs[DEFAULT_INSTANCE_KEY] = column
         return

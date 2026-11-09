@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import zipfile
 from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
@@ -14,6 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import shapely
+import zarr
 from anndata.tests.helpers import assert_equal
 from click.testing import CliRunner
 from dask.callbacks import Callback
@@ -105,6 +107,116 @@ def _q20_counts(result: SpatialData, table: AnnData) -> NDArray[np.int64]:
 
 class TestXenium:
     """Every family returns exact, explicitly linked micrometre elements."""
+
+    @pytest.mark.parametrize("profile", PROFILES, ids=PROFILE_IDS)
+    @pytest.mark.parametrize("role", ["cell", "nucleus", "both"])
+    def test_native_labels_only_contract(self, tmp_path: Path, profile: fx.Profile, role: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            result = xenium(
+                bundle.root,
+                include_table=False,
+                include_cell_labels=role != "nucleus",
+                include_nucleus_labels=role != "cell",
+                include_cell_boundaries=False,
+                include_nucleus_boundaries=False,
+                include_transcripts=False,
+                include_morphology_focus=False,
+                include_aligned_images=False,
+                scale_factors=(),
+            )
+        expected = {"cell_labels", "nucleus_labels"} if role == "both" else {f"{role}_labels"}
+        assert set(result.labels) == expected
+        assert not result.tables
+        assert not result.shapes
+        assert not result.images
+        assert not result.points
+        assert tasks == []
+        for name, truth in (("cell_labels", bundle.cell_mask), ("nucleus_labels", bundle.nucleus_mask)):
+            if name in expected:
+                labels = _array(result.labels[name])
+                assert labels.dims == ("y", "x")
+                assert labels.dtype == np.uint32
+                assert labels.shape == fx.SHAPE
+                np.testing.assert_array_equal(labels.data.compute(), truth)
+                transform = _transform(labels)
+                assert isinstance(transform, Scale)
+                np.testing.assert_array_equal(transform.scale, [fx.PIXEL_SIZE, fx.PIXEL_SIZE])
+
+    @pytest.mark.parametrize("import_kind", ["transcripts", "cells_only"])
+    def test_labels_only_import_contract(
+        self, tmp_path: Path, import_kind: Literal["transcripts", "cells_only"]
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(import_kind=import_kind))
+        if import_kind == "transcripts":
+            with pytest.raises(ReaderFormatError, match="no usable cell mask"):
+                xenium(
+                    bundle.root,
+                    include_table=False,
+                    include_cell_boundaries=False,
+                    include_nucleus_boundaries=False,
+                    include_transcripts=False,
+                    include_morphology_focus=False,
+                    include_aligned_images=False,
+                )
+        else:
+            result = xenium(
+                bundle.root,
+                include_table=False,
+                include_cell_boundaries=False,
+                include_nucleus_boundaries=False,
+                include_transcripts=False,
+                include_morphology_focus=False,
+                include_aligned_images=False,
+                scale_factors=(),
+            )
+            assert set(result.labels) == {"cell_labels", "nucleus_labels"}
+            np.testing.assert_array_equal(_array(result.labels["cell_labels"]).data.compute(), bundle.cell_mask)
+            assert not _array(result.labels["nucleus_labels"]).data.compute().any()
+
+    @pytest.mark.parametrize("defect", ["duplicate-count", "uint64"])
+    def test_rejects_malformed_native_summary(self, tmp_path: Path, defect: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        path = bundle.root / "cells.zarr.zip"
+        tree = tmp_path / "summary_tree"
+        with zipfile.ZipFile(path) as archive:
+            archive.extractall(tree)
+        group = zarr.open_group(tree, mode="r+", zarr_format=2)
+        summary = group["cell_summary"]
+        assert isinstance(summary, zarr.Array)
+        names = summary.attrs["column_names"]
+        assert isinstance(names, list)
+        names = list(names)
+        if defect == "duplicate-count":
+            names[0] = "nucleus_count"
+            summary.attrs["column_names"] = names
+        else:
+            # Unsupported integers must fail before float64 could round 2**53 + 1.
+            values = np.ones(summary.shape, dtype=np.uint64)
+            values[0, 7] = 2**53 + 1
+            group.create_array("cell_summary", data=values, overwrite=True).attrs["column_names"] = names
+        fx.zip_tree(tree, path)
+
+        with pytest.raises(ReaderFormatError, match=r"unique nonempty|float64 cell_summary") as error:
+            xenium(bundle.root)
+
+        assert error.value.context.reader == "xenium"
+        assert error.value.context.detected_version == "5.0.0"
+        assert error.value.path == path
+        # Labels do not consume these summaries and therefore do not validate them.
+        labels_only = xenium(
+            bundle.root,
+            include_table=False,
+            include_nucleus_labels=False,
+            include_cell_boundaries=False,
+            include_nucleus_boundaries=False,
+            include_transcripts=False,
+            include_morphology_focus=False,
+            include_aligned_images=False,
+            scale_factors=(),
+        )
+        np.testing.assert_array_equal(_array(labels_only.labels["cell_labels"]).data.compute(), bundle.cell_mask)
 
     @pytest.mark.parametrize(
         ("source_dtype", "first", "second", "expected"),

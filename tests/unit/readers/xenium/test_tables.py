@@ -345,6 +345,23 @@ class TestReadCells:
         pd.testing.assert_frame_equal(parquet.frame, csv.frame)
         assert parquet.frame["nucleus_area"].dtype == pd.ArrowDtype(pa.float64())
 
+    @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_1_3, fx.XOA_2_0])
+    def test_multichunk_floats_preserve_values_and_arrow_annotations(self, tmp_path: Path, profile: fx.Profile) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+        path = ArtifactFile(bundle.root / "cells.parquet")
+        source = TabularSource(path, "parquet", cell_types(profile.family))
+        expected = read_cells(source, context=CELLS)
+        table = pq.read_table(path)
+        pq.write_table(table, path, row_group_size=1)
+        assert pq.read_table(path)["cell_area"].num_chunks == len(table)
+
+        result = read_cells(source, context=CELLS)
+
+        pd.testing.assert_frame_equal(result.frame, expected.frame)
+        pd.testing.assert_index_equal(result.ids, expected.ids)
+        for name in ("x_centroid", "y_centroid", "cell_area", "nucleus_area"):
+            assert result.frame[name].dtype == pd.ArrowDtype(pa.float64())
+
     @pytest.mark.parametrize("kind", ["csv", "parquet"])
     def test_unsigned_ids_and_counts_preserve_full_width(self, tmp_path: Path, kind: Literal["csv", "parquet"]) -> None:
         fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)

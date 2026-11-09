@@ -15,7 +15,7 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.stereoseq import _schemas, _square
 from spatialdata_io.readers.stereoseq._layout import SquareSource
 from spatialdata_io.readers.stereoseq._square import read_square
-from tests.integration.readers.stereoseq._fixtures import write_square_gef
+from tests.integration.readers.stereoseq._fixtures import write_numeric_gef, write_square_gef
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +25,20 @@ if TYPE_CHECKING:
 
 class TestReadSquare:
     """Protect the stored-bin numerical and resource contract."""
+
+    @pytest.mark.parametrize("byteorder", ["<", ">"])
+    @pytest.mark.parametrize("wide", [False, True])
+    def test_byteorder_preserves_exact_aggregation_and_exons(
+        self, tmp_path: Path, byteorder: Literal["<", ">"], *, wide: bool
+    ) -> None:
+        path = write_numeric_gef(tmp_path / "s.gef", kind="square", byteorder=byteorder, wide=wide)
+        (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
+        table = result.table
+        assert isinstance(table.X, csr_array)
+        assert table.X.dtype == np.dtype(np.float64 if wide else np.float32)
+        assert_array_equal(table.X.data, [2**53 + 2 if wide else 6, 3])
+        assert_array_equal(table.layers["exon"].data, [2**53 + 4 if wide else 3, 1])
+        assert_array_equal(result.coordinates, [[5, 6], [1, 2]])
 
     def test_unsupported_modality_fails_before_square_payload_discovery(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "protein.gef")
@@ -328,6 +342,33 @@ class TestReadSquareAggregation:
             (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
             assert isinstance(result.table.X, csr_array)
             assert int(result.table.X.data[0]) == sum(values)
+
+
+class TestReadRecords:
+    """Retain the source integer domain in one native destination per payload."""
+
+    @pytest.mark.parametrize("byteorder", ["<", ">"])
+    @pytest.mark.parametrize("width", [1, 2, 4, 8])
+    def test_native_destinations_preserve_unsigned_extremes(self, tmp_path: Path, byteorder: str, width: int) -> None:
+        maximum = 2 ** (8 * width) - 1
+        count_dtype = f"{byteorder}u{width}"
+        with h5py.File(tmp_path / "s.gef", "w") as handle:
+            expression = handle.create_dataset(
+                "expression",
+                data=np.array(
+                    [(-(2**31), 2**32 - 1, maximum)],
+                    dtype=[("x", ">i4"), ("y", ">u4"), ("count", count_dtype)],
+                ),
+            )
+            exons = handle.create_dataset("exon", data=np.array([maximum], dtype=count_dtype))
+            coordinates, counts, exon_counts = _square._read_records(expression, exons)
+        assert counts.dtype == np.dtype(f"u{width}")
+        assert counts.dtype.isnative
+        assert int(counts[0]) == maximum
+        assert exon_counts is not None
+        assert exon_counts.dtype == counts.dtype
+        assert int(exon_counts[0]) == maximum
+        assert_array_equal(coordinates, [[-(2**31), 2**32 - 1]])
 
 
 class TestAggregateCounts:

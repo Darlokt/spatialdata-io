@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING, Literal
 import anndata as ad
 import h5py
 import numpy as np
+import pandas as pd
 import pytest
 from numpy.testing import assert_array_equal
+from scipy.sparse import csr_array
 from spatialdata.transformations import Identity, Scale, get_transformation
 
 import spatialdata_io
@@ -29,8 +31,10 @@ from spatialdata_io.readers.stereoseq._reader import (
     _path,
     _sample_id,
     _sequence,
+    _square_products,
     _transformations,
 )
+from spatialdata_io.readers.stereoseq._square import SquareCounts
 from tests.integration.readers.stereoseq._fixtures import write_analysis, write_dataset
 
 if TYPE_CHECKING:
@@ -153,6 +157,33 @@ class TestTransformations:
         transformations = _transformations(None)
         assert list(transformations) == [IMAGE_PIXELS] == ["image_pixels"]
         assert isinstance(transformations[IMAGE_PIXELS], Identity)
+
+
+class TestSquareProducts:
+    """Unsigned row identifiers leave signed grid coordinates unchanged."""
+
+    def test_identifiers_and_signed_coordinates(self, tmp_path: Path) -> None:
+        coordinates = np.array([[-(2**31), -1], [0, 0], [2**32 - 1, 2**31]], dtype=np.int64)
+        table = ad.AnnData(
+            csr_array(np.eye(3, dtype=np.float32)),
+            obs=pd.DataFrame(index=["0", "1", "2"]),
+        )
+        table.obsm["spatial"] = coordinates
+        square = SquareCounts(
+            ArtifactFile(tmp_path / "square.gef"), table, coordinates, 1, (0, 0), 500, "sample", "gef-4"
+        )
+
+        points, linked = _square_products(square, {"global": Identity()})
+
+        frame = points.compute()
+        assert frame.index.dtype == linked.obs["instance_id"].dtype == np.uint64
+        assert_array_equal(frame.index, [0, 1, 2])
+        assert_array_equal(linked.obs["instance_id"], [0, 1, 2])
+        assert linked.obs_names.tolist() == ["0", "1", "2"]
+        assert frame["x"].dtype == frame["y"].dtype == np.int64
+        assert_array_equal(frame[["x", "y"]], coordinates)
+        assert_array_equal(linked.obsm["spatial_grid"], coordinates)
+        assert_array_equal(linked.obsm["spatial"], coordinates * 0.5)
 
 
 class TestFormatVersion:

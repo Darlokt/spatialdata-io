@@ -8,7 +8,7 @@ Segmentation writes one cell-feature matrix per population::
 
 Cell barcodes are ``cellid_<id:09d>-1``; the positive integer ``id`` equals the
 GeoJSON ``cell_id`` of the cell and nucleus polygons and becomes the table's
-``instance_id``.
+``instance_id`` as uint32.
 
 10x writes no nucleus matrix. A nucleus table sums the raw 2 µm counts
 (``binned_outputs/square_002um/raw_feature_bc_matrix.h5``) over every 2 µm
@@ -46,11 +46,10 @@ if TYPE_CHECKING:
 _BATCH_SIZE = 65_536
 
 
-def cell_ids(names: pd.Index, path: ArtifactFile, *, version: str | None) -> NDArray[np.int64]:
+def cell_ids(names: pd.Index[str], path: ArtifactFile, *, version: str | None) -> NDArray[np.uint32]:
     """Decode canonical positive cell barcodes without accepting alternate spellings."""
     context = ReaderErrorContext("visium_hd", "cell barcodes", version)
-    strings = names.astype("string")
-    valid = strings.str.fullmatch(r"cellid_[0-9]{9}-1", na=False)
+    valid = names.str.fullmatch(r"cellid_[0-9]{9}-1", na=False)
     if not valid.all():
         raise ReaderFormatError(
             context=context,
@@ -59,7 +58,7 @@ def cell_ids(names: pd.Index, path: ArtifactFile, *, version: str | None) -> NDA
             expected="cellid_{positive_id:09d}-1",
         )
 
-    values = strings.str.slice(7, 16).to_numpy(dtype=np.int64)
+    values = names.str.slice(7, 16).to_numpy(dtype=np.uint32)
     if np.any(values == 0):
         raise ReaderFormatError(
             context=context,
@@ -144,13 +143,18 @@ def read_nucleus_table(
     source_rows: list[NDArray[np.int64]] = []
     target_rows: list[NDArray[np.int64]] = []
     seen = np.zeros(raw.n_obs, dtype=np.bool_)
+    # Use pandas' Arrow-backed string index engine on both sides of alignment;
+    # mixed string backends otherwise recast the entire count index per batch.
+    barcode_dtype = pd.StringDtype(storage="pyarrow", na_value=np.nan)
+    raw_names = raw.obs_names.astype(barcode_dtype, copy=False)
+    population_names = population.obs_names.astype(barcode_dtype, copy=False)
 
     with pq.ParquetFile(mapping_file) as source:
         validate_schema(source.schema_arrow, MAPPINGS_SCHEMA, mapping_file, context=mapping_context)
         for batch in source.iter_batches(batch_size=_BATCH_SIZE, columns=MAPPINGS_SCHEMA.names):
             validate_mappings(batch, mapping_file, context=mapping_context)
-            barcodes = batch.column("square_002um").to_pandas()
-            indices = raw.obs_names.get_indexer(barcodes)
+            barcodes: pd.Index[str] = pd.Index(batch.column("square_002um"), dtype=barcode_dtype)
+            indices = raw_names.get_indexer(barcodes)
             if np.any(indices < 0) or np.unique(indices).size != indices.size or np.any(seen[indices]):
                 raise ReaderFormatError(
                     context=context,
@@ -161,9 +165,9 @@ def read_nucleus_table(
             seen[indices] = True
 
             members = batch.column("in_nucleus").to_numpy(zero_copy_only=False)
-            assigned = batch.column("cell_id").to_pandas()
-            nonnull = assigned.dropna()
-            if not pd.Index(cell_ids(pd.Index(nonnull), mapping_file, version=version)).isin(known_cell_ids).all():
+            assigned: pd.Index[str] = pd.Index(batch.column("cell_id"), dtype=barcode_dtype)
+            nonnull = assigned.dropna().unique()
+            if not pd.Index(cell_ids(nonnull, mapping_file, version=version)).isin(known_cell_ids).all():
                 raise ReaderFormatError(
                     context=context,
                     path=mapping_file,
@@ -172,7 +176,7 @@ def read_nucleus_table(
                 )
 
             # Valid cells outside the selected raw/filtered population do not contribute.
-            cells = population.obs_names.get_indexer(assigned)
+            cells = population_names.get_indexer(assigned)
             keep = members & (cells >= 0)
             source_rows.append(indices[keep])
             target_rows.append(cells[keep])

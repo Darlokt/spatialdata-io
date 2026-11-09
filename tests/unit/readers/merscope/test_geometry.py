@@ -75,8 +75,9 @@ class TestReadBoundaries:
 
     @pytest.mark.parametrize("policy", ["drop", "raise"])
     def test_invalid_slices_are_classified_as_whole_source_cells(
-        self, tmp_path: Path, policy: Literal["drop", "raise"]
+        self, tmp_path: Path, mocker: MockerFixture, policy: Literal["drop", "raise"]
     ) -> None:
+        mocker.patch.object(geometry_module, "_BOUNDARY_BATCH_ROWS", 2)
         valid = Polygon([(0, 0), (2, 0), (0, 2)])
         invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
         path = _write_boundaries(
@@ -135,7 +136,8 @@ class TestReadBoundaries:
         )
         table = pq.read_table(path).set_column(1, "ZIndex", pa.array([0, 2, 0, 3]))
         pq.write_table(table, path)
-        read = mocker.spy(geometry_module.pq.ParquetFile, "read")
+        mocker.patch.object(geometry_module, "_BOUNDARY_BATCH_ROWS", 2)
+        read = mocker.spy(geometry_module.pq.ParquetFile, "iter_batches")
 
         result = _read(path)
 
@@ -147,6 +149,58 @@ class TestReadBoundaries:
         assert "ZIndex" not in result
         assert "unused" not in result
         assert read.call_args.kwargs["columns"] == ["EntityID", "ZIndex", "Geometry", "Type"]
+
+    def test_decoding_batches_preserve_order_and_limit_wkb_temporaries(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        shape = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        path = _write_boundaries(
+            tmp_path / "boundaries.parquet", [shape] * 7, ["007", "NA", "007", "0", "NA", "0", "007"]
+        )
+        mocker.patch.object(geometry_module, "_BOUNDARY_BATCH_ROWS", 2)
+        decode = mocker.spy(geometry_module.shapely, "from_wkb")
+
+        result = read_boundaries(path, policy="keep")
+
+        assert result.source_ids.tolist() == ["007", "NA", "0"]
+        assert result.shapes.index.tolist() == ["007", "NA", "0"]
+        assert all(value.equals(shape) for value in result.shapes.geometry)
+        assert [len(call.args[0]) for call in decode.call_args_list] == [2, 2, 2, 1]
+
+    def test_empty_projected_population_fails(self, tmp_path: Path) -> None:
+        path = tmp_path / "empty.parquet"
+        pq.write_table(
+            pa.table(
+                {
+                    "EntityID": pa.array([], pa.string()),
+                    "ZIndex": pa.array([], pa.uint64()),
+                    "Geometry": pa.array([], pa.binary()),
+                }
+            ),
+            path,
+        )
+        with pytest.raises(ReaderFormatError, match="no cell boundaries"):
+            read_boundaries(ArtifactFile(path), policy="keep")
+
+    @pytest.mark.parametrize("invalid", ["geometry", "id", "plane", "type"])
+    def test_later_batch_failure_closes_parquet(self, tmp_path: Path, mocker: MockerFixture, invalid: str) -> None:
+        shape = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        path = _write_boundaries(tmp_path / "boundaries.parquet", [shape] * 3, ["first", "second", "last"])
+        table = pq.read_table(path)
+        name, values = {
+            "geometry": ("Geometry", pa.array([shapely.to_wkb(shape), shapely.to_wkb(shape), b"invalid"])),
+            "id": ("EntityID", pa.array(["first", "second", None])),
+            "plane": ("ZIndex", pa.array([0, 0, -1])),
+            "type": ("Type", pa.array(["Cell", "Cell", "Nucleus"])),
+        }[invalid]
+        pq.write_table(table.set_column(table.schema.get_field_index(name), name, values), path)
+        mocker.patch.object(geometry_module, "_BOUNDARY_BATCH_ROWS", 2)
+        with pq.ParquetFile(path) as source:
+            close = mocker.spy(source, "close")
+            mocker.patch.object(geometry_module.pq, "ParquetFile", return_value=source)
+            with pytest.raises(ReaderFormatError):
+                read_boundaries(path, policy="keep")
+            close.assert_called_once()
 
     def test_large_integer_ids_never_pass_through_float(self, tmp_path: Path) -> None:
         shape = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
@@ -205,7 +259,7 @@ class TestReadBoundaries:
             close = mocker.spy(source, "close")
             mocker.patch.object(geometry_module.pq, "ParquetFile", return_value=source)
             if fail:
-                mocker.patch.object(source, "read", side_effect=RuntimeError("injected"))
+                mocker.patch.object(source, "iter_batches", side_effect=RuntimeError("injected"))
                 with pytest.raises(RuntimeError, match="injected"):
                     _read(path)
             else:

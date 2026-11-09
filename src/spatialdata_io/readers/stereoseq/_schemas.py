@@ -1,7 +1,8 @@
 """Validate the GEF (HDF5) and analysis H5AD schemas that the Stereo-seq reader consumes.
 
 GEF compound datasets are read by field name, never by column position, so
-field order may vary. Integer fields accept the unsigned widths listed; ``x``
+field order may vary. Integer compound fields and optional count vectors accept
+either byte order at the supported unsigned widths; ``x``
 and ``y`` are exact int32 or uint32 DNB-grid values. Root attributes ``omics``
 (``"Transcriptomics"`` when present; absent in historical files) and ``sn``
 (chip serial) are strict UTF-8 text. The optional root attribute ``version``
@@ -114,7 +115,7 @@ def integer_dtype(
     signed: bool = False,
     widths: tuple[int, ...] = (1, 2, 4, 8),
 ) -> None:
-    """Validate an unsigned integer or explicitly signed coordinate dtype."""
+    """Validate an unsigned integer or explicitly signed coordinate dtype in either byte order."""
     kinds = "iu" if signed else "u"
     if dtype.kind not in kinds or dtype.itemsize not in widths:
         raise schema_error(

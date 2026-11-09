@@ -12,6 +12,7 @@ import dask.array as da
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 import tifffile
 from anndata.tests.helpers import assert_equal
@@ -40,6 +41,32 @@ if TYPE_CHECKING:
 
 class TestMerscope:
     """Read actual CSV, GeoParquet and TIFF artifacts through the public API."""
+
+    @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
+    @pytest.mark.parametrize("current", [False, True])
+    @pytest.mark.parametrize("policy", ["keep", "drop"])
+    def test_boundary_row_groups_preserve_complete_products(
+        self,
+        tmp_path: Path,
+        profile: Literal["standard", "cellpose", "watershed"],
+        policy: Literal["keep", "drop"],
+        *,
+        current: bool,
+    ) -> None:
+        fixture = write_merscope_dataset(
+            tmp_path, profile=profile, invalid_first_cell=True, reassigned_transcripts=current
+        )
+        vpt = None if profile == "standard" else fixture.analysis
+        expected = merscope(fixture.root, vpt_directory=vpt, invalid_geometries=policy)
+        path = fixture.analysis / (
+            "cell_boundaries.parquet" if profile == "standard" else f"{profile}_micron_space.parquet"
+        )
+        table = pq.read_table(path)
+        pq.write_table(table, path, row_group_size=1)
+
+        actual = merscope(fixture.root, vpt_directory=vpt, invalid_geometries=policy)
+
+        assert_spatial_data_objects_are_identical(actual, expected)
 
     @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
     def test_nullable_planes_preserve_xy_footprints(

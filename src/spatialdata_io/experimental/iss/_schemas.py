@@ -15,7 +15,7 @@ dtypes and missingness are kept; duplicate field names are rejected. Label IDs
 are positive (zero is label background) and must fit the label image dtype.
 
 Output: ``obs["region"]`` (categorical labels element name) and the instance
-column (``instance_key``, or ``instance_id`` built from the observation names)
+column (``instance_key``, or uint64 ``instance_id`` built from the observation names)
 link each row to the labels. A source field already named like an output column
 must hold equal values. ``obsm["spatial_source"]`` and
 ``uns["spatialdata_io_positions"]`` are reserved and must be absent, because no
@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 
 REGION_KEY = "region"
 DEFAULT_INSTANCE_KEY = "instance_id"
+INSTANCE_ID_DTYPE = pd.ArrowDtype(pa.uint64())
 # Linkage requires at least 16-bit integer instance IDs.
 MIN_INSTANCE_BITS = 16
 TABLE_CONTEXT = ReaderErrorContext("iss", "table")

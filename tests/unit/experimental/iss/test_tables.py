@@ -22,6 +22,18 @@ if TYPE_CHECKING:
 class TestReadTable:
     """Reject malformed scientific inputs before final linkage."""
 
+    def test_empty_generated_ids_use_anndata_compatible_uint64(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "empty.h5ad")
+        source = ad.AnnData(X=np.zeros((0, 1), dtype=np.float32), obs=pd.DataFrame(index=[]))
+        source.write_h5ad(path)
+
+        table = read_table(path, region="cells", instance_key=None, label_dtype=np.dtype(np.uint16))
+
+        assert table.shape == (0, 1)
+        assert isinstance(table.obs, pd.DataFrame)
+        assert table.obs["instance_id"].dtype == np.dtype(np.uint64)
+        assert table.obs["instance_id"].tolist() == []
+
     @pytest.mark.parametrize("present", [True, False])
     def test_unknown_embedding_preserves_shape_dtype_and_has_no_description(
         self, tmp_path: Path, *, present: bool
@@ -138,7 +150,7 @@ class TestReadTable:
         assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
         assert table.obs[instance_key or "instance_id"].tolist() == [7, 2]
         # Arrow-backed generated IDs are converted to AnnData-compatible storage before linkage.
-        assert str(table.obs[instance_key or "instance_id"].dtype) == "int64"
+        assert str(table.obs[instance_key or "instance_id"].dtype) == ("int64" if instance_key else "uint64")
 
     def test_conflicting_region_field(self, tmp_path: Path) -> None:
         write_iss_dataset(tmp_path)
@@ -200,6 +212,29 @@ class TestReadTable:
 class TestSetInstanceIds:
     """Preserve exact integers and reject nonsensical label references."""
 
+    @pytest.mark.parametrize("identifier", [1, 7, 2**53 + 1, 2**63, 2**64 - 1])
+    def test_generated_ids_use_uint64(self, tmp_path: Path, identifier: int) -> None:
+        obs = pd.DataFrame(index=[str(identifier), "2"])
+
+        _set_instance_ids(
+            obs, instance_key=None, label_dtype=np.dtype(np.uint64), path=ArtifactFile(tmp_path / "counts.h5ad")
+        )
+
+        assert obs["instance_id"].tolist() == [identifier, 2]
+        assert str(obs["instance_id"].dtype) == "uint64[pyarrow]"
+        assert obs.index.tolist() == [str(identifier), "2"]
+
+    @pytest.mark.parametrize("identifier", [0, 2**64])
+    def test_generated_ids_reject_background_and_overflow(self, tmp_path: Path, identifier: int) -> None:
+        obs = pd.DataFrame(index=[str(identifier)])
+
+        with pytest.raises(ReaderFormatError, match="nonpositive or out-of-range"):
+            _set_instance_ids(
+                obs, instance_key=None, label_dtype=np.dtype(np.uint64), path=ArtifactFile(tmp_path / "counts.h5ad")
+            )
+
+        assert "instance_id" not in obs
+
     @pytest.mark.parametrize("value", ["cell-a", "1.5", "0_7", "+2", "-2", " 2", "2 ", "\u0667", "", "1e3"])
     def test_names_other_than_ascii_digits_are_rejected(self, tmp_path: Path, value: str) -> None:
         # int() would accept several of these spellings and link the row to a wrong or unintended label.
@@ -251,7 +286,7 @@ class TestSetInstanceIds:
             obs, instance_key=instance_key, label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "counts.h5ad")
         )
 
-        assert str(obs[instance_key or "instance_id"].dtype) == ("int64[pyarrow]" if instance_key is None else "int64")
+        assert str(obs[instance_key or "instance_id"].dtype) == ("uint64[pyarrow]" if instance_key is None else "int64")
 
     @pytest.mark.parametrize("dtype", ["int16", "uint16", "int32", "uint32", "int64", "uint64"])
     @pytest.mark.parametrize("empty", [False, True])

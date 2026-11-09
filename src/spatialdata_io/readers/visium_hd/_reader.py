@@ -422,12 +422,13 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
             and ``pxl_col_in_fullres``; ``obsm["spatial"]`` holds the nominal
             bin centres.
         ``shapes["cell_boundaries"]``, ``tables["cell_table"]``
-            Cell polygons indexed by integer ``cell_id`` and the selected cell
-            matrix, linked by ``instance_id``; ``obsm["spatial"]`` holds the
+            Cell polygons indexed by uint32 ``cell_id`` and the selected cell
+            matrix, linked by uint32 ``instance_id``; ``obsm["spatial"]`` holds the
             vendor centroids (Space Ranger 4.1 and later).
         ``shapes["nucleus_boundaries"]``, ``tables["nucleus_table"]``
             Nucleus polygons and, when requested, the summed raw 2 µm counts
             of the selected cells' nuclei, with vendor nucleus centroids.
+            Shape indexes and table ``instance_id`` use the same uint32 cell IDs.
         ``images["full_image"]``, ``images["hires_image"]``, ``images["lowres_image"]``
             Lazy CYX microscope images with the source dtype and channel order;
             only the full-resolution image gets ``scale_factors`` levels.
