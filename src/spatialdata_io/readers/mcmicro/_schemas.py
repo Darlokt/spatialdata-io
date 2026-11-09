@@ -40,14 +40,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
 
+from spatialdata_io.readers._utils.csv import decode_float64, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -74,22 +72,17 @@ MORPHOLOGY = frozenset(
         "Orientation",
     }
 )
-_LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
-
 
 MARKERS_CONTEXT = ReaderErrorContext("mcmicro", "markers")
 QUANTIFICATION_CONTEXT = ReaderErrorContext("mcmicro", "quantification")
 
 
-def schema_error(context: ReaderErrorContext, path: ArtifactFile, *, found: str, expected: str) -> ReaderFormatError:
-    """Describe a source contract violation of one artifact."""
-    return ReaderFormatError(context=context, path=path, found=found, expected=expected)
-
-
 def validate_columns(columns: Sequence[str], path: ArtifactFile, *, context: ReaderErrorContext) -> None:
     """Reject empty, duplicate, or NUL-containing names before parser repair."""
     if not columns or len(set(columns)) != len(columns) or any(not name or "\x00" in name for name in columns):
-        raise schema_error(context, path, found=f"header {list(columns)!r}", expected="unique nonempty field names")
+        raise ReaderFormatError(
+            context=context, path=path, found=f"header {list(columns)!r}", expected="unique nonempty field names"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,22 +107,30 @@ def canonical_markers(names: Sequence[str]) -> tuple[str, ...]:
 def normalize_markers(frame: pd.DataFrame, path: ArtifactFile) -> MarkerPanel:
     """Index the owned Arrow-string panel with collision-free MCQuant feature IDs."""
     if MARKER_NAME not in frame.columns:
-        raise schema_error(
-            MARKERS_CONTEXT, path, found=f"columns {frame.columns.tolist()!r}", expected=f"a {MARKER_NAME!r} column"
+        raise ReaderFormatError(
+            context=MARKERS_CONTEXT,
+            path=path,
+            found=f"columns {frame.columns.tolist()!r}",
+            expected=f"a {MARKER_NAME!r} column",
         )
     if frame.empty:
-        raise schema_error(MARKERS_CONTEXT, path, found="no markers", expected="one row per registered image channel")
+        raise ReaderFormatError(
+            context=MARKERS_CONTEXT, path=path, found="no markers", expected="one row per registered image channel"
+        )
 
     names = frame[MARKER_NAME]
     if names.eq("").any() or names.str.contains("\x00", regex=False).any():
-        raise schema_error(
-            MARKERS_CONTEXT, path, found="empty or NUL-containing marker names", expected="nonempty marker names"
+        raise ReaderFormatError(
+            context=MARKERS_CONTEXT,
+            path=path,
+            found="empty or NUL-containing marker names",
+            expected="nonempty marker names",
         )
     features = canonical_markers(names.tolist())
     if len(set(features)) != len(features):
-        raise schema_error(
-            MARKERS_CONTEXT,
-            path,
+        raise ReaderFormatError(
+            context=MARKERS_CONTEXT,
+            path=path,
             found=f"MCQuant feature IDs {list(features)!r} with generated collisions",
             expected="unique IDs after suffixing repeated marker names",
         )
@@ -156,24 +157,24 @@ def quantification_columns(
     validate_columns(columns, path, context=QUANTIFICATION_CONTEXT)
     conflicts = sorted(set(features).intersection((CELL_ID, *CENTROIDS)))
     if conflicts:
-        raise schema_error(
-            QUANTIFICATION_CONTEXT,
-            path,
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=path,
             found=f"canonical marker IDs {conflicts!r} overlap required quantification fields",
             expected="marker IDs distinct from CellID and centroid fields",
         )
     missing = [name for name in (CELL_ID, *features, *CENTROIDS) if name not in columns]
     if missing:
-        raise schema_error(
-            QUANTIFICATION_CONTEXT,
-            path,
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=path,
             found=f"missing columns {missing!r}",
             expected=f"{CELL_ID!r}, every canonical marker and both centroids",
         )
     if REGION_KEY in columns:
-        raise schema_error(
-            QUANTIFICATION_CONTEXT,
-            path,
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=path,
             found=f"a source {REGION_KEY!r} column",
             expected="no reader-owned linkage column",
         )
@@ -187,85 +188,37 @@ def quantification_columns(
     )
 
 
-def _lexical(column: pa.Array | pa.ChunkedArray) -> pd.Series:
-    """View Arrow source text through pandas string methods without copying it."""
-    return pd.Series(pd.arrays.ArrowExtensionArray(column), dtype=STRING_DTYPE)
-
-
-def float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: str) -> npt.NDArray[np.float64]:
-    """Decode correctly rounded finite float64 values without silent underflow."""
-    expected = f"finite float64 {name!r} values"
-    if column.null_count:
-        raise schema_error(QUANTIFICATION_CONTEXT, path, found=f"missing {name!r} values", expected=expected)
-    try:
-        values = pc.cast(column, pa.float64()).to_numpy(zero_copy_only=False)
-    except pa.ArrowInvalid as error:
-        raise schema_error(
-            QUANTIFICATION_CONTEXT, path, found=f"nonnumeric {name!r} values", expected=expected
-        ) from error
-    if not np.isfinite(values).all():
-        raise schema_error(QUANTIFICATION_CONTEXT, path, found=f"nonfinite {name!r} values", expected=expected)
-
-    # A nonzero decimal spelling that decodes to zero would silently change sparsity.
-    zero = values == 0
-    if zero.any() and not _lexical(column)[zero].str.fullmatch(_LITERAL_ZERO).all():
-        raise schema_error(
-            QUANTIFICATION_CONTEXT, path, found=f"{name!r} values that underflow to zero", expected=expected
-        )
-    return values
-
-
-def float_block(columns: Sequence[pa.Array], names: Sequence[str], path: ArtifactFile) -> npt.NDArray[np.float64]:
-    """Decode a bounded rows-by-markers block with one vectorized pass over its text.
-
-    The column-major text is decoded at once; only an invalid block is rescanned
-    column by column, so the error names the offending marker.
-    """
-    try:
-        values = float_values(pa.concat_arrays(list(columns)), path, "marker")
-    except ReaderFormatError:
-        for column, name in zip(columns, names, strict=True):
-            float_values(column, path, name)
-        raise
-    # A transposed column-major view keeps the decoded buffer without a copy.
-    return values.reshape(len(columns), -1).T
-
-
 def optional_float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: str) -> pd.Series:
     """Decode a morphology annotation, treating only empty fields as missing."""
-    present = _lexical(column).ne("").to_numpy(dtype=np.bool_)
+    present = pd.Series(pd.arrays.ArrowExtensionArray(column), dtype=STRING_DTYPE).ne("").to_numpy(dtype=np.bool_)
     decoded = np.full(len(present), np.nan)
     if present.any():
-        decoded[present] = float_values(column.filter(pa.array(present)), path, name)
+        decoded[present] = decode_float64(
+            column.filter(pa.array(present)), name=name, context=QUANTIFICATION_CONTEXT, path=path
+        )
     return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(decoded, mask=~present)), dtype=FLOAT_DTYPE)
 
 
 def cell_ids(column: pa.Array | pa.ChunkedArray, label_dtype: np.dtype[np.integer], path: ArtifactFile) -> pd.Series:
     """Decode exact positive label IDs that fit the segmentation dtype."""
-    expected = f"positive integer {CELL_ID!r} values representable as {label_dtype}"
-    if column.null_count:
-        raise schema_error(QUANTIFICATION_CONTEXT, path, found=f"missing {CELL_ID!r} values", expected=expected)
-    try:
-        # Arrow parses decimal integers exactly; float spellings and overflow fail.
-        identifiers = pc.cast(column, pa.int64()).to_numpy(zero_copy_only=False)
-    except pa.ArrowInvalid as error:
-        raise schema_error(
-            QUANTIFICATION_CONTEXT, path, found=f"non-integer {CELL_ID!r} values", expected=expected
-        ) from error
+    identifiers = decode_integers(column, name=CELL_ID, minimum=1, context=QUANTIFICATION_CONTEXT, path=path)
     limit = min(np.iinfo(label_dtype).max, np.iinfo(np.int64).max)
-    if (identifiers <= 0).any() or (identifiers > limit).any():
-        raise schema_error(
-            QUANTIFICATION_CONTEXT, path, found=f"{CELL_ID!r} values outside the label contract", expected=expected
+    if len(identifiers) and int(identifiers.max()) > limit:
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=path,
+            found=f"{CELL_ID!r} value {int(identifiers.max())} above {limit}",
+            expected=f"positive integer {CELL_ID!r} values representable as {label_dtype}",
         )
-    return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(identifiers)), dtype=CELL_ID_DTYPE)
+    return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(identifiers, pa.int64())), dtype=CELL_ID_DTYPE)
 
 
 def validate_position_columns(columns: QuantificationColumns, *, multiple: bool, path: ArtifactFile) -> None:
     """Reject imported fields that would collide with generated per-row frames."""
     if multiple and {"spatial_frame", "spatial_pixel_frame"}.intersection(columns.names):
-        raise schema_error(
-            QUANTIFICATION_CONTEXT,
-            path,
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=path,
             found="existing spatial_frame or spatial_pixel_frame column",
             expected="unoccupied generated position frame columns",
         )

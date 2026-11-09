@@ -1,4 +1,4 @@
-"""Select, insert and reorder explicitly named raster axes of a lazy array."""
+"""Validate caller axis overrides and select, insert and reorder named raster axes lazily."""
 
 from __future__ import annotations
 
@@ -8,6 +8,55 @@ import dask.array as da
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
+
+
+def validate_data_axes(data_axes: object, /) -> str | None:
+    """Validate a caller's ``data_axes`` override before any I/O and return it lowercase.
+
+    ``data_axes`` names every axis of a 2D raster's stored array, one letter
+    per dimension in any letter case, for example ``"CYX"`` or ``"YXS"``. ``S``
+    (interleaved samples) and ``C`` both become the channel axis, so at most
+    one of them may appear. Whether the letters match the file's rank is
+    checked when the file is read.
+
+    Parameters
+    ----------
+    data_axes
+        Borrowed caller value, or ``None`` to keep the file's declared axes.
+
+    Returns
+    -------
+    str or None
+        The lowercase axes, or ``None``.
+
+    Raises
+    ------
+    TypeError
+        If ``data_axes`` is neither a string nor ``None``; the message names
+        the type found.
+    ValueError
+        If the string is not ASCII letters, repeats an axis (counting ``S`` as
+        ``C``), or lacks ``X`` or ``Y``.
+    """
+    if data_axes is None:
+        return None
+    if not isinstance(data_axes, str):
+        message = f"data_axes must be a string such as 'CYX', or None; found {type(data_axes).__name__}."
+        raise TypeError(message)
+
+    axes = data_axes.lower()
+    letters = axes.replace("s", "c")
+    if (
+        not (data_axes.isascii() and data_axes.isalpha())
+        or len(set(letters)) != len(letters)
+        or not {"x", "y"}.issubset(letters)
+    ):
+        message = (
+            "data_axes must contain distinct single-letter axes including X and Y, "
+            f"with S (samples) counting as C; found {data_axes!r}."
+        )
+        raise ValueError(message)
+    return axes
 
 
 def _normalize_axes(axes: Sequence[str], *, parameter: str) -> tuple[str, ...]:

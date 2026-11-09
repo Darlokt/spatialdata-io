@@ -278,7 +278,7 @@ class TestSteinbockPositions:
         (tmp_path / "images.csv").write_text(
             "image,width_px,height_px,acquisition_width_um,acquisition_height_um\nsample-a.tiff,12,10,24,40\n"
         )
-        with pytest.raises(ReaderFormatError, match="spacing"):
+        with pytest.raises(ReaderFormatError, match=r"Y pixel size 3\.0 versus 4\.0 µm"):
             steinbock(tmp_path)
 
     def test_partial_ome_calibration_retains_native_coordinates(self, tmp_path: Path) -> None:

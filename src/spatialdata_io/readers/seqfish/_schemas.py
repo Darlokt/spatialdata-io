@@ -30,13 +30,13 @@ rounded integers.
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from spatialdata_io.readers._utils.csv import decode_float64, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
@@ -54,7 +54,6 @@ BOUNDARIES_CONTEXT = ReaderErrorContext("seqfish", "Boundaries")
 STRING_DTYPE = pd.ArrowDtype(pa.string())
 FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 CELL_COLUMNS = ("label", "area", "center_x", "center_y")
-_LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 
 
 def _validate_columns(
@@ -113,82 +112,6 @@ def validate_transcript_columns(columns: Sequence[str], path: ArtifactFile) -> t
     return ("name", "x", "y", *(column for column in ("z", "cell") if column in columns))
 
 
-def normalize_ids(
-    series: pd.Series, path: ArtifactFile, *, context: ReaderErrorContext, allow_zero: bool = False
-) -> npt.NDArray[np.int64 | np.uint64]:
-    """Normalize lexical integral values into one signed or unsigned 64-bit array."""
-    values: list[int] = []
-    lower = 0 if allow_zero else 1
-    # CSV source columns are lexical Arrow strings. Cast their common unsigned
-    # decimal form directly; never let numeric inference choose a float buffer.
-    if len(series) and not series.isna().any() and series.str.fullmatch(r"[0-9]+").all():
-        try:
-            integers = series.astype(pd.ArrowDtype(pa.uint64()))
-        except pa.ArrowInvalid:
-            pass
-        else:
-            if integers.min() < lower:
-                raise ReaderFormatError(
-                    context=context, path=path, found="zero identifier", expected="positive cell identifiers"
-                )
-            dtype = np.uint64 if integers.max() >= 2**63 else np.int64
-            return integers.to_numpy(dtype=dtype)
-    for value in series:
-        token = str(value)
-        try:
-            exact = Decimal(token)
-        except (InvalidOperation, ValueError) as error:
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found=f"identifier {token!r}",
-                expected="finite integral 64-bit identifiers",
-            ) from error
-        if not exact.is_finite() or exact < lower or exact >= 2**64 or exact != exact.to_integral_value():
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found=f"identifier {token!r}",
-                expected=f"integral identifiers in [{lower}, 2**64)",
-            )
-        values.append(int(exact))
-    return np.asarray(values, dtype=np.uint64 if values and max(values) >= 2**63 else np.int64)
-
-
-def normalize_floats(series: pd.Series, path: ArtifactFile, column: str, *, context: ReaderErrorContext) -> pd.Series:
-    """Decode correctly rounded float64 values, rejecting overflow and destructive underflow."""
-    lexical = series.astype(STRING_DTYPE)
-    expected = "finite float64 values without underflow or integer precision loss"
-    try:
-        normalized = lexical.astype(FLOAT_DTYPE)
-    except (ValueError, TypeError, pa.ArrowInvalid) as error:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"nonnumeric {column} values", expected=expected
-        ) from error
-    values = normalized.to_numpy(dtype=np.float64, na_value=np.nan)
-    if not np.isfinite(values).all():
-        raise ReaderFormatError(
-            context=context, path=path, found=f"nonfinite or missing {column} values", expected=expected
-        )
-
-    # Native Arrow decoding rounds ordinary decimal coordinates correctly.
-    # Only integral precision loss and a nonzero lexeme decoded as zero need
-    # slower exact decimal comparisons; literal zeros bypass that work.
-    candidates = np.abs(values) >= 2**53
-    zero = values == 0
-    if zero.any():
-        literal_zero = lexical.str.fullmatch(_LITERAL_ZERO).to_numpy(dtype=np.bool_)
-        candidates |= zero & ~literal_zero
-    for row in np.flatnonzero(candidates):
-        exact = Decimal(lexical.iloc[row])
-        number = float(values[row])
-        if (number == 0 and exact != 0) or (exact == exact.to_integral_value() and exact != Decimal(number)):
-            raise ReaderFormatError(
-                context=context, path=path, found=f"{column} value {lexical.iloc[row]!r}", expected=expected
-            )
-    return normalized
-
-
 def normalize_transcript_partition(
     frame: pd.DataFrame, *, features: tuple[str, ...], path: ArtifactFile
 ) -> pd.DataFrame:
@@ -203,13 +126,15 @@ def normalize_transcript_partition(
         )
     frame["name"] = pd.Categorical(names.to_numpy(), categories=features)
     for axis in ("x", "y"):
-        frame[axis] = normalize_floats(frame[axis], path, axis, context=TRANSCRIPTS_CONTEXT).to_numpy(dtype=np.float64)
+        frame[axis] = decode_float64(pa.array(frame[axis]), name=axis, context=TRANSCRIPTS_CONTEXT, path=path)
     if "cell" in frame:
-        identifiers = normalize_ids(frame["cell"], path, context=TRANSCRIPTS_CONTEXT, allow_zero=True)
+        identifiers = decode_integers(
+            pa.array(frame["cell"]), name="cell", minimum=0, context=TRANSCRIPTS_CONTEXT, path=path
+        )
         frame["cell"] = pd.Series(identifiers, index=frame.index, dtype=pd.ArrowDtype(pa.uint64()))
     if "z" in frame:
         # Vendor z is a nonnegative image-plane index, not physical distance.
-        planes = normalize_ids(frame.pop("z"), path, context=TRANSCRIPTS_CONTEXT, allow_zero=True)
+        planes = decode_integers(pa.array(frame.pop("z")), name="z", minimum=0, context=TRANSCRIPTS_CONTEXT, path=path)
         if planes.dtype.kind == "u":
             raise ReaderFormatError(
                 context=TRANSCRIPTS_CONTEXT,
@@ -280,8 +205,12 @@ def boundary_features(
                 expected="geometry only in Feature.geometry",
             )
         feature["properties"] = properties
-    identifiers = normalize_ids(
-        pd.Series([str(value) for value in raw_ids], dtype=STRING_DTYPE), path, context=BOUNDARIES_CONTEXT
+    identifiers = decode_integers(
+        pa.array([str(value) for value in raw_ids], pa.string()),
+        name="id",
+        minimum=1,
+        context=BOUNDARIES_CONTEXT,
+        path=path,
     )
     if len(np.unique(identifiers)) != len(identifiers):
         raise ReaderFormatError(

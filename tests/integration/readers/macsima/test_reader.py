@@ -123,6 +123,22 @@ class TestMacsima:
         # Mixed software versions have no single format version.
         assert "spatialdata_io_format_version" not in result.attrs
 
+    def test_warnings_name_the_reader_at_the_callers_line(self, tmp_path: Path) -> None:
+        channels = (ChannelSpec("CD3", 1, "APC", shape=(4, 5)), ChannelSpec("CD4", 2, "PE", shape=(3, 6)))
+        write_stack(tmp_path / "run", channels, version=1)
+        tifffile.imwrite(tmp_path / "run" / "preview.tif", np.zeros((3, 3), dtype=np.uint16), metadata=None)
+        (tmp_path / "empty").mkdir()
+
+        with pytest.warns(UserWarning, match="macsima") as caught:
+            macsima(tmp_path, parsing_style="processed_multiple_folders")
+
+        assert [str(warning.message) for warning in caught] == [
+            f"macsima: no TIFF files found in {str(tmp_path / 'empty')!r}; skipping this folder.",
+            "macsima: skipping TIFF files without OME metadata in stack 'run': ['preview.tif'].",
+            "macsima: zero-padding the channels of stack 'run' to the common canvas (4, 6).",
+        ]
+        assert {warning.filename for warning in caught} == {__file__}
+
     def test_excluded_folder_is_omitted(self, tmp_path: Path) -> None:
         write_stack(tmp_path / "keep", V1_CHANNELS[:1], version=1)
         write_stack(tmp_path / "keep_old", V1_CHANNELS[:1], version=1)

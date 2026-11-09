@@ -9,14 +9,18 @@ caller's ``data_axes``::
 
 Channel ``C`` holds scientific channels and is never reinterpreted as RGB from
 its count or dtype. A non-singleton samples axis ``S`` (interleaved RGB, for
-example) is rejected unless ``data_axes`` maps it to ``C``. Channel names, in
-order of precedence:
+example) is rejected unless ``data_axes`` maps it to ``C``. Declared axes that
+cannot be normalized are malformed content (``ReaderFormatError``);
+``data_axes`` that do not fit the file raise ``ValueError`` with a note naming
+the raw image. Channel names, in order of precedence:
 
 - ``r, g, b(, a)`` for samples the TIFF declares RGB (``PhotometricInterpretation``
   RGB or JPEG-compressed YCbCr; a fourth sample declared alpha by ``ExtraSamples``);
-- OME channel names when all are nonempty and unique, else OME channel IDs; an
-  OME channel expanded from samples names them ``<name or ID>:sample:<index>``;
-- positional integers without OME metadata.
+- OME channel names when all are nonempty and unique, else OME channel IDs,
+  when the channel axis is the declared OME channel or samples axis; an OME
+  channel expanded from samples names them ``<name or ID>:sample:<index>``;
+- positional integers without OME metadata, or when ``data_axes`` reads another
+  declared axis (for example Z) as ``C``.
 
 The caller asserts that image and labels are registered on the same pixel grid;
 only equal YX extents are checked. Complete OME ``PhysicalSizeX``/``Y`` of the
@@ -30,20 +34,22 @@ always means micrometres. Stage placement is never inferred.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose
 from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.image import (
+    channel_source,
     inspect_tiff,
     normalize_raster_axes,
     ome_channel_names,
     ome_pixel_sizes_um,
     raster_channel_names,
     read_tiff,
+    require_matching_pixel_sizes,
+    select_tiff_series,
 )
 
 if TYPE_CHECKING:
@@ -117,17 +123,20 @@ def read_rasters(layout: IssLayout, *, data_axes: str | None, raster: RasterOpti
         )
     raster.validate_label_pyramid(labels, element=f"ISS labels {layout.labels}")
 
-    # Declared RGB and OME sample records apply only when data_axes mapped S to C.
+    # A declared S becomes channels only when data_axes maps it to C, because
+    # normalization rejects a non-singleton S otherwise.
     level = image_metadata.series[0].levels[0]
     source_axes = tuple(axis.lower() for axis in level.axes)
-    samples = data_axes is not None and "s" in source_axes and data_axes[source_axes.index("s")] == "c"
-    ome = ome_channel_names(
-        image_metadata,
-        series=0,
-        count=int(image.shape[0]),
-        samples=samples,
-        context=ReaderErrorContext("iss", "raw image channels"),
-    )
+    samples, ome_samples = channel_source(source_axes, source_axes if data_axes is None else data_axes)
+    ome = None
+    if ome_samples is not None:
+        ome = ome_channel_names(
+            image_metadata,
+            series=0,
+            count=int(image.shape[0]),
+            samples=ome_samples,
+            context=ReaderErrorContext("iss", "raw image channels"),
+        )
 
     scale = _micrometre_scale(image_metadata, label_metadata, source_axes, data_axes)
     frame, transform = (_PIXEL_FRAME, Identity()) if scale is None else (_CALIBRATED_FRAME, scale)
@@ -157,18 +166,16 @@ def _read_raster(
 ) -> tuple[Array, TiffMetadata]:
     """Inspect the only series and normalize its full-resolution level lazily to ``target_axes``."""
     metadata = inspect_tiff(path, context=context)
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"{len(metadata.series)} series", expected="exactly one TIFF series"
-        )
-
-    raster = read_tiff(metadata, series=0, level=0, context=context)
+    raster = read_tiff(metadata, series=select_tiff_series(metadata, None, context=context), level=0, context=context)
     axes = tuple(data_axes) if data_axes is not None else tuple(axis.lower() for axis in raster.axes)
     try:
         array = normalize_raster_axes(
             raster.data, axes, target_axes=target_axes, add_missing=("c",) if "c" in target_axes else ()
         )
     except ValueError as error:
+        if data_axes is not None:
+            add_reader_context(error, context=context, path=path)
+            raise
         raise ReaderFormatError(
             context=context,
             path=path,
@@ -191,14 +198,13 @@ def _micrometre_scale(
 
     context = ReaderErrorContext("iss", "OME calibration")
     x, y = ome_pixel_sizes_um(image, series=0, axes=("x", "y"), context=context)
-    label_sizes = ome_pixel_sizes_um(labels, series=0, axes=("x", "y"), context=context)
     # Labels inherit missing sizes; only two present declarations can conflict.
-    for axis, expected, declared in zip("XY", (x, y), label_sizes, strict=True):
-        if expected is not None and declared is not None and not isclose(declared, expected, rel_tol=1e-12):
-            raise ReaderFormatError(
-                context=context,
-                path=labels.path,
-                found=f"{axis} spacing {declared} versus {expected} µm",
-                expected="label calibration agreeing with the caller-aligned raw image",
-            )
+    require_matching_pixel_sizes(
+        ome_pixel_sizes_um(labels, series=0, axes=("x", "y"), context=context),
+        (x, y),
+        axes="xy",
+        context=context,
+        path=labels.path,
+        expected="label calibration agreeing with the caller-aligned raw image",
+    )
     return Scale([x, y], axes=("x", "y")) if x is not None and y is not None else None

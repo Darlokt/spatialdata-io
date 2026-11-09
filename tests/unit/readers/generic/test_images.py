@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -14,7 +15,6 @@ import tifffile
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import LazyRaster
 from spatialdata_io.readers.generic import image
-from spatialdata_io.readers.generic._images import _ome_samples_mode
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -232,25 +232,42 @@ class TestImage:
 
     @pytest.mark.parametrize(
         "axes",
-        ["", "x", "cy", "tcyx", "cyyx", "yxx", "channel,y,x", ("channel", "y", "x")],
+        ["", "x", "cy", "tcyx", "cyyx", "yxx", "syx", "channel,y,x"],
     )
-    def test_rejects_unsupported_or_malformed_axes(self, axes: str | tuple[str, ...]) -> None:
-        with pytest.raises(ValueError, match="data_axes must be a permutation"):
+    def test_rejects_unsupported_or_malformed_axes(self, axes: str) -> None:
+        message = f"data_axes must be a permutation of 'yx', 'cyx', 'zyx', or 'czyx'; found {axes!r}."
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             image("image.tif", axes, "global")
 
-    @pytest.mark.parametrize("axes", [None, 3, ("y", 1)])
-    def test_rejects_nonstring_axes(self, axes: object) -> None:
-        with pytest.raises(TypeError, match="data_axes must be a string or a sequence"):
+    @pytest.mark.parametrize(
+        ("axes", "found"),
+        [(None, "NoneType"), (3, "int"), (("c", "y", "x"), "tuple"), (["y", "x"], "list"), (b"yx", "bytes")],
+    )
+    def test_rejects_nonstring_axes(self, axes: object, found: str) -> None:
+        with pytest.raises(TypeError, match=f"^data_axes must be a string such as 'cyx'; found {found}.$"):
             image("image.tif", cast("str", axes), "global")
+
+    def test_axes_of_another_rank_are_a_caller_error_with_context(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.tif"
+        tifffile.imwrite(path, np.zeros((2, 4, 5), dtype=np.uint8), photometric="minisblack", metadata={"axes": "CYX"})
+
+        # Every supported axis set is a subset of its canonical target, so only the rank can disagree.
+        with pytest.raises(ValueError, match="source_axes rank 2 does not match array rank 3") as caught:
+            image(path, "yx", "global")
+
+        assert type(caught.value) is ValueError
+        assert caught.value.__notes__ == [
+            f"While handling {ReaderErrorContext('generic', 'image').describe(path=path)}."
+        ]
 
     @pytest.mark.parametrize(
         ("tiff_series", "tiff_level", "error", "match"),
         [
-            (-1, 0, ValueError, "tiff_series must be non-negative"),
-            (0, -1, ValueError, "tiff_level must be non-negative"),
-            (True, 0, TypeError, "tiff_series must be an integer"),
-            ("0", 0, TypeError, "tiff_series must be an integer"),
-            (0, 1.0, TypeError, "tiff_level must be an integer"),
+            (-1, 0, ValueError, r"tiff_series must be nonnegative; found -1\."),
+            (0, -1, ValueError, r"tiff_level must be nonnegative; found -1\."),
+            (True, 0, TypeError, "tiff_series must be an integer or None; found bool"),
+            ("0", 0, TypeError, "tiff_series must be an integer or None; found str"),
+            (0, 1.0, TypeError, "tiff_level must be an integer; found float"),
         ],
     )
     def test_rejects_invalid_tiff_selection(
@@ -327,28 +344,6 @@ class TestImage:
     def test_rejects_unsupported_image_suffix(self) -> None:
         with pytest.raises(ValueError, match="Unsupported image suffix"):
             image("image.bmp", "yx", "global")
-
-
-class TestOmeSamplesMode:
-    """Decide whether the caller's channels are OME channels, OME samples or neither."""
-
-    @pytest.mark.parametrize(
-        ("declared", "axes", "expected"),
-        [
-            ("cyx", "cyx", False),
-            ("zcyx", "zcyx", False),
-            ("yx", "yx", False),
-            ("yxs", "yxc", True),
-            ("cyxs", "cyxz", False),
-            ("cyxs", "zyxc", None),
-            ("cyx", "zyx", None),
-            ("zyx", "cyx", None),
-            ("qyx", "cyx", None),
-            ("yxs", "yxz", None),
-        ],
-    )
-    def test_maps_the_callers_channel_axis(self, declared: str, axes: str, expected: bool | None) -> None:  # noqa: FBT001
-        assert _ome_samples_mode(tuple(declared), tuple(axes)) is expected
 
 
 class TestImageArchitecture:

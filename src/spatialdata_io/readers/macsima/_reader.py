@@ -8,13 +8,12 @@ per split nuclei stack) and record provenance.
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, warn_user
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.macsima._channels import make_channel_options, plan_stack
@@ -49,9 +48,7 @@ def _read_sources(stack: StackFiles) -> list[ChannelSource]:
             sources.append(source)
 
     if skipped:
-        warnings.warn(
-            f"Skipping TIFF files without OME metadata in stack {stack.name!r}: {skipped}.", UserWarning, stacklevel=3
-        )
+        warn_user(f"macsima: skipping TIFF files without OME metadata in stack {stack.name!r}: {skipped}.")
     if not sources:
         raise ReaderFormatError(
             context=_STACK_CONTEXT,

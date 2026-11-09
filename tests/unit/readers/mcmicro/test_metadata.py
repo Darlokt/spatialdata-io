@@ -111,7 +111,7 @@ class TestReadMarkers:
             ("marker_name,marker_name\nA,B\n", "unique nonempty"),
             ('"unterminated\n', "malformed CSV header|unique nonempty"),
             ("marker_name\n", "no markers"),
-            ("marker_name,x\nA\n", "malformed marker CSV"),
+            ("marker_name,x\nA\n", r"malformed CSV records \("),
             ("channel_number\n1\n", "marker_name"),
         ],
     )

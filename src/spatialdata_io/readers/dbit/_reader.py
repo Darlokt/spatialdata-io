@@ -7,7 +7,6 @@ squares, links the table to them and sorts its rows by A and then B.
 
 from __future__ import annotations
 
-import warnings
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -18,7 +17,7 @@ from spatialdata.transformations import Identity, Scale
 from xarray import DataTree
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.names import sanitize_element_name, validate_element_name
@@ -132,7 +131,9 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         Source TIFF axes as one string of distinct letters including ``X`` and
         ``Y``, case-insensitive, for example ``"CYX"`` for a stack without axis
         metadata; ``S`` (samples) counts as a channel axis. Defaults to the
-        axes the file declares. Requires a TIFF image.
+        axes the file declares. An axis read as channels that the file
+        declares otherwise gets positional channel names. Requires a TIFF
+        image.
     tiff_series
         Zero-based TIFF series. Required when the file has several series.
         Requires a TIFF image.
@@ -240,13 +241,16 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         If an option has the wrong type, or expression storage is unsupported.
     ValueError
         If an option has an invalid value, an image option is given without a
-        suitable image, expression values are not finite, or a square loses its width.
+        suitable image, ``data_axes`` cannot be mapped to CYX for the image
+        (with a note naming it), expression values are not finite, or a square
+        loses its width.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         If a path is missing or has the wrong kind.
     ValueError
         A contextual ``ReaderFormatError`` naming the artifact and path if an
         artifact is ambiguous or malformed, for example several tables, a
-        multi-series TIFF without ``tiff_series``, an invalid barcode map,
+        multi-series TIFF without ``tiff_series``, declared image axes that
+        cannot be mapped to CYX, an invalid barcode map,
         observation names whose barcodes are malformed, duplicated or not in
         the map, or occupied coordinate destinations.
     """
@@ -331,5 +335,5 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     result = SpatialData(images=images, shapes={dataset_id: grid}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="dbit")
     if duplicate_sums:
-        warnings.warn(f"dbit {layout.table.name}: " + "; ".join(map(str, duplicate_sums)), UserWarning, stacklevel=2)
+        warn_user(f"dbit {layout.table.name}: " + "; ".join(map(str, duplicate_sums)))
     return result

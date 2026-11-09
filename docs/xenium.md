@@ -155,13 +155,13 @@ sdata["he_image"] = xenium_aligned_image(
 )
 ```
 
-The alignment matrix `M` maps image pixels to morphology pixels; without it the image is assumed to share the morphology grid. Axes come from the TIFF metadata; `data_axes` overrides them with a string such as `"YXS"` (any letter case). Channel names follow what the file declares:
+The alignment matrix `M` maps image pixels to morphology pixels; without it the image is assumed to share the morphology grid. Axes come from the TIFF metadata; `data_axes` overrides them with one string of distinct letters including `X` and `Y`, such as `"YXS"` (any letter case; `S` and `C` both become the channel axis, so at most one may appear), checked before the image is read. Declared axes that cannot become `c, y, x` raise a contextual `ReaderFormatError`; `data_axes` that do not fit the image raise `ValueError` naming it. Channel names follow what the file declares:
 
 - interleaved samples of a TIFF that declares an RGB colour model (photometric RGB, or JPEG-compressed YCbCr as in typical H&E scans) become `r, g, b`, with `a` for declared alpha;
-- other channels keep their OME channel names, or their OME channel IDs when names are missing or repeated; samples without a colour model are named `<name or ID>:sample:<index>`;
-- without OME metadata channels are numbered `0, 1, ...`.
+- other channels keep their OME channel names, or their OME channel IDs when names are missing or repeated, when the channel axis is the declared OME channel or samples axis; samples without a colour model are named `<name or ID>:sample:<index>`;
+- without OME metadata, or when `data_axes` reads another declared axis (for example Z) as the channels, channels are numbered `0, 1, ...`; such a reinterpretation previously failed the OME channel count.
 
-Three channels are never assumed to be RGB from their count: the Breast IDC H&E, stored as Hematoxylin, Eosin and Residual channels, keeps those names. An OME channel count that does not match the image raises.
+Three channels are never assumed to be RGB from their count: the Breast IDC H&E, stored as Hematoxylin, Eosin and Residual channels, keeps those names. An OME channel count that does not match a corresponding channel axis raises.
 
 {func}`~spatialdata_io.xenium_explorer_selection` reads a Xenium Explorer coordinates export (`Selection,X,Y`, or `X,Y` with the name in the first comment line) as polygons in µm with `Identity()`, indexed by selection name in file order. Clicked cells are named `Cell <id>`. The result can be added to the `SpatialData` object or used with {func}`spatialdata.polygon_query`.
 

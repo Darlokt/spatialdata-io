@@ -20,13 +20,12 @@ normalized metadata of the inspected channels and reads no pixels:
 
 from __future__ import annotations
 
-import warnings
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, warn_user
 
 if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
@@ -205,11 +204,7 @@ def plan_stack(stack: StackFiles, sources: Sequence[ChannelSource], options: Cha
     names = _names(selected, include_cycle=options.include_cycle_in_channel_names, stack=stack)
     paddings, canvas = _place_on_canvas(selected)
     if any(padding != NO_PADDING for padding in paddings):
-        warnings.warn(
-            f"Zero-padding the channels of stack {stack.name!r} to the common canvas {canvas}.",
-            UserWarning,
-            stacklevel=3,
-        )
+        warn_user(f"macsima: zero-padding the channels of stack {stack.name!r} to the common canvas {canvas}.")
     channels = tuple(
         PlannedChannel(source, name, padding) for source, name, padding in zip(selected, names, paddings, strict=True)
     )

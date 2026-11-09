@@ -110,7 +110,7 @@ class TestReadCalibration:
             output.write(np.zeros((16, 16), dtype=np.uint16))
             output.write(np.zeros((8, 8), dtype=np.uint16))
         graph = mocker.spy(raster_module, "read_tiff")
-        with pytest.raises(ReaderFormatError, match="2 series"):
+        with pytest.raises(ReaderFormatError, match="expected one TIFF series; found 2 TIFF series"):
             read_calibration(ArtifactFile(path))
         graph.assert_not_called()
 
@@ -136,7 +136,7 @@ class TestReadDapi:
         with tifffile.TiffWriter(path) as output:
             output.write(np.zeros((16, 16), dtype=np.uint16))
             output.write(np.zeros((8, 8), dtype=np.uint16))
-        with pytest.raises(ReaderFormatError, match="2 series"):
+        with pytest.raises(ReaderFormatError, match="expected one TIFF series; found 2 TIFF series"):
             read_dapi(ArtifactFile(path))
 
     @pytest.mark.parametrize(("axes", "shape"), [("ZYX", (2, 16, 16)), ("QYX", (2, 16, 16))])
@@ -272,11 +272,16 @@ class TestReadLabels:
             assert result.dtype == np.dtype(np.uint16)
         pixels.assert_not_called()
 
-    @pytest.mark.parametrize("calibrated", [False, True])
-    def test_ome_labels_inherit_or_confirm_dapi_calibration(self, tmp_path: Path, *, calibrated: bool) -> None:
+    @pytest.mark.parametrize(
+        "calibration",
+        [{}, {"PhysicalSizeX": 0.2, "PhysicalSizeY": 0.5}, {"PhysicalSizeX": 0.2}, {"PhysicalSizeY": 0.5}],
+        ids=["absent", "complete", "x-only", "y-only"],
+    )
+    def test_ome_labels_inherit_or_confirm_dapi_calibration(
+        self, tmp_path: Path, calibration: dict[str, float]
+    ) -> None:
         dapi, path = tmp_path / "DAPI.tiff", tmp_path / "Segmentation.tiff"
         _write_dapi(dapi)
-        calibration = {"PhysicalSizeX": 0.2, "PhysicalSizeY": 0.5} if calibrated else {}
         tifffile.imwrite(
             path,
             np.zeros((48, 64), dtype=np.uint32),
@@ -350,8 +355,9 @@ class TestReadLabels:
         [
             ("shape", "segmentation YX shape (47, 64) and DAPI shape (48, 64)"),
             ("dtype", "float32"),
-            ("calibration", "segmentation OME physical sizes differ from DAPI"),
-            ("incomplete", "physical Y/X sizes (None, 0.3)"),
+            ("calibration", "X pixel size 0.3 versus 0.2 µm"),
+            # A partial declaration is inherited where absent but still checked where present.
+            ("incomplete", "X pixel size 0.3 versus 0.2 µm"),
         ],
     )
     def test_segmentation_errors_name_the_segmentation(self, tmp_path: Path, invalid: str, found: str) -> None:

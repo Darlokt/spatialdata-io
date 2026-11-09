@@ -19,8 +19,6 @@ from spatialdata_io.readers.mcmicro._schemas import (
     STRING_DTYPE,
     canonical_markers,
     cell_ids,
-    float_block,
-    float_values,
     normalize_markers,
     optional_float_values,
     quantification_columns,
@@ -133,51 +131,6 @@ class TestQuantificationColumns:
         assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")
 
 
-class TestFloatValues:
-    """Values are correctly rounded, finite, and never silently underflow."""
-
-    def test_correctly_rounded_against_lexical_oracle(self, tmp_path: Path) -> None:
-        tokens = ["0.1", "2.675", "1e-320", "9007199254740993", "0.30000000000000004", "-0", "1.7976931348623157e308"]
-        np.testing.assert_array_equal(
-            float_values(pa.array(tokens), _path(tmp_path), "A"), np.array([float(token) for token in tokens])
-        )
-
-    @pytest.mark.parametrize(
-        ("token", "match"),
-        [
-            ("inf", "nonfinite"),
-            ("nan", "nonfinite"),
-            ("1e400", "nonfinite|nonnumeric"),
-            ("abc", "nonnumeric"),
-            ("", "nonnumeric"),
-            ("1e-400", "underflow"),
-        ],
-    )
-    def test_rejects(self, tmp_path: Path, token: str, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
-            float_values(pa.array(["1", token]), _path(tmp_path), "A")
-
-    def test_rejects_null(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="missing"):
-            float_values(pa.array(["1", None]), _path(tmp_path), "A")
-
-    @pytest.mark.parametrize("zero", ["0", "0.0", "-0.000", ".0", "0e5", "+0E-3"])
-    def test_literal_zero_spellings(self, tmp_path: Path, zero: str) -> None:
-        assert float_values(pa.array([zero]), _path(tmp_path), "A").tolist() == [0.0]
-
-
-class TestFloatBlock:
-    """A whole bounded block decodes in one pass and errors still name their marker."""
-
-    def test_rows_by_markers(self, tmp_path: Path) -> None:
-        block = float_block([pa.array(["1", "0"]), pa.array(["0.5", "2e-3"])], ("A", "B"), _path(tmp_path))
-        np.testing.assert_array_equal(block, [[1, 0.5], [0, 0.002]])
-
-    def test_error_names_the_marker(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="nonfinite 'B'"):
-            float_block([pa.array(["1"]), pa.array(["inf"])], ("A", "B"), _path(tmp_path))
-
-
 class TestOptionalFloatValues:
     """Only empty fields become missing; any other invalid value fails."""
 
@@ -199,9 +152,9 @@ class TestCellIds:
     """Label IDs are exact positive integers that fit their segmentation dtype."""
 
     def test_exact_values(self, tmp_path: Path) -> None:
-        identifiers = cell_ids(pa.array(["3", "9007199254740993"]), np.dtype(np.uint64), _path(tmp_path))
+        identifiers = cell_ids(pa.array(["3", "9007199254740993", "2.0", "4e0"]), np.dtype(np.uint64), _path(tmp_path))
         assert identifiers.dtype == CELL_ID_DTYPE
-        assert identifiers.tolist() == [3, 9007199254740993]
+        assert identifiers.tolist() == [3, 9007199254740993, 2, 4]
 
     def test_duplicate_ids_are_preserved_for_final_table_validation(self, tmp_path: Path) -> None:
         identifiers = cell_ids(pa.array(["3", "3"]), np.dtype(np.uint32), _path(tmp_path))
@@ -209,20 +162,24 @@ class TestCellIds:
         assert identifiers.dtype == CELL_ID_DTYPE
 
     @pytest.mark.parametrize(
-        ("tokens", "dtype", "match"),
+        ("tokens", "dtype", "found"),
         [
-            (["1", None], np.uint32, "missing"),
-            (["1", "2.0"], np.uint32, "non-integer"),
-            (["1", "x"], np.uint32, "non-integer"),
-            (["1", "99999999999999999999"], np.uint64, "non-integer"),
-            (["0"], np.uint32, "outside"),
-            (["-1"], np.int32, "outside"),
-            (["256"], np.uint8, "outside"),
+            (["1", None], np.uint32, "missing 'CellID' values"),
+            (["1", "2.5"], np.uint32, "'CellID' value '2.5'"),
+            (["1", "x"], np.uint32, "'CellID' value 'x'"),
+            (["1", "0x10"], np.uint32, "'CellID' value '0x10'"),
+            (["1", "99999999999999999999"], np.uint64, "'CellID' value '99999999999999999999'"),
+            (["0"], np.uint32, "'CellID' value '0'"),
+            (["-1"], np.int32, "'CellID' value '-1'"),
+            (["256"], np.uint8, "'CellID' value 256 above 255"),
+            ([str(2**63)], np.uint64, f"'CellID' value {2**63} above {2**63 - 1}"),
         ],
     )
-    def test_rejects(self, tmp_path: Path, tokens: list[str | None], dtype: type[np.integer], match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
+    def test_rejects(self, tmp_path: Path, tokens: list[str | None], dtype: type[np.integer], found: str) -> None:
+        with pytest.raises(ReaderFormatError) as caught:
             cell_ids(pa.array(tokens, pa.string()), np.dtype(dtype), _path(tmp_path))
+        assert caught.value.found == found
+        assert caught.value.context == QUANTIFICATION_CONTEXT
 
 
 class TestValidatePositionColumns:

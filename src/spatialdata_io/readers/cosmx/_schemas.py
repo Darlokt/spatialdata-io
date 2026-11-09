@@ -23,9 +23,12 @@ Values:
   in counts and transcripts, where 0 marks per-FOV background or an unassigned
   transcript, and at least 1 in metadata. Both become int64 without a floating
   intermediate.
-- Counts are nonnegative integers.
-- Coordinates are finite float64 decimals. Half a unit in the last printed
-  decimal place of each value is its rounding bound, used for placement.
+- Counts are nonnegative integers. Every integer field accepts any exact
+  decimal spelling (``2``, ``2.0``, ``2e0``) and must fit int64.
+- Coordinates are finite float64 decimals; a nonzero value that rounds to zero,
+  or an integral value of at least 2**53 that float64 cannot hold exactly,
+  fails. Half a unit in the last printed decimal place of each value is its
+  rounding bound, used for placement.
 - Metadata annotations named ``Area``, ``Area.um2``, ``AspectRatio``,
   ``Width``, ``Height``, ``Mean.*`` and ``Max.*`` are nullable float64, with
   empty fields and ``NA`` missing; every other annotation stays exact text.
@@ -46,8 +49,8 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
 
+from spatialdata_io.readers._utils.csv import decode_float64, decode_integer_block, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
@@ -84,7 +87,6 @@ TRANSCRIPT_OPTIONAL = ("z", "CellComp", CELL)
 # Vendor morphology and stain-intensity fields; every other metadata field stays exact text.
 _NUMERIC_METADATA = re.compile(r"Area|Area\.um2|AspectRatio|Width|Height|(?:Mean|Max)\..+")
 _FOV_POSITION_PIXELS = (("x_px", "y_px"), ("x_global_px", "y_global_px"))
-_LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 _DECIMAL = r"[+-]?(?:\d+(?:\.(?P<fraction>\d*))?|\.(?P<leading>\d+))(?:[eE](?P<exponent>[+-]?\d+))?"
 
 
@@ -180,51 +182,35 @@ def integer_values(
     column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str, *, minimum: int | None
 ) -> npt.NDArray[np.int64]:
     """Decode exact int64 values without a floating intermediate, optionally bounded below."""
-    expected = f"integer {name!r} values" + ("" if minimum is None else f" of at least {minimum}")
-    if column.null_count:
-        raise schema_error(path, artifact, found=f"missing {name!r} values", expected=expected)
-    try:
-        values = pc.cast(column, pa.int64()).to_numpy(zero_copy_only=False)
-    except pa.ArrowInvalid as error:
-        raise schema_error(path, artifact, found=f"non-integer {name!r} values", expected=expected) from error
-    if minimum is not None and (values < minimum).any():
-        raise schema_error(path, artifact, found=f"{name!r} values below {minimum}", expected=expected)
-    return values
+    values = decode_integers(
+        column, name=name, minimum=minimum, context=ReaderErrorContext("cosmx", artifact), path=path
+    )
+    if values.dtype.kind == "u":
+        raise schema_error(
+            path, artifact, found=f"{name!r} value {int(values.max())}", expected=f"{name!r} values within int64"
+        )
+    return values.astype(np.int64, copy=False)
 
 
 def count_block(columns: Sequence[pa.Array], names: Sequence[str], path: ArtifactFile) -> npt.NDArray[np.int64]:
-    """Decode a bounded rows-by-features count block with one vectorized pass.
-
-    Only an invalid block is rescanned column by column, so the error names its
-    feature.
-    """
-    try:
-        values = integer_values(pa.concat_arrays(list(columns)), path, COUNTS, "count", minimum=0)
-    except ReaderFormatError:
-        for column, name in zip(columns, names, strict=True):
-            integer_values(column, path, COUNTS, name, minimum=0)
-        raise
-    # A transposed column-major view keeps the decoded buffer without a copy.
-    return values.reshape(len(columns), -1).T
+    """Decode a bounded rows-by-features count block with one vectorized pass; errors name the feature."""
+    counts = decode_integer_block(
+        columns, names=names, minimum=0, context=ReaderErrorContext("cosmx", COUNTS), path=path
+    )
+    if counts.dtype.kind == "u":
+        maxima = counts.max(axis=0)
+        name = names[int(maxima.argmax())]
+        raise schema_error(
+            path, COUNTS, found=f"{name!r} value {int(maxima.max())}", expected=f"{name!r} values within int64"
+        )
+    return counts.astype(np.int64, copy=False)
 
 
 def float_values(
     column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str
 ) -> npt.NDArray[np.float64]:
-    """Decode correctly rounded finite float64 values without silent underflow."""
-    expected = f"finite float64 {name!r} values"
-    if column.null_count:
-        raise schema_error(path, artifact, found=f"missing {name!r} values", expected=expected)
-    try:
-        values = pc.cast(column, pa.float64()).to_numpy(zero_copy_only=False)
-    except pa.ArrowInvalid as error:
-        raise schema_error(path, artifact, found=f"nonnumeric {name!r} values", expected=expected) from error
-    if not np.isfinite(values).all():
-        raise schema_error(path, artifact, found=f"nonfinite {name!r} values", expected=expected)
-    zero = values == 0
-    if zero.any() and not _lexical(column)[zero].str.fullmatch(_LITERAL_ZERO).all():
-        raise schema_error(path, artifact, found=f"{name!r} values that underflow to zero", expected=expected)
-    return values
+    """Decode correctly rounded finite float64 values without underflow or integer precision loss."""
+    return decode_float64(column, name=name, context=ReaderErrorContext("cosmx", artifact), path=path)
 
 
 def optional_float_values(

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 def generic(  # noqa: PLR0913, RUF100
     path: str | Path,
     *,
-    data_axes: Sequence[str] | None = None,
+    data_axes: str | None = None,
     coordinate_system: str | None = None,
     tiff_series: int | None = None,
     tiff_level: int = 0,
@@ -51,8 +51,9 @@ def generic(  # noqa: PLR0913, RUF100
     path
         Image or GeoJSON file. ``~`` is expanded.
     data_axes
-        Image only, required: the axes of the decoded array, a
-        case-insensitive permutation of ``yx``, ``cyx``, ``zyx`` or ``czyx``.
+        Image only, required: the axes of the decoded array as one string, a
+        case-insensitive permutation of ``yx``, ``cyx``, ``zyx`` or ``czyx``
+        such as ``"cyx"``.
     coordinate_system
         Name of the target coordinate system, preserved literally; it must
         contain a non-whitespace character. ``None`` selects ``"global"``.

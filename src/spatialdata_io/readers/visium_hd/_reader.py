@@ -480,9 +480,10 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
     TypeError
         If an option has the wrong type.
     ValueError
-        If an option has an invalid value or contradicts another option, an
-        image's axes cannot be mapped to CYX, no product is selected, or
-        ``data_axes``/``tiff_series`` are given for a PNG or JPEG image.
+        If an option has an invalid value or contradicts another option,
+        ``data_axes`` cannot be mapped to CYX for the image (with a note naming
+        it), no product is selected, or ``data_axes``/``tiff_series`` are given
+        for a PNG or JPEG image.
     IndexError
         If ``tiff_series`` is out of range.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
@@ -493,8 +494,9 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         unsupported or inconsistent with another, for example sources reporting
         different Space Ranger versions or library IDs, positions that disagree
         with the 2 µm registration, negative or fractional counts, counts
-        whose nucleus sums cannot stay exact, or a multi-series TIFF without
-        ``tiff_series``.
+        whose nucleus sums cannot stay exact, a multi-series TIFF without
+        ``tiff_series``, or image axes declared by a file that cannot be
+        mapped to CYX.
     """
     options = _validate_options(
         bin_sizes=bin_sizes,

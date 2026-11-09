@@ -36,6 +36,7 @@ from spatialdata_io.readers._utils.image import (
     read_jpeg,
     read_png,
     read_tiff,
+    select_tiff_series,
 )
 from spatialdata_io.readers.cosmx._schemas import IMAGES, LABELS
 from spatialdata_io.readers.cosmx._transforms import fov_frame, global_frame, raster_to_local
@@ -64,11 +65,7 @@ def _source(path: ArtifactFile, context: ReaderErrorContext) -> LazyRaster:
     if suffix == ".png":
         return read_png(path, context=context)
     metadata = inspect_tiff(path, context=context)
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"{len(metadata.series)} TIFF series", expected="one series"
-        )
-    return read_tiff(metadata, series=0, level=0, context=context)
+    return read_tiff(metadata, series=select_tiff_series(metadata, None, context=context), level=0, context=context)
 
 
 def _normalize(

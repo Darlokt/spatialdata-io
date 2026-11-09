@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
@@ -12,7 +11,7 @@ from spatialdata_io.experimental.iss._images import read_rasters, validate_data_
 from spatialdata_io.experimental.iss._layout import discover_layout, validate_artifact_names
 from spatialdata_io.experimental.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY
 from spatialdata_io.experimental.iss._tables import read_table
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.names import validate_element_name
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
@@ -106,8 +105,9 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
             RGB or JPEG-compressed YCbCr); otherwise OME channel names when all
             are nonempty and unique, else OME channel IDs, with
             ``<name or ID>:sample:<index>`` for an OME channel expanded from
-            samples; otherwise positions. A three- or four-channel image is
-            never guessed to be RGB.
+            samples; otherwise, including channels that ``data_axes`` reads
+            from another declared axis such as Z, positions. A three- or
+            four-channel image is never guessed to be RGB.
         ``labels["<dataset_id>_labels_image"]``
             Lazy YX labels with the source integer dtype. Zero is background.
         ``tables["table"]``
@@ -167,15 +167,16 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         If an option has the wrong type, or the expression storage is
         unsupported.
     ValueError
-        If an option has an invalid value, for example a wrong file suffix.
+        If an option has an invalid value, for example a wrong file suffix, or
+        ``data_axes`` does not fit the raw image (with a note naming it).
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         If a path is missing or has the wrong kind.
     ValueError
         A contextual ``ReaderFormatError`` naming the artifact and path if an
-        artifact is malformed: several TIFF series, unsupported axes, unequal
-        extents, non-integer labels, conflicting calibration, a missing or
-        duplicate table field, invalid or out-of-range IDs, or non-finite
-        expression.
+        artifact is malformed: several TIFF series, unsupported declared axes,
+        unequal extents, non-integer labels, conflicting calibration, a
+        missing or duplicate table field, invalid or out-of-range IDs, or
+        non-finite expression.
     """
     validate_artifact_names(raw_image_file, labels_file, table_file)
     _validate_options(instance_key, dataset_id)
@@ -204,7 +205,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     )
     set_reader_provenance(result.attrs, reader="iss")
     if duplicate_sums:
-        warnings.warn(f"iss {layout.table.name}: " + "; ".join(map(str, duplicate_sums)), UserWarning, stacklevel=2)
+        warn_user(f"iss {layout.table.name}: " + "; ".join(map(str, duplicate_sums)))
     return result
 
 

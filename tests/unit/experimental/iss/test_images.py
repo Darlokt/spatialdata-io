@@ -65,7 +65,7 @@ class TestReadRaster:
                     np.full((2, 8, 12), value, dtype=np.uint16), photometric="minisblack", metadata={"axes": "CYX"}
                 )
 
-        with pytest.raises(ReaderFormatError, match="2 series"):
+        with pytest.raises(ReaderFormatError, match="expected one TIFF series; found 2 TIFF series"):
             _read_raster(
                 ArtifactFile(path), context=ReaderErrorContext("iss", "raw image"), target_axes=("c", "y", "x")
             )
@@ -75,10 +75,13 @@ class TestReadRaster:
         source = np.arange(2 * 8 * 12, dtype=np.uint16).reshape(2, 8, 12)
         tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "QYX"})
 
-        with pytest.raises(ReaderFormatError, match="Axis 'q'"):
+        with pytest.raises(ReaderFormatError, match="Axis 'q'") as caught:
             _read_raster(
                 ArtifactFile(path), context=ReaderErrorContext("iss", "raw image"), target_axes=("c", "y", "x")
             )
+        assert caught.value.context == ReaderErrorContext("iss", "raw image")
+        assert caught.value.path == path
+        assert type(caught.value.__cause__) is ValueError
 
         image, _ = _read_raster(
             ArtifactFile(path),
@@ -105,6 +108,20 @@ class TestReadRaster:
             data_axes="YXC",
         )
         np.testing.assert_array_equal(image.compute(), source.transpose(2, 0, 1))
+
+    @pytest.mark.parametrize(("data_axes", "match"), [("yx", "rank"), ("zyx", "absent from target_axes")])
+    def test_axes_that_do_not_fit_the_file_are_a_caller_error(self, tmp_path: Path, data_axes: str, match: str) -> None:
+        path = tmp_path / "stack.tiff"
+        tifffile.imwrite(
+            path, np.zeros((2, 8, 12), dtype=np.uint16), photometric="minisblack", metadata={"axes": "CYX"}
+        )
+        context = ReaderErrorContext("iss", "raw image")
+
+        with pytest.raises(ValueError, match=match) as caught:
+            _read_raster(ArtifactFile(path), context=context, target_axes=("c", "y", "x"), data_axes=data_axes)
+
+        assert type(caught.value) is ValueError
+        assert caught.value.__notes__ == [f"While handling {context.describe(path=path)}."]
 
 
 class TestReadRasters:
@@ -193,6 +210,25 @@ class TestReadRasters:
         result = read_rasters(layout, data_axes="yxc", raster=make_raster_options())
 
         assert result.image.coords["c"].to_numpy().tolist() == expected
+
+    def test_axis_reinterpreted_as_channels_gets_positions(self, tmp_path: Path) -> None:
+        dataset = write_iss_dataset(tmp_path)
+        # One OME channel record describes the single channel, not the two Z planes.
+        tifffile.imwrite(
+            tmp_path / "raw.tiff",
+            dataset.raw,
+            ome=True,
+            photometric="minisblack",
+            metadata={"axes": "ZYX", "Channel": {"Name": ["DAPI"]}},
+        )
+        layout = discover_layout(
+            tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
+        )
+
+        result = read_rasters(layout, data_axes="cyx", raster=make_raster_options())
+
+        assert result.image.coords["c"].to_numpy().tolist() == list(range(dataset.raw.shape[0]))
+        np.testing.assert_array_equal(result.image.data.compute(), dataset.raw)
 
     @pytest.mark.parametrize("compression", [None, "deflate"])
     def test_lazy_native_tiles_are_serializable_and_bounded(
@@ -304,5 +340,7 @@ class TestPhysicalTransform:
         layout = discover_layout(
             tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad"
         )
-        with pytest.raises(ReaderFormatError, match="calibration"):
+        with pytest.raises(ReaderFormatError, match="calibration") as caught:
             read_rasters(layout, data_axes=None, raster=make_raster_options())
+        assert caught.value.found == "X pixel size 0.4 versus 0.3 µm"
+        assert caught.value.path == tmp_path / "labels.tiff"

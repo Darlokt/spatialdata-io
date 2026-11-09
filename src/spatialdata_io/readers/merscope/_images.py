@@ -20,7 +20,7 @@ from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
+from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff, select_tiff_series
 from spatialdata_io.readers.merscope._transforms import read_transform
 
 if TYPE_CHECKING:
@@ -41,14 +41,8 @@ _GRID_CONTEXT = ReaderErrorContext("merscope", "mosaic image grid")
 def _read_channel(path: ArtifactFile) -> Array:
     """Create one source graph from one inspected full-resolution grayscale plane."""
     metadata = inspect_tiff(path, context=_CHANNEL_CONTEXT)
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=_CHANNEL_CONTEXT,
-            path=path,
-            found=f"{len(metadata.series)} TIFF series",
-            expected="one full-resolution grayscale series",
-        )
-    raster = read_tiff(metadata, series=0, level=0, context=_CHANNEL_CONTEXT)
+    series = select_tiff_series(metadata, None, context=_CHANNEL_CONTEXT)
+    raster = read_tiff(metadata, series=series, level=0, context=_CHANNEL_CONTEXT)
     try:
         array = normalize_raster_axes(raster.data, raster.axes, target_axes=("y", "x"))
     except ValueError as error:

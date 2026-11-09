@@ -18,12 +18,16 @@ from spatialdata.transformations import Affine, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import LazyRaster, inspect_tiff, make_raster_options, read_tiff
+from spatialdata_io.readers._utils.image import (
+    inspect_tiff,
+    make_raster_options,
+    normalize_cyx_image,
+    read_tiff,
+)
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd._images import (
     ImageOptions,
-    _cyx,
     _read_fullres,
     _warp_grid,
     make_image_options,
@@ -138,10 +142,11 @@ class TestReadFullres:
         with tifffile.TiffWriter(path) as writer:
             writer.write(np.ones((8, 9), np.uint16))
             writer.write(np.ones((5, 6), np.uint16))
-        with pytest.raises(ReaderFormatError, match="found 2 series") as error:
+        with pytest.raises(ReaderFormatError, match="found 2 TIFF series") as error:
             _read_fullres(path, _options(), version=VERSION)
         assert error.value.context == ReaderErrorContext("visium_hd", "full-resolution image", VERSION)
         assert error.value.path == path
+        assert error.value.expected == "one TIFF series or an explicit tiff_series selection"
         assert _read_fullres(path, _options(tiff_series=1), version=VERSION).pixels.shape == (1, 5, 6)
 
     def test_out_of_range_series_has_context(self, tmp_path: Path) -> None:
@@ -182,33 +187,24 @@ class TestReadFullres:
         with pytest.raises(ValueError, match=r"exceed the spatial extent of the full-resolution image \(8 x 9"):
             _read_fullres(path, options, version=VERSION)
 
+    # The shared CYX normalization tests every axis case; these check the reader's context and path.
+    def test_unmappable_declared_axes_are_malformed_content(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "image.tif")
+        tifffile.imwrite(path, np.ones((2, 5, 7), np.uint16), photometric="minisblack", metadata={"axes": "ZYX"})
+        with pytest.raises(ReaderFormatError, match="Axis 'z' has length 2") as error:
+            _read_fullres(path, _options(), version=VERSION)
+        assert error.value.context == ReaderErrorContext("visium_hd", "full-resolution image", VERSION)
+        assert error.value.path == path
+        assert type(error.value.__cause__) is ValueError
 
-class TestCyx:
-    """Axes follow metadata and explicit names, including singleton removal."""
-
-    def test_singleton_and_missing_channel(self, tmp_path: Path) -> None:
-        path = ArtifactFile(tmp_path / "x.tif")
-        assert _cyx(LazyRaster(da.zeros((1, 5, 7)), ("t", "y", "x")), path, context=_CONTEXT).pixels.shape == (1, 5, 7)
-        image = _cyx(LazyRaster(da.zeros((5, 7, 4)), ("y", "x", "s")), path, context=_CONTEXT)
-        assert image.pixels.shape == (4, 5, 7)
-        assert image.channels is None
-
-    @pytest.mark.parametrize(
-        ("shape", "axes", "match"),
-        [
-            ((2, 3, 5, 7), ("c", "s", "y", "x"), "duplicate axes"),
-            ((2, 5, 7), ("z", "y", "x"), r"Axis 'z' has length 2 and is absent from target_axes"),
-        ],
-    )
-    def test_unmappable_axes_have_context(
-        self, tmp_path: Path, shape: tuple[int, ...], axes: tuple[str, ...], match: str
-    ) -> None:
-        path = ArtifactFile(tmp_path / "x.tif")
-        with pytest.raises(ValueError, match=match) as error:
-            _cyx(LazyRaster(da.zeros(shape), axes), path, context=_CONTEXT)
-        assert error.value.__notes__ == [
-            f"While handling reader 'visium_hd', artifact 'test image', detected version '{VERSION}', path '{path}'."
-        ]
+    def test_unmappable_data_axes_are_a_caller_error_with_context(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "image.tif")
+        tifffile.imwrite(path, np.ones((2, 5, 7), np.uint16), photometric="minisblack", metadata={"axes": "CYX"})
+        with pytest.raises(ValueError, match="rank") as error:
+            _read_fullres(path, _options(data_axes="yx"), version=VERSION)
+        assert type(error.value) is ValueError
+        context = ReaderErrorContext("visium_hd", "full-resolution image", VERSION)
+        assert error.value.__notes__ == [f"While handling {context.describe(path=path)}."]
 
 
 class TestChannelNames:
@@ -376,8 +372,9 @@ class TestReadImages:
         with tifffile.TiffWriter(layout.cytassist) as writer:
             writer.write(np.ones((8, 9), np.uint8))
             writer.write(np.ones((5, 6), np.uint8))
-        with pytest.raises(ReaderFormatError, match="unambiguous CytAssist"):
+        with pytest.raises(ReaderFormatError, match="expected one TIFF series; found 2 TIFF series") as error:
             read_images(layout, frame, scales, source, _options(), version=VERSION)
+        assert error.value.context == ReaderErrorContext("visium_hd", "CytAssist image", VERSION)
 
     def test_microscopy_without_feature_slice(self, tmp_path: Path) -> None:
         layout, frame, scales, _ = _bundle(tmp_path)
@@ -460,9 +457,13 @@ class TestWarpCytassist:
         source = np.arange(256 * 256, dtype=np.uint16).reshape(256, 256)
         tifffile.imwrite(path, source, tile=(16, 16), compression="deflate")
         spy = mocker.spy(tiff_dask, "_read_tiff_selection")
-        raster = _cyx(
-            read_tiff(inspect_tiff(path, context=_CONTEXT), series=0, level=0, context=_CONTEXT), path, context=_CONTEXT
-        ).pixels
+        raster, _ = normalize_cyx_image(
+            read_tiff(inspect_tiff(path, context=_CONTEXT), series=0, level=0, context=_CONTEXT),
+            None,
+            tiff=None,
+            context=_CONTEXT,
+            path=path,
+        )
         # This registration makes CytAssist pixels equal global micrometres.
         h = np.array([[2, 0, 1], [0, 2, 1], [0, 0, 1]], dtype=float)
         warped, _ = warp_cytassist(

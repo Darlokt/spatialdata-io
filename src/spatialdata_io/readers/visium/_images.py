@@ -28,6 +28,10 @@ axis is the OME channel (or samples) axis, or when the file has a single
 channel; a ``data_axes`` reinterpretation of another axis as channels gets
 positions.
 
+Axes the file declares that cannot become ``c, y, x`` are malformed content and
+raise ``ReaderFormatError``; axes from ``data_axes`` that do not fit the file
+raise ``ValueError`` with a note naming the image.
+
 A TIFF has one series unless ``tiff_series`` selects one of several; the
 full-resolution level of that series is read. Only the full-resolution image
 gets generated pyramid levels; the PNGs are already downsampled.
@@ -42,16 +46,17 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import (
     inspect_tiff,
     make_raster_options,
-    normalize_raster_axes,
-    ome_channel_names,
-    raster_channel_names,
+    normalize_cyx_image,
     read_jpeg,
     read_png,
     read_tiff,
+    select_tiff_series,
+    validate_data_axes,
+    validate_tiff_index,
 )
 
 if TYPE_CHECKING:
@@ -61,7 +66,7 @@ if TYPE_CHECKING:
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
-    from spatialdata_io.readers._utils.image import LazyRaster, RasterOptions, TiffMetadata
+    from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.visium._geometry import VisiumFrames
     from spatialdata_io.readers.visium._layout import VisiumLayout
@@ -113,27 +118,8 @@ def make_image_options(
     The rank of ``data_axes`` and the range of ``tiff_series`` depend on the
     file and are checked when it is read.
     """
-    if data_axes is not None:
-        if not isinstance(data_axes, str):
-            message = f"data_axes must be a string such as 'CYX', or None; found {type(data_axes).__name__}."
-            raise TypeError(message)
-        # S (samples) becomes the channel axis, so it may not accompany C.
-        axes = data_axes.lower().replace("s", "c")
-        if not axes.isascii() or not axes.isalpha() or len(set(axes)) != len(axes) or not {"x", "y"}.issubset(axes):
-            message = (
-                "data_axes must contain distinct single-letter axes including X and Y, "
-                f"with S (samples) counting as C; found {data_axes!r}."
-            )
-            raise ValueError(message)
-
-    if tiff_series is not None:
-        if isinstance(tiff_series, bool) or not isinstance(tiff_series, int):
-            message = f"tiff_series must be an integer or None; found {type(tiff_series).__name__}."
-            raise TypeError(message)
-        if tiff_series < 0:
-            message = f"tiff_series must be nonnegative; found {tiff_series}."
-            raise ValueError(message)
-
+    axes = validate_data_axes(data_axes)
+    validate_tiff_index(tiff_series, parameter="tiff_series", optional=True)
     raster = make_raster_options(scale_factors, chunks)
 
     if fullres_kind != "tiff" and (data_axes is not None or tiff_series is not None):
@@ -143,52 +129,7 @@ def make_image_options(
         message = "scale_factors require fullres_image_file; the hires and lowres images stay single-scale."
         raise ValueError(message)
 
-    return ImageOptions(
-        raster=raster, data_axes=None if data_axes is None else data_axes.lower(), tiff_series=tiff_series
-    )
-
-
-def _only_series(metadata: TiffMetadata, path: ArtifactFile, *, context: ReaderErrorContext) -> int:
-    """Return the index of the file's only series; several require ``tiff_series``."""
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"{len(metadata.series)} series",
-            expected="a single series or an explicit tiff_series selection",
-        )
-    return 0
-
-
-def _normalize(
-    raster: LazyRaster, source: tuple[str, ...], *, path: ArtifactFile, context: ReaderErrorContext
-) -> Array:
-    """Map the source axes to CYX, treating samples as channels and dropping named singletons."""
-    try:
-        return normalize_raster_axes(
-            raster.data,
-            tuple("c" if axis == "s" else axis for axis in source),
-            target_axes=_IMAGE_AXES,
-            add_missing=("c",),
-        )
-    except ValueError as error:
-        add_reader_context(error, context=context, path=path)
-        raise
-
-
-def _channel_source(declared: tuple[str, ...], source: tuple[str, ...]) -> tuple[bool, bool | None]:
-    """Return whether the channels are the file's samples, and how OME channels map to them.
-
-    The second value is ``False`` for one OME channel per image channel,
-    ``True`` for one image channel per OME sample, and ``None`` when the OME
-    channels do not correspond to the image channels. Normalization rejects
-    ``c`` beside ``s``, so the source has at most one channel axis.
-    """
-    index = next((index for index, axis in enumerate(source) if axis in {"c", "s"}), None)
-    if index is None:
-        # The added singleton channel is the OME channel only if the file has no channel axis.
-        return False, None if {"c", "s"} & set(declared) else False
-    return declared[index] == "s", {"c": False, "s": True}.get(declared[index])
+    return ImageOptions(raster=raster, data_axes=axes, tiff_series=tiff_series)
 
 
 def _parse(
@@ -220,32 +161,23 @@ def _read_fullres(
 ) -> DataArray | DataTree:
     """Read bounded metadata of the full-resolution image and build it without pixel tasks."""
     context = ReaderErrorContext("visium", "full-resolution image", version)
-    metadata, series = None, 0
+    tiff = None
     kind = image_kind(path)
     if kind == "tiff":
         metadata = inspect_tiff(path, context=context)
-        series = _only_series(metadata, path, context=context) if options.tiff_series is None else options.tiff_series
+        series = select_tiff_series(metadata, options.tiff_series, context=context, option="tiff_series")
         raster = read_tiff(metadata, series=series, level=0, context=context)
+        tiff = (metadata, series)
     elif kind == "png":
         raster = read_png(path, context=context)
     else:
         raster = read_jpeg(path, context=context)
 
-    declared = tuple(axis.lower() for axis in raster.axes)
-    source = declared if options.data_axes is None else tuple(options.data_axes)
-    image = _normalize(raster, source, path=path, context=context)
+    image, channels = normalize_cyx_image(raster, options.data_axes, tiff=tiff, context=context, path=path)
     options.raster.validate_image_pyramid(image, element="the full-resolution image")
-
-    samples, ome_samples = _channel_source(declared, source)
-    ome = None
-    if metadata is not None and ome_samples is not None:
-        ome = ome_channel_names(
-            metadata, series=series, count=int(image.shape[0]), samples=ome_samples, context=context
-        )
-
     return _parse(
         image,
-        channels=raster_channel_names(raster.color, samples=samples, ome=ome),
+        channels=channels,
         transformations=transformations,
         raster=options.raster,
         scale_factors=options.raster.model_scale_factors,
@@ -262,10 +194,8 @@ def _read_png(
 ) -> DataArray | DataTree:
     """Build one single-scale downsampled Space Ranger PNG."""
     context = ReaderErrorContext("visium", artifact, version)
-    lazy = read_png(path, context=context)
-    image = _normalize(lazy, tuple(axis.lower() for axis in lazy.axes), path=path, context=context)
     # PNG components are interleaved samples, so a declared colour type names them.
-    channels = raster_channel_names(lazy.color, samples=True, ome=None)
+    image, channels = normalize_cyx_image(read_png(path, context=context), None, tiff=None, context=context, path=path)
     return _parse(image, channels=channels, transformations=transformations, raster=raster)
 
 

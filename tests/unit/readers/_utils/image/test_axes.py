@@ -1,13 +1,49 @@
-"""Tests for explicit lazy raster-axis normalization."""
+"""Tests for caller axis validation and explicit lazy raster-axis normalization."""
 
 from __future__ import annotations
+
+import re
 
 import dask.array as da
 import numpy as np
 import pytest
 from dask import delayed
 
-from spatialdata_io.readers._utils.image import normalize_raster_axes
+from spatialdata_io.readers._utils.image import normalize_raster_axes, validate_data_axes
+
+
+class TestValidateDataAxes:
+    """Accept one string of distinct axis letters, with S and C both meaning channels."""
+
+    @pytest.mark.parametrize(
+        ("data_axes", "expected"),
+        [(None, None), ("CYX", "cyx"), ("yxs", "yxs"), ("Cyx", "cyx"), ("XY", "xy"), ("ZCYX", "zcyx"), ("SYX", "syx")],
+    )
+    def test_returns_lowercase_axes(self, data_axes: str | None, expected: str | None) -> None:
+        assert validate_data_axes(data_axes) == expected
+
+    @pytest.mark.parametrize(
+        ("data_axes", "found"),
+        [(("C", "Y", "X"), "tuple"), (["C", "Y", "X"], "list"), (b"CYX", "bytes"), (3, "int")],
+    )
+    def test_rejects_non_strings_naming_the_type(self, data_axes: object, found: str) -> None:
+        message = f"data_axes must be a string such as 'CYX', or None; found {found}."
+        with pytest.raises(TypeError, match=f"^{message}$"):
+            validate_data_axes(data_axes)
+
+    @pytest.mark.parametrize(
+        "data_axes",
+        # Repeated, S beside C, without X or Y, digits, non-ASCII (including the
+        # Kelvin sign, which lowercases to ASCII "k"), empty, separators.
+        ["YYX", "yYx", "CSYX", "ZY", "CX", "C1YX", "ÄYX", "\u212aYX", "", "C Y X", "C,Y,X"],
+    )
+    def test_rejects_invalid_letters(self, data_axes: str) -> None:
+        message = (
+            "data_axes must contain distinct single-letter axes including X and Y, "
+            f"with S (samples) counting as C; found {data_axes!r}."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+            validate_data_axes(data_axes)
 
 
 class TestNormalizeRasterAxes:

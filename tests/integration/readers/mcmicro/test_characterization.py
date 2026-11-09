@@ -168,7 +168,7 @@ class TestMcmicroCorrections:
         tifffile.imwrite(labels, np.zeros((64, 80), np.uint8), metadata={"axes": "YX"})
         source = fixture.root / "quantification" / "sample_part_7--method_a_cells.csv"
         source.write_text(source.read_text().replace("\n2,", "\n300,", 1), encoding="utf-8")
-        with pytest.raises(ReaderFormatError, match="label contract"):
+        with pytest.raises(ReaderFormatError, match="value 300 above 255"):
             mcmicro(fixture.root)
         tifffile.imwrite(labels, np.zeros((10, 10), np.uint32), metadata={"axes": "YX"})
         with pytest.raises(ReaderFormatError, match="image grid"):

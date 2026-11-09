@@ -139,7 +139,7 @@ class TestReadTranscripts:
         [
             ("1,1,inf,1,1,1,0,A,N,x\n", "nonfinite"),
             ("1,1,1,1,1,1,0,A,N\n", "malformed CSV records"),
-            ("0,1,1,1,1,1,0,A,N,x\n", "below 1"),
+            ("0,1,1,1,1,1,0,A,N,x\n", "'fov' value '0'"),
         ],
     )
     @pytest.mark.parametrize("source", ["plain", "gzip"])
@@ -197,16 +197,19 @@ class TestGzipLayout:
             points.compute()
 
     def test_header_and_many_rows_in_first_member_stay_lazy(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        first_member = _HEADER + _ROWS[0] * 100_000
+        # The member must dwarf one buffered read for the bound below to prove laziness.
+        assert len(first_member) > 16 * io.DEFAULT_BUFFER_SIZE
         path = tmp_path / "tx.csv.gz"
-        path.write_bytes(
-            gzip.compress((_HEADER + _ROWS[0] * 100_000).encode(), mtime=0) + gzip.compress(_ROWS[1].encode(), mtime=0)
-        )
+        path.write_bytes(gzip.compress(first_member.encode(), mtime=0) + gzip.compress(_ROWS[1].encode(), mtime=0))
         decoder = mocker.spy(_transcripts, "_decode_member")
         # The decoder owns gzip's read-ahead; this spy measures eager source I/O.
         header_reader = mocker.spy(gzip._GzipReader, "read")  # noqa: SLF001, RUF100
         points = read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
         decoder.assert_not_called()
-        assert 0 < sum(len(block) for block in header_reader.spy_return_list) < 65536
+        # Reading the header line decompresses one buffer of GzipFile's read-ahead, whose
+        # size is io.DEFAULT_BUFFER_SIZE: 8 KiB before Python 3.14 and 128 KiB since.
+        assert 0 < sum(len(block) for block in header_reader.spy_return_list) <= io.DEFAULT_BUFFER_SIZE
         # Every first-member row is returned once, including when it crosses compressed task ranges.
         assert len(points.compute()) == 100_001
 

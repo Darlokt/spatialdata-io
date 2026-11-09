@@ -1,12 +1,26 @@
-"""Contextual errors shared by private reader utilities."""
+"""Contextual errors and user warnings shared by reader utilities and readers.
+
+:class:`ReaderErrorContext` names the reader, artifact and detected format
+version of an operation. :class:`ReaderFormatError` reports a violated reader
+contract with that context; :func:`add_reader_context` adds it as a note to an
+exception that is re-raised unchanged. :class:`RasterFormatError` is raised by
+the shared raster boundary, which has no reader context.
+
+:func:`warn_user` emits a reader's ``UserWarning`` at the user's call site, the
+first stack frame outside ``spatialdata_io``, however deeply the reader emits
+it.
+"""
 
 from __future__ import annotations
 
+import os
+import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
 
-if TYPE_CHECKING:
-    from pathlib import Path
+# Directory prefix of every module of this package (``.../spatialdata_io/``).
+# Warnings skip frames under it, whatever the call depth inside the package.
+_PACKAGE_PREFIX = f"{Path(__file__).parents[2]}{os.sep}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +173,34 @@ def add_reader_context(
     error.add_note(f"While handling {context.describe(path=path)}.")
 
 
+def warn_user(message: str, /) -> None:
+    """Emit a ``UserWarning`` attributed to the first caller outside ``spatialdata_io``.
+
+    Parameters
+    ----------
+    message
+        Complete warning text, by convention starting with the reader name
+        (``"stereoseq: ..."``). It is emitted unchanged.
+
+    Warns
+    -----
+    UserWarning
+        ``message``, attributed to the first stack frame whose file is not
+        inside the ``spatialdata_io`` package: the user's call of a public
+        reader, however deeply the reader emits the warning. Warning filters
+        that match a module or line, and the once-per-location default,
+        apply to that call.
+
+    Notes
+    -----
+    The frames are skipped with ``skip_file_prefixes`` of
+    :func:`warnings.warn` instead of a fixed ``stacklevel``, which would
+    point into the package as soon as the emitting call moves to another
+    depth.
+    """
+    warnings.warn(message, UserWarning, skip_file_prefixes=(_PACKAGE_PREFIX,))
+
+
 def _restore_reader_format_error(
     context: ReaderErrorContext,
     found: str,
@@ -169,4 +211,4 @@ def _restore_reader_format_error(
     return ReaderFormatError(context=context, found=found, expected=expected, path=path)
 
 
-__all__ = ["RasterFormatError", "ReaderErrorContext", "ReaderFormatError", "add_reader_context"]
+__all__ = ["RasterFormatError", "ReaderErrorContext", "ReaderFormatError", "add_reader_context", "warn_user"]

@@ -42,7 +42,11 @@ if TYPE_CHECKING:
     help="Path to the output SpatialData Zarr store.",
 )
 @click.option("--name", "element_name", "-n", type=str, help="Name of the element to store.")
-@click.option("--data-axes", type=str, help="Image axes: a permutation of yx, cyx, zyx, or czyx.")
+@click.option(
+    "--data-axes",
+    type=str,
+    help="Image axes as one string: a permutation of yx, cyx, zyx, or czyx, in any letter case.",
+)
 @click.option(
     "--coordinate-system",
     "-c",

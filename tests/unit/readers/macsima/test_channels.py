@@ -185,9 +185,13 @@ class TestPlanStack:
     def test_unequal_shapes_pad_right_and_bottom_with_a_warning(self) -> None:
         sources = [_source("CD3", 1, shape=(10, 12)), _source("CD4", 2, shape=(8, 14))]
 
-        with pytest.warns(UserWarning, match=r"stack 'run' to the common canvas \(10, 14\)"):
+        with pytest.warns(UserWarning, match="common canvas") as caught:
             plan = plan_stack(_STACK, sources, _OPTIONS)
 
+        assert [str(warning.message) for warning in caught] == [
+            "macsima: zero-padding the channels of stack 'run' to the common canvas (10, 14)."
+        ]
+        assert caught[0].filename == __file__
         assert [channel.padding for channel in plan.channels] == [((0, 0), (0, 2)), ((0, 2), (0, 0))]
 
     def test_offsets_place_equal_shapes_on_a_shared_canvas(self) -> None:

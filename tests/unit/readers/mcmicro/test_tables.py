@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import io
+from functools import partial
 from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
 import pandas as pd
-import pyarrow.csv as pacsv
 import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
 from spatialdata_io._positions import POSITIONS_KEY
+from spatialdata_io.readers._utils.csv import iter_csv_batches
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.mcmicro import _tables as mcmicro_tables
 from spatialdata_io.readers.mcmicro._layout import Quantification, Segmentation
 from spatialdata_io.readers.mcmicro._rasters import ImageGrid
 from spatialdata_io.readers.mcmicro._schemas import STRING_DTYPE, MarkerPanel, quantification_columns
@@ -23,7 +25,6 @@ from spatialdata_io.readers.mcmicro._tables import _read_measurements, _set_posi
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from unittest.mock import MagicMock
 
     from pytest_mock import MockerFixture
 
@@ -143,10 +144,13 @@ class TestReadTable:
         ("text", "match"),
         [
             (_HEADER + "1,inf,0,0,0,1,a\n", "nonfinite"),
-            (_HEADER + "1,1,0,0,0,1\n", "malformed quantification"),
+            (_HEADER + "1,1,0,0,0,1\n", r"malformed CSV records \("),
             (_HEADER + "1,1,0,,0,1,a\n", "nonnumeric 'X_centroid'"),
             (_HEADER + "1,1,0,0,0,big,a\n", "nonnumeric 'Area'"),
-            (_HEADER + "300,1,0,0,0,1,a\n", "outside the label contract"),
+            (_HEADER + "300,1,0,0,0,1,a\n", "'CellID' value 300 above 255"),
+            (_HEADER + "1,1,0,0,9007199254740993,1,a\n", "'Y_centroid' value '9007199254740993' beyond"),
+            (_HEADER + "1,1,9007199254740993,0,0,1,a\n", "'B' value '9007199254740993' beyond"),
+            (_HEADER + "2.0,1,1e-400,0,0,1,a\n", "'B' value '1e-400' underflowing"),
             ("CellID,A,B,X_centroid,Y_centroid,A\n", "unique nonempty"),
             ("CellID,A,X_centroid,Y_centroid\n1,1,0,0\n", "missing columns"),
             ('"unterminated\n', "malformed CSV header|unique nonempty"),
@@ -164,7 +168,8 @@ class TestReadTable:
         self, tmp_path: Path, mocker: MockerFixture, *, parser_batches: bool
     ) -> None:
         mocker.patch("spatialdata_io.readers.mcmicro._tables._BATCH_MEMORY_BYTES", 32)
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._CSV_BLOCK_BYTES", 128 if parser_batches else 1024 * 1024)
+        if parser_batches:
+            mocker.patch.object(mcmicro_tables, "iter_csv_batches", partial(iter_csv_batches, block_bytes=128))
         text = _HEADER + "".join(f"{identifier},1,0,0,0,1,note\n" for identifier in [*range(1, 31), 7])
         source = _quantification(tmp_path, "s", text)
         with pytest.raises(ReaderFormatError, match=r"duplicate \(region, instance\) pairs") as caught:
@@ -196,10 +201,10 @@ class TestReadTable:
 
 
 class TestReadMeasurements:
-    """The source and Arrow streaming reader have one owner on all iteration outcomes."""
+    """The reader owns and closes its source on every iteration outcome."""
 
     @pytest.mark.parametrize("failure", [None, "numeric", "parser"])
-    def test_source_and_reader_close(self, tmp_path: Path, mocker: MockerFixture, failure: str | None) -> None:
+    def test_source_closes(self, tmp_path: Path, mocker: MockerFixture, failure: str | None) -> None:
         text = _HEADER + "".join(f"{i},1,0,0,0,1,a\n" for i in range(1, 21))
         if failure == "numeric":
             text += "2,inf,0,0,0,1,a\n"
@@ -209,37 +214,15 @@ class TestReadMeasurements:
         path = ArtifactFile(tmp_path / "s.csv")
         columns = quantification_columns(_HEADER.strip().split(","), ("A", "B"), path)
         mocker.patch("pathlib.Path.open", return_value=source)
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._CSV_BLOCK_BYTES", 128)
-        actual_open = pacsv.open_csv
-        readers: list[MagicMock] = []
-
-        def track_reader(
-            handle: io.BytesIO,
-            *,
-            read_options: pacsv.ReadOptions,
-            parse_options: pacsv.ParseOptions,
-            convert_options: pacsv.ConvertOptions,
-        ) -> MagicMock:
-            reader = actual_open(
-                handle, read_options=read_options, parse_options=parse_options, convert_options=convert_options
-            )
-            tracked = mocker.MagicMock(wraps=reader)
-            tracked.__enter__.return_value = reader
-            tracked.__exit__.side_effect = reader.__exit__
-            readers.append(tracked)
-            return tracked
-
-        mocker.patch("spatialdata_io.readers.mcmicro._tables.pacsv.open_csv", side_effect=track_reader)
+        mocker.patch.object(mcmicro_tables, "iter_csv_batches", partial(iter_csv_batches, block_bytes=128))
         if failure is None:
             assert len(_read_measurements(path, columns, np.dtype(np.uint32)).cell_ids) == 20
         else:
-            with pytest.raises(ReaderFormatError, match=r"nonfinite|malformed quantification") as caught:
+            with pytest.raises(ReaderFormatError, match=r"nonfinite|malformed CSV records") as caught:
                 _read_measurements(path, columns, np.dtype(np.uint32))
             assert caught.value.context.reader == "mcmicro"
             assert caught.value.path == path
         assert source.closed
-        assert len(readers) == 1
-        readers[0].__exit__.assert_called_once()
 
 
 class TestSetPositions:

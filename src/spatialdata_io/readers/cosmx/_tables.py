@@ -26,18 +26,17 @@ from __future__ import annotations
 
 import gzip
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
-from spatialdata_io.readers._utils.csv import parse_csv_header
+from spatialdata_io.readers._utils.csv import iter_csv_batches, parse_csv_header, read_csv_table
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
@@ -74,14 +73,14 @@ from spatialdata_io.readers.cosmx._transforms import GLOBAL, GLOBAL_PIXELS, Axis
 
 if TYPE_CHECKING:
     import io
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
     import numpy.typing as npt
+    import pyarrow as pa
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.cosmx._schemas import Artifact
 
-_CSV_BLOCK_BYTES = 1024 * 1024
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
 _TABLE_CONTEXT = ReaderErrorContext("cosmx", "cell table")
 # Columns of obs that the reader generates or relies on by name; the vendor
@@ -89,52 +88,32 @@ _TABLE_CONTEXT = ReaderErrorContext("cosmx", "cell table")
 _READER_OBS_COLUMNS = (FOV, CELL_ID, REGION_KEY, FRAME_KEY)
 
 
-def open_source(path: ArtifactFile) -> io.BufferedReader | gzip.GzipFile:
-    """Open one plain or gzip byte stream for the caller to own; gzip accepts concatenated members."""
-    return gzip.GzipFile(path, "rb") if path.name.endswith(".gz") else path.open("rb")
+@contextmanager
+def _source(path: ArtifactFile, artifact: Artifact) -> Generator[io.BufferedIOBase]:
+    """Own one plain or gzip byte stream, translating corrupt gzip data read inside the block.
+
+    Gzip sources may hold one stream or concatenated members.
+    """
+    try:
+        with gzip.GzipFile(path, "rb") if path.name.endswith(".gz") else path.open("rb") as source:
+            yield source
+    except (gzip.BadGzipFile, EOFError, zlib.error) as error:
+        raise schema_error(
+            path, artifact, found=f"invalid gzip data: {error}", expected="a readable gzip stream"
+        ) from error
 
 
 def read_header(path: ArtifactFile, artifact: Artifact) -> list[str]:
     """Read and parse the first CSV record before interpreting names."""
-    try:
-        with open_source(path) as handle:
-            line = handle.readline()
-    except (gzip.BadGzipFile, EOFError, zlib.error) as error:
-        raise schema_error(
-            path, artifact, found=f"invalid gzip data: {error}", expected="a readable gzip stream"
-        ) from error
+    with _source(path, artifact) as source:
+        line = source.readline()
     return parse_csv_header(line, context=ReaderErrorContext("cosmx", artifact), path=path)
 
 
-def _batches(path: ArtifactFile, artifact: Artifact, columns: list[str]) -> Iterator[pa.RecordBatch]:
-    """Stream lexical record batches; Arrow checks full record widths."""
-    try:
-        with (
-            open_source(path) as handle,
-            pacsv.open_csv(
-                handle,
-                read_options=pacsv.ReadOptions(
-                    column_names=columns, skip_rows=1, block_size=_CSV_BLOCK_BYTES, use_threads=False
-                ),
-                parse_options=pacsv.ParseOptions(newlines_in_values=True),
-                convert_options=pacsv.ConvertOptions(column_types=dict.fromkeys(columns, pa.string()), null_values=[]),
-            ) as reader,
-        ):
-            yield from reader
-    except pa.ArrowInvalid as error:
-        raise schema_error(
-            path, artifact, found=f"malformed CSV: {error}", expected="one field per header column"
-        ) from error
-    except (gzip.BadGzipFile, EOFError, zlib.error) as error:
-        raise schema_error(
-            path, artifact, found=f"invalid gzip data: {error}", expected="a readable gzip stream"
-        ) from error
-
-
 def _table(path: ArtifactFile, artifact: Artifact, columns: list[str]) -> pa.Table:
-    """Read a bounded-width eager source as exact text."""
-    schema = pa.schema([(name, pa.string()) for name in columns])
-    return pa.Table.from_batches(list(_batches(path, artifact, columns)), schema=schema)
+    """Read a bounded-width eager source as exact text; Arrow checks full record widths."""
+    with _source(path, artifact) as source:
+        return read_csv_table(source, header=columns, context=ReaderErrorContext("cosmx", artifact), path=path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,22 +136,23 @@ def read_counts(path: ArtifactFile) -> Counts:
     blocks: list[sparse.csr_array] = []
     fovs: list[npt.NDArray[np.int64]] = []
     cell_ids: list[npt.NDArray[np.int64]] = []
-    for batch in _batches(path, COUNTS, columns):
-        for offset in range(0, batch.num_rows, rows_per_batch):
-            block = batch.slice(offset, rows_per_batch)
-            fov = integer_values(block.column(FOV), path, COUNTS, FOV, minimum=1)
-            cell = integer_values(block.column(CELL_ID), path, COUNTS, CELL_ID, minimum=0)
-            values = count_block([block.column(name) for name in features], features, path)
-            # CosMx reports per-FOV background as cell 0; it is not a cell observation.
-            keep = cell != 0
-            if not keep.all():
-                values, fov, cell = values[keep], fov[keep], cell[keep]
-            # Counts are complete when read (rows are never summed), and stacking
-            # promotes float32 blocks exactly to float64 when any block needs it:
-            # the dtype one final conversion would select, without an int64 copy.
-            blocks.extend(finalize_count_arrays((as_csr_array(values),), context=context, path=path))
-            fovs.append(fov)
-            cell_ids.append(cell)
+    with _source(path, COUNTS) as source:
+        for batch in iter_csv_batches(source, header=columns, context=context, path=path):
+            for offset in range(0, batch.num_rows, rows_per_batch):
+                block = batch.slice(offset, rows_per_batch)
+                fov = integer_values(block.column(FOV), path, COUNTS, FOV, minimum=1)
+                cell = integer_values(block.column(CELL_ID), path, COUNTS, CELL_ID, minimum=0)
+                values = count_block([block.column(name) for name in features], features, path)
+                # CosMx reports per-FOV background as cell 0; it is not a cell observation.
+                keep = cell != 0
+                if not keep.all():
+                    values, fov, cell = values[keep], fov[keep], cell[keep]
+                # Counts are complete when read (rows are never summed), and stacking
+                # promotes float32 blocks exactly to float64 when any block needs it:
+                # the dtype one final conversion would select, without an int64 copy.
+                blocks.extend(finalize_count_arrays((as_csr_array(values),), context=context, path=path))
+                fovs.append(fov)
+                cell_ids.append(cell)
     expression = (
         sparse.vstack(blocks, format="csr") if blocks else sparse.csr_array((0, len(features)), dtype=np.float32)
     )

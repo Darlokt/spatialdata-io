@@ -45,13 +45,12 @@ makes one stack per immediate subfolder and ignores files in the root::
 
 from __future__ import annotations
 
-import warnings
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, warn_user
 from spatialdata_io.readers._utils.names import sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
@@ -191,7 +190,7 @@ def _multiple_folders(root: DatasetRoot, exclude_folder_names: frozenset[str]) -
         directory = require_metadata_directory(root, entry, context=_CONTEXT)
         files = _candidate_files(root, directory)
         if not files:
-            warnings.warn(f"No TIFF files found in {str(entry)!r}; skipping this folder.", UserWarning, stacklevel=4)
+            warn_user(f"macsima: no TIFF files found in {str(entry)!r}; skipping this folder.")
             continue
         folders.append((entry.name, StackFiles(_element_name(entry.name), directory, files)))
 

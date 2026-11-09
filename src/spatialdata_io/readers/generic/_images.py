@@ -8,9 +8,11 @@ Supported files are selected by suffix:
 - PNG (``.png``) and JPEG (``.jpg``, ``.jpeg``): one delayed whole-frame decode.
 
 No axis meaning is guessed. The caller names every decoded axis with
-``data_axes``, a permutation of ``yx``, ``cyx``, ``zyx`` or ``czyx``; the image
-is returned in canonical ``c, y, x`` or ``c, z, y, x`` order with a singleton
-channel added to grayscale data. Values, dtype and channel order are kept.
+``data_axes``, one string that is a permutation of ``yx``, ``cyx``, ``zyx`` or
+``czyx``; the image is returned in canonical ``c, y, x`` or ``c, z, y, x``
+order with a singleton channel added to grayscale data. Values, dtype and
+channel order are kept. Axes that do not fit the decoded array raise
+``ValueError`` with a note naming the image.
 
 When the caller's ``c`` axis is the file's interleaved samples axis and the file
 declares those samples RGB, the channels are ``r, g, b``, or ``r, g, b, a``
@@ -54,7 +56,7 @@ https://www.openmicroscopy.org/Schemas/OME/2016-06
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
@@ -63,9 +65,10 @@ from spatialdata.models import Image2DModel, Image3DModel
 from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.image import (
     LazyRaster,
+    channel_source,
     inspect_tiff,
     make_raster_options,
     normalize_raster_axes,
@@ -75,10 +78,14 @@ from spatialdata_io.readers._utils.image import (
     read_jpeg,
     read_png,
     read_tiff,
+    select_tiff_series,
+    validate_tiff_index,
 )
 from spatialdata_io.readers._utils.paths import require_file
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from xarray import DataArray, DataTree
 
     from spatialdata_io.readers._utils.image import TiffMetadata
@@ -125,35 +132,22 @@ def _image_format(path: Path) -> _ImageFormat:
     return image_format
 
 
-def _source_axes(data_axes: Sequence[str]) -> tuple[str, ...]:
-    if not isinstance(data_axes, Sequence) or not all(isinstance(axis, str) for axis in data_axes):
-        message = f"data_axes must be a string or a sequence of axis names. Found {data_axes!r}."
+def _source_axes(data_axes: str) -> tuple[str, ...]:
+    """Return the caller's lowercase axes, one string permuting a supported axis set."""
+    if not isinstance(data_axes, str):
+        message = f"data_axes must be a string such as 'cyx'; found {type(data_axes).__name__}."
         raise TypeError(message)
-    return tuple(axis.lower() for axis in data_axes)
-
-
-def _canonical_axes(axes: tuple[str, ...]) -> tuple[str, ...]:
+    axes = tuple(data_axes.lower())
     # The length check rejects repeated axes, which collapse in the set.
-    canonical = _CANONICAL_AXES.get(frozenset(axes))
-    if canonical is None or len(axes) != len(set(axes)):
-        message = f"data_axes must be a permutation of 'yx', 'cyx', 'zyx', or 'czyx'. Found {axes!r}."
+    if frozenset(axes) not in _CANONICAL_AXES or len(axes) != len(set(axes)):
+        message = f"data_axes must be a permutation of 'yx', 'cyx', 'zyx', or 'czyx'; found {data_axes!r}."
         raise ValueError(message)
-    return canonical
-
-
-def _validate_index(name: str, value: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        message = f"{name} must be an integer. Found {value!r}."
-        raise TypeError(message)
-    if value < 0:
-        message = f"{name} must be non-negative. Found {value!r}."
-        raise ValueError(message)
+    return axes
 
 
 def _validate_tiff_selection(image_format: _ImageFormat, *, tiff_series: int | None, tiff_level: int) -> None:
-    if tiff_series is not None:
-        _validate_index("tiff_series", tiff_series)
-    _validate_index("tiff_level", tiff_level)
+    validate_tiff_index(tiff_series, parameter="tiff_series", optional=True)
+    validate_tiff_index(tiff_level, parameter="tiff_level", optional=False)
     if image_format != "tiff" and (tiff_series is not None or tiff_level != 0):
         message = "tiff_series and tiff_level can only select TIFF-family inputs."
         raise ValueError(message)
@@ -195,20 +189,12 @@ def _normalize_chunks(chunks: Chunks | None, *, axes: tuple[str, ...]) -> dict[s
 def _read_raster(
     path: Path, image_format: _ImageFormat, *, tiff_series: int | None, tiff_level: int
 ) -> tuple[LazyRaster, _TiffSelection | None]:
-    file = require_file(path.expanduser(), context=_CONTEXT)
+    file = require_file(path, context=_CONTEXT)
     if image_format == "tiff":
         metadata = inspect_tiff(file, context=_CONTEXT)
-        if tiff_series is None:
-            if len(metadata.series) != 1:
-                raise ReaderFormatError(
-                    context=_CONTEXT,
-                    path=file,
-                    found=f"{len(metadata.series)} series",
-                    expected="a single series or an explicit tiff_series selection",
-                )
-            tiff_series = 0
-        raster = read_tiff(metadata, series=tiff_series, level=tiff_level, context=_CONTEXT)
-        return raster, _TiffSelection(metadata, tiff_series, tiff_level)
+        series = select_tiff_series(metadata, tiff_series, context=_CONTEXT, option="tiff_series")
+        raster = read_tiff(metadata, series=series, level=tiff_level, context=_CONTEXT)
+        return raster, _TiffSelection(metadata, series, tiff_level)
     if image_format == "png":
         return read_png(file, context=_CONTEXT), None
     return read_jpeg(file, context=_CONTEXT), None
@@ -248,27 +234,13 @@ def _physical_transform(raster: LazyRaster, tiff: _TiffSelection | None, axes: t
     return Scale(sizes, axes=spatial_axes) if len(sizes) == len(spatial_axes) else Identity()
 
 
-def _ome_samples_mode(declared: tuple[str, ...], axes: tuple[str, ...]) -> bool | None:
-    """Return whether the caller's channels are OME samples, or ``None`` if they are not OME channels."""
-    if "c" not in axes:
-        # The added singleton channel is the OME channel only if the file's
-        # channel and samples axes were both squeezed away as singletons.
-        return None if "c" in declared or "s" in declared else False
-    channel = declared[axes.index("c")]
-    if channel == "c":
-        return False
-    # Samples alone form the channels only without a separate channel axis.
-    return True if channel == "s" and "c" not in declared else None
-
-
 def _channel_names(
     raster: LazyRaster, tiff: _TiffSelection | None, axes: tuple[str, ...], count: int
 ) -> list[str] | None:
     """Return declared colour or OME channel names, or ``None`` for positional indexes."""
-    declared = tuple(axis.lower() for axis in raster.axes)
-    # A colour declaration concerns the samples alone, even next to a channel axis.
-    samples = "c" in axes and declared[axes.index("c")] == "s"
-    ome_samples = _ome_samples_mode(declared, axes)
+    # The caller names interleaved samples "c" too; a colour declaration
+    # concerns the samples alone, even next to a channel axis.
+    samples, ome_samples = channel_source(tuple(axis.lower() for axis in raster.axes), axes)
     ome = None
     if tiff is not None and ome_samples is not None:
         # Count or identity disagreements on a corresponding axis are corrupt OME and raise.
@@ -279,7 +251,7 @@ def _channel_names(
 # Explicit public options keep format and model contracts inspectable.
 def image(  # noqa: PLR0913, RUF100
     path: str | Path,
-    data_axes: Sequence[str],
+    data_axes: str,
     coordinate_system: str,
     *,
     tiff_series: int | None = None,
@@ -298,10 +270,10 @@ def image(  # noqa: PLR0913, RUF100
     path
         Raster file to read. ``~`` is expanded.
     data_axes
-        Caller-declared axes of the decoded array, for example ``"yxc"`` or
-        ``("c", "y", "x")``: a case-insensitive permutation of ``yx``, ``cyx``,
-        ``zyx`` or ``czyx``. Interleaved TIFF, PNG and JPEG samples (for
-        example RGB) are named ``c`` here.
+        Caller-declared axes of the decoded array as one string, for example
+        ``"yxc"``: a case-insensitive permutation of ``yx``, ``cyx``, ``zyx``
+        or ``czyx``. Interleaved TIFF, PNG and JPEG samples (for example RGB)
+        are named ``c`` here.
     coordinate_system
         Name of the target coordinate system, preserved literally; it must
         contain a non-whitespace character.
@@ -350,16 +322,17 @@ def image(  # noqa: PLR0913, RUF100
     Raises
     ------
     TypeError
-        If ``coordinate_system`` is not a string, or ``data_axes``, TIFF
+        If ``data_axes`` or ``coordinate_system`` is not a string, or the TIFF
         selection, scale factors or chunk sizes have the wrong type, including
         irregular per-axis chunk partitions.
     ValueError
         If the suffix, axes, coordinate system name, TIFF selection, scale
         factors or chunks are invalid, or the axes do not match the decoded
-        array. Malformed files raise the subclasses ``ReaderFormatError`` or
-        ``RasterFormatError`` with the reader context, including a TIFF with
-        several series and no ``tiff_series``, and OME channel records that
-        disagree with the raster channels.
+        array (with a note naming the image). Malformed files raise the
+        subclasses ``ReaderFormatError`` or ``RasterFormatError`` with the
+        reader context, including a TIFF with several series and no
+        ``tiff_series``, and OME channel records that disagree with the raster
+        channels.
     IndexError
         If the TIFF series or level does not exist.
     FileNotFoundError, IsADirectoryError
@@ -370,10 +343,10 @@ def image(  # noqa: PLR0913, RUF100
     TIFF metadata inspection is eager and bounded. Caller-owned sequences and
     mappings are not mutated.
     """
-    source = Path(path)
+    source = Path(path).expanduser()
     image_format = _image_format(source)
     source_axes = _source_axes(data_axes)
-    target_axes = _canonical_axes(source_axes)
+    target_axes = _CANONICAL_AXES[frozenset(source_axes)]
     if not isinstance(coordinate_system, str):
         message = "coordinate_system must be a string."
         raise TypeError(message)
@@ -386,12 +359,17 @@ def image(  # noqa: PLR0913, RUF100
     chunks_by_axis = _normalize_chunks(chunks, axes=target_axes)
 
     raster, tiff = _read_raster(source, image_format, tiff_series=tiff_series, tiff_level=tiff_level)
-    normalized = normalize_raster_axes(
-        raster.data,
-        source_axes,
-        target_axes=target_axes,
-        add_missing=("c",) if "c" not in source_axes else (),
-    )
+    try:
+        normalized = normalize_raster_axes(
+            raster.data,
+            source_axes,
+            target_axes=target_axes,
+            add_missing=("c",) if "c" not in source_axes else (),
+        )
+    except ValueError as error:
+        # The axes are the caller's, so a mismatch with the file is a caller error.
+        add_reader_context(error, context=_CONTEXT, path=source)
+        raise
     options.validate_image_pyramid(normalized, element="the image")
     transform = _physical_transform(raster, tiff, source_axes)
     channel_names = _channel_names(raster, tiff, source_axes, int(normalized.shape[0]))

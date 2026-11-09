@@ -19,7 +19,7 @@ from spatialdata.models import Image2DModel
 from spatialdata.transformations import Scale
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff
+from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, read_tiff, select_tiff_series
 
 if TYPE_CHECKING:
     from xarray import DataArray, DataTree
@@ -41,8 +41,9 @@ def read_morphology(
     ------
     ReaderFormatError
         If the file has not exactly one OME image series, has unnamed or repeated
-        channels, a calibration other than ``pixel_size``, or a linked file set
-        different from the OME-TIFF files beside it.
+        channels, a calibration other than ``pixel_size``, a linked file set
+        different from the OME-TIFF files beside it, or declared axes other than
+        channels, Y and X (and singleton axes).
     ValueError
         If ``raster`` requests more downsampling than the image extent allows.
     """
@@ -51,9 +52,11 @@ def read_morphology(
     def error(*, found: str, expected: str) -> ReaderFormatError:
         return ReaderFormatError(context=context, path=image.entry, found=found, expected=expected)
 
-    if len(metadata.series) != 1 or metadata.ome is None or len(metadata.ome.images) != 1:
-        raise error(found=f"{len(metadata.series)} series", expected="one OME image series")
-    pixels = metadata.ome.images[0].pixels
+    series = select_tiff_series(metadata, None, context=context)
+    # Inspection pairs every series with one OME image, so only OME's absence remains.
+    if metadata.ome is None:
+        raise error(found="a TIFF without OME metadata", expected="one OME image series")
+    pixels = metadata.ome.images[series].pixels
 
     names = [channel.name for channel in pixels.channels]
     if any(not name for name in names) or len(set(names)) != len(names):
@@ -81,8 +84,11 @@ def read_morphology(
             expected=f"exactly the OME-TIFF files {sorted(image.members)}",
         )
 
-    lazy = read_tiff(metadata, series=0, level=0, context=context)
-    data = normalize_raster_axes(lazy.data, lazy.axes, target_axes=("c", "y", "x"), add_missing=("c",))
+    lazy = read_tiff(metadata, series=series, level=0, context=context)
+    try:
+        data = normalize_raster_axes(lazy.data, lazy.axes, target_axes=("c", "y", "x"), add_missing=("c",))
+    except ValueError as cause:
+        raise error(found=str(cause), expected="channel, Y and X axes with only singleton other axes") from cause
     if data.shape[0] != len(names):
         raise error(found=f"{data.shape[0]} channels for {len(names)} names", expected="one OME name per channel")
     raster.validate_image_pyramid(data, element="the morphology image")

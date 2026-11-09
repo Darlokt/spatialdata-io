@@ -11,10 +11,11 @@ columns. A record longer than a block leaves the blocks it spans empty; they
 become empty partitions. Building the frame reads no record; the caller has
 already read the header with :func:`read_csv_header`.
 
-Arrow does not reject every malformed quote; columns are text unless the
-caller supplies Arrow types. No text is a null: empty fields are empty
-strings, and an empty field in a column with a non-text type is a malformed
-record.
+Blocks are parsed with the options of the eager batch reader
+:func:`iter_csv_batches`, so Arrow does not reject every malformed quote either.
+Columns are text unless the caller supplies Arrow types. No text is a null:
+empty fields are empty strings, and an empty field in a column with a non-text
+type is a malformed record.
 """
 
 from __future__ import annotations
@@ -26,11 +27,10 @@ from typing import TYPE_CHECKING, cast
 import dask.dataframe as dd
 import pandas as pd
 import pyarrow as pa
-import pyarrow.csv as pacsv
 from dask import delayed
 from dask.bytes import read_bytes
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.csv._batches import read_records
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -67,25 +67,8 @@ def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
         block = block[newline + 1 :] if newline >= 0 else b""
     if not block:
         return _empty(spec)
-    try:
-        with pa.BufferReader(block) as source:
-            table = pacsv.read_csv(
-                source,
-                read_options=pacsv.ReadOptions(column_names=list(spec.names), use_threads=False),
-                parse_options=pacsv.ParseOptions(newlines_in_values=True),
-                convert_options=pacsv.ConvertOptions(
-                    include_columns=spec.schema.names,
-                    column_types=spec.schema,
-                    null_values=[],
-                ),
-            )
-    except pa.ArrowInvalid as error:
-        raise ReaderFormatError(
-            context=spec.context,
-            path=spec.path,
-            found=f"malformed CSV records ({error})",
-            expected="records with one field per header column",
-        ) from error
+    with pa.BufferReader(block) as source:
+        table = read_records(source, spec.names, spec.schema, skip_rows=0, context=spec.context, path=spec.path)
     return table.to_pandas(types_mapper=pd.ArrowDtype)
 
 

@@ -54,7 +54,6 @@ from spatialdata_io.readers.visium._schemas import (
     REGION_KEY,
     SPOT_ID_DTYPE,
     normalize_positions,
-    position_error,
 )
 
 if TYPE_CHECKING:
@@ -92,8 +91,11 @@ def read_positions(layout: VisiumLayout) -> pd.DataFrame:
                 ),
             )
     except (pa.ArrowInvalid, pa.ArrowKeyError) as error:
-        raise position_error(
-            context, layout.positions, str(error), "required columns and consistent CSV record widths"
+        raise ReaderFormatError(
+            context=context,
+            path=layout.positions,
+            found=str(error),
+            expected="required columns and consistent CSV record widths",
         ) from error
     except OSError as error:
         add_reader_context(error, context=context, path=layout.positions)

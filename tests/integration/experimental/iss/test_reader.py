@@ -53,6 +53,7 @@ class TestIss:
             )
         messages = [str(item.message) for item in reported if "combined" in str(item.message)]
         assert len(messages) == 1
+        assert [item.filename for item in reported if "combined" in str(item.message)] == [__file__]
         assert "in X" in messages[0]
         assert "layers['counts']" in messages[0]
         assert "int8 to float32" in messages[0]

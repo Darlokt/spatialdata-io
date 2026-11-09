@@ -123,6 +123,26 @@ class TestReadCounts:
         counts = read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A\n"))
         assert counts.expression.shape == (0, 1)
 
+    def test_exact_decimal_integer_spellings(self, tmp_path: Path) -> None:
+        counts = read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A,B\n1.0,2e0,3.0,0\n+1,1,0e0,4\n"))
+        assert counts.fovs.dtype == counts.cell_ids.dtype == np.dtype(np.int64)
+        assert counts.fovs.tolist() == [1, 1]
+        assert counts.cell_ids.tolist() == [2, 1]
+        assert counts.expression.dtype == np.float32
+        np.testing.assert_array_equal(counts.expression.toarray(), [[3, 0], [0, 4]])
+
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_source_closes_when_a_record_is_malformed(
+        self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
+    ) -> None:
+        path = _write(tmp_path, "c.csv", "fov,cell_ID,A\n1,1,1\n1,2\n", compressed=compressed)
+        sources = mocker.spy(_tables.gzip, "GzipFile") if compressed else mocker.spy(type(path), "open")
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV records \(") as caught:
+            read_counts(path)
+        assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
+        assert sources.spy_return_list
+        assert all(source.closed for source in sources.spy_return_list)
+
     @pytest.mark.parametrize("batch_bytes", [1, _DEFAULT_BATCH_BYTES])
     @pytest.mark.parametrize("cells", [(1, 2, 3), (0, 0, 0), (0, 2, 3)])
     def test_background_modes(
@@ -140,7 +160,7 @@ class TestReadCounts:
         assert counts.cell_ids.tolist() == [cell for cell in cells if cell]
 
     def test_invalid_background_counts_are_not_ignored(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="below 0"):
+        with pytest.raises(ReaderFormatError, match="'A' value '-1'"):
             read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A\n1,0,-1\n"))
 
     def test_large_sparse_expression_is_never_densified(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -157,9 +177,9 @@ class TestReadCounts:
         ("text", "match"),
         [
             ("fov,cell_ID,A\n1,1,0\n1,1,2\n", "duplicate"),
-            ("fov,cell_ID,A\n1,1,1.5\n", "non-integer 'A'"),
-            ("fov,cell_ID,A\n0,1,1\n", "'fov' values below 1"),
-            ("fov,cell_ID,A\n1,1\n", "malformed CSV"),
+            ("fov,cell_ID,A\n1,1,1.5\n", "'A' value '1.5'"),
+            ("fov,cell_ID,A\n0,1,1\n", "'fov' value '0'"),
+            ("fov,cell_ID,A\n1,1\n", r"malformed CSV records \("),
         ],
     )
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:
@@ -199,8 +219,10 @@ class TestReadMetadata:
         ("replace", "match"),
         [
             (("\n1,2,", "\n1,1,"), "duplicate"),
-            (("1,1,2,5,102", "1,0,2,5,102"), "below 1"),
+            (("1,1,2,5,102", "1,0,2,5,102"), "'cell_ID' value '0'"),
             (("106,12", "inf,12"), "nonfinite"),
+            (("106,12", "9007199254740993,12"), "beyond the exact float64 integers"),
+            (("1,2,6,2", "1,1.0,6,2"), "duplicate"),
             (("01\n", "01\n9,9,0x1,1,1,1,1,1,\n"), "non-decimal|nonnumeric"),
         ],
     )
@@ -227,6 +249,13 @@ class TestReadMetadata:
         ]  # fmt: skip
         assert obs["note_1"].tolist() == ["01", "", "x"]
         assert obs["cell"].tolist() == ["c_1_1", "c_1_2", "c_2_1"]
+
+    def test_truncated_gzip_stream_fails(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, "m.csv", _METADATA, compressed=True)
+        path.write_bytes(path.read_bytes()[:-12])
+        with pytest.raises(ReaderFormatError, match="invalid gzip data") as caught:
+            read_metadata(path)
+        assert caught.value.context == ReaderErrorContext("cosmx", "cell metadata")
 
     def test_repeated_vendor_ids(self, tmp_path: Path) -> None:
         text = "cell," + _METADATA.replace("\n1,", "\nc,1,").replace("\n2,", "\nc,2,")

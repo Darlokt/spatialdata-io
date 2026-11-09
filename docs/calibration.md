@@ -18,7 +18,7 @@ frame. No universal stage origin or half-pixel correction is inferred.
 | --- | --- |
 | Generic | Complete selected base-series OME spatial sizes calibrate retained XY or XYZ axes. A volume missing Z spacing, an explicitly reinterpreted spatial axis, or a selected nonzero stored level retains source pixels. GeoJSON coordinates have source-defined units and require explicit registration when appended to an existing store. |
 | DBiT | Barcode-grid coordinates retain their documented grid units; an image's OME spacing alone cannot establish barcode pitch or orientation. |
-| seqFISH | Verified source micrometre coordinates; one selected ROI uses `global`, independent ROIs keep their own frames. |
+| seqFISH | Verified source micrometre coordinates; one selected ROI uses `global`, independent ROIs keep their own frames. Segmentation OME sizes must equal the DAPI ones where declared; absent ones are inherited. |
 | Stereo-seq | GEF grid pitch divided by 1000 maps the common source grid to micrometres. Native bins and original origins keep source values. Tables retain exact `spatial_grid` and expose physical `spatial`; source bin reference positions are not shifted to footprint centres. Image-only reads use an exact-sample GEF companion when available, otherwise source pixels. |
 | MERSCOPE | Native vectors are micrometres. The inverse vendor micron-to-mosaic affine calibrates images without changing vector coordinates. Missing image calibration keeps images and native vectors in separate frames when both are returned. |
 | MACSima | Validated isotropic OME spacing always calibrates the stack. One parent stack uses `global`; independent stacks retain their names. The transformation switch has been removed. |

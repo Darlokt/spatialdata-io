@@ -13,7 +13,7 @@ from spatialdata.transformations import Scale, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import make_raster_options
+from spatialdata_io.readers._utils.image import LazyRaster, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium import _images
 from spatialdata_io.readers.xenium._images import read_morphology
@@ -136,8 +136,26 @@ class TestReadMorphology:
         path = tmp_path / "plain.tif"
         tifffile.imwrite(path, np.zeros(fx.SHAPE, dtype=np.uint16))
 
-        with pytest.raises(ReaderFormatError, match="one OME image series; found 1 series"):
+        with pytest.raises(ReaderFormatError, match="one OME image series; found a TIFF without OME metadata"):
             _read(MorphologyImage(ArtifactFile(path), path.name, frozenset({path.name})))
+
+    def test_requires_one_series(self, tmp_path: Path) -> None:
+        path = tmp_path / "series.ome.tif"
+        with tifffile.TiffWriter(path, ome=True) as writer:
+            writer.write(np.zeros(fx.SHAPE, dtype=np.uint16), metadata={"axes": "YX", "Channel": {"Name": ["DAPI"]}})
+            writer.write(np.zeros(fx.SHAPE, dtype=np.uint16), metadata={"axes": "YX", "Channel": {"Name": ["DAPI"]}})
+
+        with pytest.raises(ReaderFormatError, match="expected one TIFF series; found 2 TIFF series"):
+            _read(MorphologyImage(ArtifactFile(path), path.name, frozenset({path.name})))
+
+    def test_declared_axes_that_cannot_become_cyx_are_malformed(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        images, _ = _focus_set(tmp_path, ("DAPI",))
+        mocker.patch.object(_images, "read_tiff", return_value=LazyRaster(da.zeros((2, *fx.SHAPE)), ("Z", "Y", "X")))
+
+        with pytest.raises(ReaderFormatError, match="Axis 'z' has length 2") as caught:
+            _read(images)
+
+        assert type(caught.value.__cause__) is ValueError
 
     def test_channel_names_must_be_unique(self, tmp_path: Path) -> None:
         images, _ = _focus_set(tmp_path, ("DAPI", "DAPI"))

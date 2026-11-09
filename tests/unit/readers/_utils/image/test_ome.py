@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 from ome_types import OME
 from ome_types.model import Channel, Image, Pixels, UnitsLength
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import TiffMetadata, ome_channel_names, ome_pixel_sizes_um
+from spatialdata_io.readers._utils.image import (
+    TiffMetadata,
+    ome_channel_names,
+    ome_pixel_sizes_um,
+    require_matching_pixel_sizes,
+)
+from spatialdata_io.readers._utils.image._ome import PIXEL_SIZE_RTOL
 from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _CONTEXT = ReaderErrorContext("test", "OME calibration")
@@ -220,3 +227,63 @@ class TestOmeChannelNames:
 
         with pytest.raises(ReaderFormatError, match="unique OME channel IDs"):
             ome_channel_names(metadata, series=0, count=count, samples=samples, context=_CONTEXT)
+
+
+class TestRequireMatchingPixelSizes:
+    """Compare two declarations axis by axis; only two present sizes can conflict."""
+
+    @pytest.mark.parametrize(
+        ("declared", "reference"),
+        [
+            ((0.5, 0.25), (0.5, 0.25)),
+            ((0.5, None), (0.5, 0.25)),
+            ((None, None), (0.5, 0.25)),
+            ((0.5, 0.25), (None, None)),
+            ((None, 0.25), (0.5, None)),
+            # Last-bit arithmetic differences, such as 9 nm converted two ways.
+            ((0.009, 0.1 + 0.2), (9.0 * 0.001, 0.3)),
+        ],
+    )
+    def test_accepts_agreeing_or_absent_sizes(
+        self, declared: tuple[float | None, ...], reference: tuple[float | None, ...]
+    ) -> None:
+        require_matching_pixel_sizes(
+            declared, reference, axes="xy", context=_CONTEXT, path=_PATH, expected="agreeing sizes"
+        )
+
+    @pytest.mark.parametrize(
+        ("declared", "reference", "found"),
+        [
+            ((0.5, 0.25), (0.5, 0.26), "Y pixel size 0.25 versus 0.26 µm"),
+            ((0.6, None), (0.5, 0.25), "X pixel size 0.6 versus 0.5 µm"),
+            # A float32 round trip is a real disagreement at this tolerance.
+            ((0.1, 0.25), (float(np.float32(0.1)), 0.25), f"X pixel size 0.1 versus {float(np.float32(0.1))} µm"),
+        ],
+    )
+    def test_rejects_two_present_sizes_that_disagree(
+        self, declared: tuple[float | None, ...], reference: tuple[float | None, ...], found: str
+    ) -> None:
+        with pytest.raises(ReaderFormatError) as caught:
+            require_matching_pixel_sizes(
+                declared, reference, axes="xy", context=_CONTEXT, path=_PATH, expected="agreeing sizes"
+            )
+
+        assert caught.value.context == _CONTEXT
+        assert caught.value.path == _PATH
+        assert caught.value.found == found
+        assert caught.value.expected == "agreeing sizes"
+
+    def test_tolerance_is_relative(self) -> None:
+        size = 1e-6
+        within = size * (1 + PIXEL_SIZE_RTOL / 2)
+        beyond = size * (1 + PIXEL_SIZE_RTOL * 4)
+
+        require_matching_pixel_sizes((within,), (size,), axes="z", context=_CONTEXT, path=_PATH, expected="agreement")
+        with pytest.raises(ReaderFormatError, match="Z pixel size"):
+            require_matching_pixel_sizes(
+                (beyond,), (size,), axes="z", context=_CONTEXT, path=_PATH, expected="agreement"
+            )
+
+    def test_rejects_declarations_of_different_lengths(self) -> None:
+        with pytest.raises(ValueError, match="zip"):
+            require_matching_pixel_sizes((0.5,), (0.5, 0.5), axes="xy", context=_CONTEXT, path=_PATH, expected="")

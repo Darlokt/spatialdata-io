@@ -15,7 +15,7 @@ from spatialdata_io.readers.merscope._schemas import (
     _FLOAT_DTYPE,
     GEOMETRY_REPRESENTATION_DTYPE,
     STRING_DTYPE,
-    _normalize_floats,
+    _float_values,
     blank_columns,
     boundary_columns,
     count_columns,
@@ -97,11 +97,13 @@ class TestIntegerValues:
 
     def test_normal_and_unsigned(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "count.csv")
-        assert integer_values(pd.Series(["0", "3"], dtype=STRING_DTYPE), path, "count matrix").tolist() == [0, 3]
-        result = integer_values(pd.Series([str(2**64 - 1), "2.0", "3e0"], dtype=STRING_DTYPE), path, "count matrix")
+        assert integer_values(pd.Series(["0", "3"], dtype=STRING_DTYPE), path, "count matrix", "A").tolist() == [0, 3]
+        result = integer_values(
+            pd.Series([str(2**64 - 1), "2.0", "3e0"], dtype=STRING_DTYPE), path, "count matrix", "A"
+        )
         assert result.tolist() == [2**64 - 1, 2, 3]
         assert result.dtype == np.dtype(np.uint64)
-        assert integer_values(pd.Series([], dtype=STRING_DTYPE), path, "count matrix").dtype == np.dtype(np.int64)
+        assert integer_values(pd.Series([], dtype=STRING_DTYPE), path, "count matrix", "A").dtype == np.dtype(np.int64)
 
     @pytest.mark.parametrize("chunked", [False, True])
     @pytest.mark.parametrize(
@@ -116,7 +118,7 @@ class TestIntegerValues:
     def test_arrow_counts(self, tmp_path: Path, *, chunked: bool, tokens: list[str], expected: list[int]) -> None:
         column = pa.array(tokens, type=pa.string())
         source = pa.chunked_array([column.slice(0, 1), column.slice(1)]) if chunked else column
-        result = integer_values(source, ArtifactFile(tmp_path / "count.csv"), "count matrix")
+        result = integer_values(source, ArtifactFile(tmp_path / "count.csv"), "count matrix", "A")
         np.testing.assert_array_equal(result, np.asarray(expected, dtype=result.dtype))
         assert result.dtype == np.dtype(np.uint64 if expected and max(expected) >= 2**63 else np.int64)
 
@@ -128,8 +130,8 @@ class TestIntegerValues:
         path = ArtifactFile(tmp_path / "count.csv")
         column = pa.array([value], type=pa.string())
         source = pa.chunked_array([column]) if chunked else column
-        with pytest.raises(ReaderFormatError, match=r"integral|integer") as caught:
-            integer_values(source, path, "count matrix")
+        with pytest.raises(ReaderFormatError, match="exact integer 'A' values of at least 0") as caught:
+            integer_values(source, path, "count matrix", "A")
         assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
         assert caught.value.path == path
 
@@ -137,30 +139,32 @@ class TestIntegerValues:
         "value", [None, "", "1.00000000000000001", "1e-400", "-1", "nan", "inf", str(2**64), "x", "1" * 129]
     )
     def test_invalid(self, tmp_path: Path, value: str | None) -> None:
-        with pytest.raises(ReaderFormatError, match=r"integral|integer"):
-            integer_values(pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "count.csv"), "count matrix")
+        with pytest.raises(ReaderFormatError, match="exact integer 'A' values"):
+            integer_values(
+                pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "count.csv"), "count matrix", "A"
+            )
 
 
-class TestNormalizeFloats:
-    """Keep correctly rounded float64 coordinates and reject destructive decoding."""
+class TestFloatValues:
+    """Decode Arrow-backed pandas text with the shared exact float64 contract."""
 
     def test_precision(self, tmp_path: Path) -> None:
-        result = _normalize_floats(
-            pd.Series(["0.10000000000000002", "-0.00e1000", str(2**53)], index=[2, 4, 6]),
+        result = _float_values(
+            pd.Series(["0.10000000000000002", "-0.00e1000", str(2**53)], index=[2, 4, 6], dtype=STRING_DTYPE),
             ArtifactFile(tmp_path / "tx.csv"),
             "transcripts",
-            "x",
+            "global_x",
         )
-        assert result.dtype == _FLOAT_DTYPE
-        assert result.index.tolist() == [2, 4, 6]
-        np.testing.assert_array_equal(result.to_numpy(dtype=np.float64), [0.10000000000000002, 0, 2**53])
+        assert result.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(result, [0.10000000000000002, 0, 2**53])
 
     @pytest.mark.parametrize("value", [None, "", "nan", "inf", "1e400", "1e-400", str(2**53 + 1), "1" * 129])
     def test_invalid(self, tmp_path: Path, value: str | None) -> None:
-        with pytest.raises(ReaderFormatError, match="float64"):
-            _normalize_floats(
-                pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "tx.csv"), "transcripts", "x"
+        with pytest.raises(ReaderFormatError, match="float64 'global_x' values") as caught:
+            _float_values(
+                pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "tx.csv"), "transcripts", "global_x"
             )
+        assert caught.value.context == ReaderErrorContext("merscope", "transcripts")
 
 
 class TestMetadataColumns:

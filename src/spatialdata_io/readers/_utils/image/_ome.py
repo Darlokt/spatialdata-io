@@ -12,21 +12,24 @@ An interleaved RGB image is one ``Channel`` with ``SamplesPerPixel="3"``
 (``SizeC`` counts samples), which ``tifffile`` exposes as a samples axis
 ``S`` of length three rather than as a channel axis ``C``.
 
-These helpers normalize those declarations; readers decide what they
-calibrate. ``raster_channel_names`` decides when the OME identifiers label a
-raster's channels: a colour model declared by the TIFF itself (``r, g, b``)
-takes precedence over them. Schema:
+These helpers normalize those declarations and compare two of them; readers
+decide what they calibrate. ``raster_channel_names`` decides when the OME
+identifiers label a raster's channels: a colour model declared by the TIFF
+itself (``r, g, b``) takes precedence over them. Schema:
 https://www.openmicroscopy.org/Schemas/OME/2016-06
 """
 
 from __future__ import annotations
 
-from math import isfinite
+from math import isclose, isfinite
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.image.tiff import TiffMetadata
 
@@ -34,6 +37,14 @@ if TYPE_CHECKING:
 # one correctly rounded operation: 9 nm becomes exactly the float nearest
 # 0.009 µm, which multiplying by the inexact 0.001 does not guarantee.
 _TO_MICROMETERS: dict[str, tuple[int, int]] = {"µm": (1, 1), "nm": (1, 1000), "mm": (1000, 1)}
+
+# Declarations of one pixel size reach a reader through different arithmetic
+# (an exact extent/width ratio, a producer's float division, decimal OME text,
+# a unit conversion), which can differ in the last bits. This relative
+# tolerance absorbs that and is far below any physically meaningful
+# disagreement; it deliberately does not absorb a float32 round trip (about
+# 6e-8 relative).
+PIXEL_SIZE_RTOL = 1e-12
 
 
 def ome_pixel_sizes_um(
@@ -104,6 +115,57 @@ def ome_pixel_sizes_um(
             )
         result.append(micrometres)
     return tuple(result)
+
+
+def require_matching_pixel_sizes(  # noqa: PLR0913, RUF100 - Two declarations plus explicit error context.
+    declared: Sequence[float | None],
+    reference: Sequence[float | None],
+    /,
+    *,
+    axes: str,
+    context: ReaderErrorContext,
+    path: Path,
+    expected: str,
+) -> None:
+    """Require two pixel-size declarations of one grid to agree wherever both are present.
+
+    Parameters
+    ----------
+    declared
+        Sizes in micrometres declared by the artifact being checked, one per
+        axis of ``axes``; ``None`` where a size is absent.
+    reference
+        Sizes in micrometres of the grid it must share, in the same order.
+    axes
+        One letter per entry, such as ``"xy"``, used in the message.
+    context
+        Owning reader and artifact of ``declared``.
+    path
+        File that declared ``declared``.
+    expected
+        Reader-owned description of the required agreement.
+
+    Raises
+    ------
+    ReaderFormatError
+        If two present sizes of one axis differ by more than
+        ``PIXEL_SIZE_RTOL`` relative.
+
+    Notes
+    -----
+    An absent size never conflicts: the caller inherits it from the other
+    declaration. Which declaration calibrates the grid, and whether a partial
+    one calibrates anything, remain reader decisions.
+    """
+    for axis, size, reference_size in zip(axes, declared, reference, strict=True):
+        if size is None or reference_size is None or isclose(size, reference_size, rel_tol=PIXEL_SIZE_RTOL):
+            continue
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"{axis.upper()} pixel size {size} versus {reference_size} µm",
+            expected=expected,
+        )
 
 
 def ome_channel_names(

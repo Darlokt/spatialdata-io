@@ -24,17 +24,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
-import pyarrow as pa
-import pyarrow.csv as pacsv
 import yaml
 
-from spatialdata_io.readers._utils.csv import parse_csv_header
+from spatialdata_io.readers._utils.csv import parse_csv_header, read_csv_table
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.mcmicro._schemas import (
     MARKERS_CONTEXT,
     MarkerPanel,
     normalize_markers,
-    schema_error,
     validate_columns,
 )
 
@@ -70,32 +67,29 @@ def read_workflow(path: ArtifactFile) -> Literal["wsi", "tma"]:
         with path.open(encoding="utf-8-sig") as source:
             root = yaml.compose(source, Loader=yaml.SafeLoader)
     except UnicodeDecodeError as error:
-        raise schema_error(_WORKFLOW_CONTEXT, path, found="invalid UTF-8", expected=expected) from error
+        raise ReaderFormatError(
+            context=_WORKFLOW_CONTEXT, path=path, found="invalid UTF-8", expected=expected
+        ) from error
     except (yaml.YAMLError, RecursionError) as error:
-        raise schema_error(_WORKFLOW_CONTEXT, path, found=f"malformed YAML: {error}", expected=expected) from error
+        raise ReaderFormatError(
+            context=_WORKFLOW_CONTEXT, path=path, found=f"malformed YAML: {error}", expected=expected
+        ) from error
     if root is None:
-        raise schema_error(_WORKFLOW_CONTEXT, path, found="an empty document", expected=expected)
+        raise ReaderFormatError(context=_WORKFLOW_CONTEXT, path=path, found="an empty document", expected=expected)
 
     tma = _member(_member(root, "workflow", path), "tma", path)
     if not isinstance(tma, yaml.ScalarNode) or tma.tag != _BOOL_TAG:
-        raise schema_error(_WORKFLOW_CONTEXT, path, found=f"workflow.tma tagged {tma.tag}", expected=expected)
+        raise ReaderFormatError(
+            context=_WORKFLOW_CONTEXT, path=path, found=f"workflow.tma tagged {tma.tag}", expected=expected
+        )
     return "tma" if yaml.SafeLoader.bool_values[tma.value.lower()] else "wsi"
 
 
 def read_markers(path: ArtifactFile) -> MarkerPanel:
     """Parse the marker panel as exact text under one source owner."""
-    expected = "a comma-delimited marker panel"
-    try:
-        with path.open("rb") as source:
-            columns = parse_csv_header(source.readline(), context=MARKERS_CONTEXT, path=path)
-            validate_columns(columns, path, context=MARKERS_CONTEXT)
-            source.seek(0)
-            table = pacsv.read_csv(
-                source,
-                read_options=pacsv.ReadOptions(column_names=columns, skip_rows=1, use_threads=False),
-                parse_options=pacsv.ParseOptions(newlines_in_values=True),
-                convert_options=pacsv.ConvertOptions(column_types=dict.fromkeys(columns, pa.string()), null_values=[]),
-            )
-    except pa.ArrowInvalid as error:
-        raise schema_error(MARKERS_CONTEXT, path, found=f"malformed marker CSV: {error}", expected=expected) from error
+    with path.open("rb") as source:
+        columns = parse_csv_header(source.readline(), context=MARKERS_CONTEXT, path=path)
+        validate_columns(columns, path, context=MARKERS_CONTEXT)
+        source.seek(0)
+        table = read_csv_table(source, header=columns, context=MARKERS_CONTEXT, path=path)
     return normalize_markers(table.to_pandas(types_mapper=pd.ArrowDtype), path)

@@ -162,7 +162,7 @@ class TestMacsimaData:
         shutil.copytree(require_test_dataset("macsima_omap23"), tmp_path / "OMAP23_small")
         (tmp_path / "empty_folder").mkdir()
 
-        with pytest.warns(UserWarning, match="No TIFF files found in .*empty_folder"):
+        with pytest.warns(UserWarning, match="no TIFF files found in .*empty_folder"):
             both = macsima(tmp_path, parsing_style="processed_multiple_folders")
         one = macsima(
             tmp_path,

@@ -221,7 +221,9 @@ TIFF or BigTIFF signature is read as TIFF whatever its suffix (including
 must have one series unless `tiff_series` selects one; several series without
 a selection raise a contextual `ReaderFormatError`. `data_axes` overrides the
 TIFF's declared axes as one case-insensitive string such as `"CYX"`;
-`data_axes` and `tiff_series` raise for a PNG or JPEG image. The
+`data_axes` and `tiff_series` raise for a PNG or JPEG image. Declared axes
+that cannot become `c, y, x` raise a contextual `ReaderFormatError`, and
+`data_axes` that do not fit the file raise a `ValueError` naming the image. The
 full-resolution/hires longest-side dimensions are checked against the vendor
 scale factor.
 

@@ -70,7 +70,7 @@ class TestReadRaster:
             writer.write(np.zeros((8, 10), dtype=np.uint16))
             writer.write(np.ones((6, 7), dtype=np.uint16))
 
-        with pytest.raises(ReaderFormatError, match="2 series"):
+        with pytest.raises(ReaderFormatError, match="expected one TIFF series; found 2 TIFF series"):
             _read_raster(ArtifactFile(path), target_axes=("c", "y", "x"), context=_CONTEXT)
 
     @pytest.mark.parametrize("axes", ["QYX", "ZYX"])
@@ -342,7 +342,7 @@ class TestCalibration:
         labels = self._metadata(tmp_path, "labels", conflicting if artifact == "labels" else {})
         row = ImageMetadata(self._SHAPE, (0.5, 2.5)) if csv else None
 
-        with pytest.raises(ReaderFormatError, match="X spacing") as caught:
+        with pytest.raises(ReaderFormatError, match="X pixel size") as caught:
             _calibration(image, labels, row, self._SHAPE)
 
         assert caught.value.path == (image if artifact == "image" else labels).path

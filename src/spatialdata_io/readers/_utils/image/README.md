@@ -14,8 +14,15 @@ The package owns:
 - task-local file and store ownership;
 - delayed PNG and JPEG decoding;
 - explicit, lazy axis selection and normalization;
-- the colour model each source declares for its samples, and the one rule
-  that labels raster channels from it or from OME metadata.
+- validation of a caller's `data_axes` override and TIFF series and level
+  indexes, and the rule that a file read without a series selection holds
+  exactly one series;
+- the colour model each source declares for its samples, the correspondence
+  between a raster's channel axis and the file's samples axis and OME channel
+  records, and the one rule that labels raster channels from them;
+- the agreement check between two pixel-size declarations of one grid;
+- the normalization of a 2D image to `c, y, x` from its declared axes or a
+  caller's `data_axes`, with its channel names.
 
 A vendor reader owns:
 
@@ -23,8 +30,7 @@ A vendor reader owns:
 - choosing a file, TIFF series, and pyramid level;
 - interpreting or overriding source axes;
 - selecting channels, time points, and z planes;
-- stacking files, and deciding which source axis becomes the channel axis and
-  whether OME channel records describe it;
+- stacking files, and deciding which source axis becomes the channel axis;
 - image-versus-label semantics;
 - transformations, coordinate systems, and SpatialData model construction;
 - requested/model rechunking after the native read layer.
@@ -63,31 +69,45 @@ from spatialdata.models import Image2DModel
 
 from spatialdata_io.readers._utils.image import (
     inspect_tiff,
-    normalize_raster_axes,
-    ome_channel_names,
-    raster_channel_names,
+    normalize_cyx_image,
     read_tiff,
+    select_tiff_series,
 )
 
 metadata = inspect_tiff(path, context=context)
-raster = read_tiff(metadata, series=0, level=0, context=context)
-axes = tuple(axis.lower() for axis in raster.axes)
-data = normalize_raster_axes(
-    raster.data,
-    tuple("c" if axis == "s" else axis for axis in axes),
-    target_axes=("c", "y", "x"),
-    add_missing=("c",),
-)
-samples = "s" in axes
-ome = ome_channel_names(metadata, series=0, count=int(data.shape[0]), samples=samples, context=context)
-names = raster_channel_names(raster.color, samples=samples, ome=ome)
+series = select_tiff_series(metadata, None, context=context)
+raster = read_tiff(metadata, series=series, level=0, context=context)
+data, names = normalize_cyx_image(raster, data_axes, tiff=(metadata, series), context=context, path=path)
+options.validate_image_pyramid(data, element="the image")
 image = Image2DModel.parse(data, dims=("c", "y", "x"), c_coords=names, rgb=False)
 ```
 
-`series` and `level` are intentionally required. The utility must not silently
-choose the first image in a scientific file that contains several images. An
-out-of-range series or level raises `IndexError` with a note naming the reader
-context and the TIFF path.
+`normalize_cyx_image(raster, data_axes, tiff=..., context=..., path=...)`
+is the shared 2D image contract of CODEX, DBiT, Visium, Visium HD and the
+Xenium aligned image. It reads the file's declared axes, or the caller's
+`data_axes` validated by `validate_data_axes`; maps the samples axis `S` to
+`C`; drops named singletons and adds a missing `C` (`normalize_raster_axes`);
+attributes a failure by its origin (below); and returns the lazy `c, y, x`
+array with the names of `raster_channel_names`, consulting the OME records of
+`tiff` (`None` for PNG and JPEG) only when `channel_source` says they describe
+the channel axis. Readers keep file and series selection, contexts, pyramid
+validation, transformations and element names. Readers with other axis
+semantics compose the lower-level helpers themselves: the generic image reader
+(caller permutations, 3D), ISS (`S` is not a channel), and readers whose
+channel names come from panels, plans or stains.
+
+`series` and `level` are intentionally required by `read_tiff`. The utility
+must not silently choose the first image in a scientific file that contains
+several images. `select_tiff_series(metadata, series, context=..., option=...)`
+returns a caller's selection unchanged, or `0` for a file with exactly one
+series; several series without a selection raise `ReaderFormatError`
+(found `"<n> TIFF series"`, expected `"one TIFF series"`, followed by
+`" or an explicit <option> selection"` when the reader names its option). An
+out-of-range series or level raises `IndexError` from `read_tiff` with a note
+naming the reader context and the TIFF path. Readers validate caller indexes
+before any I/O with `validate_tiff_index(value, parameter=..., optional=...)`:
+`TypeError` naming the type found for a non-integer or boolean (and for `None`
+unless the selection is optional), `ValueError` for a negative index.
 
 PNG and JPEG have no selectable series or levels, so their entry points combine
 header inspection with lazy graph construction. Ancillary PNG and JPEG payloads
@@ -117,6 +137,13 @@ Malformed encoded raster storage raises `RasterFormatError` from
 reader utility errors, while its raster-specific meaning and all decisions about
 when to raise it remain owned by this package. Axis-option and array-contract
 failures retain their precise `TypeError` or `ValueError` contracts.
+
+`normalize_raster_axes` raises a plain `ValueError`. Readers attribute it by
+the origin of the axes: axes declared by the file are malformed content, so
+the reader raises a `ReaderFormatError` chained from it, with its context and
+the file path; axes given by the caller's `data_axes` keep the `ValueError`,
+which gains a note naming the reader context and path. `normalize_cyx_image`
+applies this rule; other readers apply it locally.
 
 ## TIFF and OME metadata
 
@@ -193,6 +220,16 @@ insert it. Axis labels are abstract
 single-letter names at this boundary: the calling reader must interpret unknown
 TIFF axes or replace them with an explicit, validated format-specific override.
 
+`validate_data_axes(data_axes)` is that validation for a 2D reader's
+`data_axes` option, before any I/O: `None`, or one string of ASCII letters in
+any case naming every stored axis, for example `"CYX"` or `"YXS"`. `S`
+(interleaved samples) and `C` both become the channel axis, so the letters must
+be distinct once `S` counts as `C`, and `X` and `Y` are required. Another type
+raises `TypeError` naming it; invalid letters raise `ValueError`. The result is
+lowercase; the rank is checked against the file when it is read. Readers whose
+override has another meaning (the generic image reader's permutations, ISS
+where `S` is its own axis) keep their own rule.
+
 ## Adding another format
 
 Add a format only for a demonstrated reader requirement. Do not add a generic
@@ -249,8 +286,19 @@ compared between linked artifacts.
 Generic base images, ISS aligned pairs, MACSima channels, MCMICRO local grids,
 seqFISH and Steinbock exports share this normalization. Readers decide whether an incomplete set
 calibrates anything and continue to own axis association, selected
-series/levels, dimensions, cross-artifact agreement, registration and
-transformations. The helper assigns no frame and reads no pixels.
+series/levels, dimensions, registration and transformations. The helper
+assigns no frame and reads no pixels.
+
+`require_matching_pixel_sizes(declared, reference, axes=..., context=...,
+path=..., expected=...)` checks that two declarations of one grid agree, for
+example a segmentation's OME sizes against its image's: per axis, two present
+sizes must agree within the relative tolerance `PIXEL_SIZE_RTOL = 1e-12`,
+otherwise `ReaderFormatError` names the axis and both sizes. An absent size
+never conflicts; the reader inherits it from the other declaration. The
+tolerance absorbs last-bit differences between arithmetic paths (decimal OME
+text, an extent/width ratio, a unit conversion), not a float32 round trip
+(about `6e-8` relative). ISS, MCMICRO, seqFISH and Steinbock use it; which
+declaration calibrates the grid stays theirs.
 
 `ome_channel_names(metadata, series=..., count=..., samples=..., context=...)`
 returns one OME identifier per raster channel. Each OME channel is identified by
@@ -264,8 +312,31 @@ samples axis. If it is, every OME channel expands to one identifier per sample,
 record and sample order without assuming a colour interpretation, and are
 unique whenever the channel identifiers are. A channel or sample count that
 differs from the raster raises instead of falling back to positions. It returns
-`None` without OME metadata. CODEX, DBiT, ISS, seqFISH and Steinbock use it;
-readers decide which source axis becomes the raster channel axis.
+`None` without OME metadata.
+
+`channel_source(declared, source)` decides whether the OME records apply. Its
+arguments are the lowercase axes the file declares and the reader's reading of
+them (the declared axes or a caller's `data_axes`), in which `c` and `s` both
+mark the channel axis. It returns `(samples, ome_samples)`: whether the channel
+axis is the declared samples axis, and the `samples` argument of
+`ome_channel_names`, or `None` when the records do not describe the channel
+axis:
+
+| Channel axis | `samples` | `ome_samples` |
+| --- | --- | --- |
+| declared `c` | `False` | `False` |
+| declared `s`, no declared `c` | `True` | `True` |
+| declared `s` beside a declared `c` | `True` | `None` |
+| any other declared axis (a `data_axes` reinterpretation) | `False` | `None` |
+| added singleton, file declares no `c` or `s` | `False` | `False` |
+| added singleton, file declares `c` or `s` | `False` | `None` |
+
+With `None` the reader skips `ome_channel_names`, so a reinterpreted axis gets
+positional names instead of the names of another axis, and is not rejected for
+a channel count that describes another axis. `normalize_cyx_image` applies
+both helpers for CODEX, DBiT, Visium, Visium HD and the Xenium aligned image;
+the generic image reader and ISS call them directly; seqFISH and Steinbock read
+their channel axis as declared and call `ome_channel_names` directly.
 
 ## Channel labels from declared colour
 
@@ -290,11 +361,12 @@ count or dtype, or pass `rgb=None` to SpatialData:
 
 1. `samples` (the raster's channel axis is the source's `s` axis) and a declared
    `color`: `["r", "g", "b"]` or `["r", "g", "b", "a"]`;
-2. otherwise `ome`, the result of `ome_channel_names` when the reader has
-   established that the channel axis corresponds to the OME channels;
+2. otherwise `ome`, the result of `ome_channel_names` when `channel_source`
+   reports that the channel axis corresponds to the OME channels;
 3. otherwise `None`, which gives positional coordinates `0..n-1`.
 
 OME identifiers are computed and validated before the rule is applied, so
 corrupt OME channel records fail even when a colour declaration supplies the
-names. CODEX, DBiT, ISS and the generic image reader use the rule; pass
-`rgb=False` with the returned names to `Image2DModel.parse`.
+names. CODEX, CosMx, DBiT, the generic image reader, ISS, Stereo-seq, Visium,
+Visium HD and the Xenium aligned image use the rule; pass `rgb=False` with the
+returned names to `Image2DModel.parse`.

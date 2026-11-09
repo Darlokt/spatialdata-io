@@ -18,8 +18,11 @@ with a GeoJSON file or `invalid_geometries="drop"` with an image fails.
 
 ## Images
 
-Images require explicit `data_axes`: a case-insensitive permutation of `yx`,
-`cyx`, `zyx` or `czyx` naming every axis of the decoded array. Images keep
+Images require explicit `data_axes`: one string, a case-insensitive
+permutation of `yx`, `cyx`, `zyx` or `czyx` naming every axis of the decoded
+array, such as `"yxc"`. Another type, such as a tuple of letters, raises
+`TypeError`; axes that do not match the rank of the decoded array raise
+`ValueError` with a note naming the image. Images keep
 source values, dtype and channel order in canonical `c, y, x` or `c, z, y, x`
 order, with a singleton channel for grayscale. `tiff_series` selects a TIFF
 series; when omitted, the only series is read and a file with several series
@@ -68,7 +71,9 @@ falling back, even when a colour declaration supplies the names.
 
 RGB TIFF and OME-TIFF, RGB, RGBA and palette PNG, and three-component JPEG
 images previously had positional or `<name or ID>:sample:<k>` channel
-coordinates; they now use `r, g, b(, a)`.
+coordinates; they now use `r, g, b(, a)`. `data_axes` previously also accepted
+a sequence of axis names such as `("c", "y", "x")`; join the letters into one
+string such as `"cyx"`, the form every reader and the CLI accept.
 
 ## GeoJSON
 

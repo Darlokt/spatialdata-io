@@ -20,6 +20,14 @@ outside tissue. Grid coordinates must be nonnegative integers fitting int64.
 Pixel coordinates must be finite, nonnegative float64 values; conversions
 that lose large integer precision or underflow to zero fail.
 
+seqFISH, MERSCOPE, MCMICRO and CosMx decode numeric CSV fields from their
+text with one rule. Float fields hold correctly rounded finite float64 values;
+a nonzero value that rounds to zero, or an integral value of at least 2⁵³ that
+float64 cannot hold exactly (such as `9007199254740993` or `1e300`), fails.
+Integer fields accept every exact decimal spelling of an integer (`2`, `+2`,
+`2.0`, `2e0`); fractions, hexadecimal such as `0x10`, surrounding whitespace,
+digit separators and values outside the reader's range fail.
+
 Curio metric exports have a positional exception: their first two columns
 contain the metric name and value. A subsequent named `Category` column selects
 the metric group. These first two columns are not freely reorderable. CODEX

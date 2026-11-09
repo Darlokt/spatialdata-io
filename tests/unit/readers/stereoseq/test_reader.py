@@ -183,6 +183,7 @@ class TestFormatVersion:
         with pytest.warns(UserWarning, match=message) as caught:
             assert _format_version(files) is None
         assert len(caught) == 1
+        assert caught[0].filename == __file__
 
 
 class TestStereoseq:
@@ -200,8 +201,9 @@ class TestStereoseq:
         with h5py.File(fixture.cells, "r+") as handle:
             handle.attrs["version"] = np.uint32(4)
 
-        with pytest.warns(UserWarning, match=r"sample\.gef: gef-2, sample\.cellbin\.gef: gef-4"):
+        with pytest.warns(UserWarning, match=r"sample\.gef: gef-2, sample\.cellbin\.gef: gef-4") as caught:
             result = stereoseq(tmp_path, bin_sizes=(1,), cell_bins="unadjusted")
+        assert [warning.filename for warning in caught] == [__file__]
         assert "spatialdata_io_format_version" not in result.attrs
         assert set(result.tables) == {"bin1_table", "cells_table"}
 

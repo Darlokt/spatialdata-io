@@ -14,6 +14,10 @@ coordinates of the count products and their transformations.
   ``bin1_img_tissue_cut.tif`` become ``(y, x)`` labels with the source boolean
   or integer values. A non-singleton channel or samples axis fails.
 
+Declared axes that cannot become these axes (a non-singleton extra axis, or a
+channel or samples axis in a mask) are malformed content and raise a
+contextual ``ReaderFormatError``.
+
 Only the first full-resolution level is read; pyramids are generated from
 ``scale_factors``, by nearest neighbour for labels.
 """
@@ -25,11 +29,18 @@ from typing import TYPE_CHECKING
 from spatialdata.models import Image2DModel, Labels2DModel
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, raster_channel_names, read_tiff
+from spatialdata_io.readers._utils.image import (
+    inspect_tiff,
+    normalize_raster_axes,
+    raster_channel_names,
+    read_tiff,
+    select_tiff_series,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from dask.array import Array
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
@@ -41,15 +52,19 @@ def _read(source: ImageSource) -> LazyRaster:
     """Read the single full-resolution series of one registered TIFF."""
     context = ReaderErrorContext("stereoseq", source.name)
     metadata = inspect_tiff(source.file, context=context)
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context,
-            path=source.file,
-            found=f"{len(metadata.series)} TIFF series",
-            expected="one registered image series",
-        )
+    return read_tiff(metadata, series=select_tiff_series(metadata, None, context=context), level=0, context=context)
 
-    return read_tiff(metadata, series=0, level=0, context=context)
+
+def _normalize(
+    lazy: LazyRaster, source: ImageSource, axes: tuple[str, ...], *, target: tuple[str, ...], expected: str
+) -> Array:
+    """Normalize declared axes to ``target``; a failure is malformed content of the file."""
+    try:
+        return normalize_raster_axes(lazy.data, axes, target_axes=target, add_missing=("c",) if "c" in target else ())
+    except ValueError as error:
+        raise ReaderFormatError(
+            context=ReaderErrorContext("stereoseq", source.name), path=source.file, found=str(error), expected=expected
+        ) from error
 
 
 def read_image(
@@ -60,7 +75,13 @@ def read_image(
     declared = tuple(axis.lower() for axis in lazy.axes)
     # Interleaved samples and scientific channels both become the channel axis.
     axes = tuple("c" if axis == "s" else axis for axis in declared)
-    data = normalize_raster_axes(lazy.data, axes, target_axes=("c", "y", "x"), add_missing=("c",))
+    data = _normalize(
+        lazy,
+        source,
+        axes,
+        target=("c", "y", "x"),
+        expected="Y and X axes with at most one channel or samples axis and only singleton other axes",
+    )
     raster.validate_image_pyramid(data, element=f"Stereo-seq image {source.name!r}")
 
     return Image2DModel.parse(
@@ -80,7 +101,9 @@ def read_mask(
     """Read one single-channel mask lazily as YX labels with its source values."""
     lazy = _read(source)
     # Masks have no channel semantics; a non-singleton C or S axis fails.
-    data = normalize_raster_axes(lazy.data, lazy.axes, target_axes=("y", "x"))
+    data = _normalize(
+        lazy, source, lazy.axes, target=("y", "x"), expected="Y and X axes with only singleton other axes"
+    )
     if data.dtype.kind not in "biu":
         raise ReaderFormatError(
             context=ReaderErrorContext("stereoseq", source.name),

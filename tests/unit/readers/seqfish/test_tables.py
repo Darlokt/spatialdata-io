@@ -23,10 +23,13 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
+_CELLS = "center_y,label,extra,area,center_x\n3,1,ignored,4,2\n5,2,ignored,6,7\n"
+
+
 def _sources(
     path: Path,
     counts: str = ",B,A\n2,0,4\n1,7,0\n",
-    cells: str = "center_y,label,extra,area,center_x\n3,1,ignored,4,2\n5,2,ignored,6,7\n",
+    cells: str = _CELLS,
 ) -> tuple[ArtifactFile, ArtifactFile]:
     count_path = path / "counts.csv"
     cell_path = path / "cells.csv"
@@ -157,6 +160,9 @@ class TestReadTable:
             ',A\n1,"bad\n',
             '"unterminated\n',
             ",A,A\n1,1,2\n",
+            ",A\n1,0x10\n",
+            ",A\n0x1,1\n",
+            ",A\n1,1_0\n",
         ],
     )
     def test_invalid_counts(self, tmp_path: Path, counts: str) -> None:
@@ -191,10 +197,10 @@ class TestReadTable:
         assert result.obs["area"].tolist() == [0]
         assert result.obsm["spatial"][0, 0] == 0.10000000000000002
 
-    def test_quoted_multiline_numeric_fields(self, tmp_path: Path) -> None:
-        """Retain accepted integral count and ID lexemes containing quoted newlines."""
-        counts = ',"Gene,A"\r\n"1\n","2\n"\r\n'
-        cells = 'label,area,center_x,center_y,ignored\r\n"1\n",0,1.5,2,"line\nbreak"\r\n'
+    def test_quoted_multiline_records(self, tmp_path: Path) -> None:
+        """Quoted fields may span lines; quoted numbers keep their exact spelling."""
+        counts = ',"Gene,A"\r\n"1","2"\r\n'
+        cells = 'label,area,center_x,center_y,ignored\r\n"1",0,"1.5",2,"line\nbreak"\r\n'
 
         result = read_table(*_sources(tmp_path, counts, cells))
 
@@ -204,6 +210,22 @@ class TestReadTable:
         assert result.var_names.tolist() == ["Gene,A"]
         np.testing.assert_array_equal(result.obsm["spatial"], [[1.5, 2]])
 
+    @pytest.mark.parametrize(
+        ("counts", "cells", "artifact", "found"),
+        [
+            (',A\n"1\n",2\n', _CELLS, "CellxGene", "'cell ID' value '1\\n'"),
+            (',A\n1,"2\n"\n', _CELLS, "CellxGene", "'A' value '2\\n'"),
+            (",A\n1,2\n", 'label,area,center_x,center_y\n" 1",0,1,2\n', "CellCoordinates", "'label' value ' 1'"),
+        ],
+    )
+    def test_numbers_padded_with_whitespace_fail(
+        self, tmp_path: Path, counts: str, cells: str, artifact: str, found: str
+    ) -> None:
+        with pytest.raises(ReaderFormatError) as caught:
+            read_table(*_sources(tmp_path, counts, cells))
+        assert caught.value.context.artifact == artifact
+        assert caught.value.found == found
+
 
 class TestCountBlock:
     """Exercise exact column normalization at its bounded numerical owner."""
@@ -211,7 +233,7 @@ class TestCountBlock:
     @pytest.mark.parametrize("spelling", [str(2**64 - 1), f"{2**64 - 1}.0", f"{2**64 - 1}e0"])
     def test_full_uint64_fallback_and_ordinary_columns(self, tmp_path: Path, spelling: str) -> None:
         batch = pa.record_batch([["1"], ["9007199254740993.0"], [spelling], ["0"]], names=["", "A", "B", "C"])
-        result = _count_block(batch, ArtifactFile(tmp_path / "counts.csv"))
+        result = _count_block(batch, ("A", "B", "C"), ArtifactFile(tmp_path / "counts.csv"))
         assert result.dtype == np.dtype(np.uint64)
         np.testing.assert_array_equal(result.data, np.array([2**53 + 1, 2**64 - 1], dtype=np.uint64))
         np.testing.assert_array_equal(result.indices, [0, 1])
@@ -222,7 +244,7 @@ class TestCountBlock:
         batch = pa.record_batch(
             [["1", "2"], [tokens[0], "0"], [tokens[1], "0"], [tokens[2], "0"]], names=["", "A", "B", "C"]
         )
-        result = _count_block(batch, ArtifactFile(tmp_path / "counts.csv"))
+        result = _count_block(batch, ("A", "B", "C"), ArtifactFile(tmp_path / "counts.csv"))
         assert isinstance(result, sparse.csr_array)
         assert result.has_canonical_format
         assert result.shape == (2, 3)

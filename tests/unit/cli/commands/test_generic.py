@@ -5,11 +5,13 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING
 
+import click
 import pytest
 
 from spatialdata_io._cli.commands.generic import generic_command
 from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
 from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
+from spatialdata_io.readers.generic import generic, image
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,6 +29,15 @@ class TestGenericCommand:
         _path, _output, _name, *reader_options = inspect.signature(generic_to_zarr).parameters
 
         assert options == ["input_path", "output_path", "element_name", *reader_options]
+
+    def test_data_axes_is_one_string_like_the_readers(self) -> None:
+        option = next(parameter for parameter in generic_command.params if parameter.name == "data_axes")
+
+        assert option.type is click.STRING
+        assert not option.multiple
+        assert inspect.signature(generic).parameters["data_axes"].annotation == "str | None"
+        assert inspect.signature(image).parameters["data_axes"].annotation == "str"
+        assert inspect.signature(generic_to_zarr).parameters["data_axes"].annotation == "str | None"
 
     def test_forwards_options_and_reports_new_output(
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture

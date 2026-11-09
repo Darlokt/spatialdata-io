@@ -88,6 +88,7 @@ class TestReadTable:
         with pytest.warns(UserWarning, match="combined") as reported:
             result = curio(tmp_path).tables["table"].X
         assert len(reported) == 1
+        assert reported[0].filename == __file__
 
         assert isinstance(result, sparse.csr_array)
         assert result.dtype == np.dtype(dtype)

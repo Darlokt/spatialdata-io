@@ -230,8 +230,8 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
     ValueError
         If an option has an invalid value, an image option is given without a
         suitable ``fullres_image_file``, ``dataset_id`` is needed but missing,
-        the axes of an image cannot be mapped to CYX, or a count is not finite
-        or not exactly representable.
+        ``data_axes`` cannot be mapped to CYX for the image (with a note
+        naming it), or a count is not finite or not exactly representable.
     IndexError
         If ``tiff_series`` is out of range.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
@@ -241,8 +241,9 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
         detected Space Ranger version if an artifact is ambiguous or
         malformed, for example several count sources, an incomplete MEX
         triplet, invalid position fields or scale factors, a count barcode
-        without a position row, several HDF5 library IDs, or a multi-series
-        TIFF without ``tiff_series``.
+        without a position row, several HDF5 library IDs, a multi-series
+        TIFF without ``tiff_series``, or image axes declared by the file that
+        cannot be mapped to CYX.
     """
     if dataset_id is not None:
         validate_element_name(dataset_id, parameter="dataset_id", reserved=_RESERVED_NAMES)

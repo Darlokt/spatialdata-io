@@ -40,19 +40,19 @@ https://vizgen.github.io/vizgen-postprocessing/output_data_formats/detected_tran
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from spatialdata_io.readers._utils.csv import decode_float64, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    import numpy as np
     import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
@@ -68,7 +68,6 @@ STRING_DTYPE = pd.ArrowDtype(pa.string())
 GEOMETRY_REPRESENTATION_DTYPE = pd.CategoricalDtype(["union_footprint", "source_components"])
 _FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
 _INTEGER_DTYPE = pd.ArrowDtype(pa.int64())
-_LITERAL_ZERO = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 _BLANK_NAME = re.compile(r"Blank-[1-9][0-9]*")
 _METADATA_FLOATS = frozenset(
     {
@@ -143,57 +142,17 @@ def normalize_cell_ids(
 
 
 def integer_values(
-    source: pd.Series | pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact
+    source: pd.Series | pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str
 ) -> npt.NDArray[np.int64 | np.uint64]:
     """Decode nonnegative integers without a floating intermediate; uint64 only above int64."""
-    column = pa.array(source.astype(STRING_DTYPE)) if isinstance(source, pd.Series) else pc.cast(source, pa.string())
-    if column.null_count:
-        raise schema_error(path, artifact, found="missing integer", expected="nonnegative 64-bit integral values")
-    try:
-        # Arrow's native integer parser is the common count and stack-index path.
-        values = pc.cast(column, pa.uint64()).to_numpy()
-    except pa.ArrowInvalid:
-        # Exact decimal fallback for spellings such as "2.0" or "3e0".
-        exact_values: list[int] = []
-        for token in column.to_pylist():
-            try:
-                exact = Decimal(token)
-            except InvalidOperation as error:
-                raise schema_error(
-                    path, artifact, found=f"integer {token!r}", expected="nonnegative integral values"
-                ) from error
-            if not exact.is_finite() or exact < 0 or exact >= 2**64 or exact != exact.to_integral_value():
-                raise schema_error(
-                    path, artifact, found=f"integer {token!r}", expected="nonnegative 64-bit integral values"
-                ) from None
-            exact_values.append(int(exact))
-        dtype = np.uint64 if exact_values and max(exact_values) >= 2**63 else np.int64
-        return np.asarray(exact_values, dtype=dtype)
-    return values if len(values) and values.max() >= 2**63 else values.astype(np.int64, copy=False)
+    # Parquet plane indexes arrive as Arrow integers; CSV fields as text.
+    text = pa.array(source) if isinstance(source, pd.Series) else pc.cast(source, pa.string())
+    return decode_integers(text, name=name, minimum=0, context=ReaderErrorContext("merscope", artifact), path=path)
 
 
-def _normalize_floats(series: pd.Series, path: ArtifactFile, artifact: Artifact, column: str) -> pd.Series:
+def _float_values(series: pd.Series, path: ArtifactFile, artifact: Artifact, name: str) -> npt.NDArray[np.float64]:
     """Decode float64 values, rejecting nonfinite values, underflow and integer precision loss."""
-    lexical = series.astype(STRING_DTYPE)
-    expected = "finite float64 values without underflow or integer precision loss"
-    try:
-        normalized = lexical.astype(_FLOAT_DTYPE)
-    except (ValueError, TypeError, pa.ArrowInvalid) as error:
-        raise schema_error(path, artifact, found=f"nonnumeric {column} values", expected=expected) from error
-    values = normalized.to_numpy(dtype=np.float64, na_value=np.nan)
-    if not np.isfinite(values).all():
-        raise schema_error(path, artifact, found=f"nonfinite or missing {column} values", expected=expected)
-    # Only large integers and zeros can hide destructive rounding; check those exactly.
-    candidates = np.abs(values) >= 2**53
-    zero = values == 0
-    if zero.any():
-        candidates |= zero & ~lexical.str.fullmatch(_LITERAL_ZERO).to_numpy(dtype=np.bool_)
-    for row in np.flatnonzero(candidates):
-        exact = Decimal(lexical.iloc[row])
-        number = float(values[row])
-        if (number == 0 and exact != 0) or (exact == exact.to_integral_value() and exact != Decimal(number)):
-            raise schema_error(path, artifact, found=f"{column} precision loss", expected=expected)
-    return normalized
+    return decode_float64(pa.array(series), name=name, context=ReaderErrorContext("merscope", artifact), path=path)
 
 
 def metadata_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
@@ -214,18 +173,20 @@ def normalize_metadata(frame: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
     frame.index = pd.Index(identifiers.to_numpy(), name=None)
     for column in frame.columns:
         if column in _METADATA_FLOATS:
-            frame[column] = _normalize_floats(frame[column], path, METADATA, column)
+            frame[column] = pd.Series(
+                _float_values(frame[column], path, METADATA, column), index=frame.index, dtype=_FLOAT_DTYPE
+            )
     if "volume" in frame and frame["volume"].lt(0).any():
         raise schema_error(path, METADATA, found="negative volume", expected="nonnegative cell volumes")
     if "transcript_count" in frame:
-        values = integer_values(frame["transcript_count"], path, METADATA)
+        values = integer_values(frame["transcript_count"], path, METADATA, "transcript_count")
         frame["transcript_count"] = pd.Series(
             values, index=frame.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(values.dtype))
         )
     if "fov" in frame:
         # Vendor metadata permits absent FOV assignments for merged entities.
         missing = frame["fov"].eq("")
-        values = integer_values(frame.loc[~missing, "fov"], path, METADATA)
+        values = integer_values(frame.loc[~missing, "fov"], path, METADATA, "fov")
         if values.dtype.kind == "u":
             raise schema_error(path, METADATA, found="FOV overflow", expected="nullable nonnegative int64 FOV indexes")
         frame["fov"] = pd.Series(pd.NA, index=frame.index, dtype=_INTEGER_DTYPE)
@@ -277,7 +238,7 @@ def normalize_boundary_ids(table: pa.Table, path: ArtifactFile) -> pd.Index:
     identifiers = normalize_cell_ids(pd.Series(ids, dtype=STRING_DTYPE), path, BOUNDARIES)
     # VPT permits absent plane annotations. XY footprint construction uses every
     # geometry row, independently of this optional 3D stack annotation.
-    planes = integer_values(table.column("ZIndex").drop_null(), path, BOUNDARIES)
+    planes = integer_values(table.column("ZIndex").drop_null(), path, BOUNDARIES, "ZIndex")
     if planes.dtype.kind == "u":
         raise schema_error(path, BOUNDARIES, found="ZIndex overflow", expected="nonnegative int64 plane indexes")
     if "Type" in table.column_names:
@@ -324,10 +285,10 @@ def normalize_transcript_partition(
         )
     frame["gene"] = pd.Categorical(genes.to_numpy(), categories=features)
     for column, axis in (("global_x", "x"), ("global_y", "y")):
-        frame[axis] = _normalize_floats(frame.pop(column), path, TRANSCRIPTS, column).to_numpy(dtype=np.float64)
+        frame[axis] = _float_values(frame.pop(column), path, TRANSCRIPTS, column)
     for column in ("global_z", "fov", "barcode_id"):
         if column in frame:
-            values = integer_values(frame.pop(column), path, TRANSCRIPTS)
+            values = integer_values(frame.pop(column), path, TRANSCRIPTS, column)
             if values.dtype.kind == "u":
                 raise schema_error(
                     path, TRANSCRIPTS, found=f"{column} overflow", expected="nonnegative int64 source indexes"

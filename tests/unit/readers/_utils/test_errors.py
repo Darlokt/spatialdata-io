@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import pickle
+import sys
+from pathlib import Path
+from types import FunctionType
 from typing import TYPE_CHECKING
 
 import pytest
 
+import spatialdata_io
 from spatialdata_io.readers import _utils
 from spatialdata_io.readers._utils import errors
 from spatialdata_io.readers._utils.errors import (
@@ -15,11 +20,14 @@ from spatialdata_io.readers._utils.errors import (
     ReaderErrorContext,
     ReaderFormatError,
     add_reader_context,
+    warn_user,
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Callable
     from types import TracebackType
+
+_PACKAGE_DIRECTORY = Path(spatialdata_io.__file__).parent
 
 
 class TestReaderErrorContext:
@@ -135,6 +143,68 @@ class TestAddReaderContext:
         assert "reader 'reader'" in raised.value.__notes__[0]
 
 
+def _line(offset: int) -> int:
+    """Return the caller's current line number plus ``offset``."""
+    return sys._getframe(1).f_lineno + offset
+
+
+def _emit(message: str) -> None:
+    warn_user(message)
+
+
+def _relay(callback: Callable[[str], None], message: str) -> None:
+    callback(message)
+
+
+def _relocated(function: FunctionType, filename: Path) -> FunctionType:
+    """Return ``function`` with its frames reported under ``filename``."""
+    return FunctionType(function.__code__.replace(co_filename=str(filename)), function.__globals__)
+
+
+class TestWarnUser:
+    def test_emits_the_message_unchanged_as_a_user_warning_at_the_caller(self) -> None:
+        message = "reader: {braces}, %s and 'quotes' are kept."
+
+        line = _line(2)
+        with pytest.warns(UserWarning, match="reader") as caught:
+            warn_user(message)
+
+        assert [(warning.category, str(warning.message)) for warning in caught] == [(UserWarning, message)]
+        assert (caught[0].filename, caught[0].lineno) == (__file__, line)
+
+    def test_nested_package_frames_are_skipped(self) -> None:
+        emit = _relocated(_emit, _PACKAGE_DIRECTORY / "readers" / "_emit.py")
+        relay = _relocated(_relay, _PACKAGE_DIRECTORY / "readers" / "reader" / "_relay.py")
+
+        line = _line(2)
+        with pytest.warns(UserWarning, match="nested") as caught:
+            relay(emit, "reader: nested")
+
+        assert (caught[0].filename, caught[0].lineno) == (__file__, line)
+
+    def test_the_first_frame_outside_the_package_is_named(self) -> None:
+        emit = _relocated(_emit, _PACKAGE_DIRECTORY / "_emit.py")
+        relay = _relocated(_relay, _PACKAGE_DIRECTORY / "_relay.py")
+
+        def callback(message: str) -> None:
+            emit(message)
+
+        with pytest.warns(UserWarning, match="callback") as caught:
+            relay(callback, "reader: through a callback")
+
+        assert (caught[0].filename, caught[0].lineno) == (__file__, callback.__code__.co_firstlineno + 1)
+
+    def test_a_sibling_directory_sharing_the_package_name_is_outside(self) -> None:
+        sibling = Path(f"{_PACKAGE_DIRECTORY}_extension") / "_emit.py"
+        emit = _relocated(_emit, sibling)
+
+        with pytest.warns(UserWarning, match="sibling") as caught:
+            emit("reader: sibling")
+
+        assert f"{_PACKAGE_DIRECTORY}{os.sep}" == errors._PACKAGE_PREFIX
+        assert caught[0].filename == str(sibling)
+
+
 class TestErrorPackage:
     def test_exports_shared_reader_errors(self) -> None:
         assert errors.__all__ == [
@@ -142,6 +212,7 @@ class TestErrorPackage:
             "ReaderErrorContext",
             "ReaderFormatError",
             "add_reader_context",
+            "warn_user",
         ]
         assert issubclass(RasterFormatError, ValueError)
         assert not hasattr(_utils, "ReaderFormatError")

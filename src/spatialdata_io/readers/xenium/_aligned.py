@@ -17,8 +17,11 @@ caller's ``data_axes``::
 
 Samples become channels named ``r, g, b(, a)`` only when the TIFF declares an
 RGB colour model; otherwise channels take their OME names or IDs, and
-positional indexes without OME metadata. Three channels are never guessed to be
-RGB.
+positional indexes without OME metadata or when ``data_axes`` reads another
+axis as the channels. Three channels are never guessed to be RGB. Axes the
+file declares that cannot become ``c, y, x`` are malformed content and raise
+``ReaderFormatError``; ``data_axes`` that do not fit the file raise
+``ValueError`` with a note naming the image.
 """
 
 from __future__ import annotations
@@ -40,10 +43,9 @@ from spatialdata_io.readers._utils.image import (
     RasterOptions,
     inspect_tiff,
     make_raster_options,
-    normalize_raster_axes,
-    ome_channel_names,
-    raster_channel_names,
+    normalize_cyx_image,
     read_tiff,
+    validate_data_axes,
 )
 from spatialdata_io.readers._utils.paths import ArtifactFile, require_file
 
@@ -104,28 +106,17 @@ def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, ras
     Raises
     ------
     ValueError
-        If ``data_axes`` does not name one axis per stored dimension, or
-        ``raster`` requests more downsampling than the image extent allows.
+        If lowercase ``data_axes`` cannot be mapped to CYX for the image (with
+        a note naming it), or ``raster`` requests more downsampling than the
+        image extent allows.
     ReaderFormatError
-        If the image metadata or the alignment matrix is malformed.
+        If the image metadata, its declared axes or the alignment matrix are
+        malformed.
     """
     metadata = inspect_tiff(image, context=context)
     lazy = read_tiff(metadata, series=0, level=0, context=context)
-    declared = tuple(axis.lower() for axis in lazy.axes)
-    source = declared if data_axes is None else tuple(data_axes.lower())
-    if len(source) != len(declared):
-        message = f"data_axes {data_axes!r} names {len(source)} axes; the image has axes {''.join(lazy.axes)!r}."
-        raise ValueError(message)
-    # Interleaved samples (S) become channels; C axes are channels already.
-    data = normalize_raster_axes(
-        lazy.data, tuple("c" if axis == "s" else axis for axis in source), target_axes=_AXES, add_missing=("c",)
-    )
+    data, channels = normalize_cyx_image(lazy, data_axes, tiff=(metadata, 0), context=context, path=image)
     raster.validate_image_pyramid(data, element="the aligned image")
-
-    # Declared RGB samples and OME sample records apply only when the file's
-    # samples axis became the channels.
-    samples = "s" in declared and source[declared.index("s")] in {"c", "s"}
-    ome = ome_channel_names(metadata, series=0, count=int(data.shape[0]), samples=samples, context=context)
 
     transformation: BaseTransformation = Scale([pixel_size, pixel_size], axes=("y", "x"))
     if alignment is not None:
@@ -136,23 +127,12 @@ def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, ras
     return Image2DModel.parse(
         data,
         dims=_AXES,
-        c_coords=raster_channel_names(lazy.color, samples=samples, ome=ome),
+        c_coords=channels,
         rgb=False,
         scale_factors=raster.model_scale_factors,
         chunks=raster.image_chunks(),
         transformations={"global": transformation},
     )
-
-
-def _validate_data_axes(data_axes: str | None) -> None:
-    if data_axes is None:
-        return
-    if not isinstance(data_axes, str):
-        message = "data_axes must be a string such as 'YXS', or None."
-        raise TypeError(message)
-    if not data_axes.isalpha() or len(set(data_axes.lower())) != len(data_axes):
-        message = f"data_axes must contain distinct single-letter axis names, such as 'YXS'; found {data_axes!r}."
-        raise ValueError(message)
 
 
 def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretation and raster options.
@@ -179,9 +159,11 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
         ``pixel_size`` (``sdata.attrs["xenium"]["experiment"]["pixel_size"]``).
         The image's own OME pixel size is a different quantity and is not used.
     data_axes
-        Axes of the stored array, one letter per dimension in any letter case,
-        overriding the TIFF axes, for example ``"YXS"``. ``S`` marks interleaved
-        samples and ``C`` channels; both become the channel axis.
+        Axes of the stored array as one string, one distinct letter per
+        dimension in any letter case including ``X`` and ``Y``, overriding the
+        TIFF axes, for example ``"YXS"``. ``S`` marks interleaved samples and
+        ``C`` channels; both become the channel axis, so at most one may
+        appear.
     scale_factors
         Integer factors of at least two, one per generated pyramid level; empty
         for a single scale.
@@ -203,21 +185,24 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
           TIFF samples and the TIFF declares an RGB colour model
           (photometric RGB or JPEG-compressed YCbCr);
         - otherwise the OME channel names when all are nonempty and unique, else
-          the OME channel IDs; samples without a colour model are named
+          the OME channel IDs, when the channel axis is the declared OME channel
+          or samples axis; samples without a colour model are named
           ``<name or ID>:sample:<index>``;
-        - positional ``0, 1, ...`` without OME metadata.
+        - positional ``0, 1, ...`` without OME metadata, or when ``data_axes``
+          reads another axis as the channels.
 
         Three or four channels are never assumed to be RGB from their count.
 
     Raises
     ------
     TypeError, ValueError
-        If options are invalid, or ``data_axes`` does not match the image rank.
+        If options are invalid, or ``data_axes`` cannot be mapped to CYX for
+        the image (a ``ValueError`` with a note naming it).
     FileNotFoundError, IsADirectoryError
         If a file is missing or a directory.
     ValueError
-        A contextual ``ReaderFormatError`` if the image, its OME channels or the
-        alignment matrix are malformed.
+        A contextual ``ReaderFormatError`` if the image, its declared axes, its
+        OME channels or the alignment matrix are malformed.
     """
     if isinstance(pixel_size, bool) or not isinstance(pixel_size, int | float):
         message = "pixel_size must be a number of micrometres."
@@ -225,11 +210,9 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
     if not math.isfinite(pixel_size) or pixel_size <= 0:
         message = "pixel_size must be a finite positive number of micrometres."
         raise ValueError(message)
-    _validate_data_axes(data_axes)
+    axes = validate_data_axes(data_axes)
     raster = make_raster_options(scale_factors, chunks)
 
     image = require_file(Path(image_file).expanduser(), context=_CONTEXT)
     alignment = None if alignment_file is None else require_file(Path(alignment_file).expanduser(), context=_CONTEXT)
-    return read_aligned(
-        image, alignment, pixel_size=float(pixel_size), data_axes=data_axes, raster=raster, context=_CONTEXT
-    )
+    return read_aligned(image, alignment, pixel_size=float(pixel_size), data_axes=axes, raster=raster, context=_CONTEXT)

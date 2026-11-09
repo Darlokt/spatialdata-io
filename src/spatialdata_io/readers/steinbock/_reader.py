@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING, Literal, cast
 
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
@@ -242,9 +241,5 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
     )
     set_reader_provenance(result.attrs, reader="steinbock")
     if duplicate_sums:
-        warnings.warn(
-            f"steinbock {layout.table.name}: " + "; ".join(map(str, duplicate_sums)),
-            UserWarning,
-            stacklevel=2,
-        )
+        warn_user(f"steinbock {layout.table.name}: " + "; ".join(map(str, duplicate_sums)))
     return result

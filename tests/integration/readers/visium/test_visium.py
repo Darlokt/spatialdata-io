@@ -529,7 +529,7 @@ class TestVisiumImagesAndNames:
             writer.write(np.zeros((5, 7), dtype=np.uint8), photometric="minisblack")
             writer.write(np.ones((9, 11), dtype=np.uint8), photometric="minisblack")
 
-        with pytest.raises(ReaderFormatError, match="2 series") as caught:
+        with pytest.raises(ReaderFormatError, match="2 TIFF series") as caught:
             visium(tmp_path, fullres_image_file=fullres)
         assert caught.value.context.detected_version == "9.9.9"
 

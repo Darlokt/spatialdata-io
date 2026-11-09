@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -13,7 +12,7 @@ from spatialdata import SpatialData
 from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, warn_user
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
@@ -236,11 +235,7 @@ def _format_version(sources: Mapping[ArtifactFile, str | None]) -> str | None:
     versions = set(sources.values())
     if len(versions - {None}) > 1:
         found = ", ".join(f"{file.name}: {version or 'no version'}" for file, version in sources.items())
-        warnings.warn(
-            f"stereoseq: the read GEFs have different schema versions ({found}); no format version is recorded.",
-            UserWarning,
-            stacklevel=3,
-        )
+        warn_user(f"stereoseq: the read GEFs have different schema versions ({found}); no format version is recorded.")
         return None
     return versions.pop() if len(versions) == 1 else None
 
@@ -525,5 +520,5 @@ def stereoseq(  # noqa: PLR0913 - every product selection is an explicit public 
     set_reader_provenance(result.attrs, reader="stereoseq", format_version=format_version)
     for file, sums in duplicates:
         if sums:
-            warnings.warn(f"stereoseq {file.name}: " + "; ".join(map(str, sums)), UserWarning, stacklevel=2)
+            warn_user(f"stereoseq {file.name}: " + "; ".join(map(str, sums)))
     return result

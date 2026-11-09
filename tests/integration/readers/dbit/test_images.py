@@ -148,7 +148,7 @@ class TestDbitImages:
                 metadata={"axes": "CYX"},
             )
 
-        with pytest.raises(ReaderFormatError, match="found 2 series"):
+        with pytest.raises(ReaderFormatError, match="found 2 TIFF series"):
             dbit(tmp_path, image_file=path)
 
         result = dbit(tmp_path, image_file=path, tiff_series=1, tiff_level=1, include_border=False)

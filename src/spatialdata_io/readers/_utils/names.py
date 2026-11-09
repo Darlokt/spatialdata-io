@@ -49,12 +49,11 @@ names are not checked.
 
 from __future__ import annotations
 
-import os
 import re
-import warnings
 from collections import Counter
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+
+from spatialdata_io.readers._utils.errors import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -65,9 +64,6 @@ _RULE = "nonempty, only alphanumeric characters, '_', '-' or '.', not '.' or '..
 _FALLBACK = "unnamed"
 _INDEX_COLUMN = "_index"
 _LEADING_UNDERSCORES = re.compile(r"^_{2,}")
-# Warnings name the first frame outside this package, the user's call site,
-# however deeply a reader calls the sanitizer.
-_PACKAGE_PREFIX = f"{Path(__file__).parents[2]}{os.sep}"
 
 
 def _follows_rule(name: str) -> bool:
@@ -201,11 +197,7 @@ def sanitize_element_name(value: str, /, *, source: str, parameter: str | None, 
     while name.lower() in reserved_names:
         name = _FALLBACK if name == "_" else f"{name}_"
 
-    warnings.warn(
-        f"{source} {value!r} is not a usable SpatialData element name; using {name!r}. {_remedy(parameter)}",
-        UserWarning,
-        skip_file_prefixes=(_PACKAGE_PREFIX,),
-    )
+    warn_user(f"{source} {value!r} is not a usable SpatialData element name; using {name!r}. {_remedy(parameter)}")
     return name
 
 
@@ -306,11 +298,7 @@ def sanitize_column_names(
             if kind == "column"
             else ("names that a SpatialData table does not accept as uns keys", "Rename them in the source")
         )
-        warnings.warn(
-            f"{source} has {problem}; using {pairs}. {remedy} to choose the names explicitly.",
-            UserWarning,
-            skip_file_prefixes=(_PACKAGE_PREFIX,),
-        )
+        warn_user(f"{source} has {problem}; using {pairs}. {remedy} to choose the names explicitly.")
     return result
 
 

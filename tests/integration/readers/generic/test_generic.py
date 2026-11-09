@@ -451,10 +451,10 @@ class TestImage:
             writer.write(np.zeros((5, 7), dtype=np.uint8), photometric="minisblack", metadata={"axes": "YX"})
             writer.write(np.ones((9, 11), dtype=np.uint8), photometric="minisblack", metadata={"axes": "YX"})
 
-        with pytest.raises(ReaderFormatError, match="found 2 series") as error:
+        with pytest.raises(ReaderFormatError, match="found 2 TIFF series") as error:
             image(path, "yx", "global")
 
-        assert error.value.expected == "a single series or an explicit tiff_series selection"
+        assert error.value.expected == "one TIFF series or an explicit tiff_series selection"
         np.testing.assert_array_equal(image(path, "yx", "global", tiff_series=0).data.compute(), np.zeros((1, 5, 7)))
 
     def test_selects_tiff_series(self, tmp_path: Path) -> None:

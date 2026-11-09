@@ -66,17 +66,14 @@ https://www.10xgenomics.com/support/software/space-ranger/latest/analysis/output
 from __future__ import annotations
 
 import math
-import os
 import re
-import warnings
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context, warn_user
 from spatialdata_io.readers._utils.metadata import decode_hdf5_text, parse_json_object, read_json_object
 from spatialdata_io.readers.visium_hd._transforms import SPOT_PITCH_UM
 
@@ -87,11 +84,9 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_VERSION = re.compile(r"(?:spaceranger-)?((\d+)\.(\d+)\.\d+)")
+_VERSION = re.compile(r"(?:spaceranger-)?(\d+\.\d+\.\d+)")
 # Releases whose outputs are covered by fixtures; others read with a warning.
 _TESTED_RELEASES = ((3, 0), (3, 1), (4, 0), (4, 1))
-# Attribute the warning to the first frame outside this package.
-_PACKAGE_PREFIX = f"{Path(__file__).parents[2]}{os.sep}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,14 +115,12 @@ class SourceMetadata:
     cytassist: NDArray[np.float64] | None
 
 
-def _error(path: ArtifactFile, found: str, expected: str, *, context: ReaderErrorContext) -> ReaderFormatError:
-    return ReaderFormatError(context=context, found=found, expected=expected, path=path)
-
-
 def _positive(values: dict[str, object], name: str, *, path: ArtifactFile, context: ReaderErrorContext) -> float:
     value = values.get(name)
     if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
-        raise _error(path, f"{name}={value!r}", "a finite positive number", context=context)
+        raise ReaderFormatError(
+            context=context, path=path, found=f"{name}={value!r}", expected="a finite positive number"
+        )
     return float(value)
 
 
@@ -143,13 +136,15 @@ def read_bin_scale_factors(path: ArtifactFile, size_um: int, *, version: str | N
     diameter = _positive(values, "spot_diameter_fullres", path=path, context=context)
     bin_size = _positive(values, "bin_size_um", path=path, context=context)
     if bin_size != size_um:
-        raise _error(path, f"bin_size_um={bin_size!r}", f"bin_size_um={size_um}", context=context)
+        raise ReaderFormatError(
+            context=context, path=path, found=f"bin_size_um={bin_size!r}", expected=f"bin_size_um={size_um}"
+        )
     if not math.isclose(size_um / diameter, factors.microns_per_pixel, rel_tol=1e-12):
-        raise _error(
-            path,
-            "inconsistent bin pitch, diameter and microns_per_pixel",
-            "bin_size_um / spot_diameter_fullres = microns_per_pixel",
+        raise ReaderFormatError(
             context=context,
+            path=path,
+            found="inconsistent bin pitch, diameter and microns_per_pixel",
+            expected="bin_size_um / spot_diameter_fullres = microns_per_pixel",
         )
 
     return factors
@@ -173,7 +168,9 @@ def read_identity(path: ArtifactFile) -> Identity:
             raw: object = source.attrs.get("library_ids")
             if isinstance(raw, np.ndarray) and raw.ndim:
                 if raw.size != 1:
-                    raise _error(path, f"{raw.size} library IDs", "exactly one library ID", context=context)
+                    raise ReaderFormatError(
+                        context=context, path=path, found=f"{raw.size} library IDs", expected="exactly one library ID"
+                    )
                 raw = raw.reshape(-1)[0]
             library_id = (
                 None if raw is None else decode_hdf5_text(raw, attribute="library_ids", context=context, path=path)
@@ -205,30 +202,28 @@ def reconcile_identities(paths: Sequence[ArtifactFile]) -> Identity:
         context = ReaderErrorContext("visium_hd", "count identity", candidate.format_version or version)
         if candidate.format_version is not None:
             if version is not None and candidate.format_version != version:
-                raise _error(
-                    path,
-                    f"software_version={candidate.format_version!r}",
-                    f"software_version={version!r} shared by all consumed sources",
+                raise ReaderFormatError(
                     context=context,
+                    path=path,
+                    found=f"software_version={candidate.format_version!r}",
+                    expected=f"software_version={version!r} shared by all consumed sources",
                 )
             version = candidate.format_version
         if candidate.library_id is not None:
             if library_id is not None and candidate.library_id != library_id:
-                raise _error(
-                    path,
-                    f"library_id={candidate.library_id!r}",
-                    f"library_id={library_id!r} shared by all known library IDs",
+                raise ReaderFormatError(
                     context=context,
+                    path=path,
+                    found=f"library_id={candidate.library_id!r}",
+                    expected=f"library_id={library_id!r} shared by all known library IDs",
                 )
             library_id = candidate.library_id
 
     if version is not None and tuple(map(int, version.split(".")[:2])) not in _TESTED_RELEASES:
         tested = ", ".join(f"{major}.{minor}" for major, minor in _TESTED_RELEASES)
-        warnings.warn(
+        warn_user(
             f"visium_hd: Space Ranger {version} is untested (tested releases: {tested}); "
-            "its layout is read from the artifacts present.",
-            UserWarning,
-            skip_file_prefixes=(_PACKAGE_PREFIX,),
+            "its layout is read from the artifacts present."
         )
     return Identity(version, library_id)
 
@@ -241,11 +236,15 @@ def _matrix(value: object, *, path: ArtifactFile, name: str, context: ReaderErro
     if numeric.shape not in {(9,), (3, 3)} or any(
         isinstance(element, bool) or not isinstance(element, int | float) for element in numeric.flat
     ):
-        raise _error(path, f"malformed {name}", "a numeric 3 by 3 matrix or null", context=context)
+        raise ReaderFormatError(
+            context=context, path=path, found=f"malformed {name}", expected="a numeric 3 by 3 matrix or null"
+        )
 
     matrix = numeric.astype(np.float64).reshape(3, 3)
     if not np.isfinite(matrix).all() or np.linalg.det(matrix) == 0:
-        raise _error(path, f"nonfinite or singular {name}", "a finite invertible matrix", context=context)
+        raise ReaderFormatError(
+            context=context, path=path, found=f"nonfinite or singular {name}", expected="a finite invertible matrix"
+        )
 
     matrix.flags.writeable = False
     return matrix
@@ -254,7 +253,9 @@ def _matrix(value: object, *, path: ArtifactFile, name: str, context: ReaderErro
 def _dimension(values: dict[str, object], name: str, *, path: ArtifactFile, context: ReaderErrorContext) -> int:
     value = values.get(name)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise _error(path, f"{name}={value!r}", "a positive integer grid dimension", context=context)
+        raise ReaderFormatError(
+            context=context, path=path, found=f"{name}={value!r}", expected="a positive integer grid dimension"
+        )
 
     return value
 
@@ -265,16 +266,28 @@ def _matrix_pair(
     forward = f"spot_colrow_to_{frame}_colrow"
     inverse = f"{frame}_colrow_to_spot_colrow"
     if forward not in values or inverse not in values:
-        raise _error(path, f"incomplete {frame} matrix pair", "both forward and inverse keys", context=context)
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"incomplete {frame} matrix pair",
+            expected="both forward and inverse keys",
+        )
 
     first = _matrix(values[forward], path=path, name=forward, context=context)
     second = _matrix(values[inverse], path=path, name=inverse, context=context)
     if (first is None) != (second is None):
-        raise _error(path, f"partly null {frame} matrix pair", "two matrices or two null values", context=context)
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"partly null {frame} matrix pair",
+            expected="two matrices or two null values",
+        )
     if first is not None and second is not None:
         product = first @ second
         if product[2, 2] == 0 or not np.allclose(product / product[2, 2], np.eye(3), rtol=1e-6, atol=1e-6):
-            raise _error(path, f"inconsistent {frame} matrix pair", "mutual inverses", context=context)
+            raise ReaderFormatError(
+                context=context, path=path, found=f"inconsistent {frame} matrix pair", expected="mutual inverses"
+            )
     return first
 
 
@@ -293,8 +306,11 @@ def read_source_metadata(path: ArtifactFile, *, version: str | None) -> SourceMe
 
     matrices = values.get("transform_matrices")
     if not isinstance(matrices, dict):
-        raise _error(
-            path, "missing transform_matrices object", "nullable forward/inverse matrix pairs", context=context
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="missing transform_matrices object",
+            expected="nullable forward/inverse matrix pairs",
         )
 
     _matrix_pair(matrices, "microscope", path=path, context=context)
@@ -302,7 +318,12 @@ def read_source_metadata(path: ArtifactFile, *, version: str | None) -> SourceMe
 
     pitch = _positive(values, "spot_pitch", path=path, context=context)
     if pitch != SPOT_PITCH_UM:
-        raise _error(path, f"spot_pitch={pitch!r}", "the supported 2 micrometre HD grid pitch", context=context)
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"spot_pitch={pitch!r}",
+            expected="the supported 2 micrometre HD grid pitch",
+        )
 
     return SourceMetadata(
         _dimension(values, "nrows", path=path, context=context),

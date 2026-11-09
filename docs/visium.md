@@ -91,7 +91,7 @@ The full-resolution image may be a TIFF, OME-TIFF, BigTIFF (`.tif`, `.tiff`, `.b
 
 - A TIFF must have one series, or `tiff_series` selects one; its full-resolution level is read.
 - Its axes come from the file. `data_axes` overrides them with one case-insensitive string of distinct letters including `X` and `Y`, for example `"CYX"` for a multi-page stack without axis metadata. `S` (samples) counts as a channel axis.
-- Interleaved samples become channels, named singleton dimensions are dropped and any other extra axis raises.
+- Interleaved samples become channels, named singleton dimensions are dropped and any other extra axis raises: a `ReaderFormatError` for axes the file declares, a `ValueError` naming the image for `data_axes` that do not fit the file.
 - `data_axes`, `tiff_series` and `scale_factors` raise without a suitable `fullres_image_file`, before any file is read.
 
 Channel names follow the colour model the file declares, never the channel count or dtype:

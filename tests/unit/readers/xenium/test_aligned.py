@@ -153,13 +153,29 @@ class TestXeniumAlignedImage:
 
         assert image.coords["c"].to_numpy().tolist() == ["Channel:0:0", "Channel:0:1"]
 
-    def test_ome_channels_must_match_the_raster(self, tmp_path: Path) -> None:
+    def test_axis_reinterpreted_as_channels_gets_positions(self, tmp_path: Path) -> None:
         path = tmp_path / "x.ome.tif"
-        tifffile.imwrite(path, np.zeros((2, 12, 16), np.uint16), ome=True, metadata={"axes": "CYX"})
+        data = np.arange(3 * 12 * 16, dtype=np.uint16).reshape(3, 12, 16)
+        tifffile.imwrite(path, data, ome=True, metadata={"axes": "ZYX", "Channel": {"Name": ["DAPI"]}})
 
-        # A misdeclared axis order gives 16 raster channels for two OME channels.
-        with pytest.raises(ReaderFormatError, match="2 OME channels for 16 raster channels"):
-            xenium_aligned_image(path, pixel_size=PIXEL_SIZE, data_axes="yxc")
+        # The single OME channel record describes neither the Z planes nor the X columns.
+        planes = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, data_axes="cyx")
+        columns = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, data_axes="ycx")
+
+        assert planes.coords["c"].to_numpy().tolist() == [0, 1, 2]
+        np.testing.assert_array_equal(planes.data.compute(), data)
+        assert columns.coords["c"].to_numpy().tolist() == list(range(12))
+
+    def test_declared_axes_that_cannot_become_cyx_are_malformed(self, tmp_path: Path) -> None:
+        path = tmp_path / "x.ome.tif"
+        tifffile.imwrite(path, np.zeros((2, 12, 16), np.uint16), ome=True, metadata={"axes": "ZYX"})
+
+        with pytest.raises(ReaderFormatError, match="Axis 'z' has length 2") as caught:
+            xenium_aligned_image(path, pixel_size=PIXEL_SIZE)
+
+        assert caught.value.context == ReaderErrorContext("xenium", "aligned image")
+        assert caught.value.path == path
+        assert type(caught.value.__cause__) is ValueError
 
     def test_scale_factors_must_fit_the_image(self, tmp_path: Path) -> None:
         _rgb(tmp_path / "x.ome.tif")
@@ -174,9 +190,16 @@ class TestXeniumAlignedImage:
             ({"pixel_size": True}, TypeError, "number of micrometres"),
             ({"pixel_size": 0.0}, ValueError, "finite positive"),
             ({"pixel_size": float("nan")}, ValueError, "finite positive"),
-            ({"pixel_size": 0.2, "data_axes": ("y", "x", "s")}, TypeError, "string such as 'YXS'"),
+            (
+                {"pixel_size": 0.2, "data_axes": ("y", "x", "s")},
+                TypeError,
+                "string such as 'CYX', or None; found tuple",
+            ),
             ({"pixel_size": 0.2, "data_axes": "y x"}, ValueError, "distinct single-letter"),
             ({"pixel_size": 0.2, "data_axes": "yXy"}, ValueError, "distinct single-letter"),
+            # Samples beside channels, or no X, fail before the image is read.
+            ({"pixel_size": 0.2, "data_axes": "cyxs"}, ValueError, r"S \(samples\) counting as C"),
+            ({"pixel_size": 0.2, "data_axes": "cys"}, ValueError, "including X and Y"),
             ({"pixel_size": 0.2, "scale_factors": [1]}, ValueError, "at least 2"),
         ],
     )
@@ -191,8 +214,11 @@ class TestXeniumAlignedImage:
     def test_wrong_axes_and_missing_files(self, tmp_path: Path) -> None:
         _rgb(tmp_path / "x.ome.tif")
 
-        with pytest.raises(ValueError, match="data_axes 'yx' names 2 axes; the image has axes 'YXS'"):
+        with pytest.raises(ValueError, match="rank 2 does not match array rank 3") as caught:
             xenium_aligned_image(tmp_path / "x.ome.tif", pixel_size=PIXEL_SIZE, data_axes="yx")
+        assert type(caught.value) is ValueError
+        context = ReaderErrorContext("xenium", "aligned image")
+        assert caught.value.__notes__ == [f"While handling {context.describe(path=tmp_path / 'x.ome.tif')}."]
         with pytest.raises(FileNotFoundError):
             xenium_aligned_image(tmp_path / "missing.ome.tif", pixel_size=PIXEL_SIZE)
         with pytest.raises(FileNotFoundError):

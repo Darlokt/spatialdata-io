@@ -72,7 +72,7 @@ def _plan(
         split_threshold_nuclei_channel=2,
     )
     stack = StackFiles(name="run", directory=ArtifactDirectory(directory.resolve()), files=())
-    with pytest.warns(UserWarning, match="Zero-padding") if padded else nullcontext():
+    with pytest.warns(UserWarning, match="zero-padding") if padded else nullcontext():
         plan = plan_stack(stack, sources, options)
     return plan, pixels
 

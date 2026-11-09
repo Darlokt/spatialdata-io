@@ -166,11 +166,15 @@ class TestDiscoverMultipleFolders:
     def test_skips_folders_without_tiffs_with_a_warning(self, tmp_path: Path) -> None:
         _touch(tmp_path / "run" / "x.tif", tmp_path / "empty" / "notes.txt")
 
-        with pytest.warns(UserWarning, match="No TIFF files found in .*empty.*skipping"):
+        with pytest.warns(UserWarning, match="no TIFF files found") as caught:
             layout = discover_layout(
                 tmp_path, parsing_style="processed_multiple_folders", exclude_folder_names=frozenset()
             )
 
+        assert [str(warning.message) for warning in caught] == [
+            f"macsima: no TIFF files found in {str(tmp_path / 'empty')!r}; skipping this folder."
+        ]
+        assert caught[0].filename == __file__
         assert [stack.name for stack in layout.stacks] == ["run"]
 
     def test_rejects_when_no_folder_has_tiffs(self, tmp_path: Path) -> None:

@@ -75,8 +75,9 @@ class TestReadTranscripts:
         mocker.patch.object(transcript_module, "read_csv_blocks", partial(read_csv_blocks, block_bytes=128))
         points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert not points.partitions[0].compute().empty
-        with pytest.raises(ReaderFormatError, match="identifier"):
+        with pytest.raises(ReaderFormatError, match="'cell' value") as caught:
             points.partitions[-1].compute()
+        assert caught.value.found == f"'cell' value {invalid_cell!r}"
 
     def test_projected_known_categories_construct_without_tasks_and_serialize(
         self, tmp_path: Path, mocker: MockerFixture

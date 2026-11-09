@@ -36,7 +36,9 @@ class TestValidateImageOptions:
 
     @pytest.mark.parametrize("axes", [["y", "x"], ("c", "y", "x"), b"YX"])
     def test_axes_must_be_a_string(self, axes: object) -> None:
-        with pytest.raises(TypeError, match="data_axes must be a string"):
+        with pytest.raises(
+            TypeError, match=f"data_axes must be a string such as 'CYX', or None; found {type(axes).__name__}"
+        ):
             validate_image_options(axes, None, 0)  # pyrefly: ignore[bad-argument-type] - Untrusted caller input.
 
     @pytest.mark.parametrize("value", [True, 0.5, "0"])
@@ -171,12 +173,39 @@ class TestReadImage:
         source = np.ones((2, 5, 6), dtype=np.uint8)
         tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "QYX"})
 
-        with pytest.raises(ValueError, match="Axis 'q'"):
+        with pytest.raises(ReaderFormatError, match="Axis 'q'") as caught:
             read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+        assert caught.value.context == ReaderErrorContext("dbit", "histology image")
+        assert caught.value.path == path
+        assert type(caught.value.__cause__) is ValueError
 
         image = read_image(ArtifactFile(path), data_axes="CYX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
+        np.testing.assert_array_equal(image.data.compute(), source)
+
+    def test_axes_that_do_not_fit_the_file_are_a_caller_error(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.tif"
+        tifffile.imwrite(path, np.ones((2, 5, 6), dtype=np.uint8), photometric="minisblack", metadata={"axes": "CYX"})
+
+        with pytest.raises(ValueError, match="rank") as caught:
+            read_image(ArtifactFile(path), data_axes="YX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+
+        assert type(caught.value) is ValueError
+        context = ReaderErrorContext("dbit", "histology image")
+        assert caught.value.__notes__ == [f"While handling {context.describe(path=path)}."]
+
+    def test_axis_reinterpreted_as_channels_gets_positions(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.ome.tif"
+        source = np.arange(3 * 5 * 6, dtype=np.uint8).reshape(3, 5, 6)
+        # One OME channel record describes the single channel, not the three Z planes.
+        tifffile.imwrite(
+            path, source, ome=True, photometric="minisblack", metadata={"axes": "ZYX", "Channel": {"Name": ["DAPI"]}}
+        )
+
+        image = read_image(ArtifactFile(path), data_axes="CYX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+
+        assert image.coords["c"].to_numpy().tolist() == [0, 1, 2]
         np.testing.assert_array_equal(image.data.compute(), source)
 
     def test_default_options_are_single_scale_channel_chunks(self, tmp_path: Path) -> None:
@@ -241,9 +270,9 @@ class TestReadImage:
             writer.write(np.zeros((5, 6), dtype=np.uint8), metadata={"axes": "YX"})
             writer.write(np.full((3, 4), 9, dtype=np.uint16), metadata={"axes": "YX"})
 
-        with pytest.raises(ReaderFormatError, match="found 2 series") as caught:
+        with pytest.raises(ReaderFormatError, match="found 2 TIFF series") as caught:
             read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
-        assert caught.value.expected == "a single series or an explicit tiff_series selection"
+        assert caught.value.expected == "one TIFF series or an explicit tiff_series selection"
         assert caught.value.context == ReaderErrorContext("dbit", "histology image")
 
         for series, expected in ((0, np.zeros((1, 5, 6), dtype=np.uint8)), (1, np.full((1, 3, 4), 9, np.uint16))):

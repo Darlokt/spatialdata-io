@@ -120,6 +120,7 @@ class TestStereoseqAnalysisExpression:
             "preserve exact sums"
             for path in paths
         ]
+        assert {warning.filename for warning in reported} == {__file__}
         assert len(result.tables) == 2
         for table in result.tables.values():
             assert isinstance(table.X, sparse.csr_array)

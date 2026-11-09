@@ -38,14 +38,20 @@ declared size is source metadata, not a verified measurement.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose
 from typing import TYPE_CHECKING, cast
 
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_pixel_sizes_um, read_tiff
+from spatialdata_io.readers._utils.image import (
+    inspect_tiff,
+    normalize_raster_axes,
+    ome_pixel_sizes_um,
+    read_tiff,
+    require_matching_pixel_sizes,
+    select_tiff_series,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -106,15 +112,7 @@ class ImageGrid:
 def _read(path: ArtifactFile, context: ReaderErrorContext, target_axes: tuple[str, ...]) -> tuple[Array, TiffMetadata]:
     """Inspect once and normalize the full-resolution series to named 2D axes."""
     metadata = inspect_tiff(path, context=context)
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"{len(metadata.series)} TIFF series",
-            expected="one full-resolution series",
-        )
-
-    raster = read_tiff(metadata, series=0, level=0, context=context)
+    raster = read_tiff(metadata, series=select_tiff_series(metadata, None, context=context), level=0, context=context)
     try:
         array = normalize_raster_axes(
             raster.data,
@@ -201,15 +199,14 @@ def read_labels(
         )
 
     # Present sizes must agree with the image's; absent ones are inherited.
-    declared = ome_pixel_sizes_um(metadata, series=0, axes=("x", "y"), context=_CALIBRATION_CONTEXT)
-    for axis, expected, size in zip("XY", grid.declared_sizes_um, declared, strict=True):
-        if expected is not None and size is not None and not isclose(size, expected, rel_tol=1e-12):
-            raise ReaderFormatError(
-                context=_CALIBRATION_CONTEXT,
-                path=path,
-                found=f"{axis} spacing {size} versus {expected} µm",
-                expected="segmentation calibration agreeing with its source image grid",
-            )
+    require_matching_pixel_sizes(
+        ome_pixel_sizes_um(metadata, series=0, axes=("x", "y"), context=_CALIBRATION_CONTEXT),
+        grid.declared_sizes_um,
+        axes="xy",
+        context=_CALIBRATION_CONTEXT,
+        path=path,
+        expected="segmentation calibration agreeing with its source image grid",
+    )
 
     # _read_labels admitted only signed and unsigned integer dtypes.
     return _labels_element(labels, grid, options), cast("np.dtype[np.integer]", labels.dtype)

@@ -118,7 +118,8 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         - ``images["<ROI>_DAPI"]``: lazy ``(c, y, x)`` image in the source
           dtype, channels named by OME channel names or IDs.
         - ``labels["<ROI>_Segmentation"]``: lazy ``(y, x)`` integer labels in
-          the source dtype.
+          the source dtype. OME physical sizes the segmentation declares must
+          equal the DAPI ones; a size it does not declare is inherited.
         - ``points["<ROI>_TranscriptList"]``: lazy two-dimensional points
           ``x``, ``y`` with categorical ``name`` (categories in feature-header
           order), optional ``cell`` (``uint64[pyarrow]``, ``0`` unassigned)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -12,12 +12,8 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish._schemas import (
-    CELLS_CONTEXT,
-    FLOAT_DTYPE,
     STRING_DTYPE,
     boundary_features,
-    normalize_floats,
-    normalize_ids,
     normalize_transcript_partition,
     validate_cell_columns,
     validate_count_columns,
@@ -57,70 +53,6 @@ class TestValidateCellColumns:
         with pytest.raises(ReaderFormatError, match="cell fields") as caught:
             validate_cell_columns(["label", "area"], ArtifactFile(tmp_path / "cells.csv"))
         assert caught.value.context.artifact == "CellCoordinates"
-
-
-class TestNormalizeIds:
-    """Retain exact identity across accepted lexical integer representations."""
-
-    def test_exact_large_and_decimal_ids(self, tmp_path: Path) -> None:
-        result = normalize_ids(
-            pd.Series([str(2**53 + 1), "02.0", "3e0"]), ArtifactFile(tmp_path / "cells.csv"), context=CELLS_CONTEXT
-        )
-        np.testing.assert_array_equal(result, [2**53 + 1, 2, 3])
-        assert result.dtype == np.dtype(np.int64)
-
-    def test_unsigned_and_empty(self, tmp_path: Path) -> None:
-        path = ArtifactFile(tmp_path / "cells.csv")
-        assert normalize_ids(pd.Series([str(2**64 - 1)]), path, context=CELLS_CONTEXT).dtype == np.dtype(np.uint64)
-        assert normalize_ids(pd.Series([], dtype=STRING_DTYPE), path, context=CELLS_CONTEXT).dtype == np.dtype(np.int64)
-        assert normalize_ids(pd.Series([str(2**63)]), path, context=CELLS_CONTEXT).tolist() == [2**63]
-        assert normalize_ids(pd.Series(["0"]), path, context=CELLS_CONTEXT, allow_zero=True).tolist() == [0]
-
-    def test_arrow_zero_identifier(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="positive cell"):
-            normalize_ids(
-                pd.Series(["0"], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "cells.csv"), context=CELLS_CONTEXT
-            )
-
-    @pytest.mark.parametrize("storage", ["pyarrow", "python"])
-    def test_pandas_string_identifiers(self, tmp_path: Path, storage: Literal["pyarrow", "python"]) -> None:
-        result = normalize_ids(
-            pd.Series(["0", str(2**63 + 1)], dtype=pd.StringDtype(storage=storage)),
-            ArtifactFile(tmp_path / "tx.csv"),
-            context=CELLS_CONTEXT,
-            allow_zero=True,
-        )
-        assert result.dtype == np.dtype(np.uint64)
-        assert result.tolist() == [0, 2**63 + 1]
-
-    @pytest.mark.parametrize(
-        "value", [None, "True", "", "NaN", "inf", "0", "-1", "1.00000000000000001", "1e10000", str(2**64), "1" * 129]
-    )
-    def test_invalid_identifiers(self, tmp_path: Path, *, value: str | None) -> None:
-        with pytest.raises(ReaderFormatError, match="identifier") as caught:
-            normalize_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), context=CELLS_CONTEXT)
-        assert caught.value.context is CELLS_CONTEXT
-
-
-class TestNormalizeFloats:
-    """Keep correctly rounded precision while rejecting destructive conversion."""
-
-    def test_round_trip_and_index(self, tmp_path: Path) -> None:
-        result = normalize_floats(
-            pd.Series(["0.10000000000000002", "-0.00e1000", "9007199254740992"], index=[2, 4, 8]),
-            ArtifactFile(tmp_path / "cells.csv"),
-            "x",
-            context=CELLS_CONTEXT,
-        )
-        assert result.dtype == FLOAT_DTYPE
-        assert result.index.tolist() == [2, 4, 8]
-        np.testing.assert_array_equal(result.to_numpy(dtype=np.float64), [0.10000000000000002, 0, 2**53])
-
-    @pytest.mark.parametrize("value", [None, True, "", "nan", "inf", "1e-400", "1e400", "9007199254740993", "1" * 129])
-    def test_invalid_coordinates(self, tmp_path: Path, *, value: str | bool | None) -> None:
-        with pytest.raises(ReaderFormatError, match="float64") as caught:
-            normalize_floats(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), "x", context=CELLS_CONTEXT)
-        assert caught.value.context is CELLS_CONTEXT
 
 
 class TestValidateTranscriptColumns:
@@ -168,9 +100,8 @@ class TestNormalizeTranscriptPartition:
         assert result["cell"].tolist() == [0, 2**63]
         assert result["z_raw"].tolist() == [0, 2]
         assert "z" not in result
-        assert normalize_transcript_partition(
-            result.iloc[:0].drop(columns="z_raw"), features=("A", "B"), path=path
-        ).empty
+        empty = pd.DataFrame({name: pd.Series(dtype=STRING_DTYPE) for name in ("name", "x", "y", "cell")})
+        assert normalize_transcript_partition(empty, features=("A", "B"), path=path).empty
 
     @pytest.mark.parametrize("name", ["unknown", None])
     def test_unknown_features(self, tmp_path: Path, name: str | None) -> None:

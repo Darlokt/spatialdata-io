@@ -9,7 +9,8 @@ Both rasters are single-series TIFFs read at full resolution:
   or repeated.
 - ``<ROI>_Segmentation.tiff``: integer ``(y, x)`` cell labels, ``0`` for
   background and otherwise the cell ID, on the DAPI pixel grid. It must have
-  the DAPI shape and, if it declares OME physical sizes, the DAPI ones.
+  the DAPI shape, and every OME physical size it declares must equal the DAPI
+  one; a size it does not declare is inherited from DAPI.
 
 Both are mapped into the ROI's micrometre frame with the DAPI pixel scale.
 Pixels are not read: the label dtype is checked against the largest table cell
@@ -20,14 +21,21 @@ rejected, because DAPI and labels are single-component rasters.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from spatialdata.models import Image2DModel, Labels2DModel
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff, normalize_raster_axes, ome_channel_names, read_tiff
+from spatialdata_io.readers._utils.image import (
+    inspect_tiff,
+    normalize_raster_axes,
+    ome_channel_names,
+    ome_pixel_sizes_um,
+    read_tiff,
+    require_matching_pixel_sizes,
+    select_tiff_series,
+)
 from spatialdata_io.readers.seqfish._transforms import pixel_scale
 
 if TYPE_CHECKING:
@@ -45,15 +53,9 @@ _LABEL_AXES = ("y", "x")
 
 
 def _inspect(path: ArtifactFile, context: ReaderErrorContext) -> TiffMetadata:
-    """Inspect a TIFF once and require exactly one full-resolution series."""
+    """Inspect a TIFF once and require exactly one series, read at full resolution."""
     metadata = inspect_tiff(path, context=context)
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context,
-            path=metadata.path,
-            found=f"{len(metadata.series)} series",
-            expected="exactly one full-resolution TIFF series",
-        )
+    select_tiff_series(metadata, None, context=context)
     return metadata
 
 
@@ -116,23 +118,15 @@ def read_image(dapi: DapiRaster, *, frame: str, options: RasterOptions) -> DataA
 
 
 def _check_calibration(metadata: TiffMetadata, reference: Scale) -> None:
-    """Require any declared segmentation pixel size to equal the DAPI one."""
-    if metadata.ome is None:
-        return
-    pixels = metadata.ome.images[0].pixels
-    if pixels.physical_size_x is None and pixels.physical_size_y is None:
-        return
-    declared = pixel_scale(metadata, context=_SEGMENTATION_CONTEXT).to_scale_vector(("y", "x"))
-    if not all(
-        isclose(actual, expected, rel_tol=1e-12)
-        for actual, expected in zip(declared, reference.to_scale_vector(("y", "x")), strict=True)
-    ):
-        raise ReaderFormatError(
-            context=_SEGMENTATION_CONTEXT,
-            path=metadata.path,
-            found="segmentation OME physical sizes differ from DAPI",
-            expected="the same calibrated pixel grid for segmentation and DAPI",
-        )
+    """Require every declared segmentation pixel size to equal the DAPI one; absent sizes are inherited."""
+    require_matching_pixel_sizes(
+        ome_pixel_sizes_um(metadata, series=0, axes=("y", "x"), context=_SEGMENTATION_CONTEXT),
+        [float(size) for size in reference.to_scale_vector(("y", "x"))],
+        axes="yx",
+        context=_SEGMENTATION_CONTEXT,
+        path=metadata.path,
+        expected="the same calibrated pixel grid for segmentation and DAPI",
+    )
 
 
 def read_labels(

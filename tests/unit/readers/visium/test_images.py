@@ -378,32 +378,25 @@ class TestReadImages:
         assert image.shape == (3, 5, 7)
         assert _channels(image) == [0, 1, 2]
 
-    @pytest.mark.parametrize(
-        ("shape", "axes", "match"),
-        [
-            ((2, 3, 5, 7), ("z", "c", "y", "x"), "absent from target_axes"),
-            ((2, 5, 7), ("z", "y", "x"), "absent from target_axes"),
-            ((3, 5, 7), ("Q", "Y", "X"), "absent from target_axes"),
-            ((3, 5, 7), ("c", "y", "y"), "duplicate axes"),
-            ((3, 5, 7), ("c", "z", "x"), "must both contain"),
-            ((2, 3, 5, 7), ("c", "s", "y", "x"), "duplicate axes"),
-        ],
-    )
-    def test_rejects_unmappable_axes_with_context(
-        self, tmp_path: Path, mocker: MockerFixture, shape: tuple[int, ...], axes: tuple[str, ...], match: str
-    ) -> None:
-        path = _fake_tiff(tmp_path, mocker, shape, axes)
+    # The shared CYX normalization tests every axis permutation; these check the reader's context.
+    def test_unmappable_declared_axes_are_malformed_content(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = _fake_tiff(tmp_path, mocker, (2, 5, 7), ("z", "y", "x"))
 
-        with pytest.raises(ValueError, match=match) as caught:
+        with pytest.raises(ReaderFormatError, match="absent from target_axes") as caught:
             _read(tmp_path, path)
 
-        assert any("full-resolution image" in note and "'2.1.0'" in note for note in caught.value.__notes__)
+        assert caught.value.context == _FULLRES_CONTEXT
+        assert caught.value.path == path
+        assert type(caught.value.__cause__) is ValueError
 
-    def test_rejects_data_axes_of_another_rank(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_unmappable_data_axes_are_a_caller_error_with_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _fake_tiff(tmp_path, mocker, (3, 5, 7), ("c", "y", "x"))
 
-        with pytest.raises(ValueError, match="rank"):
+        with pytest.raises(ValueError, match="rank") as caught:
             _read(tmp_path, path, _options(data_axes="YX"))
+
+        assert type(caught.value) is ValueError
+        assert caught.value.__notes__ == [f"While handling {_FULLRES_CONTEXT.describe(path=path)}."]
 
     def test_data_axes_resolve_an_unknown_axis(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _fake_tiff(tmp_path, mocker, (3, 5, 7), ("Q", "Y", "X"))
@@ -432,10 +425,11 @@ class TestReadImages:
             writer.write(first, photometric="minisblack", metadata={"axes": "YX"})
             writer.write(second, photometric="minisblack", metadata={"axes": "YX"})
 
-        with pytest.raises(ReaderFormatError, match="2 series") as caught:
+        with pytest.raises(ReaderFormatError, match="2 TIFF series") as caught:
             _read(tmp_path, path)
         assert caught.value.context == _FULLRES_CONTEXT
         assert caught.value.path == path
+        assert caught.value.expected == "one TIFF series or an explicit tiff_series selection"
 
         selected = _read(tmp_path, path, _options(tiff_series=1))
         assert selected.dtype == second.dtype

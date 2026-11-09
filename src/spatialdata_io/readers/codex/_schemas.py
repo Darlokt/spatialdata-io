@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from spatialdata_io.readers._utils.csv import LITERAL_ZERO
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.names import validate_element_name
 
@@ -46,7 +47,6 @@ INTEGER_DTYPES = {"i": pd.ArrowDtype(pa.int64()), "u": pd.ArrowDtype(pa.uint64()
 REQUIRED_COLUMNS = frozenset({"cell_id", "region", "x", "y"})
 CELL_TABLE_CONTEXT = ReaderErrorContext("codex", "cell table")
 _CYCLE_COLUMN = re.compile(r"cyc\d+_ch\d+")
-_ZERO_PATTERN = r"[+-]?(?:0+(?:\.0*)?|\.0+)(?:[eE][+-]?\d+)?"
 # The region names the shapes element. Other element names are fixed, and
 # SpatialData compares names case-insensitively across element types.
 _RESERVED_REGIONS = frozenset({"table", "images"})
@@ -219,7 +219,7 @@ def normalize_csv_numbers(frame: pd.DataFrame, columns: list[str], path: Artifac
         values = numeric.to_numpy(dtype=np.float64, na_value=np.nan)
         # Sparse signal blocks contain many literal zeros. Only a nonzero
         # lexical value rounded to zero needs an underflow check.
-        underflow = (values == 0) & ~source.str.fullmatch(_ZERO_PATTERN).to_numpy(dtype=np.bool_)
+        underflow = (values == 0) & ~source.str.fullmatch(LITERAL_ZERO).to_numpy(dtype=np.bool_)
         candidates = source.ne("").to_numpy() & ((np.abs(values) >= 2**53) | underflow)
         for row in np.flatnonzero(candidates):
             exact = Decimal(source.iloc[row])

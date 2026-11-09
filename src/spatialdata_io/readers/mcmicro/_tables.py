@@ -35,12 +35,11 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
-from spatialdata_io.readers._utils.csv import read_csv_header
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.csv import decode_float64, decode_float64_block, iter_csv_batches, read_csv_header
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -57,11 +56,8 @@ from spatialdata_io.readers.mcmicro._schemas import (
     REGION_KEY,
     QuantificationColumns,
     cell_ids,
-    float_block,
-    float_values,
     optional_float_values,
     quantification_columns,
-    schema_error,
     validate_position_columns,
 )
 
@@ -73,7 +69,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.mcmicro._rasters import ImageGrid
     from spatialdata_io.readers.mcmicro._schemas import MarkerPanel
 
-_CSV_BLOCK_BYTES = 1024 * 1024
 _BATCH_MEMORY_BYTES = 8 * 1024 * 1024
 _NATIVE_FRAME_SUFFIX = "_regionprops_indices"
 _NATIVE_POSITION = "source_regionprops_centroid_zero_based_pixel_index_centres"
@@ -104,35 +99,16 @@ def _read_measurements(
     identifiers: list[pa.Array] = []
     annotations: list[pa.RecordBatch] = []
 
-    # Arrow checks full record widths but can accept malformed CSV quoting.
-    try:
-        with (
-            path.open("rb") as handle,
-            pacsv.open_csv(
-                handle,
-                read_options=pacsv.ReadOptions(
-                    column_names=columns.names, skip_rows=1, block_size=_CSV_BLOCK_BYTES, use_threads=False
-                ),
-                parse_options=pacsv.ParseOptions(newlines_in_values=True),
-                convert_options=pacsv.ConvertOptions(
-                    column_types=dict.fromkeys(columns.names, pa.string()), null_values=[]
-                ),
-            ) as reader,
-        ):
-            for batch in reader:
-                for offset in range(0, batch.num_rows, rows_per_batch):
-                    block = batch.slice(offset, rows_per_batch)
-                    dense = float_block([block.column(name) for name in features], features, path)
-                    blocks.append(as_csr_array(dense))
-                    identifiers.append(block.column(CELL_ID))
-                    annotations.append(block.select(annotation_names))
-    except pa.ArrowInvalid as error:
-        raise schema_error(
-            QUANTIFICATION_CONTEXT,
-            path,
-            found=f"malformed quantification CSV: {error}",
-            expected="one field per header column",
-        ) from error
+    with path.open("rb") as handle:
+        for batch in iter_csv_batches(handle, header=columns.names, context=QUANTIFICATION_CONTEXT, path=path):
+            for offset in range(0, batch.num_rows, rows_per_batch):
+                block = batch.slice(offset, rows_per_batch)
+                dense = decode_float64_block(
+                    [block.column(name) for name in features], names=features, context=QUANTIFICATION_CONTEXT, path=path
+                )
+                blocks.append(as_csr_array(dense))
+                identifiers.append(block.column(CELL_ID))
+                annotations.append(block.select(annotation_names))
 
     schema = pa.schema([(name, pa.string()) for name in annotation_names])
     return _Measurements(
@@ -156,7 +132,9 @@ def _observations(
     for measurement, path in sources:
         end = offset + len(measurement.cell_ids)
         for axis, name in enumerate(CENTROIDS):
-            spatial[offset:end, axis] = float_values(measurement.annotations.column(name), path, name)
+            spatial[offset:end, axis] = decode_float64(
+                measurement.annotations.column(name), name=name, context=QUANTIFICATION_CONTEXT, path=path
+            )
         offset = end
 
     obs = pd.DataFrame(index=index)
@@ -198,9 +176,9 @@ def read_table(
         if columns is None:
             columns = current
         elif set(current.names) != set(columns.names):
-            raise schema_error(
-                QUANTIFICATION_CONTEXT,
-                path,
+            raise ReaderFormatError(
+                context=QUANTIFICATION_CONTEXT,
+                path=path,
                 found=f"columns {list(current.names)!r}",
                 expected=f"the shared MCQuant schema {columns.names!r}",
             )
@@ -214,9 +192,9 @@ def read_table(
             source_grids.append(grids[quantification.target.image_id])
 
     if columns is None or not measurements:
-        raise schema_error(
-            QUANTIFICATION_CONTEXT,
-            quantifications[0].path,
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=quantifications[0].path,
             found="no quantified cells",
             expected="at least one MCQuant row",
         )
@@ -258,16 +236,16 @@ def _physical_positions(
         with np.errstate(over="ignore", invalid="ignore", under="ignore"):
             rows *= spacing
         if not np.isfinite(rows).all():
-            raise schema_error(
-                QUANTIFICATION_CONTEXT,
-                path,
+            raise ReaderFormatError(
+                context=QUANTIFICATION_CONTEXT,
+                path=path,
                 found=f"nonfinite physical positions in {grid.frame!r}",
                 expected="finite float64 physical XY",
             )
         if np.any(nonzero & (rows == 0)):
-            raise schema_error(
-                QUANTIFICATION_CONTEXT,
-                path,
+            raise ReaderFormatError(
+                context=QUANTIFICATION_CONTEXT,
+                path=path,
                 found="nonzero shifted pixel coordinates becoming zero physical positions",
                 expected="nonzero float64 physical XY for nonzero shifted pixel coordinates",
             )

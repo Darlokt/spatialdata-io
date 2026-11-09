@@ -47,12 +47,15 @@ class TestValidateImageOptions:
 
     @pytest.mark.parametrize("axes", [["c", "y", "x"], ("C", "Y", "X"), b"CYX"])
     def test_axes_type(self, axes: object) -> None:
-        with pytest.raises(TypeError, match="data_axes"):
+        with pytest.raises(
+            TypeError, match=f"data_axes must be a string such as 'CYX', or None; found {type(axes).__name__}"
+        ):
             validate_image_options(axes, None)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
 
-    @pytest.mark.parametrize("axes", ["", "C Y", "CY1", "CYy", "c-y-x"])
+    # Samples beside channels, or axes without X and Y, now fail before any I/O.
+    @pytest.mark.parametrize("axes", ["", "C Y", "CY1", "CYy", "c-y-x", "CYXS", "CZT", "ÄYX"])
     def test_invalid_axes(self, axes: str) -> None:
-        with pytest.raises(ValueError, match="distinct single-letter"):
+        with pytest.raises(ValueError, match="distinct single-letter axes including X and Y"):
             validate_image_options(axes, None)
 
     def test_options_are_validated_before_io(self, tmp_path: Path) -> None:
@@ -202,7 +205,7 @@ class TestReadImage:
             path, np.zeros((2, 8, 10), dtype=np.uint16), metadata={"axes": "QYX"}, photometric="minisblack"
         )
 
-        with pytest.raises(ValueError, match="Axis 'q'"):
+        with pytest.raises(ReaderFormatError, match="Axis 'q'") as caught:
             read_image(
                 ArtifactFile(path),
                 data_axes=None,
@@ -211,6 +214,9 @@ class TestReadImage:
                 frame="image_pixels",
                 transformation=Identity(),
             )
+        assert caught.value.context == ReaderErrorContext("codex", "stitched image")
+        assert caught.value.path == path
+        assert type(caught.value.__cause__) is ValueError
 
         result = read_image(
             ArtifactFile(path),
@@ -279,7 +285,7 @@ class TestReadImage:
         path = tmp_path / "image.tif"
         write_image(path)
 
-        with pytest.raises(ValueError, match="rank 2 does not match array rank 3"):
+        with pytest.raises(ValueError, match="rank 2 does not match array rank 3") as caught:
             read_image(
                 ArtifactFile(path),
                 data_axes="YX",
@@ -288,6 +294,31 @@ class TestReadImage:
                 frame="image_pixels",
                 transformation=Identity(),
             )
+
+        # Caller axes that do not fit the file are a caller error, not malformed content.
+        assert type(caught.value) is ValueError
+        context = ReaderErrorContext("codex", "stitched image")
+        assert caught.value.__notes__ == [f"While handling {context.describe(path=path)}."]
+
+    def test_axis_reinterpreted_as_channels_gets_positions(self, tmp_path: Path) -> None:
+        path = tmp_path / "image.ome.tif"
+        source = np.arange(3 * 8 * 10, dtype=np.uint16).reshape(3, 8, 10)
+        # One OME channel record describes the single channel, not the three Z planes.
+        tifffile.imwrite(
+            path, source, ome=True, photometric="minisblack", metadata={"axes": "ZYX", "Channel": {"Name": ["DAPI"]}}
+        )
+
+        result = read_image(
+            ArtifactFile(path),
+            data_axes="CYX",
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
+
+        assert result.coords["c"].to_numpy().tolist() == [0, 1, 2]
+        np.testing.assert_array_equal(result.data.compute(), source)
 
     @pytest.mark.parametrize(
         ("ome", "samples", "expected"),

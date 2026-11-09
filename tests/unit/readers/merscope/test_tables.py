@@ -151,11 +151,24 @@ class TestReadTable:
             "cell,A\na,1\x00\n",
             "cell,A\na,1,2\n",
             "cell,A,B\na,1\n",
+            "cell,A\na,0x10\n",
+            "cell,A\na, 5\n",
+            "cell,A\na,1_000\n",
         ],
     )
     def test_bad_counts(self, tmp_path: Path, counts: str) -> None:
-        with pytest.raises(ReaderFormatError):
+        with pytest.raises(ReaderFormatError) as caught:
             read_table(_sources(tmp_path, counts))
+        assert caught.value.path == tmp_path / "counts.csv"
+
+    def test_malformed_records_name_the_artifact(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV records \(") as caught:
+            read_table(_sources(tmp_path, "cell,A\na,1,2\n"))
+        assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
+        assert caught.value.expected == "records with one field per header column"
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV records \(") as caught:
+            read_table(_sources(tmp_path, metadata="EntityID,center_x,center_y\na,1\n"))
+        assert caught.value.context == ReaderErrorContext("merscope", "cell metadata")
 
     @pytest.mark.parametrize(
         "metadata",

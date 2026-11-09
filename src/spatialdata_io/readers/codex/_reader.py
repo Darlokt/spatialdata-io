@@ -80,9 +80,11 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         centres at ``column + 0.5, row + 0.5``) to native table ``x, y``.
         Without it the image is not registered to the table. Requires an image.
     data_axes
-        Source TIFF axes as one string of distinct letters, for example
-        ``"CYX"`` for a stack without axis metadata. Defaults to the axes the
-        file declares. Requires an image.
+        Source TIFF axes as one string of distinct letters including ``X`` and
+        ``Y``, for example ``"CYX"`` for a stack without axis metadata; ``S``
+        (samples) counts as ``C``. Defaults to the axes the file declares. An
+        axis read as channels that the file declares otherwise gets positional
+        channel names. Requires an image.
     tiff_series
         Zero-based TIFF series. Required when the file has several series.
         Requires an image.
@@ -176,14 +178,16 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         If an option has the wrong type.
     ValueError
         If an option has an invalid value, an image option is given without an
-        image, ``pixel_size_um`` conflicts with the experiment, or the
+        image, ``data_axes`` cannot be mapped to CYX for the image (with a note
+        naming it), ``pixel_size_um`` conflicts with the experiment, or the
         calibration over- or underflows a cell position.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         If a path is missing or has the wrong kind.
     ValueError
         A contextual ``ReaderFormatError`` naming the artifact and path if the
         table or image is ambiguous or malformed, for example a
-        multi-series TIFF without ``tiff_series``, missing or duplicate fields,
+        multi-series TIFF without ``tiff_series``, declared image axes that
+        cannot be mapped to CYX, missing or duplicate fields,
         lossy numbers, several regions, invalid or duplicate cell IDs, or an
         unsupported experiment version.
     """

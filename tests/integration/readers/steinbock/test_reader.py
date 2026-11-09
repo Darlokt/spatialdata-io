@@ -719,6 +719,7 @@ class TestSteinbock:
         (summed,) = (warning for warning in reported if "combined" in str(warning.message))
         assert slot in str(summed.message)
         assert path.name in str(summed.message)
+        assert summed.filename == __file__
         assert path.read_bytes() == before
 
     @pytest.mark.parametrize("slot", ["X", "counts"])

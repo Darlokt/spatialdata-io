@@ -40,7 +40,6 @@ image's). An incomplete calibration leaves the sample in pixels.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isclose
 from typing import TYPE_CHECKING
 
 from spatialdata.models import Image2DModel, Labels2DModel
@@ -53,6 +52,8 @@ from spatialdata_io.readers._utils.image import (
     ome_channel_names,
     ome_pixel_sizes_um,
     read_tiff,
+    require_matching_pixel_sizes,
+    select_tiff_series,
 )
 from spatialdata_io.readers.steinbock._layout import PIXEL_FRAME_SUFFIX
 
@@ -73,11 +74,6 @@ _LABEL_AXES = ("y", "x")
 _IMAGE_CONTEXT = ReaderErrorContext("steinbock", "OME image")
 _MASK_CONTEXT = ReaderErrorContext("steinbock", "mask")
 _CALIBRATION_CONTEXT = ReaderErrorContext("steinbock", "sample calibration")
-# Declarations of one spacing reach the reader through different arithmetic
-# (an exact extent/width ratio here, a producer's float division or decimal
-# text in OME), which can differ in the last bits. 1e-12 absorbs that and is
-# far below any physically meaningful disagreement.
-_SPACING_RTOL = 1e-12
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,12 +171,7 @@ def _read_raster(
 ) -> tuple[Array, TiffMetadata]:
     """Return the lazy full-resolution pixels of the only series in the target axes, and the metadata."""
     metadata = inspect_tiff(path, context=context)
-    if len(metadata.series) != 1:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"{len(metadata.series)} series", expected="exactly one TIFF series"
-        )
-
-    raster = read_tiff(metadata, series=0, level=0, context=context)
+    raster = read_tiff(metadata, series=select_tiff_series(metadata, None, context=context), level=0, context=context)
     try:
         array = normalize_raster_axes(
             raster.data,
@@ -231,11 +222,11 @@ def _calibration(
 
 def _require_agreement(declared: tuple[float | None, ...], reference: tuple[float | None, ...], path: Path) -> None:
     """Reject two present XY sizes that disagree; an absent size never conflicts."""
-    for axis, size, expected in zip("XY", declared, reference, strict=True):
-        if size is not None and expected is not None and not isclose(size, expected, rel_tol=_SPACING_RTOL):
-            raise ReaderFormatError(
-                context=_CALIBRATION_CONTEXT,
-                path=path,
-                found=f"{axis} spacing {size} versus {expected} µm/pixel",
-                expected="images.csv and linked image/mask calibration in agreement, including partial declarations",
-            )
+    require_matching_pixel_sizes(
+        declared,
+        reference,
+        axes="xy",
+        context=_CALIBRATION_CONTEXT,
+        path=path,
+        expected="images.csv and linked image/mask calibration in agreement, including partial declarations",
+    )

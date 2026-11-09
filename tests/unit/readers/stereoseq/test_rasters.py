@@ -13,7 +13,7 @@ from numpy.testing import assert_array_equal
 from spatialdata.transformations import Scale, get_transformation
 from xarray import DataArray, DataTree
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
 from spatialdata_io.readers._utils.paths import ArtifactFile
@@ -173,10 +173,11 @@ class TestReadImage:
             writer.write(np.zeros((4, 5), dtype=np.uint8), metadata={"axes": "YX"})
             writer.write(np.zeros((6, 7), dtype=np.uint8), metadata={"axes": "YX"})
 
-        with pytest.raises(ReaderFormatError, match="series"):
+        with pytest.raises(ReaderFormatError, match="expected one TIFF series; found 2 TIFF series") as caught:
             read_image(
                 ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS, transformations=FRAME
             )
+        assert caught.value.context == ReaderErrorContext("stereoseq", "registered")
 
     def test_rejects_unknown_nonsingleton_axis(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_regist.tif"
@@ -184,10 +185,13 @@ class TestReadImage:
             path, np.zeros((5, 16, 24), dtype=np.uint8), metadata={"axes": "QYX"}, photometric="minisblack"
         )
 
-        with pytest.raises(ValueError, match=r"[Qq]"):
+        with pytest.raises(ReaderFormatError, match="Axis 'q' has length 5") as caught:
             read_image(
                 ImageSource(ArtifactFile(path), "registered", "image"), raster=DEFAULT_OPTIONS, transformations=FRAME
             )
+        assert caught.value.context == ReaderErrorContext("stereoseq", "registered")
+        assert caught.value.path == path
+        assert type(caught.value.__cause__) is ValueError
 
 
 class TestReadMask:
@@ -273,8 +277,11 @@ class TestReadMask:
         path = tmp_path / "sample_mask.tif"
         tifffile.imwrite(path, np.zeros((16, 24, 3), dtype=np.uint8), photometric="rgb")
 
-        with pytest.raises(ValueError, match=r"[Ss]"):
+        with pytest.raises(ReaderFormatError, match="Axis 's' has length 3") as caught:
             read_mask(ImageSource(ArtifactFile(path), "mask", "labels"), raster=DEFAULT_OPTIONS, transformations=FRAME)
+        assert caught.value.context == ReaderErrorContext("stereoseq", "mask")
+        assert caught.value.path == path
+        assert caught.value.expected == "Y and X axes with only singleton other axes"
 
     def test_rejects_floating_point(self, tmp_path: Path) -> None:
         path = tmp_path / "sample_mask.tif"

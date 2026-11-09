@@ -161,12 +161,14 @@ class TestDbit:
 
         assert dict(result.images) == {}
 
+    # No name of leading dots and a suffix: pathlib reads "..h5ad" as stem "."
+    # and suffix ".h5ad" before Python 3.14, but as a name without suffix since.
     @pytest.mark.parametrize(
         ("name", "expected"),
         [
             ("invalid name.h5ad", "invalid_name"),
-            ("..h5ad", "unnamed"),
-            ("...h5ad", "unnamed"),
+            ("#.h5ad", "_"),
+            ("_ x.h5ad", "_x"),
             ("__x.h5ad", "_x"),
             ("table.h5ad", "table_"),
             ("TABLE.h5ad", "TABLE_"),
@@ -369,6 +371,7 @@ class TestDbit:
             result = dbit(tmp_path)
 
         assert len(caught) == 1
+        assert caught[0].filename == __file__
         expression = result.tables["table"].X
         assert isinstance(expression, sparse.csr_array)
         assert expression.has_canonical_format

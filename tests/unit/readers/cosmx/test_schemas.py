@@ -144,48 +144,80 @@ class TestTranscriptColumns:
 
 
 class TestIntegerValues:
-    """Identifiers are exact integers, optionally bounded below."""
+    """Identifiers and counts are exact int64 integers, optionally bounded below."""
 
     def test_exact(self, tmp_path: Path) -> None:
         values = integer_values(pa.array(["9007199254740993", "-1"]), _path(tmp_path), "transcripts", "z", minimum=None)
+        assert values.dtype == np.dtype(np.int64)
         assert values.tolist() == [9007199254740993, -1]
 
-    @pytest.mark.parametrize(("token", "match"), [(None, "missing"), ("1.0", "non-integer"), ("0", "below 1")])
-    def test_rejects(self, tmp_path: Path, token: str | None, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
-            integer_values(pa.array(["1", token], pa.string()), _path(tmp_path), "count matrix", "fov", minimum=1)
+    @pytest.mark.parametrize("token", ["2.0", "2e0", "+2", "0.2e1", "02"])
+    def test_exact_decimal_spellings(self, tmp_path: Path, token: str) -> None:
+        values = integer_values(pa.array(["1", token]), _path(tmp_path), "count matrix", "fov", minimum=1)
+        assert values.dtype == np.dtype(np.int64)
+        assert values.tolist() == [1, 2]
+
+    @pytest.mark.parametrize(
+        ("token", "minimum", "found", "expected"),
+        [
+            (None, 1, "missing 'fov' values", "exact integer 'fov' values of at least 1 below 2**64"),
+            ("1.5", 1, "'fov' value '1.5'", "exact integer 'fov' values of at least 1 below 2**64"),
+            ("0x10", 1, "'fov' value '0x10'", "exact integer 'fov' values of at least 1 below 2**64"),
+            ("0", 1, "'fov' value '0'", "exact integer 'fov' values of at least 1 below 2**64"),
+            (str(2**63), 1, f"'fov' value {2**63}", "'fov' values within int64"),
+            (f"{2**63}.0", 0, f"'fov' value {2**63}", "'fov' values within int64"),
+            (str(2**63), None, f"'fov' value {str(2**63)!r}", "exact integer 'fov' values within int64"),
+        ],
+    )
+    def test_rejects(self, tmp_path: Path, token: str | None, minimum: int | None, found: str, expected: str) -> None:
+        with pytest.raises(ReaderFormatError) as caught:
+            integer_values(pa.array(["1", token], pa.string()), _path(tmp_path), "count matrix", "fov", minimum=minimum)
+        assert caught.value.found == found
+        assert caught.value.expected == expected
+        assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
 
 
 class TestCountBlock:
     """Count blocks decode in one pass and errors name their feature."""
 
     def test_rows_by_features(self, tmp_path: Path) -> None:
-        block = count_block([pa.array(["1", "0"]), pa.array(["0", "5"])], ("A", "B"), _path(tmp_path))
+        block = count_block([pa.array(["1", "0"]), pa.array(["0", "5.0"])], ("A", "B"), _path(tmp_path))
+        assert block.dtype == np.dtype(np.int64)
         np.testing.assert_array_equal(block, [[1, 0], [0, 5]])
 
-    @pytest.mark.parametrize(("token", "match"), [("1.5", "non-integer 'B'"), ("-1", "'B' values below 0")])
-    def test_error_names_the_feature(self, tmp_path: Path, token: str, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match) as error:
+    @pytest.mark.parametrize(
+        ("token", "found"), [("1.5", "'B' value '1.5'"), ("-1", "'B' value '-1'"), (str(2**63), f"'B' value {2**63}")]
+    )
+    def test_error_names_the_feature(self, tmp_path: Path, token: str, found: str) -> None:
+        with pytest.raises(ReaderFormatError) as error:
             count_block([pa.array(["1"]), pa.array([token])], ("A", "B"), _path(tmp_path))
+        assert error.value.found == found
         assert error.value.context == ReaderErrorContext("cosmx", "count matrix")
 
 
 class TestFloatValues:
-    """Coordinates are correctly rounded, finite, and never silently underflow."""
+    """Coordinates are correctly rounded, finite, and never silently underflow or round integers."""
 
     def test_correctly_rounded_against_lexical_oracle(self, tmp_path: Path) -> None:
-        tokens = ["162613.4", "159172.222222222", "0.1", "1e-320", "-0"]
+        tokens = ["162613.4", "159172.222222222", "0.1", "1e-320", "-0", str(2**53)]
         np.testing.assert_array_equal(
             float_values(pa.array(tokens), _path(tmp_path), "transcripts", "x"), [float(token) for token in tokens]
         )
 
     @pytest.mark.parametrize(
         ("token", "match"),
-        [(None, "missing"), ("inf", "nonfinite"), ("NA", "nonnumeric"), ("1e-400", "underflow")],
+        [
+            (None, "missing"),
+            ("inf", "nonfinite"),
+            ("NA", "nonnumeric"),
+            ("1e-400", "underflow"),
+            ("9007199254740993", "beyond the exact float64 integers"),
+        ],
     )
     def test_rejects(self, tmp_path: Path, token: str | None, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match):
+        with pytest.raises(ReaderFormatError, match=match) as caught:
             float_values(pa.array(["1", token], pa.string()), _path(tmp_path), "transcripts", "x")
+        assert caught.value.context == ReaderErrorContext("cosmx", "transcripts")
 
 
 class TestOptionalFloatValues:
