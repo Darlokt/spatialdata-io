@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import gzip
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pytest
@@ -33,6 +34,61 @@ def _frames(element: DataArray | DataTree) -> dict[str, np.ndarray]:
 
 class TestCosmxCharacterization:
     """Values the legacy reader produced correctly on this fixture remain exactly unchanged."""
+
+    @pytest.mark.parametrize("profile", ["flat_2021", "atomx"])
+    @pytest.mark.parametrize("storage", ["plain", "single_gzip", "member_gzip"])
+    def test_profiles_and_compression_preserve_complete_values(
+        self,
+        tmp_path: Path,
+        profile: Literal["flat_2021", "atomx"],
+        storage: str,
+    ) -> None:
+        fixture = write_cosmx_dataset(
+            tmp_path, profile=profile, compressed=storage != "plain", rasters=profile == "flat_2021"
+        )
+        if storage == "single_gzip":
+            for path in fixture.root.glob("*.csv.gz"):
+                path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes()), mtime=0))
+        result = cosmx(fixture.root)
+        table = result.tables["table"]
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.has_canonical_format
+        assert table.X.dtype == np.float32
+        assert table.var_names.tolist() == list(fixture.features)
+        expected = [[1, 0, 2, 0], [0, 3, 0, 0], [4, 0, 0, 0], [0, 0, 7, 1]]
+        if profile == "atomx":
+            expected = [[*row, row[-1]] for row in expected]
+        np.testing.assert_array_equal(table.X.toarray(), expected)
+        assert table.obs["fov"].tolist() == [2, 2, 10, 10]
+        assert table.obs["cell_ID"].tolist() == [1, 2, 1, 2]
+        assert table.obs["note"].tolist() == ["01", "02", "01", "02"]
+        assert table.obs["Mean.DAPI"].isna().tolist() == [False, False, False, True]
+        assert table.obs_names.tolist() == (
+            ["0", "1", "2", "3"] if profile == "flat_2021" else ["c_1_2_1", "c_1_2_2", "c_1_10_1", "c_1_10_2"]
+        )
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[2, 5], [6, 2], [2, 5], [6, 2]])
+        global_centers = (
+            [[1002, 5005.5], [1006, 5002.5], [3002.25, 7005], [3006.25, 7002]]
+            if profile == "flat_2021"
+            else [[1002, 4995.5], [1006, 4998.5], [3002.25, 6995], [3006.25, 6998]]
+        )
+        np.testing.assert_array_equal(table.obsm["spatial_global_pixels"], global_centers)
+        points = result.points["Run_1_transcripts"].compute()
+        assert points["target"].cat.categories.tolist() == list(fixture.features)
+        assert points["fov"].tolist() == [2, 2, 2, 10, 10, 10]
+        assert points["cell_ID"].tolist() == [1, 0, 2, 1, 0, 2]
+        assert points["z_raw"].tolist() == [0, -1, 2, 0, -1, 2]
+        np.testing.assert_array_equal(points["x"], [1002, 1002.25, 1006.5, 3002.25, 3002.5, 3006.75])
+        np.testing.assert_array_equal(
+            points["y"],
+            [5005.625, 5005.625, 5002.625, 7005.125, 7005.125, 7002.125]
+            if profile == "flat_2021"
+            else [4995.375, 4995.375, 4998.375, 6994.875, 6994.875, 6997.875],
+        )
+        np.testing.assert_array_equal(points["x_local"], [2, 2.25, 6.5, 2, 2.25, 6.5])
+        np.testing.assert_array_equal(points["y_local"], [5.125, 5.125, 2.125, 5.125, 5.125, 2.125])
+        if profile == "atomx":
+            assert points["cell"].tolist() == ["c_1_2_1", "", "c_1_2_2", "c_1_10_1", "", "c_1_10_2"]
 
     def test_counts_order_and_centers(self, tmp_path: Path) -> None:
         result = cosmx(write_cosmx_dataset(tmp_path).root)

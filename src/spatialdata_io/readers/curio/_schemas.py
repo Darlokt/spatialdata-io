@@ -23,12 +23,11 @@ distinct identifiers compare equal after truncation.
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 from spatialdata.models import TableModel
 
 from spatialdata_io._positions import POSITIONS_KEY
@@ -41,13 +40,13 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 STRING_DTYPE = pd.ArrowDtype(pa.string())
-CLUSTER_COLUMNS = ["bead_id", "cluster"]
+CLUSTER_TYPES = pa.schema([("bead_id", pa.string()), ("cluster", pa.string())])
 DEFINING_FEATURES_KEY = "Top_cluster_defining_features"
 
-_INTEGER_DTYPES = {"i": pd.ArrowDtype(pa.int64()), "u": pd.ArrowDtype(pa.uint64())}
-_FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
-_BOOLEAN_DTYPE = pd.ArrowDtype(pa.bool_())
-_BOOLEANS = {"TRUE": True, "FALSE": False, "True": True, "False": False, "true": True, "false": False}
+_BOOLEANS = pa.array(["TRUE", "FALSE", "True", "False", "true", "false"])
+# Recognize unsupported signs too: an integer column must fail its checked
+# conversion instead of retrying as float and rounding exact integers.
+_INTEGER = r"^[+-]?(?:[0-9]+|0[xX][0-9a-fA-F]+)$"
 RESERVED_OBS = ("cluster", "region", "instance_id")
 # uns keys the reader writes; metric categories become uns keys too.
 RESERVED_UNS = frozenset({DEFINING_FEATURES_KEY, POSITIONS_KEY, TableModel.ATTRS_KEY})
@@ -99,20 +98,20 @@ def validate_counts(table: ad.AnnData, path: ArtifactFile) -> None:
 
 
 def validate_header(columns: list[str], artifact: str, path: ArtifactFile, *, feature_ids: bool = False) -> None:
-    """Reject empty, duplicate or NUL-containing header names before pandas can repair them.
+    """Reject empty or NUL-containing names after ``csv_header`` establishes uniqueness.
 
     With ``feature_ids``, the first column is positional and its name may be empty.
     """
     named = columns[1:] if feature_ids else columns
-    if (
-        not columns
-        or any(not column for column in named)
-        or any("\x00" in column for column in columns)
-        or len(set(columns)) != len(columns)
-    ):
+    if not columns or any(not column for column in named) or any("\x00" in column for column in columns):
         raise schema_error(
             artifact, path, found=f"invalid header {columns!r}", expected="nonempty unique named columns"
         )
+
+
+def text_types(columns: list[str]) -> pa.Schema:
+    """Declare literal strings for the validated named enrichment header."""
+    return pa.schema([(name, pa.string()) for name in columns])
 
 
 def validate_text(frame: pd.DataFrame, artifact: str, path: ArtifactFile) -> None:
@@ -203,53 +202,55 @@ def normalize_moran(moran: pd.DataFrame, path: ArtifactFile) -> None:
 
 
 def _parse_statistic(source: pd.Series, path: ArtifactFile) -> pd.Series:
-    """Parse one column as booleans, exact 64-bit integers or finite float64."""
-    if len(source) and source.isin(list(_BOOLEANS)).all():
-        return source.map(_BOOLEANS).astype(_BOOLEAN_DTYPE)
-
+    """Classify one complete statistic column before its checked Arrow conversion."""
+    values = pa.array(source, type=pa.string())
     try:
-        numeric = pd.to_numeric(source)
-    except ValueError as error:
-        raise schema_error(
-            MORAN_FEATURES,
-            path,
-            found=f"nonnumeric Moran statistic {source.name!r}",
-            expected="finite numeric or boolean statistics",
-        ) from error
-    if numeric.dtype.kind in _INTEGER_DTYPES:
-        return numeric.astype(_INTEGER_DTYPES[numeric.dtype.kind])
-
-    # Parse the source text again with Arrow, whose cast is correctly rounded;
-    # pandas turns "0.10000000000000002" into 0.1 and returns objects beyond 64 bits.
-    try:
-        numeric = source.astype(_FLOAT_DTYPE)
-    except (pa.ArrowInvalid, ValueError) as error:
+        boolean_tokens = pc.call_function("is_in", [values], options=pc.SetLookupOptions(_BOOLEANS))
+        if len(values) and pc.call_function("all", [boolean_tokens]).as_py():
+            numeric = pc.cast(values, pa.bool_())
+        else:
+            # Arrow casts do not trim the spaces/tabs its CSV parser accepts.
+            values = pc.call_function("utf8_trim", [values], options=pc.TrimOptions(" \t"))
+            integer_tokens = pc.call_function(
+                "match_substring_regex", [values], options=pc.MatchSubstringOptions(_INTEGER)
+            )
+            if not len(values) or pc.call_function("all", [integer_tokens]).as_py():
+                numeric = _integer_statistic(values, path)
+            else:
+                numeric = pc.cast(values, pa.float64())
+                finite = pc.call_function("is_finite", [numeric])
+                if not pc.call_function("all", [finite]).as_py():
+                    raise schema_error(
+                        MORAN_FEATURES,
+                        path,
+                        found=f"nonfinite Moran statistic {source.name!r}",
+                        expected="finite numeric or boolean statistics",
+                    )
+    except pa.ArrowInvalid as error:
         raise schema_error(
             MORAN_FEATURES,
             path,
             found=f"invalid Moran statistic {source.name!r}",
-            expected="finite numeric or boolean statistics",
+            expected="finite float64, exact int64/uint64, or boolean statistics in Arrow's numeric grammar",
         ) from error
 
-    values = numeric.to_numpy(dtype=np.float64, na_value=np.nan)
-    if not np.isfinite(values).all():
-        raise schema_error(
-            MORAN_FEATURES,
-            path,
-            found=f"nonfinite Moran statistic {source.name!r}",
-            expected="finite numeric or boolean statistics",
-        )
+    return pd.Series(pd.arrays.ArrowExtensionArray(numeric), index=source.index, name=source.name)
 
-    # Decimal fractions round by nature; integral spellings beyond 2**53 and
-    # underflow to zero would silently change the value, so only those are checked.
-    candidates = (np.abs(values) >= 2**53) | (values == 0)
-    for row in np.flatnonzero(candidates):
-        if Decimal(source.iloc[row]) != Decimal(float(values[row])):
+
+def _integer_statistic(values: pa.Array | pa.ChunkedArray, path: ArtifactFile) -> pa.Array | pa.ChunkedArray:
+    """Choose one exact signed or unsigned domain without signed hexadecimal wrapping."""
+    negative = pc.call_function("starts_with", [values], options=pc.MatchSubstringOptions("-"))
+    # Arrow's int64 string cast wraps large hexadecimal magnitudes. Parse
+    # nonnegative magnitudes as uint64 before choosing the final signed width.
+    unsigned = pc.cast(pc.call_function("if_else", [negative, pa.scalar("0"), values]), pa.uint64())
+    if len(unsigned) and pc.call_function("max", [unsigned]).as_py() >= 2**63:
+        signed = pc.cast(values.filter(negative), pa.int64())
+        if len(signed) and pc.call_function("min", [signed]).as_py() < 0:
             raise schema_error(
                 MORAN_FEATURES,
                 path,
-                found=f"numeric precision loss in {source.name!r}",
-                expected="losslessly representable numeric values",
+                found="integer Moran statistic mixes negative values and values above int64",
+                expected="one exact int64 or uint64 statistic domain",
             )
-
-    return numeric
+        return unsigned
+    return pc.cast(values, pa.int64())

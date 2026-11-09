@@ -1,7 +1,7 @@
 """Build the cell table from ``cell_by_gene.csv`` and ``cell_metadata.csv``.
 
-Counts are streamed in bounded row batches: each batch is decoded exactly as
-integers into a small dense block, converted to CSR and given its count dtype
+Counts are streamed in typed Arrow batches: each uint64 batch is converted to
+a bounded dense tensor, then CSR and given its count dtype
 right away, so only sparse float storage accumulates. Rows keep the count file
 order and features its column order. Metadata is aligned to the count rows by
 exact cell identity; both files must describe the same cells.
@@ -25,11 +25,13 @@ from typing import TYPE_CHECKING, cast
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
-from spatialdata_io.readers._utils.csv import decode_integer_block, iter_csv_batches, read_csv_header, read_csv_table
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -46,7 +48,8 @@ from spatialdata_io.readers.merscope._schemas import (
     STRING_DTYPE,
     blank_columns,
     count_columns,
-    metadata_columns,
+    count_types,
+    metadata_types,
     normalize_cell_ids,
     normalize_metadata,
     schema_error,
@@ -54,8 +57,6 @@ from spatialdata_io.readers.merscope._schemas import (
 )
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.merscope._geometry import CellBoundaries
     from spatialdata_io.readers.merscope._layout import Names, TableFiles
@@ -63,7 +64,12 @@ if TYPE_CHECKING:
 _COUNTS_CONTEXT = ReaderErrorContext("merscope", COUNTS)
 _METADATA_CONTEXT = ReaderErrorContext("merscope", METADATA)
 _TABLE_CONTEXT = ReaderErrorContext("merscope", "cell table")
-_BATCH_MEMORY_BYTES = 8 * 1024 * 1024
+# A native batch can span the current block and the preceding partial record.
+# At two source bytes per count, its uint64 value payload is at most eight
+# times this block target; parser allocations, dense copies and CSR are extra.
+# Records fitting one block are supported regardless of their alignment.
+_BATCH_BYTES = 1024 * 1024
+_PARSE = pacsv.ParseOptions(newlines_in_values=True)
 # Columns whose names the reader relies on or generates; source columns that
 # equal one ignoring case are renamed rather than these.
 _READER_OBS_COLUMNS = ("EntityID", "center_x", "center_y", *OUTPUT_ANNOTATIONS)
@@ -71,48 +77,64 @@ _READER_OBS_COLUMNS = ("EntityID", "center_x", "center_y", *OUTPUT_ANNOTATIONS)
 
 def read_feature_names(path: ArtifactFile) -> tuple[str, ...]:
     """Read only the count header, including blanks in exact source order."""
-    return count_columns(read_csv_header(path, context=_COUNTS_CONTEXT), path)
+    return count_columns(csv_header(path, context=_COUNTS_CONTEXT), path)
 
 
-def _count_block(batch: pa.RecordBatch, features: tuple[str, ...], path: ArtifactFile) -> sparse.csr_array:
-    """Decode one bounded row batch exactly into an integer CSR block."""
-    counts = decode_integer_block(batch.columns[1:], names=features, minimum=0, context=_COUNTS_CONTEXT, path=path)
-    return as_csr_array(counts)
+def _count_block(batch: pa.RecordBatch) -> sparse.csr_array:
+    """Convert one bounded typed count batch to canonical CSR."""
+    counts = batch.select(range(1, batch.num_columns)).to_tensor(row_major=True)
+    return as_csr_array(np.asarray(counts))
 
 
 def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[str, ...]]:
-    """Stream exact counts in bounded batches, retaining only sparse blocks and row identities."""
-    columns = read_csv_header(path, context=_COUNTS_CONTEXT)
-    features = count_columns(columns, path)
-    # 16 bytes per count: its 8-byte decoded value and its concatenated text
-    # with offsets, apart from Arrow's parser batches and the sparse output.
-    rows_per_batch = max(1, _BATCH_MEMORY_BYTES // (16 * len(features)))
+    """Stream typed counts, retaining only sparse blocks and exact Arrow identities."""
+    types = count_types(csv_header(path, context=_COUNTS_CONTEXT), path)
+    identifiers: list[pa.Array] = []
     blocks: list[sparse.csr_array] = []
-    identifiers: list[str] = []
-    with path.open("rb") as handle:
-        for batch in iter_csv_batches(handle, header=columns, context=_COUNTS_CONTEXT, path=path):
-            for offset in range(0, batch.num_rows, rows_per_batch):
-                block = batch.slice(offset, rows_per_batch)
-                identifiers.extend(block.column(0).to_pylist())
-                # Converting each block at once keeps only float storage.
-                # Stacking promotes float32 blocks exactly to float64 when
-                # any block needs it, which equals one final conversion.
-                blocks.extend(
-                    finalize_count_arrays((_count_block(block, features, path),), context=_COUNTS_CONTEXT, path=path)
-                )
+    try:
+        with (
+            path.open("rb") as handle,
+            csv_errors(context=_COUNTS_CONTEXT, path=path),
+            pacsv.open_csv(
+                handle,
+                read_options=pacsv.ReadOptions(block_size=_BATCH_BYTES, use_threads=False),
+                parse_options=_PARSE,
+                convert_options=pacsv.ConvertOptions(
+                    column_types=types, include_columns=types.names, null_values=[], strings_can_be_null=False
+                ),
+            ) as reader,
+        ):
+            for batch in reader:
+                identifiers.append(batch.column(0))
+                # Counts are complete at ingestion. Immediate finalization retains
+                # float storage; stacking promotes blocks exactly when needed.
+                blocks.extend(finalize_count_arrays((_count_block(batch),), context=_COUNTS_CONTEXT, path=path))
+    except OSError as error:
+        add_reader_context(error, context=_COUNTS_CONTEXT, path=path)
+        raise
     if not blocks:
         raise schema_error(path, COUNTS, found="no cells", expected="a nonempty count population")
-    ids = normalize_cell_ids(pd.Series(identifiers, dtype=STRING_DTYPE), path, COUNTS)
+    ids = normalize_cell_ids(pd.Series(pa.chunked_array(identifiers, pa.string()), dtype=STRING_DTYPE), path, COUNTS)
     if not ids.is_unique:
         raise schema_error(path, COUNTS, found="duplicate count identities", expected="one count row per exact cell ID")
-    return sparse.vstack(blocks, format="csr"), pd.Index(ids.to_numpy(), name=None), features
+    return sparse.vstack(blocks, format="csr"), pd.Index(ids, name=None), tuple(types.names[1:])
 
 
 def _read_metadata(path: ArtifactFile) -> pd.DataFrame:
-    """Read finite eager annotations once, preserving extra source fields as text."""
-    columns = metadata_columns(read_csv_header(path, context=_METADATA_CONTEXT), path)
-    with path.open("rb") as handle:
-        source = read_csv_table(handle, header=columns, context=_METADATA_CONTEXT, path=path)
+    """Read typed eager annotations, preserving additional source fields literally."""
+    types = metadata_types(csv_header(path, context=_METADATA_CONTEXT), path)
+    try:
+        with path.open("rb") as handle, csv_errors(context=_METADATA_CONTEXT, path=path):
+            source = pacsv.read_csv(
+                handle,
+                parse_options=_PARSE,
+                convert_options=pacsv.ConvertOptions(
+                    column_types=types, include_columns=list(types), null_values=[""], strings_can_be_null=False
+                ),
+            )
+    except OSError as error:
+        add_reader_context(error, context=_METADATA_CONTEXT, path=path)
+        raise
     return normalize_metadata(source.to_pandas(types_mapper=pd.ArrowDtype), path)
 
 

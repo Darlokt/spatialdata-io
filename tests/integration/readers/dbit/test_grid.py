@@ -112,6 +112,48 @@ class TestDbit:
         assert get_table_keys(table) == ("maximum", "region", "pixel_id")
         assert table.obs["pixel_id"].tolist() == grid.index.tolist() == [0, 1]
 
+    def test_complete_fifty_by_fifty_grid_preserves_ids_above_uint8(self, tmp_path: Path) -> None:
+        """The largest supported complete grid has 2500 distinct observation IDs."""
+        sequences = ["".join(bases) for bases in islice(product("ACGT", repeat=8), 100)]
+        a, b = sequences[:50], sequences[50:]
+        (tmp_path / "barcode_list.txt").write_text(
+            "".join(
+                f"{axis}{i + 1}\t{sequence}\n"
+                for axis, values in (("A", a), ("B", b))
+                for i, sequence in enumerate(values)
+            ),
+            encoding="utf-8",
+        )
+        coordinates = np.array(list(product(range(1, 51), repeat=2)), dtype=np.uint16)
+        order = np.random.default_rng(20261109).permutation(len(coordinates))
+        identifiers = [b[y - 1] + a[x - 1] for x, y in coordinates]
+        values = np.arange(1, len(coordinates) + 1, dtype=np.uint16)
+        ad.AnnData(
+            X=sparse.csr_array(values[order, None]),
+            obs=pd.DataFrame(index=[identifiers[i] for i in order]),
+            var=pd.DataFrame(index=["gene"]),
+        ).write_h5ad(tmp_path / "complete.h5ad")
+
+        result = dbit(tmp_path, include_border=False)
+        table = result.tables["table"]
+        grid = result.shapes["complete"]
+        assert table.obs_names.tolist() == identifiers
+        assert table.obs["pixel_id"].tolist() == grid.index.tolist() == list(range(2500))
+        assert grid.index.dtype == np.dtype(np.uint16)
+        assert all(table.obs[name].dtype == np.dtype(np.uint16) for name in ("array_A", "array_B", "pixel_id"))
+        assert table.obsm["spatial_grid"].dtype == np.dtype(np.uint16)
+        np.testing.assert_array_equal(table.obsm["spatial_grid"], coordinates)
+        assert isinstance(table.X, sparse.csr_array)
+        np.testing.assert_array_equal(table.X.data, values)
+        np.testing.assert_array_equal(grid.bounds.iloc[-1].to_numpy(), [49, 49, 50, 50])
+        assert get_table_keys(table) == ("complete", "region", "pixel_id")
+        destination = tmp_path / "complete-grid.h5ad"
+        table.write_h5ad(destination)
+        restored = ad.read_h5ad(destination)
+        assert restored.obs["pixel_id"].tolist() == list(range(2500))
+        assert all(restored.obs[name].dtype == np.dtype(np.uint16) for name in ("array_A", "array_B", "pixel_id"))
+        assert restored.obsm["spatial_grid"].dtype == np.dtype(np.uint16)
+
     @pytest.mark.parametrize("border_scale", [0.0, 1.0, 2.5, 3.9])
     def test_image_overlay_matches_vertices_scaled_into_image_pixels(self, tmp_path: Path, border_scale: float) -> None:
         """The grid-to-image scale renders the squares where pixel-unit vertices used to be.

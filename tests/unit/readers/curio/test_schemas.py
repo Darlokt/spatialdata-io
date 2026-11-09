@@ -13,9 +13,11 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.curio._schemas import (
+    CLUSTER_TYPES,
     DEFINING_FEATURES_KEY,
     STRING_DTYPE,
     normalize_moran,
+    text_types,
     validate_clusters,
     validate_counts,
     validate_header,
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
 class TestValidateHeader:
     """Reject repaired or unnamed schema fields at the raw header boundary."""
 
-    @pytest.mark.parametrize("columns", [[], ["gene", "gene"], ["gene", ""], ["gene", "null\x00field"]])
+    @pytest.mark.parametrize("columns", [[], ["gene", ""], ["gene", "null\x00field"]])
     def test_invalid_names(self, tmp_path: Path, columns: list[str]) -> None:
         """Reject ambiguous annotation headers before parser name repair."""
         with pytest.raises(ReaderFormatError, match="header"):
@@ -41,6 +43,18 @@ class TestValidateHeader:
         """Accept the empty first field emitted for R row names."""
         validate_header(
             ["", "arbitrary_statistic"], "Moran features", ArtifactFile(tmp_path / "moran.tsv"), feature_ids=True
+        )
+
+
+class TestTextTypes:
+    """The positional and dynamic text schemas have one source of names and types."""
+
+    def test_cluster_fields(self) -> None:
+        assert pa.schema([("bead_id", pa.string()), ("cluster", pa.string())]) == CLUSTER_TYPES
+
+    def test_named_field_order_and_empty_row_name(self) -> None:
+        assert text_types(["", "arbitrary", "001"]) == pa.schema(
+            [("", pa.string()), ("arbitrary", pa.string()), ("001", pa.string())]
         )
 
 
@@ -95,21 +109,22 @@ class TestNormalizeMoran:
             pd.ArrowDtype(pa.bool_()),
         ]
 
-    @pytest.mark.parametrize("token", ["9007199254740993.0", "1e-1000"])
-    def test_numeric_precision_loss(self, tmp_path: Path, token: str) -> None:
-        """Reject decimal rounding and underflow at the annotation boundary."""
-        with pytest.raises(ReaderFormatError, match="precision"):
-            normalize_moran(pd.DataFrame({"stat": [token]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv"))
+    @pytest.mark.parametrize("token", ["9007199254740993.0", "1e-1000", " 0.25 ", "\t-2.5e-1\t"])
+    def test_native_float_rounding(self, tmp_path: Path, token: str) -> None:
+        frame = pd.DataFrame({"stat": [token]}, dtype=STRING_DTYPE)
 
-    @pytest.mark.parametrize(
-        "token", ["NA", "NaN", "text", "", "inf", "-inf", "1e999", "18446744073709551617", " 0.25 "]
-    )
+        normalize_moran(frame, ArtifactFile(tmp_path / "moran.tsv"))
+
+        assert frame["stat"].tolist() == [float(token)]
+        assert frame["stat"].dtype == pd.ArrowDtype(pa.float64())
+
+    @pytest.mark.parametrize("token", ["NA", "NaN", "text", "", "inf", "-inf", "1e999", "18446744073709551617"])
     def test_invalid_statistic(self, tmp_path: Path, token: str) -> None:
-        with pytest.raises(ReaderFormatError, match=r"Moran statistic|precision"):
+        with pytest.raises(ReaderFormatError, match="Moran statistic"):
             normalize_moran(pd.DataFrame({"I": [token]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv"))
 
     def test_boolean_and_numeric_tokens_cannot_mix(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="nonnumeric"):
+        with pytest.raises(ReaderFormatError, match="invalid Moran statistic"):
             normalize_moran(
                 pd.DataFrame({"I": ["TRUE", "1"]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv")
             )
@@ -121,6 +136,64 @@ class TestNormalizeMoran:
 
         np.testing.assert_array_equal(frame["I"], [0.0, 0.0])
         assert frame["I"].dtype == pd.ArrowDtype(pa.float64())
+
+    @pytest.mark.parametrize(
+        ("tokens", "dtype", "expected"),
+        [
+            (["\t-9223372036854775808 ", "0x10", "0007", "-0"], pa.int64(), [-(2**63), 16, 7, 0]),
+            (["0xffffffffffffffff", "0", "-0", "9223372036854775808"], pa.uint64(), [2**64 - 1, 0, 0, 2**63]),
+            (["0X7FFFFFFFFFFFFFFF", "2", "0", "-1"], pa.int64(), [2**63 - 1, 2, 0, -1]),
+            (["TRUE", "False", "true", "FALSE"], pa.bool_(), [True, False, True, False]),
+            (["9007199254740993", "0.5", "1e-400", "-2"], pa.float64(), [float(2**53 + 1), 0.5, 0.0, -2.0]),
+        ],
+    )
+    def test_multichunk_exact_domains_and_row_order(
+        self, tmp_path: Path, tokens: list[str], dtype: pa.DataType, expected: list[int | float | bool]
+    ) -> None:
+        """A statistic's type and values are independent of Arrow CSV chunk boundaries."""
+        chunks = pa.chunked_array([tokens[:1], tokens[1:3], tokens[3:]], type=pa.string())
+        source = pd.Series(pd.arrays.ArrowExtensionArray(chunks), index=pd.Index([3, 1, 4, 2], name="row"))
+        frame = pd.DataFrame({"statistic": source})
+        frame.columns.name = "statistics"
+
+        normalize_moran(frame, ArtifactFile(tmp_path / "moran.tsv"))
+
+        assert frame["statistic"].tolist() == expected
+        assert frame["statistic"].dtype == pd.ArrowDtype(dtype)
+        assert frame.index.equals(source.index)
+        assert frame.index.name == "row"
+        assert frame.columns.name == "statistics"
+
+    @pytest.mark.parametrize(
+        "tokens",
+        [
+            ["18446744073709551616"],
+            ["-9223372036854775809"],
+            ["-1", "9223372036854775808"],
+            ["+1"],
+            ["+9007199254740993"],
+            ["-0x1"],
+            ["-0x0", "18446744073709551615"],
+            ["0x10000000000000000"],
+        ],
+    )
+    def test_integer_columns_never_fall_back_to_float(self, tmp_path: Path, tokens: list[str]) -> None:
+        with pytest.raises(ReaderFormatError, match="Moran statistic"):
+            normalize_moran(pd.DataFrame({"stat": tokens}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv"))
+
+    def test_mixed_column_declares_float_domain(self, tmp_path: Path) -> None:
+        """A fraction declares float64; integer-looking values then use native rounding."""
+        frame = pd.DataFrame({"stat": ["18446744073709551616", "0.5"]}, dtype=STRING_DTYPE)
+
+        normalize_moran(frame, ArtifactFile(tmp_path / "moran.tsv"))
+
+        assert frame["stat"].tolist() == [float(2**64), 0.5]
+        assert frame["stat"].dtype == pd.ArrowDtype(pa.float64())
+
+    @pytest.mark.parametrize("token", [" TRUE", "False\t", "1_0"])
+    def test_only_declared_boolean_and_numeric_spellings(self, tmp_path: Path, token: str) -> None:
+        with pytest.raises(ReaderFormatError, match="invalid Moran statistic"):
+            normalize_moran(pd.DataFrame({"stat": [token]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "moran.tsv"))
 
 
 class TestValidateCounts:

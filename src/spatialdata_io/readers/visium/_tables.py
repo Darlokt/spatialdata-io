@@ -16,7 +16,7 @@ and ``region``. ``uns["spatial"][<dataset_id>]`` keeps the scale-factor JSON
 and the HDF5 identity text as Scanpy's Visium reader stores them, without
 images.
 
-Positions are parsed by Arrow as text, projected to the six fields, with
+Positions are parsed with their declared Arrow types, projected to the six fields, with
 quoted newlines allowed. Arrow checks every record's field count but not
 strict quoting, so a malformed quote after the first record (which discovery
 parses strictly) may be read as a different value.
@@ -38,6 +38,7 @@ import pyarrow.csv as pacsv
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
+from spatialdata_io.readers._utils.csv import csv_errors
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -73,10 +74,10 @@ class PreparedTable:
 
 
 def read_positions(layout: VisiumLayout) -> pd.DataFrame:
-    """Read the six position fields as text with strict record widths and normalize them."""
+    """Read the six typed position fields with complete record widths and validate them."""
     context = ReaderErrorContext("visium", "tissue positions", layout.format_version)
     try:
-        with layout.positions.open("rb") as source:
+        with layout.positions.open("rb") as source, csv_errors(context=context, path=layout.positions):
             table = pacsv.read_csv(
                 source,
                 read_options=pacsv.ReadOptions(
@@ -87,10 +88,11 @@ def read_positions(layout: VisiumLayout) -> pd.DataFrame:
                 convert_options=pacsv.ConvertOptions(
                     column_types=POSITION_SOURCE_SCHEMA,
                     include_columns=list(POSITION_COLUMNS),
+                    null_values=[],
                     strings_can_be_null=False,
                 ),
             )
-    except (pa.ArrowInvalid, pa.ArrowKeyError) as error:
+    except pa.ArrowKeyError as error:
         raise ReaderFormatError(
             context=context,
             path=layout.positions,

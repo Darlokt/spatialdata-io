@@ -1,15 +1,17 @@
 """Stream MCQuant tables into one finite sparse table linked to its label images.
 
 Each ``quantification/<image>--<method>_<mask>.csv`` (schema in ``_schemas``)
-measures one label image. Tables are read in label order, all as exact text
-with Arrow's streaming CSV reader, and must share one set of columns:
+measures one label image. Tables are read in label order with declared Arrow
+types and must share one set of columns:
 
-- marker columns are decoded in bounded rows-by-markers float64 blocks (about
-  8 MiB, at least one row) and each block becomes CSR at once, so expression is
-  never dense as a whole. Arrow checks record widths but accepts some
+- marker columns are float64, parsed in 1 MiB source blocks and converted to
+  CSR immediately, so expression is never dense as a whole. Records should
+  fit in one parser block to be supported regardless of alignment. Arrow checks record widths but accepts some
   malformed quoting (a quote inside an unquoted field is literal text);
-- ``CellID`` becomes exact int64 IDs, the morphology columns nullable float64
-  and every other column stays Arrow text; these annotations are eager.
+- ``CellID`` is uint64, the morphology columns nullable float64 and every
+  other column stays exact Arrow text; these annotations are eager. IDs,
+  centroids and expression cannot be empty; only optional morphology treats
+  empty numeric fields as missing.
 
 The rows of all tables are concatenated once, linked by ``region`` (the label
 element name) and ``CellID``, and validated by one final linkage, which also
@@ -35,11 +37,12 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
-from spatialdata_io.readers._utils.csv import decode_float64, decode_float64_block, iter_csv_batches, read_csv_header
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -55,9 +58,9 @@ from spatialdata_io.readers.mcmicro._schemas import (
     QUANTIFICATION_CONTEXT,
     REGION_KEY,
     QuantificationColumns,
-    cell_ids,
-    optional_float_values,
     quantification_columns,
+    validate_expression,
+    validate_measurements,
     validate_position_columns,
 )
 
@@ -69,7 +72,11 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.mcmicro._rasters import ImageGrid
     from spatialdata_io.readers.mcmicro._schemas import MarkerPanel
 
-_BATCH_MEMORY_BYTES = 8 * 1024 * 1024
+# A native batch can span the current block and the preceding partial record.
+# At two source bytes per required marker, its float64 value payload is at most
+# eight times this block target; parser allocations, dense copies and CSR are
+# extra. Records fitting one block are supported regardless of alignment.
+_BATCH_BYTES = 1024 * 1024
 _NATIVE_FRAME_SUFFIX = "_regionprops_indices"
 _NATIVE_POSITION = "source_regionprops_centroid_zero_based_pixel_index_centres"
 _PHYSICAL_POSITION = "source_regionprops_centroid_in_raster_corner_frame"
@@ -81,80 +88,65 @@ _READER_OBS_COLUMNS = (REGION_KEY, CELL_ID, "spatial_frame", "spatial_pixel_fram
 
 @dataclass(frozen=True, slots=True)
 class _Measurements:
-    """Own one table's sparse expression blocks, exact IDs, and lexical annotations."""
+    """Own one table's sparse expression blocks and typed Arrow annotations."""
 
     blocks: list[sparse.csr_array]
-    cell_ids: pd.Series
     annotations: pa.Table
 
 
 def _read_measurements(
     path: ArtifactFile, columns: QuantificationColumns, label_dtype: np.dtype[np.integer]
 ) -> _Measurements:
-    """Decode bounded dense marker blocks to CSR, retaining annotations as exact text."""
-    features = columns.features
-    rows_per_batch = max(1, _BATCH_MEMORY_BYTES // (8 * len(features)))
-    annotation_names = [*columns.morphology, *columns.text]
+    """Parse typed native batches, retaining only CSR expression and eager annotations."""
+    annotation_names = [CELL_ID, *columns.morphology, *columns.text]
     blocks: list[sparse.csr_array] = []
-    identifiers: list[pa.Array] = []
     annotations: list[pa.RecordBatch] = []
-
-    with path.open("rb") as handle:
-        for batch in iter_csv_batches(handle, header=columns.names, context=QUANTIFICATION_CONTEXT, path=path):
-            for offset in range(0, batch.num_rows, rows_per_batch):
-                block = batch.slice(offset, rows_per_batch)
-                dense = decode_float64_block(
-                    [block.column(name) for name in features], names=features, context=QUANTIFICATION_CONTEXT, path=path
-                )
+    try:
+        with (
+            path.open("rb") as handle,
+            csv_errors(context=QUANTIFICATION_CONTEXT, path=path),
+            pacsv.open_csv(
+                handle,
+                read_options=pacsv.ReadOptions(block_size=_BATCH_BYTES, use_threads=False),
+                parse_options=pacsv.ParseOptions(newlines_in_values=True),
+                convert_options=pacsv.ConvertOptions(
+                    column_types=columns.types,
+                    include_columns=columns.types.names,
+                    null_values=[""],
+                    strings_can_be_null=False,
+                ),
+            ) as reader,
+        ):
+            for batch in reader:
+                validate_measurements(batch, columns, label_dtype, path)
+                dense = np.asarray(batch.select(columns.features).to_tensor(row_major=True))
+                validate_expression(dense, path)
                 blocks.append(as_csr_array(dense))
-                identifiers.append(block.column(CELL_ID))
-                annotations.append(block.select(annotation_names))
+                annotations.append(batch.select(annotation_names))
+    except OSError as error:
+        add_reader_context(error, context=QUANTIFICATION_CONTEXT, path=path)
+        raise
 
-    schema = pa.schema([(name, pa.string()) for name in annotation_names])
-    return _Measurements(
-        blocks,
-        cell_ids(pa.chunked_array(identifiers, pa.string()), label_dtype, path),
-        pa.Table.from_batches(annotations, schema=schema),
-    )
+    schema = pa.schema([columns.types.field(name) for name in annotation_names])
+    return _Measurements(blocks, pa.Table.from_batches(annotations, schema=schema))
 
 
 def _observations(
-    measurements: list[_Measurements], regions: list[str], columns: QuantificationColumns, paths: list[ArtifactFile]
+    measurements: list[_Measurements], regions: list[str], columns: QuantificationColumns
 ) -> tuple[pd.DataFrame, np.ndarray[tuple[int, int], np.dtype[np.float64]]]:
-    """Normalize concatenated lexical annotations once, independent of batch boundaries."""
-    sizes = [len(measurement.cell_ids) for measurement in measurements]
-    index = pd.Index([str(position) for position in range(sum(sizes))])
-    sources = list(zip(measurements, paths, strict=True))
-
-    # Every source file is validated with its own path before its values merge.
-    spatial = np.empty((len(index), 2), dtype=np.float64)
-    offset = 0
-    for measurement, path in sources:
-        end = offset + len(measurement.cell_ids)
-        for axis, name in enumerate(CENTROIDS):
-            spatial[offset:end, axis] = decode_float64(
-                measurement.annotations.column(name), name=name, context=QUANTIFICATION_CONTEXT, path=path
-            )
-        offset = end
-
-    obs = pd.DataFrame(index=index)
-    obs[REGION_KEY] = pd.Categorical.from_codes(np.repeat(np.arange(len(regions)), sizes), categories=pd.Index(regions))
-    obs[CELL_ID] = pd.concat([measurement.cell_ids for measurement in measurements], ignore_index=True).set_axis(index)
-
-    morphology = set(columns.morphology)
-    for name in (*columns.morphology, *columns.text):
-        if name in CENTROIDS:
-            continue
-        if name in morphology:
-            parts = [
-                optional_float_values(measurement.annotations.column(name), path, name) for measurement, path in sources
-            ]
-        else:
-            parts = [
-                measurement.annotations.column(name).to_pandas(types_mapper=pd.ArrowDtype)
-                for measurement in measurements
-            ]
-        obs[name] = pd.concat(parts, ignore_index=True).set_axis(index)
+    """Concatenate normalized typed annotations once and extract required NumPy XY."""
+    sizes = [measurement.annotations.num_rows for measurement in measurements]
+    names = [CELL_ID, *columns.morphology, *columns.text]
+    obs = pa.concat_tables([measurement.annotations.select(names) for measurement in measurements]).to_pandas(
+        types_mapper=pd.ArrowDtype
+    )
+    obs.index = pd.Index([str(position) for position in range(len(obs))])
+    spatial = np.column_stack([obs.pop(name).to_numpy(dtype=np.float64, copy=False) for name in CENTROIDS])
+    obs.insert(
+        0,
+        REGION_KEY,
+        pd.Categorical.from_codes(np.repeat(np.arange(len(regions)), sizes), categories=pd.Index(regions)),
+    )
     return obs, spatial
 
 
@@ -172,20 +164,20 @@ def read_table(
     source_grids: list[ImageGrid] = []
     for quantification in quantifications:
         path = quantification.path
-        current = quantification_columns(read_csv_header(path, context=QUANTIFICATION_CONTEXT), panel.features, path)
+        current = quantification_columns(csv_header(path, context=QUANTIFICATION_CONTEXT), panel.features, path)
         if columns is None:
             columns = current
-        elif set(current.names) != set(columns.names):
+        elif set(current.types.names) != set(columns.types.names):
             raise ReaderFormatError(
                 context=QUANTIFICATION_CONTEXT,
                 path=path,
-                found=f"columns {list(current.names)!r}",
-                expected=f"the shared MCQuant schema {columns.names!r}",
+                found=f"columns {current.types.names!r}",
+                expected=f"the shared MCQuant schema {columns.types.names!r}",
             )
         measurement = _read_measurements(path, current, label_dtypes[quantification.target.key])
 
         # A label without measured cells is not a table region; empty linked tables fail below.
-        if len(measurement.cell_ids):
+        if measurement.annotations.num_rows:
             measurements.append(measurement)
             regions.append(quantification.target.key)
             paths.append(path)
@@ -201,7 +193,7 @@ def read_table(
 
     validate_position_columns(columns, multiple=len({grid.name for grid in source_grids}) > 1, path=paths[0])
 
-    obs, spatial = _observations(measurements, regions, columns, paths)
+    obs, spatial = _observations(measurements, regions, columns)
     obs.columns = sanitize_column_names(
         list(obs.columns), source="mcmicro: the quantification CSV header", reserved=_READER_OBS_COLUMNS
     )
@@ -214,7 +206,9 @@ def read_table(
     expression = sparse.vstack([block for measurement in measurements for block in measurement.blocks], format="csr")
     table = ad.AnnData(X=expression, obs=obs)
     table.var = prepare_anndata_dataframe(var, context=MARKERS_CONTEXT)
-    _set_positions(table, spatial, source_grids, [len(measurement.cell_ids) for measurement in measurements], paths)
+    _set_positions(
+        table, spatial, source_grids, [measurement.annotations.num_rows for measurement in measurements], paths
+    )
     # This reader constructed an eager DataFrame; AnnData also admits backed frames.
     prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=_TABLE_CONTEXT, allow_float_nulls=True)
     return parse_linked_table(table, TableLinkage(tuple(regions), REGION_KEY, CELL_ID), context=_TABLE_CONTEXT)

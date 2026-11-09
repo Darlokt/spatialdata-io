@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-from functools import partial
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -14,7 +13,6 @@ from scipy import sparse
 from spatialdata.models import get_table_keys
 
 from spatialdata_io._positions import POSITIONS_KEY
-from spatialdata_io.readers._utils.csv import iter_csv_batches
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro import _tables as mcmicro_tables
@@ -69,9 +67,7 @@ def _source(tmp_path: Path, name: str = "source") -> ArtifactFile:
 class TestReadTable:
     """Rows, features, IDs, annotations, and coordinates keep their exact source meaning."""
 
-    def test_concatenation_sparsity_types_and_linkage(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        # Two float64 markers per row: one row per numerical block.
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._BATCH_MEMORY_BYTES", 16)
+    def test_concatenation_sparsity_types_and_linkage(self, tmp_path: Path) -> None:
         first = _quantification(tmp_path, "s1", _HEADER + "7,0,1.25,1.5,2,4,x\n3,0.5,0,3.5,4,,\n")
         second = _quantification(tmp_path, "s2", "B,CellID,A,note,Area,Y_centroid,X_centroid\n0,7,2,y,1,6,5.5\n")
         table = read_table((first, second), _panel(), _dtypes(first, second), _grids(first, second))
@@ -87,7 +83,7 @@ class TestReadTable:
         assert table.obs.columns.tolist() == ["region", "CellID", "Area", "note", "spatial_pixel_frame"]
         assert table.obs["region"].tolist() == ["s1_seg_cell", "s1_seg_cell", "s2_seg_cell"]
         assert table.obs["CellID"].tolist() == [7, 3, 7]
-        assert table.obs["CellID"].dtype == np.dtype(np.int64)
+        assert table.obs["CellID"].dtype == np.dtype(np.uint64)
         np.testing.assert_array_equal(table.obs["Area"].to_numpy(), [4, np.nan, 1])
         assert table.obs["note"].tolist() == ["x", "", "y"]
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[1.5, 2], [3.5, 4], [5.5, 6]])
@@ -125,6 +121,17 @@ class TestReadTable:
         table = read_table((empty, measured), _panel(), _dtypes(empty, measured), _grids(empty, measured))
         assert get_table_keys(table)[0] == "s2_seg_cell"
 
+    def test_empty_first_table_defines_annotation_order(self, tmp_path: Path) -> None:
+        empty = _quantification(tmp_path, "s1", "CellID,A,B,X_centroid,Y_centroid,Area,noteA,noteB\n")
+        measured = _quantification(
+            tmp_path, "s2", "noteB,B,Area,noteA,CellID,Y_centroid,A,X_centroid\nv,2,3,u,1,5,4,6\n"
+        )
+        table = read_table((empty, measured), _panel(), _dtypes(empty, measured), _grids(empty, measured))
+        assert table.obs.columns.tolist() == ["region", "CellID", "Area", "noteA", "noteB"]
+        assert table.obs["noteA"].tolist() == ["u"]
+        assert table.obs["noteB"].tolist() == ["v"]
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[6, 5]])
+
     def test_wide_marker_blocks_are_never_densified_as_a_whole(self, tmp_path: Path, mocker: MockerFixture) -> None:
         features = tuple(f"M{i}" for i in range(64))
         rows = [",".join(["1" if i == j else "0" for j in range(64)]) for i in range(64)]
@@ -132,28 +139,30 @@ class TestReadTable:
         text += "".join(f"{i + 1},{row},0,0\n" for i, row in enumerate(rows))
         table_source = _quantification(tmp_path, "s", text)
         panel = MarkerPanel(features, pd.DataFrame(index=pd.Index(features)))
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._BATCH_MEMORY_BYTES", 8 * 64 * 4)
-        spy = mocker.spy(sparse, "vstack")
+        mocker.patch.object(mcmicro_tables, "_BATCH_BYTES", 1024)
+        blocks = mocker.spy(mcmicro_tables, "as_csr_array")
         table = read_table((table_source,), panel, _dtypes(table_source), _grids(table_source))
-        assert spy.call_count == 1
-        assert len(spy.call_args.args[0]) == 16
+        assert blocks.call_count > 1
+        assert all(call.args[0].nbytes <= 4 * 1024 for call in blocks.call_args_list)
+        assert all(call.args[0].shape[1] == len(features) for call in blocks.call_args_list)
         assert isinstance(table.X, sparse.csr_array)
         assert table.X.nnz == 64
+        np.testing.assert_array_equal(table.X.data, np.ones(64))
+        np.testing.assert_array_equal(table.X.indices, np.arange(64))
+        np.testing.assert_array_equal(table.X.indptr, np.arange(65))
 
     @pytest.mark.parametrize(
         ("text", "match"),
         [
             (_HEADER + "1,inf,0,0,0,1,a\n", "nonfinite"),
-            (_HEADER + "1,1,0,0,0,1\n", r"malformed CSV records \("),
-            (_HEADER + "1,1,0,,0,1,a\n", "nonnumeric 'X_centroid'"),
-            (_HEADER + "1,1,0,0,0,big,a\n", "nonnumeric 'Area'"),
+            (_HEADER + "1,1,0,0,0,1\n", r"malformed CSV \("),
+            (_HEADER + "1,1,0,,0,1,a\n", "missing 'X_centroid'"),
+            (_HEADER + "1,1,0,0,0,big,a\n", r"malformed CSV \("),
             (_HEADER + "300,1,0,0,0,1,a\n", "'CellID' value 300 above 255"),
-            (_HEADER + "1,1,0,0,9007199254740993,1,a\n", "'Y_centroid' value '9007199254740993' beyond"),
-            (_HEADER + "1,1,9007199254740993,0,0,1,a\n", "'B' value '9007199254740993' beyond"),
-            (_HEADER + "2.0,1,1e-400,0,0,1,a\n", "'B' value '1e-400' underflowing"),
-            ("CellID,A,B,X_centroid,Y_centroid,A\n", "unique nonempty"),
+            (_HEADER + "2.0,1,0,0,0,1,a\n", r"malformed CSV \("),
+            ("CellID,A,B,X_centroid,Y_centroid,A\n", "repeated column"),
             ("CellID,A,X_centroid,Y_centroid\n1,1,0,0\n", "missing columns"),
-            ('"unterminated\n', "malformed CSV header|unique nonempty"),
+            ('"unterminated\n', "malformed CSV"),
         ],
     )
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:
@@ -163,13 +172,8 @@ class TestReadTable:
         assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")
         assert caught.value.path == source.path
 
-    @pytest.mark.parametrize("parser_batches", [False, True])
-    def test_duplicate_ids_across_batches_fail_at_final_linkage(
-        self, tmp_path: Path, mocker: MockerFixture, *, parser_batches: bool
-    ) -> None:
-        mocker.patch("spatialdata_io.readers.mcmicro._tables._BATCH_MEMORY_BYTES", 32)
-        if parser_batches:
-            mocker.patch.object(mcmicro_tables, "iter_csv_batches", partial(iter_csv_batches, block_bytes=128))
+    def test_duplicate_ids_across_batches_fail_at_final_linkage(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        mocker.patch.object(mcmicro_tables, "_BATCH_BYTES", 128)
         text = _HEADER + "".join(f"{identifier},1,0,0,0,1,note\n" for identifier in [*range(1, 31), 7])
         source = _quantification(tmp_path, "s", text)
         with pytest.raises(ReaderFormatError, match=r"duplicate \(region, instance\) pairs") as caught:
@@ -199,6 +203,62 @@ class TestReadTable:
         with pytest.raises(ReaderFormatError, match="no quantified cells"):
             read_table((source,), _panel(), _dtypes(source), _grids(source))
 
+    @pytest.mark.parametrize(
+        ("token", "expected"), [("0x10", 16), ("007", 7), (" 7\t", 7), (str(2**64 - 1), 2**64 - 1)]
+    )
+    def test_native_integer_grammar(self, tmp_path: Path, token: str, expected: int) -> None:
+        source = _quantification(tmp_path, "s", _HEADER + f"{token},1,0,0,0,1,a\n")
+        table = read_table((source,), _panel(), _dtypes(source, dtype=np.uint64), _grids(source))
+        assert table.obs["CellID"].tolist() == [expected]
+        assert table.obs["CellID"].dtype == np.dtype(np.uint64)
+
+    @pytest.mark.parametrize("token", ["2.0", "2e0", "+1", "1_0", "-1", str(2**64), "nan", "NA"])
+    def test_invalid_native_integer_tokens(self, tmp_path: Path, token: str) -> None:
+        source = _quantification(tmp_path, "s", _HEADER + f"{token},1,0,0,0,1,a\n")
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
+            read_table((source,), _panel(), _dtypes(source, dtype=np.uint64), _grids(source))
+        assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")
+        assert caught.value.path == source.path
+
+    @pytest.mark.parametrize("column", ["CellID", "A", "B", "X_centroid", "Y_centroid"])
+    def test_required_numeric_empty_fields_fail(self, tmp_path: Path, column: str) -> None:
+        names: tuple[str, ...] = tuple(_HEADER.strip().split(","))
+        values = ["1", "1", "0", "0", "0", "1", ""]
+        values[names.index(column)] = ""
+        source = _quantification(tmp_path, "s", _HEADER + ",".join(values) + "\n")
+        with pytest.raises(ReaderFormatError, match=f"missing '{column}'"):
+            read_table((source,), _panel(), _dtypes(source), _grids(source))
+
+    @pytest.mark.parametrize("column", ["A", "X_centroid", "Area"])
+    @pytest.mark.parametrize("token", ["1e-400", "9007199254740993", " \t0.10000000000000002 "])
+    def test_native_float_rounding(self, tmp_path: Path, column: str, token: str) -> None:
+        names: tuple[str, ...] = tuple(_HEADER.strip().split(","))
+        values = ["1", "1", "0", "0", "0", "1", ""]
+        values[names.index(column)] = token
+        source = _quantification(tmp_path, "s", _HEADER + ",".join(values) + "\n")
+        table = read_table((source,), _panel(), _dtypes(source), _grids(source))
+        if column == "A":
+            assert isinstance(table.X, sparse.csr_array)
+            actual = table.X[0, 0]
+        elif column == "X_centroid":
+            actual = table.obsm["spatial_pixels"][0, 0]
+        else:
+            actual = table.obs[column].iloc[0]
+        assert actual == float(token)
+
+    @pytest.mark.parametrize("token", ["NA", "NULL", "nan", "inf"])
+    def test_optional_morphology_only_empty_is_missing(self, tmp_path: Path, token: str) -> None:
+        source = _quantification(tmp_path, "s", _HEADER + f"1,1,0,0,0,{token},a\n")
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV|nonfinite"):
+            read_table((source,), _panel(), _dtypes(source), _grids(source))
+
+    def test_oversized_record_fails_with_source_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        mocker.patch.object(mcmicro_tables, "_BATCH_BYTES", 128)
+        source = _quantification(tmp_path, "s", _HEADER + "1,1,0,0,0,1," + "x" * 1024 + "\n")
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
+            read_table((source,), _panel(), _dtypes(source), _grids(source))
+        assert caught.value.path == source.path
+
 
 class TestReadMeasurements:
     """The reader owns and closes its source on every iteration outcome."""
@@ -214,15 +274,23 @@ class TestReadMeasurements:
         path = ArtifactFile(tmp_path / "s.csv")
         columns = quantification_columns(_HEADER.strip().split(","), ("A", "B"), path)
         mocker.patch("pathlib.Path.open", return_value=source)
-        mocker.patch.object(mcmicro_tables, "iter_csv_batches", partial(iter_csv_batches, block_bytes=128))
+        mocker.patch.object(mcmicro_tables, "_BATCH_BYTES", 128)
         if failure is None:
-            assert len(_read_measurements(path, columns, np.dtype(np.uint32)).cell_ids) == 20
+            assert _read_measurements(path, columns, np.dtype(np.uint32)).annotations.num_rows == 20
         else:
-            with pytest.raises(ReaderFormatError, match=r"nonfinite|malformed CSV records") as caught:
+            with pytest.raises(ReaderFormatError, match=r"nonfinite|malformed CSV") as caught:
                 _read_measurements(path, columns, np.dtype(np.uint32))
             assert caught.value.context.reader == "mcmicro"
             assert caught.value.path == path
         assert source.closed
+
+    def test_open_error_preserves_type_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = ArtifactFile(tmp_path / "s.csv")
+        columns = quantification_columns(_HEADER.strip().split(","), ("A", "B"), path)
+        mocker.patch("pathlib.Path.open", side_effect=PermissionError("denied"))
+        with pytest.raises(PermissionError) as caught:
+            _read_measurements(path, columns, np.dtype(np.uint32))
+        assert any("mcmicro" in note and str(path) in note for note in caught.value.__notes__)
 
 
 class TestSetPositions:

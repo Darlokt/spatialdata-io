@@ -54,11 +54,13 @@ ACGCCTGACACGCGCT-1,0,0,0,1234.5,2345.6
 | Field | Meaning | Rule |
 | --- | --- | --- |
 | `barcode` | spot barcode | nonempty, unique, no NUL; quoted values may contain commas and newlines |
-| `in_tissue` | `1` under tissue, `0` otherwise | integer token, `0` or `1` |
-| `array_row`, `array_col` | spot row and column on the capture array | nonnegative integer token fitting int64; `2.0` and `2e0` fail |
-| `pxl_row_in_fullres`, `pxl_col_in_fullres` | spot centre `y` and `x` in full-resolution pixels | finite, nonnegative, may be fractional; must not lose precision as float64 |
+| `in_tissue` | `1` under tissue, `0` otherwise | uint8, restricted to `0` or `1` |
+| `array_row`, `array_col` | spot row and column on the capture array | uint64, including zero through `2**64 - 1` |
+| `pxl_row_in_fullres`, `pxl_col_in_fullres` | spot centre `y` and `x` in full-resolution pixels | finite, nonnegative float64; may be fractional |
 
-A header names the fields, so they may come in any order and extra columns are ignored; empty or duplicate names raise. A headerless file has exactly these six fields. The first record is parsed with strict CSV quoting to recognize the header; later records must have the same number of fields, but a malformed quote there may be accepted and read as a different value. Every count barcode needs one position row; position rows without counts are not returned.
+A header names the fields, so they may come in any order and extra columns are ignored; empty or duplicate names raise. A quoted extra header name may contain a newline. A headerless file has exactly these six fields. The first record is parsed with strict CSV quoting to recognize the header; later records must have the same number of fields, but a malformed quote there may be accepted and read as a different value. Every count barcode needs one position row; position rows without counts are not returned.
+
+The six fields are parsed directly with their Arrow types. Barcode strings remain literal, including leading zeros, whitespace, `NA` and `NULL`; empty or NUL-containing barcodes fail. Numeric fields cannot be empty and have no implicit missing-value spellings. Spaces and tabs around numbers are accepted. Unsigned integers accept hexadecimal (`0x10`) and reject negative values, a leading plus sign, decimal/exponent spellings (`2.0`, `2e0`) and digit separators. Tissue values outside zero and one fail even when they fit uint8. Values outside the declared unsigned width fail conversion. Floats are rounded directly to float64: `9007199254740993` rounds to `9007199254740992` and `1e-400` to zero; negative zero is preserved. Parsed `nan`/`inf` and negative pixel coordinates fail semantic validation. Source number text is not decoded a second time to impose extra precision restrictions.
 
 `scalefactors_json.json` must give finite positive `tissue_hires_scalef` and `tissue_lowres_scalef`, whose inverses must be finite, and `spot_diameter_fullres`, whose half must be a positive float64. The whole object, including `fiducial_diameter_fullres` and any other key, is kept in `uns["spatial"]`.
 
@@ -77,7 +79,7 @@ The table has one row per count-matrix barcode in matrix order, including spots 
 
 - `X` is a canonical finite CSR sparse array, float32 when every count is exact in float32, else float64. Duplicate sparse entries are summed.
 - `var` holds `gene_ids`, `feature_types` and, when present, `genome`; `var_names` are the feature names, made unique with `-1`, `-2`, ... unless `make_var_names_unique=False`.
-- `obs` holds int64 `in_tissue`, `array_row` and `array_col`, the barcode again as `spot_id` (string) and categorical `region` (`dataset_id`); `spot_id` and `region` link the table to the circles.
+- `obs` holds uint8 `in_tissue` and uint64 `array_row`/`array_col`, the barcode again as `spot_id` (string) and categorical `region` (`dataset_id`); `spot_id` and `region` link the table to the circles.
 - `obsm["spatial_pixels"]` holds float64 spot centres `x, y` in full-resolution pixels, declared in `uns["spatialdata_io_positions"]`. There is no physical `obsm["spatial"]`.
 - `uns["spatial"][dataset_id]` holds `scalefactors` and `metadata` (`chemistry_description`, `software_version` of an HDF5 matrix) as Scanpy stores them, without images.
 
@@ -157,6 +159,7 @@ spatialdata-io visium --input outs --output sample.zarr \
 
 | Change | Reason |
 | --- | --- |
+| Position CSV fields use declared Arrow types: uint8 tissue state, uint64 array coordinates and float64 pixels. Native integer grammar and direct float rounding replace text-to-number conversion and source-lexeme precision checks. | Preserve the complete unsigned grid domain and make scalar types explicit at ingestion |
 | Coordinate systems are `<dataset_id>_pixels`, `<dataset_id>_hires_pixels` and `<dataset_id>_lowres_pixels` (were `<dataset_id>`, `<dataset_id>_downscaled_hires` and `<dataset_id>_downscaled_lowres`), and the positions declaration names `<dataset_id>_pixels`. Replace `coordinate_systems="<dataset_id>"` with `"<dataset_id>_pixels"` in rendering and query code. | Frame names state their pixel unit; `global` is reserved for micrometres |
 | Image channels are `r, g, b(, a)` only when the file declares RGB; OME-TIFF channels use their OME names. Before, every three- or four-channel image was labelled RGB(A). | A fluorescence image was mislabelled RGBA |
 | `data_axes` accepts only a string such as `"CYX"` | One form across readers; the CLI already took a string |

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 _COUNTS = '"fov","cell_ID","B","HLA-A","NegPrb1"\n2,1,0,3,0\n1,0,9,9,9\n1,2,4,0,1\n1,1,0,0,2\n'
-_DEFAULT_BATCH_BYTES = _tables._BATCH_MEMORY_BYTES  # noqa: SLF001, RUF100
+_DEFAULT_BATCH_BYTES = _tables._BATCH_BYTES  # noqa: SLF001, RUF100
 _METADATA = (
     "fov,cell_ID,CenterX_local_px,CenterY_local_px,CenterX_global_px,CenterY_global_px,Area,Mean.DAPI,note\n"
     "1,1,2,5,102,15,4,1.5,01\n1,2,6,2,106,12,3,NA,\n2,1,2,5,202,25,5,,x\n"
@@ -49,15 +49,25 @@ class TestReadHeader:
     @pytest.mark.parametrize("compressed", [False, True])
     def test_quoted_header(self, tmp_path: Path, *, compressed: bool) -> None:
         path = _write(tmp_path, "c.csv", _COUNTS, compressed=compressed)
-        assert read_header(path, "count matrix") == ["fov", "cell_ID", "B", "HLA-A", "NegPrb1"]
+        assert read_header(path, "count matrix") == ("fov", "cell_ID", "B", "HLA-A", "NegPrb1")
 
     @pytest.mark.parametrize("payload", [b"\xff\xfe,a\n", b'"unterminated\n'])
     def test_malformed(self, tmp_path: Path, payload: bytes) -> None:
         path = tmp_path / "c.csv"
         path.write_bytes(payload)
-        with pytest.raises(ReaderFormatError, match="malformed CSV header") as error:
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as error:
             read_header(ArtifactFile(path), "cell metadata")
         assert error.value.context == ReaderErrorContext("cosmx", "cell metadata")
+
+    def test_unreadable_source_preserves_exception_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = _write(tmp_path, "m.csv", _METADATA)
+        failure = PermissionError(13, "denied", str(path))
+        mocker.patch.object(type(path), "open", side_effect=failure)
+        with pytest.raises(PermissionError) as caught:
+            read_header(path, "cell metadata")
+        assert caught.value is failure
+        assert caught.value.errno == 13
+        assert any("cosmx" in note and "cell metadata" in note for note in caught.value.__notes__)
 
 
 class TestReadCounts:
@@ -67,7 +77,7 @@ class TestReadCounts:
     def test_background_removed_and_order_kept(
         self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
     ) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_MEMORY_BYTES", 1)
+        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_BYTES", 128)
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS, compressed=compressed))
         assert isinstance(counts.expression, sparse.csr_array)
         assert counts.expression.dtype == np.float32
@@ -75,12 +85,12 @@ class TestReadCounts:
         assert counts.fovs.tolist() == [2, 1, 1]
         assert counts.cell_ids.tolist() == [1, 2, 1]
 
-    @pytest.mark.parametrize("batch_bytes", [1, _DEFAULT_BATCH_BYTES])
+    @pytest.mark.parametrize("batch_bytes", [128, _DEFAULT_BATCH_BYTES])
     @pytest.mark.parametrize(("value", "dtype"), [(7, "float32"), (2**24 + 1, "float64"), (2**24 + 2, "float32")])
     def test_adaptive_exact_counts(
         self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, value: int, dtype: str
     ) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_MEMORY_BYTES", batch_bytes)
+        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_BYTES", batch_bytes)
         text = f"fov,cell_ID,A,B\n1,1,1,0\n1,2,{value},2\n"
         counts = read_counts(_write(tmp_path, "c.csv", text))
         assert counts.expression.dtype == np.dtype(dtype)
@@ -92,20 +102,20 @@ class TestReadCounts:
         assert caught.value.path == tmp_path / "c.csv"
         assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
 
-    def test_row_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_native_batches_preserve_exact_counts(self, tmp_path: Path, mocker: MockerFixture) -> None:
         # Only the last row needs float64, so every earlier 1,000-row block is float32 on its own.
         rows = "".join(
             f"{1 + row % 3},{row // 3 + 1},{row % 5},{(row * 7) % 4},{2**24 + 1 if row == 20_000 else row % 2}\n"
             for row in range(20_001)
         )
         path = _write(tmp_path, "c.csv", "fov,cell_ID,A,B,C\n" + rows)
-        blocks = mocker.spy(_tables, "count_block")
+        blocks = mocker.spy(_tables, "as_csr_array")
         whole = read_counts(path)
-        # 20,001 rows of 3 features are 480 KiB of int64, under the 8 MiB target: one block.
+        # The complete source fits the default parser block; smaller native batches keep exact CSR values.
         assert blocks.call_count == 1
-        mocker.patch.object(_tables, "_BATCH_MEMORY_BYTES", 1_000 * 8 * 3)
+        mocker.patch.object(_tables, "_BATCH_BYTES", 1024)
         batched = read_counts(path)
-        assert blocks.call_count == 1 + 21
+        assert blocks.call_count > 2
         assert whole.expression.dtype == batched.expression.dtype == np.float64
         assert whole.expression.nnz == batched.expression.nnz
         for name in ("data", "indices", "indptr"):
@@ -123,13 +133,31 @@ class TestReadCounts:
         counts = read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A\n"))
         assert counts.expression.shape == (0, 1)
 
-    def test_exact_decimal_integer_spellings(self, tmp_path: Path) -> None:
-        counts = read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A,B\n1.0,2e0,3.0,0\n+1,1,0e0,4\n"))
-        assert counts.fovs.dtype == counts.cell_ids.dtype == np.dtype(np.int64)
+    def test_native_integer_spellings(self, tmp_path: Path) -> None:
+        counts = read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A,B\n0x1,0x2,0x3,0\n1,1,0,4\n"))
+        assert str(counts.fovs.dtype) == str(counts.cell_ids.dtype) == "uint64[pyarrow]"
         assert counts.fovs.tolist() == [1, 1]
         assert counts.cell_ids.tolist() == [2, 1]
         assert counts.expression.dtype == np.float32
         np.testing.assert_array_equal(counts.expression.toarray(), [[3, 0], [0, 4]])
+
+    @pytest.mark.parametrize("compressed", [False, True])
+    @pytest.mark.parametrize("token", ["", "NA", "-1", "2.0", "2e0", "+1", "1_0", str(2**64)])
+    def test_background_counts_obey_the_typed_domain(self, tmp_path: Path, token: str, *, compressed: bool) -> None:
+        path = _write(tmp_path, "c.csv", f"fov,cell_ID,A\n1,0,{token}\n", compressed=compressed)
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
+            read_counts(path)
+        assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
+        assert caught.value.path == path
+
+    @pytest.mark.parametrize(("count", "dtype"), [(2**63, "float32"), (2**63 + 2048, "float64")])
+    def test_unsigned_counts_above_signed_range_are_exact(self, tmp_path: Path, count: int, dtype: str) -> None:
+        source = f"fov,cell_ID,A\n{2**64 - 1},{2**64 - 1},{count}\n"
+        counts = read_counts(_write(tmp_path, "c.csv", source))
+        assert counts.fovs.tolist() == counts.cell_ids.tolist() == [2**64 - 1]
+        assert counts.fovs.name is counts.cell_ids.name is None
+        assert counts.expression.dtype == np.dtype(dtype)
+        assert int(counts.expression.data[0]) == count
 
     @pytest.mark.parametrize("compressed", [False, True])
     def test_source_closes_when_a_record_is_malformed(
@@ -137,18 +165,18 @@ class TestReadCounts:
     ) -> None:
         path = _write(tmp_path, "c.csv", "fov,cell_ID,A\n1,1,1\n1,2\n", compressed=compressed)
         sources = mocker.spy(_tables.gzip, "GzipFile") if compressed else mocker.spy(type(path), "open")
-        with pytest.raises(ReaderFormatError, match=r"malformed CSV records \(") as caught:
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV \(") as caught:
             read_counts(path)
         assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
         assert sources.spy_return_list
         assert all(source.closed for source in sources.spy_return_list)
 
-    @pytest.mark.parametrize("batch_bytes", [1, _DEFAULT_BATCH_BYTES])
+    @pytest.mark.parametrize("batch_bytes", [128, _DEFAULT_BATCH_BYTES])
     @pytest.mark.parametrize("cells", [(1, 2, 3), (0, 0, 0), (0, 2, 3)])
     def test_background_modes(
         self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, cells: tuple[int, ...]
     ) -> None:
-        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_MEMORY_BYTES", batch_bytes)
+        mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_BYTES", batch_bytes)
         text = "fov,cell_ID,A,B\n" + "".join(f"1,{cell},{i},0\n" for i, cell in enumerate(cells))
         counts = read_counts(_write(tmp_path, "c.csv", text))
         assert isinstance(counts.expression, sparse.csr_array)
@@ -160,7 +188,7 @@ class TestReadCounts:
         assert counts.cell_ids.tolist() == [cell for cell in cells if cell]
 
     def test_invalid_background_counts_are_not_ignored(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="'A' value '-1'"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_counts(_write(tmp_path, "c.csv", "fov,cell_ID,A\n1,0,-1\n"))
 
     def test_large_sparse_expression_is_never_densified(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -177,9 +205,9 @@ class TestReadCounts:
         ("text", "match"),
         [
             ("fov,cell_ID,A\n1,1,0\n1,1,2\n", "duplicate"),
-            ("fov,cell_ID,A\n1,1,1.5\n", "'A' value '1.5'"),
-            ("fov,cell_ID,A\n0,1,1\n", "'fov' value '0'"),
-            ("fov,cell_ID,A\n1,1\n", r"malformed CSV records \("),
+            ("fov,cell_ID,A\n1,1,1.5\n", "malformed CSV"),
+            ("fov,cell_ID,A\n0,1,1\n", "missing or zero 'fov'"),
+            ("fov,cell_ID,A\n1,1\n", r"malformed CSV \("),
         ],
     )
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:
@@ -189,6 +217,40 @@ class TestReadCounts:
 
 class TestReadMetadata:
     """Keys, centers, rounding bounds, and annotation types are exact."""
+
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_printed_coordinate_precision_is_independent_of_numeric_value(
+        self, tmp_path: Path, *, compressed: bool
+    ) -> None:
+        text = (
+            "fov,cell_ID,CenterX_local_px,CenterY_local_px,CenterX_global_px,CenterY_global_px\n"
+            "1,1,2.00,5.000,102.0000,15.00000\n"
+            "1,2,6.0,2.0,106.00,12.00\n"
+        )
+        metadata = read_metadata(_write(tmp_path, "m.csv", text, compressed=compressed))
+        np.testing.assert_array_equal(metadata.local, [[2, 5], [6, 2]])
+        np.testing.assert_array_equal(metadata.global_, [[102, 15], [106, 12]])
+        np.testing.assert_array_equal(metadata.samples[0].local_half, [0.005, 0.05])
+        np.testing.assert_array_equal(metadata.samples[0].global_half, [0.00005, 0.005])
+        np.testing.assert_array_equal(metadata.samples[1].local_half, [0.0005, 0.05])
+        np.testing.assert_array_equal(metadata.samples[1].global_half, [0.000005, 0.005])
+
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_typed_annotations_preserve_rounding_nulls_and_literal_strings(
+        self, tmp_path: Path, *, compressed: bool
+    ) -> None:
+        text = _METADATA.replace("4,1.5,01", "0.10000000000000002,1e-400,NA")
+        metadata = read_metadata(_write(tmp_path, "m.csv", text, compressed=compressed))
+        assert str(metadata.obs["Area"].dtype) == "double[pyarrow]"
+        assert metadata.obs["Area"].iloc[0] == float("0.10000000000000002")
+        assert metadata.obs["Mean.DAPI"].iloc[0] == 0.0
+        assert metadata.obs["Mean.DAPI"].isna().tolist() == [False, True, True]
+        assert metadata.obs["note"].tolist() == ["NA", "", "x"]
+
+    @pytest.mark.parametrize("token", ["NULL", "null", "nan", "inf", "-inf"])
+    def test_numeric_annotations_allow_only_declared_null_spellings(self, tmp_path: Path, token: str) -> None:
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV|nonfinite"):
+            read_metadata(_write(tmp_path, "m.csv", _METADATA.replace("4,1.5,01", f"4,{token},01")))
 
     def test_types_and_samples(self, tmp_path: Path) -> None:
         metadata = read_metadata(_write(tmp_path, "m.csv", _METADATA))
@@ -219,10 +281,9 @@ class TestReadMetadata:
         ("replace", "match"),
         [
             (("\n1,2,", "\n1,1,"), "duplicate"),
-            (("1,1,2,5,102", "1,0,2,5,102"), "'cell_ID' value '0'"),
-            (("106,12", "inf,12"), "nonfinite"),
-            (("106,12", "9007199254740993,12"), "beyond the exact float64 integers"),
-            (("1,2,6,2", "1,1.0,6,2"), "duplicate"),
+            (("1,1,2,5,102", "1,0,2,5,102"), "missing or zero 'cell_ID'"),
+            (("106,12", "inf,12"), "non-decimal"),
+            (("1,2,6,2", "1,1.0,6,2"), "malformed CSV"),
             (("01\n", "01\n9,9,0x1,1,1,1,1,1,\n"), "non-decimal|nonnumeric"),
         ],
     )

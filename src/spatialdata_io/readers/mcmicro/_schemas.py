@@ -17,8 +17,9 @@ MCQuant writes one ``<image>--<method>_<mask>.csv`` per label image
     CellID,<marker IDs...>,X_centroid,Y_centroid,column_centroid,row_centroid,
     Area,MajorAxisLength,MinorAxisLength,Eccentricity,Solidity,Extent,Orientation,...
 
-- ``CellID``: the label value of the cell, a positive integer.
-- one column per canonical marker ID: mean intensity, the expression values.
+- ``CellID``: the label value of the cell, positive uint64 fitting its target
+  label dtype; zero is background.
+- one float64 column per canonical marker ID: finite mean intensity.
 - the regionprops morphology columns in ``MORPHOLOGY``, decoded as float64.
   ``X_centroid``/``Y_centroid`` (required) are ``centroid-1``/``centroid-0``,
   zero-based pixel-index coordinates of the label image.
@@ -29,6 +30,12 @@ Columns are matched by name in any order. Names must be unique, nonempty and
 free of NUL before a parser could repair them. The reader-owned ``region``
 column may not occur, and no canonical marker ID may name ``CellID`` or a
 centroid, so every column has one role.
+
+Arrow's typed CSV grammar applies: integers accept hexadecimal, trim spaces
+and tabs, and reject decimal or exponent spellings. Floating text rounds
+directly to float64, including underflow to zero. All required fields must be
+present; only optional morphology may contain empty numeric fields. Text is
+never implicitly null, including empty fields and missing-value words.
 """
 
 from __future__ import annotations
@@ -40,18 +47,18 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
-from spatialdata_io.readers._utils.csv import decode_float64, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    import numpy.typing as npt
+
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 STRING_DTYPE = pd.ArrowDtype(pa.string())
-FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
-CELL_ID_DTYPE = pd.ArrowDtype(pa.int64())
 
 MARKER_NAME = "marker_name"
 CELL_ID = "CellID"
@@ -144,7 +151,7 @@ def normalize_markers(frame: pd.DataFrame, path: ArtifactFile) -> MarkerPanel:
 class QuantificationColumns:
     """Partition one MCQuant header by declared role, in source order."""
 
-    names: tuple[str, ...]
+    types: pa.Schema
     features: tuple[str, ...]
     morphology: tuple[str, ...]
     text: tuple[str, ...]
@@ -181,41 +188,81 @@ def quantification_columns(
     feature_set = set(features)
     annotations = [name for name in columns if name != CELL_ID and name not in feature_set]
     return QuantificationColumns(
-        tuple(columns),
+        pa.schema(
+            [
+                (
+                    name,
+                    pa.uint64()
+                    if name == CELL_ID
+                    else pa.float64()
+                    if name in feature_set or name in MORPHOLOGY
+                    else pa.string(),
+                )
+                for name in columns
+            ]
+        ),
         features,
         tuple(name for name in annotations if name in MORPHOLOGY),
         tuple(name for name in annotations if name not in MORPHOLOGY),
     )
 
 
-def optional_float_values(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, name: str) -> pd.Series:
-    """Decode a morphology annotation, treating only empty fields as missing."""
-    present = pd.Series(pd.arrays.ArrowExtensionArray(column), dtype=STRING_DTYPE).ne("").to_numpy(dtype=np.bool_)
-    decoded = np.full(len(present), np.nan)
-    if present.any():
-        decoded[present] = decode_float64(
-            column.filter(pa.array(present)), name=name, context=QUANTIFICATION_CONTEXT, path=path
-        )
-    return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(decoded, mask=~present)), dtype=FLOAT_DTYPE)
+def validate_measurements(
+    batch: pa.RecordBatch, columns: QuantificationColumns, label_dtype: np.dtype[np.integer], path: ArtifactFile
+) -> None:
+    """Validate required values, positive label IDs and finite nullable morphology."""
+    for name in (CELL_ID, *columns.features, *CENTROIDS):
+        if batch.column(name).null_count:
+            raise ReaderFormatError(
+                context=QUANTIFICATION_CONTEXT,
+                path=path,
+                found=f"missing {name!r} values",
+                expected=f"nonempty required {name!r} fields",
+            )
 
-
-def cell_ids(column: pa.Array | pa.ChunkedArray, label_dtype: np.dtype[np.integer], path: ArtifactFile) -> pd.Series:
-    """Decode exact positive label IDs that fit the segmentation dtype."""
-    identifiers = decode_integers(column, name=CELL_ID, minimum=1, context=QUANTIFICATION_CONTEXT, path=path)
-    limit = min(np.iinfo(label_dtype).max, np.iinfo(np.int64).max)
-    if len(identifiers) and int(identifiers.max()) > limit:
+    identifiers = batch.column(CELL_ID)
+    if pc.call_function("min", [identifiers]).as_py() == 0:
         raise ReaderFormatError(
             context=QUANTIFICATION_CONTEXT,
             path=path,
-            found=f"{CELL_ID!r} value {int(identifiers.max())} above {limit}",
+            found="zero CellID",
+            expected="positive integer label IDs; zero is background",
+        )
+    maximum = pc.call_function("max", [identifiers]).as_py()
+    limit = np.iinfo(label_dtype).max
+    if maximum is not None and maximum > limit:
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=path,
+            found=f"{CELL_ID!r} value {maximum} above {limit}",
             expected=f"positive integer {CELL_ID!r} values representable as {label_dtype}",
         )
-    return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(identifiers, pa.int64())), dtype=CELL_ID_DTYPE)
+
+    for name in columns.morphology:
+        # Arrow reductions skip nulls; optional empty morphology fields remain missing.
+        if pc.call_function("all", [pc.call_function("is_finite", [batch.column(name)])]).as_py() is False:
+            raise ReaderFormatError(
+                context=QUANTIFICATION_CONTEXT,
+                path=path,
+                found=f"nonfinite {name!r} values",
+                expected="finite morphology and centroids; only optional morphology may be empty",
+            )
+
+
+def validate_expression(values: npt.NDArray[np.float64], path: ArtifactFile) -> None:
+    """Reject nonfinite typed marker intensities before sparse construction."""
+    if not np.isfinite(values).all():
+        raise ReaderFormatError(
+            context=QUANTIFICATION_CONTEXT,
+            path=path,
+            found="nonfinite marker intensities",
+            expected="finite float64 marker intensities",
+        )
 
 
 def validate_position_columns(columns: QuantificationColumns, *, multiple: bool, path: ArtifactFile) -> None:
     """Reject imported fields that would collide with generated per-row frames."""
-    if multiple and {"spatial_frame", "spatial_pixel_frame"}.intersection(columns.names):
+    if multiple and {"spatial_frame", "spatial_pixel_frame"}.intersection(columns.types.names):
         raise ReaderFormatError(
             context=QUANTIFICATION_CONTEXT,
             path=path,

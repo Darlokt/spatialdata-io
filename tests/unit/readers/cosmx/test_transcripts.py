@@ -138,8 +138,8 @@ class TestReadTranscripts:
         ("row", "match"),
         [
             ("1,1,inf,1,1,1,0,A,N,x\n", "nonfinite"),
-            ("1,1,1,1,1,1,0,A,N\n", "malformed CSV records"),
-            ("0,1,1,1,1,1,0,A,N,x\n", "'fov' value '0'"),
+            ("1,1,1,1,1,1,0,A,N\n", "malformed CSV"),
+            ("0,1,1,1,1,1,0,A,N,x\n", "missing or zero 'fov'"),
         ],
     )
     @pytest.mark.parametrize("source", ["plain", "gzip"])
@@ -151,28 +151,38 @@ class TestReadTranscripts:
         assert caught.value.context == ReaderErrorContext("cosmx", "transcripts")
         assert caught.value.path == path
 
-    def test_plain_source_uses_shared_blocks_of_the_default_size(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        blocks = mocker.spy(_transcripts, "read_csv_blocks")
-        path = _plain(tmp_path)
+    def test_native_point_annotations(self, tmp_path: Path) -> None:
+        result = read_transcripts(_plain(tmp_path), features=_FEATURES, placements=_PLACEMENTS).compute()
+        assert str(result["fov"].dtype) == str(result["cell_ID"].dtype) == "uint64[pyarrow]"
+        assert str(result["z_raw"].dtype) == "int64[pyarrow]"
+        assert str(result["x_local"].dtype) == str(result["y_local"].dtype) == "double[pyarrow]"
+        assert result["x"].dtype == result["y"].dtype == np.dtype(np.float64)
 
-        read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+    @pytest.mark.parametrize("source", ["plain", "gzip"])
+    def test_uint64_keys_signed_z_and_correct_float_rounding(self, tmp_path: Path, source: str) -> None:
+        rows = [
+            f"{2**64 - 1},{2**64 - 1},0.10000000000000002,1e-400,1,2,{-(2**63)},A,NA,x\n",
+            f"1,0,-0,3,4,5,{2**63 - 1},B,,x\n",
+        ]
+        path = _plain(tmp_path, rows) if source == "plain" else _members(tmp_path, rows, size=1)
+        result = read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS).compute()
+        assert result["fov"].tolist() == [2**64 - 1, 1]
+        assert result["cell_ID"].tolist() == [2**64 - 1, 0]
+        assert result["z_raw"].tolist() == [-(2**63), 2**63 - 1]
+        assert result["x"].iloc[0] == float("0.10000000000000002")
+        assert result["y"].iloc[0] == 0.0
+        assert np.signbit(result["x"].iloc[1])
+        assert result["CellComp"].tolist() == ["NA", ""]
 
-        blocks.assert_called_once_with(
-            path,
-            header=tuple(_HEADER.strip().split(",")),
-            columns=(
-                "fov",
-                "cell_ID",
-                "x_local_px",
-                "y_local_px",
-                "x_global_px",
-                "y_global_px",
-                "target",
-                "z",
-                "CellComp",
-            ),
-            context=ReaderErrorContext("cosmx", "transcripts"),
-        )
+    @pytest.mark.parametrize("source", ["plain", "gzip"])
+    @pytest.mark.parametrize("token", ["", "NA", "-1", "2.0", "+1", str(2**64)])
+    def test_bad_unsigned_values_fail_when_computed(self, tmp_path: Path, source: str, token: str) -> None:
+        rows = [f"1,{token},1,2,3,4,-1,A,N,x\n"]
+        path = _plain(tmp_path, rows) if source == "plain" else _members(tmp_path, rows)
+        points = read_transcripts(path, features=_FEATURES, placements=_PLACEMENTS)
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
+            points.compute()
+        assert caught.value.path == path
 
     def test_missing_columns_fail_at_construction(self, tmp_path: Path) -> None:
         path = tmp_path / "tx.csv"

@@ -47,10 +47,10 @@ class TestReadTable:
         assert result.obs_names.tolist() == source.obs_names.tolist()
         assert result.obs["array_A"].tolist() == [2, 1]
         assert result.obs["array_B"].tolist() == [2, 1]
-        assert result.obs["array_A"].dtype == pd.ArrowDtype(pa.int64())
+        assert result.obs["array_A"].dtype == pd.ArrowDtype(pa.uint16())
         grid = result.obsm["spatial_grid"]
         assert isinstance(grid, np.ndarray)
-        assert grid.dtype == np.int64
+        assert grid.dtype == np.uint16
         np.testing.assert_array_equal(grid, [[2, 2], [1, 1]])
         assert result.uns["spatialdata_io_positions"] == {
             "schema_version": 1,
@@ -231,7 +231,7 @@ class TestGridOrder:
     """Sort rows by A, then B, independent of source order."""
 
     def test_lexicographic_order(self) -> None:
-        coordinates = np.array([[2, 1], [1, 2], [2, 2], [1, 1]], dtype=np.int64)
+        coordinates = np.array([[2, 1], [1, 2], [2, 2], [1, 1]], dtype=np.uint16)
 
         order = grid_order(coordinates)
 

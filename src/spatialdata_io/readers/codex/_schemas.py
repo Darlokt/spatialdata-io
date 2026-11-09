@@ -14,25 +14,23 @@ Only complete ``cyc<digits>_ch<digits>`` names denote expression; a name such as
 Akoya CSV exports may qualify every header as ``short_name:long_label``; the
 short names identify fields and the expression long labels become markers.
 
-CSV values are decoded as text. Unknown annotations keep their exact text;
-expression, ``x``, ``y`` and ``region`` are converted to Arrow-backed int64,
-uint64 or float64 only when no value changes; cell IDs are converted exactly to
-one signed or unsigned 64-bit dtype. FCS parameters keep their native numeric
-widths. Processor output contract:
+CSV cell IDs are uint64 (zero allowed), coordinates and expression are
+float64, and regions and unknown annotations remain literal text. Numeric
+fields follow Arrow's typed CSV grammar and must be finite. FCS parameters
+retain their native numeric widths and exact integer-promotion checks. Processor output contract:
 https://help.codex.bio/codex/processor/technical-notes/expected-output
 """
 
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from spatialdata_io.readers._utils.csv import LITERAL_ZERO
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.names import validate_element_name
 
@@ -42,8 +40,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 STRING_DTYPE = pd.ArrowDtype(pa.string())
-FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
-INTEGER_DTYPES = {"i": pd.ArrowDtype(pa.int64()), "u": pd.ArrowDtype(pa.uint64())}
 REQUIRED_COLUMNS = frozenset({"cell_id", "region", "x", "y"})
 CELL_TABLE_CONTEXT = ReaderErrorContext("codex", "cell table")
 _CYCLE_COLUMN = re.compile(r"cyc\d+_ch\d+")
@@ -121,35 +117,21 @@ def check_integer_promotion(values: npt.NDArray[np.number], path: ArtifactFile) 
                 )
 
 
-def cell_ids(values: pd.Series, path: ArtifactFile) -> npt.NDArray[np.int64 | np.uint64]:
-    """Convert a nonempty population's integral IDs exactly without mutating it.
+def fcs_cell_ids(values: pd.Series, path: ArtifactFile) -> npt.NDArray[np.int64 | np.uint64]:
+    """Convert native FCS integral values without shortening stored binary floats."""
+    if values.isna().any():
+        raise schema_error(path, found="missing cell_id", expected="finite 64-bit integral cell identifiers")
+    if values.dtype.kind in "iu":
+        dtype = np.uint64 if int(values.max()) >= 2**63 else np.int64
+        return values.to_numpy(dtype=dtype, copy=False)
 
-    Choose uint64 only when required by the largest identifier. Reject values
-    that cannot share one signed or unsigned 64-bit representation.
-    """
-    # Only integer parser results can bypass lexical checks: decimal tokens can
-    # promote another exact identifier to an inexact float64 value.
-    if not values.isna().any():
-        try:
-            numeric = pd.to_numeric(values)
-        except ValueError:
-            numeric = None
-        if numeric is not None and numeric.dtype.kind in "iu":
-            largest = int(numeric.max())
-            dtype = np.uint64 if largest >= 2**63 else np.int64
-            return numeric.to_numpy(dtype=dtype, copy=False)
-
-    # For FCS, Decimal(float) retains the stored binary value, unlike str(float).
     identifiers: list[int] = []
     for value in values:
-        try:
-            exact = Decimal(float(value)) if isinstance(value, (float, np.floating)) else Decimal(str(value))
-        except InvalidOperation as error:
-            raise schema_error(path, found=f"cell_id {value!r}", expected="finite integral cell identifiers") from error
+        # Decimal(float) retains the stored binary value, unlike str(float).
+        exact = Decimal(float(value))
         if not exact.is_finite() or exact != exact.to_integral_value() or exact < -(2**63) or exact >= 2**64:
             raise schema_error(path, found=f"cell_id {value!r}", expected="finite 64-bit integral cell identifiers")
         identifiers.append(int(exact))
-
     if min(identifiers) < 0 and max(identifiers) >= 2**63:
         raise schema_error(path, found="mixed signed/unsigned overflow", expected="one representable 64-bit ID dtype")
     return np.asarray(identifiers, dtype=np.uint64 if max(identifiers) >= 2**63 else np.int64)
@@ -176,59 +158,24 @@ def region_name(regions: pd.Series, path: ArtifactFile) -> str:
         raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED) from error
 
 
-def validate_csv_fields(frame: pd.DataFrame, path: ArtifactFile) -> None:
-    """Reject missing physical fields and NULs before converting lexical values."""
-    if frame.isna().any(axis=None):
-        raise schema_error(path, found="inconsistent CSV row width", expected="one field per header column")
+def csv_types(columns: list[str], features: list[str]) -> pa.Schema:
+    """Declare fixed CSV types after source names and cycle roles were validated."""
+    numeric = {*features, "x", "y"}
+    return pa.schema(
+        [
+            (name, pa.uint64() if name == "cell_id" else pa.float64() if name in numeric else pa.string())
+            for name in columns
+        ]
+    )
 
+
+def validate_csv_annotations(frame: pd.DataFrame, path: ArtifactFile) -> None:
+    """Reject NUL in source text; typed CSV ingestion validates numeric fields and widths."""
     for column in frame:
-        if frame[column].str.contains("\x00", regex=False).any():
+        if column not in {"cell_id", "x", "y"} and frame[column].str.contains("\x00", regex=False).any():
             raise schema_error(
                 path, found=f"NUL character in {column!r}", expected="text fields without NUL characters"
             )
-
-
-def normalize_csv_numbers(frame: pd.DataFrame, columns: list[str], path: ArtifactFile) -> None:
-    """Normalize defined numerical fields into explicit Arrow primitive storage.
-
-    Nonnumeric regions retain their names. Expression and coordinate consumers
-    reject nonnumeric values. Empty numeric fields become missing; unknown
-    annotations and cell IDs never pass through this conversion.
-    """
-    for column in columns:
-        source = frame[column]
-        try:
-            numeric = pd.to_numeric(source)
-        except ValueError:
-            continue
-        if numeric.dtype.kind in INTEGER_DTYPES:
-            frame[column] = numeric.astype(INTEGER_DTYPES[numeric.dtype.kind])
-            continue
-
-        try:
-            numeric = source.replace("", pd.NA).astype(FLOAT_DTYPE)
-        except ValueError:
-            # pandas accepts whitespace around decimals, as around integers,
-            # but Arrow does not. Stripping costs a pass, so only on failure.
-            source = source.str.strip()
-            try:
-                numeric = source.replace("", pd.NA).astype(FLOAT_DTYPE)
-            except ValueError:
-                continue
-
-        values = numeric.to_numpy(dtype=np.float64, na_value=np.nan)
-        # Sparse signal blocks contain many literal zeros. Only a nonzero
-        # lexical value rounded to zero needs an underflow check.
-        underflow = (values == 0) & ~source.str.fullmatch(LITERAL_ZERO).to_numpy(dtype=np.bool_)
-        candidates = source.ne("").to_numpy() & ((np.abs(values) >= 2**53) | underflow)
-        for row in np.flatnonzero(candidates):
-            exact = Decimal(source.iloc[row])
-            if exact.is_finite() and exact != Decimal(float(values[row])):
-                raise schema_error(
-                    path, found="CSV numeric precision loss", expected="losslessly representable numeric values"
-                )
-
-        frame[column] = numeric
 
 
 def normalize_fcs_metadata(frame: pd.DataFrame, path: ArtifactFile) -> None:
@@ -241,7 +188,7 @@ def normalize_fcs_metadata(frame: pd.DataFrame, path: ArtifactFile) -> None:
 
 
 def expression_dtype(frame: pd.DataFrame, features: list[str], path: ArtifactFile) -> np.dtype:
-    """Choose a real kernel dtype for lexical CSV results or native FCS buffers."""
+    """Choose a real kernel dtype for native FCS buffers or validated XY annotations."""
     dtypes: list[np.dtype] = []
     for column in features:
         dtype = frame[column].dtype
@@ -264,7 +211,8 @@ def validate_observations(observations: pd.DataFrame, path: ArtifactFile) -> npt
 
     # Geometry stores float64 centers even when the input coordinates are ints.
     for axis in ("x", "y"):
-        check_integer_promotion(observations[axis].to_numpy(copy=False), path)
+        if observations[axis].dtype.kind in "iu":
+            check_integer_promotion(observations[axis].to_numpy(copy=False), path)
     coordinates = observations[["x", "y"]].to_numpy(dtype=expression_dtype(observations, ["x", "y"], path))
     if not np.isfinite(coordinates).all():
         raise schema_error(path, found="invalid x/y coordinates", expected="finite real region pixel coordinates")

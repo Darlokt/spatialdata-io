@@ -101,6 +101,25 @@ class TestDiscoverLayout:
         assert layout.labels is not None
         assert [item.fov for item in layout.labels.files] == [2]
 
+    @pytest.mark.parametrize(
+        ("directory", "suffix", "artifact"),
+        [("CellLabels", "tif", "cell labels"), ("CellComposite", "png", "composite images")],
+    )
+    def test_raster_fov_uint64_domain(self, tmp_path: Path, directory: str, suffix: str, artifact: str) -> None:
+        maximum = f"{directory}/raster_F{2**64 - 1}.{suffix}"
+        root = _touch(tmp_path, *_CORE, maximum)
+        layout = discover_layout(root, file_prefix=None, include_transcripts=False)
+        files = (
+            layout.images if directory == "CellComposite" else (() if layout.labels is None else layout.labels.files)
+        )
+        assert [item.fov for item in files] == [2**64 - 1]
+        overflow = f"{directory}/raster_F{2**64}.{suffix}"
+        _touch(root, overflow)
+        with pytest.raises(ReaderFormatError, match="within uint64") as error:
+            discover_layout(root, file_prefix=None, include_transcripts=False)
+        assert error.value.path == root / overflow
+        assert error.value.context == ReaderErrorContext("cosmx", artifact)
+
     @pytest.mark.parametrize("artifact", ["CellLabels", "CellComposite"])
     def test_raster_directory_wrong_kind(self, tmp_path: Path, artifact: str) -> None:
         root = _touch(tmp_path, *_CORE, artifact)

@@ -370,15 +370,17 @@ class TestCurio:
         assert loaded.shapes["cells"].index.tolist() == result.shapes["cells"].index.tolist()
 
     @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
-    def test_nullable_statistics_roundtrip(self, tmp_path: Path, storage: str) -> None:
+    @pytest.mark.parametrize("unsigned", [False, True])
+    def test_nullable_statistics_roundtrip(self, tmp_path: Path, storage: str, *, unsigned: bool) -> None:
         """Persist exact large integers, missing statistics, and nullable uns annotations."""
         write_curio(tmp_path)
         (tmp_path / "sample_variable_features_clusters.txt").write_text(
             "gene\tcluster\toptional\ngene-c\t1\t0.25\ngene-b\t0\t\ngene-a\t1\t0.75\n", encoding="utf-8"
         )
+        large_integer = 2**64 - 1 if unsigned else 2**53 + 1
         (tmp_path / "sample_variable_features_spatial_moransi.txt").write_text(
             "gene\texact_integer\tselected\tprecision\ngene-c\t2\tTRUE\t0.10000000000000002\n"
-            "gene-b\t9007199254740993\tFALSE\t0.25\n",
+            f"gene-b\t{large_integer}\tFALSE\t0.25\n",
             encoding="utf-8",
         )
         result = curio(tmp_path)
@@ -395,9 +397,9 @@ class TestCurio:
             result.write(destination)
             loaded = SpatialData.read(destination).tables["table"]
 
-        assert table.var["exact_integer"].dtype == pd.Int64Dtype()
+        assert table.var["exact_integer"].dtype == (pd.UInt64Dtype() if unsigned else pd.Int64Dtype())
         assert table.var["selected"].dtype == pd.BooleanDtype()
-        assert loaded.var["exact_integer"].iloc[0] == 2**53 + 1
+        assert loaded.var["exact_integer"].iloc[0] == large_integer
         assert loaded.var["exact_integer"].isna().tolist() == [False, True, False]
         assert loaded.var["selected"].isna().tolist() == [False, True, False]
         assert loaded.var["precision"].iloc[2] == float("0.10000000000000002")

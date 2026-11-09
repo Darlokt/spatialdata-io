@@ -59,12 +59,13 @@ class TestReadTable:
     """Keep count order, sparsity, annotations and a complete feature vocabulary."""
 
     def test_sparse_order_blank_names_and_metadata(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_MEMORY_BYTES", 1)
+        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_BYTES", 128)
         table, vocabulary = read_table(_sources(tmp_path))
         assert isinstance(table.X, sparse.csr_array)
         assert not isinstance(table.X, sparse.spmatrix)
         assert table.X.has_canonical_format
         assert table.obs_names.tolist() == ["b", "a"]
+        assert table.obs_names.name is None
         assert table.var_names.tolist() == ["B", "A", "BlanketGene", "blank-2", "Blank-0"]
         assert vocabulary == ("B", "Blank-1", "A", "BlanketGene", "blank-2", "Blank-0")
         np.testing.assert_array_equal(table.X.data, [4, 7, 10, 1, 7, 8, 11])
@@ -80,7 +81,7 @@ class TestReadTable:
         assert "spatialdata_attrs" not in table.uns
 
     def test_exact_unsigned_counts_across_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_MEMORY_BYTES", 1)
+        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_BYTES", 128)
         large = 2**63
         table, _ = read_table(_sources(tmp_path, f"cell,A\na,1\nb,{large}\n"))
         assert isinstance(table.X, sparse.csr_array)
@@ -98,11 +99,12 @@ class TestReadTable:
         table, _ = read_table(sources)
 
         assert [call.args[0].num_rows for call in blocks.call_args_list] == [rows]
-        # 16 bytes per feature and row; two features.
-        mocker.patch.object(merscope_tables, "_BATCH_MEMORY_BYTES", 16 * 2 * 1000)
+        # Source block size bounds typed batches independently of feature width.
+        mocker.patch.object(merscope_tables, "_BATCH_BYTES", 4096)
         blocks.reset_mock()
         small, _ = read_table(sources)
-        assert len(blocks.call_args_list) == 21
+        assert len(blocks.call_args_list) > 1
+        assert max(call.args[0].num_rows for call in blocks.call_args_list) < rows
         for expected, actual in ((table.X, small.X), (table.obsm["blank"], small.obsm["blank"])):
             assert isinstance(expected, sparse.csr_array)
             assert isinstance(actual, sparse.csr_array)
@@ -112,15 +114,15 @@ class TestReadTable:
             np.testing.assert_array_equal(expected.indices, actual.indices)
             np.testing.assert_array_equal(expected.indptr, actual.indptr)
 
-    @pytest.mark.parametrize("batch_bytes", [1, 8 * 1024 * 1024])
+    @pytest.mark.parametrize("batch_bytes", [128, 1024 * 1024])
     def test_exact_integer_boundaries_and_spellings(
         self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
     ) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_MEMORY_BYTES", batch_bytes)
+        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_BYTES", batch_bytes)
         table, _ = read_table(
             _sources(
                 tmp_path,
-                f"cell,A,Blank-1,B\na,{2**24 + 1},2.0,3e0\nb,{2**63},{2**64 - 2048},0\n",
+                f"cell,A,Blank-1,B\na,{2**24 + 1},0x2, 3\nb,{2**63},{2**64 - 2048},0\n",
             )
         )
         assert isinstance(table.X, sparse.csr_array)
@@ -151,8 +153,8 @@ class TestReadTable:
             "cell,A\na,1\x00\n",
             "cell,A\na,1,2\n",
             "cell,A,B\na,1\n",
-            "cell,A\na,0x10\n",
-            "cell,A\na, 5\n",
+            "cell,A\na,+1\n",
+            "cell,A\na,2.0\n",
             "cell,A\na,1_000\n",
         ],
     )
@@ -161,12 +163,74 @@ class TestReadTable:
             read_table(_sources(tmp_path, counts))
         assert caught.value.path == tmp_path / "counts.csv"
 
+    @pytest.mark.parametrize("token", ["0x10", " 16", "16\t"])
+    def test_arrow_unsigned_grammar(self, tmp_path: Path, token: str) -> None:
+        table, _ = read_table(_sources(tmp_path, f"cell,A\na,{token}\nb,0\n"))
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.data.tolist() == [16]
+
+    @pytest.mark.parametrize("column", ["center_x", "volume", "transcript_count"])
+    def test_required_numeric_empty_is_not_nullable_fov(self, tmp_path: Path, column: str) -> None:
+        metadata = f"EntityID,center_x,center_y,fov,{column if column != 'center_x' else 'extra'}\na,1,2,,\nb,3,4,,1\n"
+        if column == "center_x":
+            metadata = "EntityID,center_x,center_y,fov\na,,2,\nb,3,4,\n"
+        with pytest.raises(ReaderFormatError, match="missing"):
+            read_table(_sources(tmp_path, metadata=metadata))
+
+    def test_nullable_fov_unsigned_annotations_and_literal_ids(self, tmp_path: Path) -> None:
+        identifiers = ("007", str(2**64 - 1))
+        table, _ = read_table(
+            _sources(
+                tmp_path,
+                f"cell,A\n{identifiers[0]},1\n{identifiers[1]},0\n",
+                "EntityID,center_x,center_y,fov,transcript_count,extra\n"
+                f"{identifiers[0]},1e-400,2,,{2**64 - 1},NA\n"
+                f"{identifiers[1]},3,4,{2**64 - 1},0,\n",
+            )
+        )
+        assert table.obs.index.dtype == STRING_DTYPE
+        assert table.obs_names.tolist() == list(identifiers)
+        assert table.obs["fov"].isna().tolist() == [True, False]
+        assert table.obs["fov"].iloc[1] == 2**64 - 1
+        assert table.obs["transcript_count"].tolist() == [2**64 - 1, 0]
+        assert table.obs["extra"].tolist() == ["NA", ""]
+        assert table.obsm["spatial"][0, 0] == 0.0
+
+    @pytest.mark.parametrize("failure", [False, True])
+    def test_streaming_reader_closes(self, tmp_path: Path, mocker: MockerFixture, *, failure: bool) -> None:
+        files = _sources(tmp_path, f"cell,A\na,{2**64 - 1 if failure else 1}\nb,0\n")
+        reader = mocker.spy(type(files.counts), "open")
+        if failure:
+            with pytest.raises(ReaderFormatError, match="not exactly representable"):
+                read_table(files)
+        else:
+            read_table(files)
+        assert reader.spy_return.closed
+
+    @pytest.mark.parametrize(("function", "artifact"), [("open_csv", "count matrix"), ("read_csv", "cell metadata")])
+    def test_io_failure_preserves_exception_and_context(
+        self, tmp_path: Path, mocker: MockerFixture, function: str, artifact: str
+    ) -> None:
+        files = _sources(tmp_path)
+        headers = [
+            merscope_tables.csv_header(files.counts, context=ReaderErrorContext("merscope", "count matrix")),
+            merscope_tables.csv_header(files.metadata, context=ReaderErrorContext("merscope", "cell metadata")),
+        ]
+        mocker.patch("spatialdata_io.readers.merscope._tables.csv_header", side_effect=headers)
+        failure = PermissionError(13, "access denied", str(files.counts if function == "open_csv" else files.metadata))
+        mocker.patch(f"spatialdata_io.readers.merscope._tables.pacsv.{function}", side_effect=failure)
+        with pytest.raises(PermissionError) as caught:
+            read_table(files)
+        assert caught.value is failure
+        assert caught.value.errno == 13
+        assert artifact in caught.value.__notes__[0]
+
     def test_malformed_records_name_the_artifact(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match=r"malformed CSV records \(") as caught:
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV \(") as caught:
             read_table(_sources(tmp_path, "cell,A\na,1,2\n"))
         assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
-        assert caught.value.expected == "records with one field per header column"
-        with pytest.raises(ReaderFormatError, match=r"malformed CSV records \(") as caught:
+        assert "header's width" in caught.value.expected
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV \(") as caught:
             read_table(_sources(tmp_path, metadata="EntityID,center_x,center_y\na,1\n"))
         assert caught.value.context == ReaderErrorContext("merscope", "cell metadata")
 
@@ -194,11 +258,11 @@ class TestReadTable:
         assert table.X.shape == (2, 0 if features == "Blank-1" else 1)
         assert blanks.shape == (2, 1 if features == "Blank-1" else 0)
 
-    def test_quoted_records_and_integral_exponents(self, tmp_path: Path) -> None:
+    def test_quoted_multiline_records(self, tmp_path: Path) -> None:
         table, _ = read_table(
             _sources(
                 tmp_path,
-                'cell,"Gene,A"\na,1e0\nb,2.0\n',
+                'cell,"Gene,A"\na,1\nb,2\n',
                 'EntityID,center_x,center_y,extra\na,.10000000000000002,2,"a multiline\nannotation"\nb,3,4,NA\n',
             )
         )

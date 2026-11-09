@@ -6,11 +6,11 @@ events, with compensated and uncompensated variants (``reg001_compensated.csv``,
 described in :mod:`spatialdata_io.readers.codex._schemas`.
 
 CSV
-    Decoded as text in bounded batches of about 32 MiB of numerical values (at
-    least one row). Each batch becomes a CSR block, so the dense
-    expression of the whole population never exists at once. Defined fields
-    (``region``, ``x``, ``y``) are normalized once over the complete population,
-    so their dtypes do not depend on batch boundaries.
+    Arrow reads uint64 cell IDs, float64 XY and intensities, and literal
+    region/annotation strings in batches with a 1 MiB source target. Each batch
+    becomes CSR immediately; expression is never dense as a whole. Records of
+    at most one source block are supported reliably; larger aligned records
+    may parse, but a record crossing two block boundaries fails.
 FCS
     Decoded eagerly by readfcs. ``$PnN`` keywords are the field names and
     available ``$PnS`` keywords the marker labels of expression channels
@@ -31,11 +31,12 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pacsv
 import readfcs
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
-from spatialdata_io.readers._utils.csv import read_csv_header
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import as_csr_array
@@ -44,27 +45,31 @@ from spatialdata_io.readers.codex._schemas import (
     REQUIRED_COLUMNS,
     STRING_DTYPE,
     cell_columns,
-    cell_ids,
     check_integer_promotion,
     csv_column_names,
+    csv_types,
     expression_dtype,
-    normalize_csv_numbers,
+    fcs_cell_ids,
     normalize_fcs_metadata,
     region_name,
     schema_error,
-    validate_csv_fields,
+    validate_csv_annotations,
     validate_observations,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import BinaryIO, TextIO
+    from typing import BinaryIO
 
     import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-_CSV_MAX_DENSE_BYTES = 32 * 1024 * 1024
+# A native batch may join the previous partial record to one source block.
+# Required float64 values have at least one digit plus a separator: their
+# payload is at most eight times this source target, before the dense tensor
+# copy, sparse output, Arrow alignment and parser/annotation allocations.
+_CSV_BLOCK_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,81 +112,47 @@ def _split_cells(
     return as_csr_array(values), frame[metadata]
 
 
-def _has_record(source: TextIO) -> bool:
-    """Return whether a record follows, leaving the stream position unchanged.
-
-    pandas' Python engine skips whitespace-only lines but fails with an
-    unrelated error on input without any record when ``index_col=[]``.
-    """
-    position = source.tell()
-    while line := source.readline():
-        if line.strip():
-            source.seek(position)
-            return True
-    return False
+def _csv_expression(batch: pa.RecordBatch, features: list[str]) -> sparse.csr_array:
+    """Convert one bounded float64 expression batch directly to canonical CSR."""
+    values = batch.select(features).to_tensor(row_major=True)
+    return as_csr_array(np.asarray(values))
 
 
 def _read_csv(path: ArtifactFile) -> ad.AnnData:
-    """Parse bounded CSV batches, then assemble sparse expression once."""
-    header = read_csv_header(path, context=CELL_TABLE_CONTEXT)
-    columns, labels = csv_column_names(header, path)
+    """Read typed CSV batches, retaining expression sparsely and annotations in Arrow."""
+    columns, labels = csv_column_names(list(csv_header(path, context=CELL_TABLE_CONTEXT)), path)
     features, metadata = cell_columns(columns, path)
-    # Bound numerical materialization in bytes, rows times expression width. The
-    # lexical parser buffers and retained sparse/annotation outputs are separate.
-    batch_rows = max(1, _CSV_MAX_DENSE_BYTES // (len(features) * np.dtype(np.float64).itemsize))
-
+    types = csv_types(columns, features)
     blocks: list[sparse.csr_array] = []
-    observations: list[pd.DataFrame] = []
+    annotations: list[pa.RecordBatch] = []
     try:
-        with path.open(encoding="utf-8-sig", newline="") as source:
-            # The strictly parsed header occupies the first physical line.
-            source.readline()
-            if not _has_record(source):
-                raise schema_error(path, found="no cells", expected="a nonempty cell population")
-
-            # The Python engine distinguishes missing fields from explicit
-            # empties, and index_col=[] prevents implicit-index repair of
-            # over-wide records. String decoding protects identifiers from
-            # float inference.
-            with pd.read_csv(
+        with (
+            path.open("rb") as source,
+            csv_errors(context=CELL_TABLE_CONTEXT, path=path),
+            pacsv.open_csv(
                 source,
-                names=columns,
-                header=None,
-                chunksize=batch_rows,
-                engine="python",
-                index_col=[],
-                dtype=STRING_DTYPE,
-                keep_default_na=False,
-            ) as reader:
-                for frame in reader:
-                    validate_csv_fields(frame, path)
-                    normalize_csv_numbers(frame, features, path)
-                    expression, obs = _split_cells(frame, features, metadata, path)
-                    blocks.append(expression)
-                    observations.append(obs)
-    except pd.errors.ParserError as error:
-        raise schema_error(
-            path, found=f"malformed CSV row width or quoting: {error}", expected="one field per header column"
-        ) from error
-    except UnicodeDecodeError as error:
-        raise schema_error(path, found=f"invalid UTF-8 ({error.reason})", expected="UTF-8 CSV records") from error
+                read_options=pacsv.ReadOptions(
+                    column_names=columns, skip_rows=1, block_size=_CSV_BLOCK_BYTES, use_threads=False
+                ),
+                parse_options=pacsv.ParseOptions(newlines_in_values=True),
+                convert_options=pacsv.ConvertOptions(
+                    column_types=types, include_columns=columns, null_values=[], strings_can_be_null=False
+                ),
+            ) as reader,
+        ):
+            for batch in reader:
+                blocks.append(_csv_expression(batch, features))
+                annotations.append(batch.select(metadata))
     except OSError as error:
         add_reader_context(error, context=CELL_TABLE_CONTEXT, path=path)
         raise
-
-    # A later fractional block can promote earlier integral blocks. Verify only
-    # the values outside float64's exact-integer range before stacking once.
-    if np.result_type(*(block.dtype for block in blocks)).kind == "f":
-        for block in blocks:
-            check_integer_promotion(block.data, path)
+    if not blocks:
+        raise schema_error(path, found="no cells", expected="a nonempty cell population")
 
     expression = blocks[0] if len(blocks) == 1 else sparse.vstack(blocks, format="csr")
-
-    # Normalize scientific fields across the population, independently of batch
-    # boundaries. Unknown annotations retain their original lexical values.
-    obs = observations[0] if len(observations) == 1 else pd.concat(observations)
-    normalize_csv_numbers(obs, ["region", "x", "y"], path)
-
+    obs = pa.Table.from_batches(annotations).to_pandas(types_mapper=pd.ArrowDtype)
+    validate_csv_annotations(obs, path)
+    obs.index = pd.RangeIndex(len(obs)).astype(str)
     var = pd.DataFrame(index=features)
     if labels is not None:
         var["marker"] = pd.Series(labels, index=columns, dtype=STRING_DTYPE).reindex(features)
@@ -225,14 +196,19 @@ def _read_fcs(path: ArtifactFile) -> ad.AnnData:
 
 def read_cell_table(path: ArtifactFile) -> CellTable:
     """Read one nonempty cell population and normalize its IDs, region and positions."""
-    table = _read_fcs(path) if path.suffix.lower() == ".fcs" else _read_csv(path)
-
-    # This reader constructs eager AnnData. Dataset2D is only a backed-mode alternative.
+    fcs = path.suffix.lower() == ".fcs"
+    table = _read_fcs(path) if fcs else _read_csv(path)
+    # This reader constructs eager AnnData, never backed annotation frames.
     obs = cast("pd.DataFrame", table.obs)
-    identifiers = cell_ids(obs["cell_id"], path)
-    obs["cell_id"] = pd.Series(
-        identifiers, index=obs.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(identifiers.dtype))
-    )
+    if fcs:
+        identifiers = fcs_cell_ids(obs["cell_id"], path)
+        obs["cell_id"] = pd.Series(
+            identifiers, index=obs.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(identifiers.dtype))
+        )
+    else:
+        # ShapesModel requires a native instance index; keep CSV annotations
+        # Arrow-backed instead of rebuilding them from this geometry buffer.
+        identifiers = obs["cell_id"].to_numpy(dtype=np.uint64, copy=False)
     coordinates = validate_observations(obs, path)
     region = region_name(obs["region"], path)
     obs["region"] = pd.Categorical([region] * table.n_obs)

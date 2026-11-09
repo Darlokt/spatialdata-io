@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
@@ -113,7 +114,7 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
           remaining count and metadata populations must be identical.
           Observation names are the vendor ``cell`` IDs when present, else row
           positions ``"0"``, ``"1"``, ...
-        - ``obs``: int64 ``fov`` and ``cell_ID``; nullable float64 ``Area``,
+        - ``obs``: uint64 ``fov`` and ``cell_ID``; nullable float64 ``Area``,
           ``Area.um2``, ``AspectRatio``, ``Width``, ``Height`` and
           ``Mean.*``/``Max.*``; every other metadata column as text (an exact
           AtoMx ``cell_id`` copy of ``cell`` is dropped); categorical
@@ -133,7 +134,7 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
           image grid.
         - ``points["<dataset_id>_transcripts"]``: lazy points at the global
           pixel position, with categorical ``target`` (categories are the count
-          features), int64 ``fov`` and ``cell_ID`` (0 for unassigned), float64
+          features), uint64 ``fov`` and ``cell_ID`` (0 for unassigned), float64
           ``x_local`` and ``y_local``, and, when present, int64 ``z_raw`` (the
           vendor's slice number), text ``CellComp`` and ``cell``.
 
@@ -179,6 +180,15 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     convention has not been evidenced. AtoMx 3.10.5 pancreas coordinates are
     not a translation and remain unsupported. No scale is inferred from
     stage positions, millimetre fields or TIFF metadata.
+
+    Counts and identifiers use typed uint64 CSV ingestion; transcript ``z``
+    remains signed int64. Integers accept hexadecimal and surrounding spaces
+    or tabs, reject decimal/exponent spellings and leading plus signs, and
+    are range-checked. Floats round directly to float64; coordinates must be
+    finite. Only empty fields and ``NA`` in optional numeric metadata are
+    missing. Text annotations remain literal. Cell-centre and pixel FOV
+    position spellings remain decimal text solely to preserve their printed
+    rounding intervals; placement thresholds are unchanged.
 
     Building the result reads the transcript header and no pixel or transcript
     task runs. Plain transcript CSV partitions hold about 8 MiB of records.
@@ -307,7 +317,7 @@ def _rasters(
             pixel_size_um=pixel_size_um,
         )
         # The inspected dtype bounds the IDs without reading label pixels.
-        validate_label_ids(metadata.cell_ids[metadata.fovs == item.fov], dtype, item.path)
+        validate_label_ids(metadata.cell_ids[metadata.fovs == np.uint64(item.fov)], dtype, item.path)
     return images, labels
 
 

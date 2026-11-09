@@ -32,7 +32,12 @@ if TYPE_CHECKING:
 
 
 def csv_header(
-    path: Path, /, *, context: ReaderErrorContext, source: IO[bytes] | io.BufferedIOBase | None = None
+    path: Path,
+    /,
+    *,
+    context: ReaderErrorContext,
+    source: IO[bytes] | io.BufferedIOBase | None = None,
+    delimiter: str = ",",
 ) -> tuple[str, ...]:
     """Parse the header record of a CSV with Arrow's grammar.
 
@@ -46,6 +51,8 @@ def csv_header(
         Open binary stream of ``path``'s content positioned at the header, such
         as a gzip stream or an archive member. Exactly one physical line is
         read from it, so the caller can continue with the records.
+    delimiter
+        Field delimiter, such as a tab for a named TSV artifact.
 
     Returns
     -------
@@ -73,7 +80,11 @@ def csv_header(
         add_reader_context(error, context=context, path=path)
         raise
     with csv_errors(context=context, path=path):
-        names = pacsv.read_csv(pa.py_buffer(line), read_options=pacsv.ReadOptions(use_threads=False)).column_names
+        names = pacsv.read_csv(
+            pa.py_buffer(line),
+            read_options=pacsv.ReadOptions(use_threads=False),
+            parse_options=pacsv.ParseOptions(delimiter=delimiter),
+        ).column_names
     repeated = sorted(name for name, count in Counter(names).items() if count > 1)
     if repeated:
         raise ReaderFormatError(

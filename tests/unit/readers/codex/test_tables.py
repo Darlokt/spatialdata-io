@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 from scipy import sparse
 
@@ -36,14 +37,11 @@ class TestReadCellTable:
 
         assert result.obs["note"].tolist() == [note] * 3
 
-    @pytest.mark.parametrize("note", ['"a"suffix', '"unterminated'])
-    def test_malformed_quoting_is_rejected(self, tmp_path: Path, note: str) -> None:
-        """Reject malformed quoting even when a permissive decoder could recover field values."""
+    @pytest.mark.parametrize(("note", "expected"), [('"a"suffix', "asuffix"), ('"unterminated', "unterminated\n")])
+    def test_arrow_permissive_quoting(self, tmp_path: Path, note: str, expected: str) -> None:
         path = tmp_path / "cells.csv"
         path.write_text(f"cell_id,region,x,y,cyc001_ch001,note\n1,1,0,0,1,{note}\n", encoding="utf-8")
-
-        with pytest.raises(ReaderFormatError, match="quoting"):
-            read_cell_table(ArtifactFile(path))
+        assert read_cell_table(ArtifactFile(path)).table.obs["note"].tolist() == [expected]
 
     @pytest.mark.parametrize("spelling", ["+1", " 1 ", "0001", "-0"])
     def test_integral_expression_spellings(self, tmp_path: Path, spelling: str) -> None:
@@ -54,7 +52,7 @@ class TestReadCellTable:
         result = read_cell_table(ArtifactFile(path)).table
 
         assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(np.int64)
+        assert result.X.dtype == np.dtype(np.float64)
         np.testing.assert_array_equal(result.X.data, [] if spelling == "-0" else [1])
 
     @pytest.mark.parametrize("spelling", [" 1.5 ", "1.5\t"])
@@ -69,12 +67,13 @@ class TestReadCellTable:
         np.testing.assert_array_equal(cells.table.X.data, [1.5])
         np.testing.assert_array_equal(cells.coordinates, [[1.5, 0]])
 
-    def test_padded_underflow_is_rejected(self, tmp_path: Path) -> None:
+    def test_padded_underflow_follows_arrow_rounding(self, tmp_path: Path) -> None:
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0, 1e-400 \n", encoding="utf-8")
-
-        with pytest.raises(ReaderFormatError, match="precision"):
-            read_cell_table(ArtifactFile(path))
+        result = read_cell_table(ArtifactFile(path)).table
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.nnz == 0
+        assert result.X.dtype == np.dtype(np.float64)
 
     @pytest.mark.parametrize("column", ["cell_id", "region", "x", "y", "note", "cyc001_ch001"])
     def test_nul_rejected_in_every_source_field(self, tmp_path: Path, column: str) -> None:
@@ -84,7 +83,7 @@ class TestReadCellTable:
         path = tmp_path / "cells.csv"
         write_csv(path, frame)
 
-        with pytest.raises(ReaderFormatError, match="NUL"):
+        with pytest.raises(ReaderFormatError, match=r"NUL|malformed CSV"):
             read_cell_table(ArtifactFile(path))
 
     @pytest.mark.parametrize("dtype", [np.int16, np.uint32, np.float32, np.float64])
@@ -103,8 +102,46 @@ class TestReadCellTable:
         expected = frame[["cyc002_ch001", "cyc001_ch002"]].to_numpy().ravel()
         np.testing.assert_array_equal(result.X.data, expected[expected != 0])
 
-    def test_csv_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        """20,001 rows fit one 32 MiB block; 1,000-row blocks give the identical table."""
+    @pytest.mark.parametrize(
+        ("field", "value", "match"),
+        [
+            ("cyc002_ch001", "bad", "nonnumeric"),
+            ("x", 2**53 + 1, "precision loss"),
+            ("x", float("nan"), "invalid x/y"),
+        ],
+    )
+    def test_invalid_native_fcs_fields(
+        self, tmp_path: Path, mocker: MockerFixture, field: str, value: str | float, match: str
+    ) -> None:
+        path = tmp_path / "cells.fcs"
+        path.touch()
+        frame = cell_frame()
+        frame[field] = pd.Series([value] * len(frame), dtype="int64" if isinstance(value, int) else None)
+        source = mocker.Mock(data=frame, channels=pd.DataFrame({"PnN": frame.columns}))
+        mocker.patch("spatialdata_io.readers.codex._tables.readfcs.ReadFCS", return_value=source)
+        with pytest.raises(ReaderFormatError, match=match):
+            read_cell_table(ArtifactFile(path))
+
+    def test_native_fcs_mixed_expression_cannot_round_integers(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "cells.fcs"
+        path.touch()
+        frame = cell_frame()
+        frame["cyc002_ch001"] = pd.Series([2**53 + 1] * len(frame), dtype="int64")
+        source = mocker.Mock(data=frame, channels=pd.DataFrame({"PnN": frame.columns}))
+        mocker.patch("spatialdata_io.readers.codex._tables.readfcs.ReadFCS", return_value=source)
+        with pytest.raises(ReaderFormatError, match="precision loss"):
+            read_cell_table(ArtifactFile(path))
+
+    def test_inconsistent_fcs_parameter_count_fails(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "cells.fcs"
+        path.touch()
+        frame = cell_frame()
+        source = mocker.Mock(data=frame.iloc[:, :-1], channels=pd.DataFrame({"PnN": frame.columns}))
+        mocker.patch("spatialdata_io.readers.codex._tables.readfcs.ReadFCS", return_value=source)
+        with pytest.raises(ReaderFormatError, match="inconsistent FCS parameters"):
+            read_cell_table(ArtifactFile(path))
+
+    def test_csv_source_blocks_preserve_all_rows(self, tmp_path: Path, mocker: MockerFixture) -> None:
         rows = 20_001
         path = tmp_path / "cells.csv"
         path.write_text(
@@ -112,49 +149,39 @@ class TestReadCellTable:
             + "".join(f"{row + 1},1,{row},2,{row % 3},{-(row % 5)}\n" for row in range(rows)),
             encoding="utf-8",
         )
-        blocks = mocker.spy(_tables, "_split_cells")
-
         whole = read_cell_table(ArtifactFile(path)).table
-
-        assert [len(call.args[0]) for call in blocks.call_args_list] == [rows]
-        # Eight bytes per feature and row; two features.
-        mocker.patch.object(_tables, "_CSV_MAX_DENSE_BYTES", 8 * 2 * 1000)
-        blocks.reset_mock()
+        mocker.patch.object(_tables, "_CSV_BLOCK_BYTES", 4096)
+        blocks = mocker.spy(_tables, "_csv_expression")
         small = read_cell_table(ArtifactFile(path)).table
-        assert len(blocks.call_args_list) == 21
+        assert len(blocks.call_args_list) > 1
+        assert sum(call.args[0].num_rows for call in blocks.call_args_list) == rows
         expected, actual = whole.X, small.X
         assert isinstance(expected, sparse.csr_array)
         assert isinstance(actual, sparse.csr_array)
-        assert expected.nnz == actual.nnz
-        assert expected.dtype == actual.dtype
         np.testing.assert_array_equal(expected.data, actual.data)
         np.testing.assert_array_equal(expected.indices, actual.indices)
         np.testing.assert_array_equal(expected.indptr, actual.indptr)
         assert isinstance(whole.obs, pd.DataFrame)
         assert isinstance(small.obs, pd.DataFrame)
-        pd.testing.assert_frame_equal(whole.obs, small.obs)
+        pd.testing.assert_frame_equal(whole.obs, small.obs, check_exact=True)
 
-    def test_dense_csv_batches_are_bounded_by_feature_width(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        """Cap each numerical materialization by bytes while preserving final sparse buffers."""
-        frame = cell_frame()
-        path = tmp_path / "cells.csv"
-        write_csv(path, frame)
-        whole = read_cell_table(ArtifactFile(path)).table
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", 2 * 8)
-        split = mocker.spy(_tables, "_split_cells")
-
-        bounded = read_cell_table(ArtifactFile(path)).table
-
-        assert split.call_count == len(frame)
-        assert all(call.args[0].shape[0] == 1 for call in split.call_args_list)
-        assert isinstance(whole.X, sparse.csr_array)
-        assert isinstance(bounded.X, sparse.csr_array)
-        np.testing.assert_array_equal(bounded.X.data, whole.X.data)
-        np.testing.assert_array_equal(bounded.X.indices, whole.X.indices)
-        np.testing.assert_array_equal(bounded.X.indptr, whole.X.indptr)
-        assert isinstance(whole.obs, pd.DataFrame)
-        assert isinstance(bounded.obs, pd.DataFrame)
-        pd.testing.assert_frame_equal(bounded.obs, whole.obs, check_exact=True)
+    def test_wide_csv_expression_stays_in_source_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        rows, width = 101, 128
+        columns = [f"cyc{i:03d}_ch001" for i in range(width)]
+        values = np.zeros((rows, width), dtype=np.float64)
+        values[np.arange(rows), np.arange(rows) % width] = -1.25
+        frame = pd.DataFrame(values, columns=columns)
+        frame["cell_id"], frame["region"], frame["x"], frame["y"] = np.arange(rows), "001", 1.5, -2.5
+        write_csv(tmp_path / "cells.csv", frame)
+        mocker.patch.object(_tables, "_CSV_BLOCK_BYTES", 8192)
+        blocks = mocker.spy(_tables, "_csv_expression")
+        result = read_cell_table(ArtifactFile(tmp_path / "cells.csv")).table
+        assert len(blocks.call_args_list) > 1
+        assert all(call.args[0].num_rows < rows for call in blocks.call_args_list)
+        assert isinstance(result.X, sparse.csr_array)
+        np.testing.assert_array_equal(result.X.data, np.full(rows, -1.25))
+        np.testing.assert_array_equal(result.X.indices, np.arange(rows))
+        assert result.X.dtype == np.dtype(np.float64)
 
     @pytest.mark.parametrize(
         ("column", "values"),
@@ -173,10 +200,6 @@ class TestReadCellTable:
             ("cell_id", [str(2**63), "-1", "3"]),
             ("region", [1, 2, 1]),
             ("region", [np.nan, 1, 1]),
-            ("region", [-1, -1, -1]),
-            ("region", [1.5, 1.5, 1.5]),
-            ("region", [np.inf, np.inf, np.inf]),
-            ("x", [9007199254740993, 2, 3]),
         ],
     )
     def test_invalid_source_values(self, tmp_path: Path, column: str, values: list[str | int | float]) -> None:
@@ -187,21 +210,23 @@ class TestReadCellTable:
         write_csv(path, frame)
 
         with pytest.raises(
-            (ReaderFormatError, ValueError), match=r"finite|cell_id|regions|region|numeric|precision|overflow|x/y"
+            (ReaderFormatError, ValueError),
+            match=r"finite|cell_id|regions|region|numeric|precision|overflow|x/y|malformed CSV",
         ):
             read_cell_table(ArtifactFile(path))
 
     @pytest.mark.parametrize("column", ["x", "y", "cyc002_ch001"])
     @pytest.mark.parametrize("value", ["1e-400", "-1e-400"])
-    def test_required_scientific_fields_reject_underflow(self, tmp_path: Path, column: str, value: str) -> None:
-        """Lexical preservation of unknown fields must not weaken numerical promises."""
+    def test_required_scientific_fields_follow_arrow_underflow(self, tmp_path: Path, column: str, value: str) -> None:
         frame = cell_frame()
         frame[column] = value
-        path = tmp_path / "cells.csv"
-        write_csv(path, frame)
-
-        with pytest.raises(ReaderFormatError, match="precision"):
-            read_cell_table(ArtifactFile(path))
+        write_csv(tmp_path / "cells.csv", frame)
+        cells = read_cell_table(ArtifactFile(tmp_path / "cells.csv"))
+        if column == "cyc002_ch001":
+            assert isinstance(cells.table.X, sparse.csr_array)
+            assert cells.table.X[:, 0].nnz == 0
+        else:
+            np.testing.assert_array_equal(cells.coordinates[:, 0 if column == "x" else 1], 0)
 
     @pytest.mark.parametrize("source_format", ["csv", "fcs"])
     def test_empty_cells(self, tmp_path: Path, source_format: str) -> None:
@@ -215,7 +240,7 @@ class TestReadCellTable:
         with pytest.raises(ReaderFormatError, match="no cells"):
             read_cell_table(ArtifactFile(path))
 
-    @pytest.mark.parametrize("body", ["", "\n", "\n  \n\r\n"])
+    @pytest.mark.parametrize("body", ["", "\n", "\n\r\n"])
     def test_header_and_blank_lines_have_no_cells(self, tmp_path: Path, body: str) -> None:
         """Blank lines after the header are not records."""
         path = tmp_path / "cells.csv"
@@ -226,7 +251,7 @@ class TestReadCellTable:
 
     def test_blank_lines_before_records_are_skipped(self, tmp_path: Path) -> None:
         path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n\n  \n5,1,0,0,2\n\n", encoding="utf-8")
+        path.write_text("cell_id,region,x,y,cyc001_ch001\n\n5,1,0,0,2\n\n", encoding="utf-8")
 
         cells = read_cell_table(ArtifactFile(path))
 
@@ -238,13 +263,13 @@ class TestReadCellTable:
         path = tmp_path / "cells.csv"
         path.write_bytes(b"cell_id,region,x,y,cyc001_ch001,note\n1,1,0,0,1,\xff\n")
 
-        with pytest.raises(ReaderFormatError, match=r"artifact 'cell table'.*invalid UTF-8"):
+        with pytest.raises(ReaderFormatError, match=r"artifact 'cell table'.*UTF.?8"):
             read_cell_table(ArtifactFile(path))
 
     def test_open_failure_has_reader_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "cells.csv"
         write_csv(path)
-        mocker.patch("spatialdata_io.readers.codex._tables.read_csv_header", return_value=list(cell_frame().columns))
+        mocker.patch("spatialdata_io.readers.codex._tables.csv_header", return_value=list(cell_frame().columns))
         mocker.patch("pathlib.Path.open", side_effect=PermissionError("injected"))
 
         with pytest.raises(PermissionError, match="injected") as caught:
@@ -260,7 +285,7 @@ class TestReadCellTable:
         cells = read_cell_table(ArtifactFile(path))
 
         assert cells.region == "1"
-        assert cells.cell_ids.dtype == np.dtype(np.int64)
+        assert cells.cell_ids.dtype == np.dtype(np.uint64)
         np.testing.assert_array_equal(cells.cell_ids, [7, 2, 11])
         np.testing.assert_array_equal(cells.coordinates, [[20, 1.5], [2.5, 30], [13, 8]])
         assert cells.table.obs["cell_id"].tolist() == [7, 2, 11]
@@ -272,7 +297,7 @@ class TestReadCellTable:
         path = tmp_path / "cells.csv"
         path.write_text(f"cell_id,region,x,y,cyc001_ch001\n{row}\n", encoding="utf-8")
 
-        with pytest.raises(ReaderFormatError, match="row width"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_cell_table(ArtifactFile(path))
 
     def test_extra_zero_based_field_cannot_become_an_implicit_index(self, tmp_path: Path) -> None:
@@ -280,7 +305,7 @@ class TestReadCellTable:
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,region,x,y,cyc001_ch001\n0,1,2,3,4,5\n1,1,2,3,4,5\n", encoding="utf-8")
 
-        with pytest.raises(ReaderFormatError, match="row width"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_cell_table(ArtifactFile(path))
 
     def test_explicit_empty_metadata_is_distinct_from_missing_field(self, tmp_path: Path) -> None:
@@ -295,7 +320,7 @@ class TestReadCellTable:
 
         path.write_text("cell_id,region,x,y,cyc001_ch001,note\n1,1,0,0,1\n", encoding="utf-8")
 
-        with pytest.raises(ReaderFormatError, match="row width"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_cell_table(ArtifactFile(path))
 
     def test_fcs_without_marker_labels(self, tmp_path: Path) -> None:
@@ -321,29 +346,51 @@ class TestReadCellTable:
         assert result.tables["table"].obs["cell_id"].dtype == np.dtype(np.uint64)
         assert result.shapes["reg001"].index.tolist() == [2**64 - 1, 2, 3]
 
-    @pytest.mark.parametrize(
-        "source",
-        [
-            "1,1,0,0,9007199254740993,0.5\n",
-            "1,1,0,0,9007199254740993,0\n2,1,0,0,0.5,0\n",
-        ],
-    )
-    def test_no_float_promotion_precision_loss(self, tmp_path: Path, source: str) -> None:
-        """Reject intensities changed by within-block numeric promotion."""
+    @pytest.mark.parametrize("token", ["9007199254740993", "9007199254740993.0", "1e23"])
+    def test_float64_expression_rounds_directly(self, tmp_path: Path, token: str) -> None:
         path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001,cyc002_ch001\n" + source, encoding="utf-8")
+        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n1,1,{token},0,{token}\n", encoding="utf-8")
+        cells = read_cell_table(ArtifactFile(path))
+        assert isinstance(cells.table.X, sparse.csr_array)
+        assert cells.table.X.dtype == np.dtype(np.float64)
+        assert cells.table.X.data.tolist() == [float(token)]
+        assert cells.coordinates[0, 0] == float(token)
 
-        with pytest.raises(ReaderFormatError, match="precision"):
+    def test_float64_rounding_and_signed_zero(self, tmp_path: Path) -> None:
+        path = tmp_path / "cells.csv"
+        path.write_text(
+            "cell_id,region,x,y,cyc001_ch001\n0,001,12.947243945462901,-0.0,0.10000000000000002\n",
+            encoding="utf-8",
+        )
+        cells = read_cell_table(ArtifactFile(path))
+        assert cells.coordinates[0, 0].hex() == "0x1.9e4fd288e31c0p+3"
+        assert np.signbit(cells.coordinates[0, 1])
+        assert isinstance(cells.table.X, sparse.csr_array)
+        assert cells.table.X.data.tolist() == [0.10000000000000002]
+        assert cells.cell_ids.dtype == np.dtype(np.uint64)
+
+    @pytest.mark.parametrize("column", ["cell_id", "x", "y", "cyc001_ch001"])
+    def test_empty_required_numeric_field_fails(self, tmp_path: Path, column: str) -> None:
+        values = {"cell_id": "0", "region": "001", "x": "1", "y": "2", "cyc001_ch001": "-3"}
+        values[column] = ""
+        path = tmp_path / "cells.csv"
+        path.write_text(",".join(values) + "\n" + ",".join(values.values()) + "\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_cell_table(ArtifactFile(path))
 
-    def test_signed_unsigned_block_promotion(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        """Reject inexact signed and unsigned intensity promotion across CSV blocks."""
+    def test_literal_region_spellings_cannot_collapse(self, tmp_path: Path) -> None:
+        path = tmp_path / "cells.csv"
+        path.write_text("cell_id,region,x,y,cyc001_ch001\n1,001,0,0,1\n2,1,0,0,1\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match="multiple regions"):
+            read_cell_table(ArtifactFile(path))
+
+    def test_mixed_large_signed_expression_uses_fixed_float64(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,9223372036854775809\n2,1,0,0,-1\n", encoding="utf-8")
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", 1)
-
-        with pytest.raises(ReaderFormatError, match="precision"):
-            read_cell_table(ArtifactFile(path))
+        mocker.patch.object(_tables, "_CSV_BLOCK_BYTES", 64)
+        result = read_cell_table(ArtifactFile(path)).table
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.data.tolist() == [float(2**63 + 1), -1.0]
 
     def test_sparse_output_never_densifies(self, tmp_path: Path, mocker: MockerFixture) -> None:
         """Keep expression sparse through geometry, compatibility conversion, and linkage."""
@@ -361,9 +408,24 @@ class TestReadCellTable:
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,bad\n", encoding="utf-8")
         opened = mocker.spy(Path, "open")
 
-        with pytest.raises(ReaderFormatError, match="nonnumeric"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_cell_table(ArtifactFile(path))
 
+        assert opened.spy_return_list
+        assert all(stream.closed for stream in opened.spy_return_list)
+
+    @pytest.mark.parametrize("failure", ["none", "parse", "finite", "annotation"])
+    def test_csv_streams_close_on_all_boundaries(self, tmp_path: Path, mocker: MockerFixture, failure: str) -> None:
+        path = tmp_path / "cells.csv"
+        value = "bad" if failure == "parse" else "nan" if failure == "finite" else "1"
+        note = "bad\x00text" if failure == "annotation" else "NA"
+        path.write_text(f"cell_id,region,x,y,cyc001_ch001,note\n0,001,1,2,{value},{note}\n", encoding="utf-8")
+        opened = mocker.spy(Path, "open")
+        if failure == "none":
+            read_cell_table(ArtifactFile(path))
+        else:
+            with pytest.raises(ValueError, match=r"finite|malformed CSV|NUL"):
+                read_cell_table(ArtifactFile(path))
         assert opened.spy_return_list
         assert all(stream.closed for stream in opened.spy_return_list)
 
@@ -383,29 +445,36 @@ class TestReadCellTable:
         assert stream.closed
         assert any("cell table" in note for note in caught.value.__notes__)
 
-    def test_unrepresentable_large_decimal_is_rejected_before_float_inference(self, tmp_path: Path) -> None:
-        """Reject a decimal token whose integral value would round during float parsing."""
+    @pytest.mark.parametrize("token", ["0x10", " 16 ", "\t16\t"])
+    def test_unsigned_id_grammar(self, tmp_path: Path, token: str) -> None:
         path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,9007199254740993.0\n", encoding="utf-8")
+        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n{token},001,0,0,-1\n", encoding="utf-8")
+        result = read_cell_table(ArtifactFile(path))
+        assert result.cell_ids.tolist() == [16]
+        assert result.region == "001"
 
-        with pytest.raises(ReaderFormatError, match="precision"):
+    @pytest.mark.parametrize("token", ["-1", "-0", "+1", "2.0", "2e0", "1_0", "", str(2**64)])
+    def test_invalid_unsigned_id_spellings(self, tmp_path: Path, token: str) -> None:
+        path = tmp_path / "cells.csv"
+        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n{token},1,0,0,1\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_cell_table(ArtifactFile(path))
 
-    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
+    @pytest.mark.parametrize("batch_bytes", [256, 1024 * 1024])
     def test_exact_signed_unsigned_expression_is_batch_independent(
         self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
     ) -> None:
         """Compatible signed and unsigned intensities may share exact float64 storage."""
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,-1\n2,1,0,0,9223372036854775808\n", encoding="utf-8")
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BLOCK_BYTES", batch_bytes)
 
         result = read_cell_table(ArtifactFile(path)).table
 
         assert isinstance(result.X, sparse.csr_array)
         np.testing.assert_array_equal(result.X.data, [-1.0, float(2**63)])
 
-    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
+    @pytest.mark.parametrize("batch_bytes", [256, 1024 * 1024])
     @pytest.mark.parametrize("all_zero", [False, True])
     def test_single_and_multiple_blocks_preserve_canonical_sparse_values(
         self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, *, all_zero: bool
@@ -414,7 +483,7 @@ class TestReadCellTable:
         frame = cell_frame()
         frame[["cyc002_ch001", "cyc001_ch002"]] = 0 if all_zero else [[0, 2], [-3, 0], [4, 5]]
         write_csv(tmp_path / "cells.csv", frame)
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BLOCK_BYTES", batch_bytes)
 
         result = read_cell_table(ArtifactFile(tmp_path / "cells.csv")).table
 
@@ -422,34 +491,29 @@ class TestReadCellTable:
         assert not isinstance(result.X, sparse.spmatrix)
         assert result.X.has_canonical_format
         assert result.X.shape == (3, 2)
-        assert result.X.dtype == np.dtype(np.int64)
+        assert result.X.dtype == np.dtype(np.float64)
         np.testing.assert_array_equal(result.X.data, [] if all_zero else [2, -3, 4, 5])
         np.testing.assert_array_equal(result.X.indices, [] if all_zero else [1, 0, 0, 1])
         np.testing.assert_array_equal(result.X.indptr, [0, 0, 0, 0] if all_zero else [0, 1, 2, 4])
         assert result.obs["cell_id"].tolist() == [7, 2, 11]
 
-    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
-    def test_defined_scientific_fields_normalize_population_wide(
-        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
+    @pytest.mark.parametrize("batch_bytes", [256, 1024 * 1024])
+    @pytest.mark.parametrize("region", ["001", "1.0", "-1", "0"])
+    def test_literal_regions_and_fixed_coordinates(
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, region: str
     ) -> None:
-        """Region meaning and coordinate dtypes do not depend on a lexical batch boundary."""
         path = tmp_path / "cells.csv"
         path.write_text(
-            "cell_id,region,x,y,cyc001_ch001\n7,001,1,-2,0\n2,+1,2.5,0,-3\n11,1.0,-4,3.5,4\n",
+            f"cell_id,region,x,y,cyc001_ch001\n7,{region},1,-2,0\n2,{region},2.5,0,-3\n11,{region},-4,3.5,4\n",
             encoding="utf-8",
         )
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
-
+        mocker.patch.object(_tables, "_CSV_BLOCK_BYTES", batch_bytes)
         cells = read_cell_table(ArtifactFile(path))
-        result, coordinates = cells.table, cells.coordinates
-
-        assert result.obs["region"].tolist() == ["1"] * 3
-        assert str(result.obs["x"].dtype) == "double[pyarrow]"
-        assert str(result.obs["y"].dtype) == "double[pyarrow]"
-        np.testing.assert_array_equal(coordinates, [[1, -2], [2.5, 0], [-4, 3.5]])
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(np.int64)
-        np.testing.assert_array_equal(result.X.data, [-3, 4])
+        assert cells.region == region
+        assert cells.table.obs["region"].tolist() == [region] * 3
+        assert cells.table.obs["x"].dtype == pd.ArrowDtype(pa.float64())
+        assert cells.table.obs["y"].dtype == pd.ArrowDtype(pa.float64())
+        np.testing.assert_array_equal(cells.coordinates, [[1, -2], [2.5, 0], [-4, 3.5]])
 
 
 class TestSetPositions:

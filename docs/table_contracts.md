@@ -16,12 +16,12 @@ Headerless files retain their positional field counts and meanings.
 Visium headered tissue positions accept the six documented fields in any
 order and ignore additional fields. Headerless positions require exactly six
 fields. Barcode order is aligned to the expression table, including spots
-outside tissue. Grid coordinates must be nonnegative integers fitting int64.
-Pixel coordinates must be finite, nonnegative float64 values; conversions
-that lose large integer precision or underflow to zero fail.
+outside tissue. Tissue flags use uint8 and must be zero or one; grid coordinates
+are uint64. Pixel coordinates are correctly rounded float64 and must be finite
+and nonnegative.
 
-seqFISH and Xenium declare an Arrow type for every CSV field they read and
-let Arrow parse the field directly into it; Arrow's typed CSV grammar is their
+seqFISH, Xenium, MERSCOPE, MCMICRO, CosMx, CODEX and Visium declare Arrow types for their
+numeric CSV fields and parse them directly; Arrow's typed CSV grammar is their
 contract. Integer fields trim surrounding spaces and tabs, accept hexadecimal
 such as `0x10`, and reject `2.0`, `2e0`, `+2`, digit separators and values
 outside the declared type. Float fields are correctly rounded to the declared
@@ -30,20 +30,25 @@ float32 or float64 type, so `1e-400` reads as 0 and `9007199254740993` as
 finite values. Every record must have the header's width, also for columns
 that are not read. Each reader documents which fields may be empty.
 
-MERSCOPE, MCMICRO and CosMx decode numeric CSV fields from their text with one
-rule. Float fields hold correctly rounded finite float64 values; a nonzero value
-that rounds to zero, or an integral value of at least 2⁵³ that float64 cannot
-hold exactly (such as `9007199254740993` or `1e300`), fails. Integer fields
-accept every exact decimal spelling of an integer (`2`, `+2`, `2.0`, `2e0`);
-fractions, hexadecimal such as `0x10`, surrounding whitespace, digit separators
-and values outside the reader's range fail.
+Named CSV/TSV headers in these readers, Curio and Steinbock must occupy one
+newline-terminated physical line, except for Visium. Quoted multiline data fields are supported
+where the individual reader documents them; lazy transcript records retain
+their one-line requirement. Visium instead classifies its first complete
+logical record, including a quoted multiline header or first data row.
+
+CosMx retains the original text of placement coordinates to derive their
+printed rounding uncertainty. This reader-owned exception preserves the
+interval-based placement calculation; ordinary count, identifier, annotation
+and transcript fields use the typed numeric contract above.
 
 Curio metric exports have a positional exception: their first two columns
 contain the metric name and value. A subsequent named `Category` column selects
 the metric group. These first two columns are not freely reorderable. CODEX
 expression features are recognized by their cycle/channel names; additional
 metadata columns are not automatically treated as expression. DBiT barcode
-maps retain their two-column positional contract.
+maps retain their two-column positional contract. They are limited to 64 KiB
+before parsing and at most 100 logical records, with at most 50 positions on
+each of the two axes.
 
 ## Annotation storage
 
@@ -220,18 +225,19 @@ textual `feature_types` and available additional feature metadata; legacy HDF5
 inputs do not fabricate them.
 
 Position CSV files support quoted logical records, including embedded newlines
-in barcodes. `in_tissue`, `array_row` and `array_col` require integer tokens
-fitting int64; decimal/exponent spellings such as `2.0` and `2e0` are rejected.
-Grid indices must be nonnegative and `in_tissue` must be zero or one. Pixel
-coordinates remain finite nonnegative float64 values and may be fractional;
-their precision and underflow checks are independent of the grid grammar.
+in barcodes and header fields. `in_tissue` uses uint8 and must be zero or one;
+`array_row` and `array_col` use uint64. They follow Arrow's integer grammar,
+including hexadecimal and surrounding spaces or tabs; decimal/exponent
+spellings such as `2.0` and `2e0` are rejected. Pixel coordinates are correctly
+rounded directly to float64, including underflow to zero, and must be finite
+and nonnegative. Required numeric fields cannot be empty.
 Image scale factors must have finite inverses, and the display diameter must
 produce a positive representable circle radius.
 
 `X` contains decoded counts as float32 when every value is exact, otherwise
 float64; values unrepresentable in either dtype raise. Standard int32 HDF5
-and MTX inputs already return float32 through the accepted Scanpy decoder. `obs` adds int64 `in_tissue`,
-`array_row`, `array_col`, textual `spot_id` and categorical `region` in that
+and MTX inputs already return float32 through the accepted Scanpy decoder. `obs` adds uint8 `in_tissue`,
+uint64 `array_row` and `array_col`, textual `spot_id` and categorical `region` in that
 order. `spot_id` repeats the barcode and links to the generated spot circles
 indexed by barcode, using `region` as the region key. Float64
 `obsm["spatial_pixels"]` contains full-resolution image-pixel centres in XY order;
@@ -264,9 +270,21 @@ Cluster labels, metric values and defining-feature annotations preserve their
 literal spelling, including leading zeros, booleans, numeric-looking text and
 missing-value words. Empty metric values remain empty strings; empty
 defining-feature fields become missing values. Only Moran statistics are
-converted to numeric or boolean types, preserving exact large integers and
-rejecting nonfinite values and precision loss. Enrichment never changes
-`raw.var`. The supported Seeker primary profile requires `X_spatial` and accepts
+converted to numeric or boolean types. Each complete column selects boolean,
+int64, uint64 or float64 storage. Boolean columns accept `TRUE`/`FALSE`,
+`True`/`False` and `true`/`false`. Integer columns preserve exact values and
+reject overflow; an overflowing integer column never falls back to float.
+A true negative integer together with a value above int64's maximum cannot
+share either integer dtype and fails. Integer tokens use the Arrow grammar
+above, including hexadecimal and surrounding spaces or tabs.
+
+Columns containing decimal or exponent spellings select correctly rounded
+float64, including ordinary rounding of integer tokens in such a mixed column
+and underflow to zero. Nonfinite statistics and empty source statistics fail;
+missing values arise only when unlisted features are joined to the H5AD.
+The retained adaptive output types do not imply pandas numeric inference.
+Enrichment never changes `raw.var`.
+The supported Seeker primary profile requires `X_spatial` and accepts
 an additional exactly agreeing real numeric `spatial` embedding. Both embeddings
 must be losslessly representable in float64. Exact native XY is retained in
 `obsm["spatial_pixels"]`; canonical float64 `spatial` uses the manufacturer
@@ -288,22 +306,21 @@ Inherited `spatialdata_attrs` is rejected. See the
 CSV and FCS inputs return events in source order with positional string names
 `"0"`, `"1"`, … . Only complete `cycNNN_chNNN` names become features, in
 source order. `X` contains marker intensities, including valid negative and
-fractional values. CSV uses a common real dtype, preserving integer storage
-when possible and rejecting lossy promotion; FCS numerical widths follow the
-source. Complete Akoya `short_name:long_label` CSV headers are normalized at
+fractional values. CSV expression and XY coordinates use float64, correctly
+rounded directly during ingestion; FCS numerical widths follow the source. Complete Akoya `short_name:long_label` CSV headers are normalized at
 the first colon, with duplicate short names rejected; long marker labels become
 `var["marker"]`. Feature names remain cycle/channel IDs. FCS can add the same
 textual marker annotation aligned from its metadata.
 
-All other source columns remain in `obs`, including integer `cell_id`
-(int64 or uint64 as needed), categorical `region`, and numerical pixel `x`/`y`.
-Integral decimal and exponent spellings of CSV cell IDs normalize exactly.
-Positive integral region values normalize to string names; nonempty names
-remain names. CSV coordinates retain integer storage when possible. Additional
-CSV annotations preserve exact strings, including leading zeros, numeric-looking
-values, `NA`, `NULL` and explicit empty strings; physically absent fields fail.
-Only expression, defined coordinates, regions and IDs receive numerical
-interpretation. FCS annotations retain their native primitive types. Native XY
+All other source columns remain in `obs`. CSV `cell_id` is uint64, including
+zero and excluding negative values; integer grammar follows Arrow, so decimal
+and exponent spellings fail. CSV `region` is a literal valid element name:
+`001`, `1` and `1.0` retain distinct spellings. The returned region is categorical.
+Pixel `x`/`y` are finite float64 and may be negative. Additional CSV annotations
+preserve exact strings, including leading zeros, numeric-looking values, `NA`,
+`NULL` and explicit empty strings; physically absent fields fail. FCS keeps its
+native numerical annotation types, exact adaptive int64/uint64 IDs and numeric
+or textual region normalization. Native XY
 remains in `obs["x"]`/`obs["y"]`. Canonical float64
 `obsm["spatial"]` exists only with an explicit or supported associated physical
 calibration; its declaration identifies the source metric and frame. Physical
@@ -311,10 +328,13 @@ conversion rejects nonfinite products and, defensively, nonzero coordinates
 rounded to zero by an exceptionally small scale. Circles are linked by
 `(region, cell_id)` to their generated index; no independent segmentation
 population is inferred. No layers, `raw` or additional embeddings are created.
-CSV numerical batches allow at most 10,000 rows with a width-aware 32 MiB
-target and a one-row minimum. One sufficiently wide row may exceed the target;
-header, parser and string buffers, retained annotations, final sparse output
-and eager FCS decoding have separate costs. See the
+CSV expression is parsed in 1 MiB source blocks and converted to CSR per native
+batch, with no row-count cap. A batch can include the preceding partial record
+and the current block, bounding required float64 value payload by eight times
+the block target. Allocator alignment, parser/string buffers, retained
+annotations, the dense tensor, final sparse output and eager FCS decoding have
+separate costs. Records should fit one block to be supported regardless of
+alignment; records spanning two block boundaries fail. See the
 [API](generated/spatialdata_io.codex.rst) for CSV/FCS selection.
 
 ### ISS (experimental)
@@ -343,6 +363,22 @@ storage and inherited numerical semantics. Inherited
 describes the explicit artifact names and options.
 
 ### Steinbock
+
+Optional `images.csv` metadata uses projected Arrow string fields. Its required
+columns are `image`, `width_px` and `height_px`; optional acquisition extents
+must occur as a pair. Image names are globally nonempty and unique, and every
+record must have the complete header width. Header names and projected values
+must be UTF-8 without NUL bytes; ignored extra values are not decoded or checked
+for NUL bytes. Arrow skips blank records and accepts some malformed quoting.
+Quoted multiline data fields are supported.
+
+Only selected images have their numerical metadata interpreted. Their dimensions
+use checked uint64 conversion with the integer grammar above and must lie in
+`1..2**63-1`, the existing supported raster-dimension range. Unselected numerical
+fields may contain unused text. Selected physical extents are either both empty
+or finite positive decimal values; exact decimal division by the dimension
+precedes the final float64 rounding. This preserves calibration such as `0.1 / 7`
+without the one-ULP error introduced by converting the extent to float first.
 
 Every mask directory selected with `masks_dir` shares one table contract. Imported
 H5AD row/feature order and expression values remain; integer duplicate
@@ -387,10 +423,10 @@ Imported expression dtype, unrelated annotations and missingness remain;
 `obs` and `var` column names and top-level `uns` keys that a SpatialData table
 does not accept are sanitized with one warning per frame or mapping; `uns`
 values and nested keys stay as stored.
-`array_A` and `array_B` are one-based int64 grid coordinates; textual `sample` and
-categorical `region` contain the dataset name, and int64 `pixel_id` is the
+`array_A` and `array_B` are one-based uint16 grid coordinates; textual `sample` and
+categorical `region` contain the dataset name, and uint16 `pixel_id` is the
 zero-based sorted row position. Float64 is not inferred as a physical unit:
-`obsm["spatial_grid"]` contains integer `(A, B)` grid positions. Any
+`obsm["spatial_grid"]` contains uint16 `(A, B)` grid positions. Any
 imported `spatial` is preserved exactly under `spatial_source` before sorting;
 canonical physical `spatial` is absent.
 
@@ -438,7 +474,9 @@ feature names and no columns.
 Metadata retain source column order: `center_x`/`center_y` and optional
 `min_x`, `max_x`, `min_y`, `max_y`, `volume`, `anisotropy`,
 `perimeter_area_ratio`, `solidity` are float64; optional `transcript_count`
-is int64/uint64 and `fov` is nullable int64. Other source annotations stay
+is uint64 and `fov` is nullable uint64 (an empty field denotes an absent
+assignment for a merged entity). Required numeric fields cannot be empty.
+Other source annotations stay
 text. Generated categorical `region`, `slide`, `dataset_id`, textual
 `EntityID`, and (only with boundaries) categorical `cells_region` have distinct
 roles: actual linkage uses `(cells_region, EntityID)`, not `region`.
@@ -456,7 +494,7 @@ mean marker intensity, with features in canonical MCQuant panel order. `var`
 retains textual `marker_name` and every additional panel column; repeated
 marker names receive MCQuant suffixes on every occurrence.
 
-`obs` contains categorical `region` and int64 `CellID`, optional nullable
+`obs` contains categorical `region` and uint64 `CellID`, optional nullable
 float64 morphology and additional text annotations in their declared source
 order. `X_centroid`/`Y_centroid` leave `obs` and become float64 local pixel
 `obsm["spatial_pixels"]`. Complete source-image XY calibration adds
@@ -470,7 +508,10 @@ Solidity and Extent are dimensionless. Calibrated spatial-element transforms
 do not rescale these annotations. `(region, CellID)` links to label images;
 ID range checks do not prove label-pixel membership. No layers or `raw` are
 created. See [MCMICRO](mcmicro.md) for the exact morphology names and angle
-convention, independent core frames and parser bounds.
+convention, independent core frames and parser bounds. Only optional morphology
+fields may be empty; marker intensities, cell IDs and required centroids must
+be populated. A positive cell ID must fit the inspected label dtype, including
+the full uint64 range when the labels support it.
 
 ### CosMx
 
@@ -480,10 +521,13 @@ feature order. Background `cell_ID=0` rows are removed; metadata align by
 `(fov, cell_ID)`. Vendor `cell` values name observations when available,
 otherwise positional string names are generated. `var` has no columns.
 
-`obs` contains int64 `fov`/`cell_ID`, source annotations and categorical
+`obs` contains uint64 `fov`/`cell_ID`, source annotations and categorical
 `region` even in unlinked mode. Optional `Area`, `Area.um2`, `AspectRatio`,
-`Width`, `Height`, and `Mean.*`/`Max.*` stain summaries are nullable float64;
-other metadata stay text. Centre columns leave `obs`:
+`Width`, `Height`, and `Mean.*`/`Max.*` stain summaries are nullable float64,
+with empty fields and `NA` denoting missing annotations. Required numeric fields
+reject nulls. Other metadata stay literal text. FOVs and metadata cell IDs are
+positive; cell zero is reserved for background counts and unassigned transcripts.
+Transcript `z_raw` remains signed int64. Centre columns leave `obs`:
 `obsm["spatial_pixels"]` is local XY pixels, and `obsm["spatial_global_pixels"]`
 is global XY pixels, both float64. Local row frames `fov_<n>_pixels` identify the FOV; the native
 global declaration uses `global_pixels`. With explicit `pixel_size_um`,

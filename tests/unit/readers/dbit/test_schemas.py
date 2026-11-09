@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.dbit._schemas import (
-    BARCODE_SOURCE_DTYPE,
+    BARCODE_TYPES,
     GRID_DTYPE,
     normalize_barcodes,
     validate_barcode_prefixes,
@@ -31,17 +32,21 @@ class TestNormalizeBarcodes:
 
     def test_typed_case_normalization(self, tmp_path: Path) -> None:
         """Retain row order and extract typed positions once."""
-        frame = pd.DataFrame([["B1", "cccccccc"], ["A1", "aaaaaaaa"]], dtype=BARCODE_SOURCE_DTYPE)
+        frame = pd.DataFrame(
+            [["B1", "cccccccc"], ["A1", "aaaaaaaa"]], columns=BARCODE_TYPES.names, dtype=pd.ArrowDtype(pa.string())
+        )
         normalize_barcodes(frame, ArtifactFile(tmp_path / "barcodes.txt"))
         assert frame["position"].tolist() == [1, 1]
         assert frame["sequence"].tolist() == ["CCCCCCCC", "AAAAAAAA"]
         assert frame["axis"].tolist() == ["B", "A"]
-        assert frame.dtypes.astype(str).tolist() == ["int64[pyarrow]", "string[pyarrow]", "string[pyarrow]"]
+        assert frame.dtypes.astype(str).tolist() == ["uint16[pyarrow]", "string[pyarrow]", "string[pyarrow]"]
 
     @pytest.mark.parametrize("column", [0, 1])
     def test_null_source_fields(self, tmp_path: Path, column: int) -> None:
         """Reject missing tokens before case conversion or position parsing."""
-        frame = pd.DataFrame([["A1", "AAAAAAAA"], ["B1", "CCCCCCCC"]], dtype=BARCODE_SOURCE_DTYPE)
+        frame = pd.DataFrame(
+            [["A1", "AAAAAAAA"], ["B1", "CCCCCCCC"]], columns=BARCODE_TYPES.names, dtype=pd.ArrowDtype(pa.string())
+        )
         frame.iloc[0, column] = None
         with pytest.raises(ReaderFormatError, match="invalid barcode"):
             normalize_barcodes(frame, ArtifactFile(tmp_path / "barcodes.txt"))
@@ -50,7 +55,8 @@ class TestNormalizeBarcodes:
         """Reject empty positional input before extracting fields."""
         with pytest.raises(ReaderFormatError, match="barcode map shape"):
             normalize_barcodes(
-                pd.DataFrame(columns=[0, 1], dtype=BARCODE_SOURCE_DTYPE), ArtifactFile(tmp_path / "barcodes.txt")
+                pd.DataFrame(columns=BARCODE_TYPES.names, dtype=pd.ArrowDtype(pa.string())),
+                ArtifactFile(tmp_path / "barcodes.txt"),
             )
 
 

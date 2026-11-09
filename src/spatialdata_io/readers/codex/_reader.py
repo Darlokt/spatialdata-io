@@ -115,17 +115,17 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
             zero-based row positions.
 
             - ``X``: CSR sparse array of the cycle intensities, in source
-              feature order. CSV uses one int64, uint64 or float64 dtype,
-              keeping integers when every value is integral and rejecting
-              lossy promotion; FCS keeps its native dtype. Negative
+              feature order. CSV uses float64; FCS keeps its native dtype
+              and rejects lossy integer promotion. Negative
               compensated intensities are kept. CSV is parsed in bounded
               batches, so the dense expression of the whole table never
               exists at once.
             - ``var``: indexed by the cycle field names; ``var["marker"]``
               holds FCS ``$PnS`` labels or Akoya long labels when present.
-            - ``obs``: every non-cycle field. ``cell_id`` is int64, or uint64
-              when an ID needs it; ``region`` is categorical; ``x`` and ``y``
-              stay in native pixels. Other CSV fields keep their exact text
+            - ``obs``: every non-cycle field. CSV ``cell_id`` is uint64
+              (including zero); FCS IDs use int64 or uint64 as needed.
+              ``region`` is categorical; CSV ``x`` and ``y`` are float64
+              native pixels. Other CSV fields keep their exact text
               (including ``NA``, ``NULL``, leading zeros and empty strings);
               FCS fields keep their numeric dtypes. Field names that a
               SpatialData table does not accept (``tile num``) are sanitized
@@ -137,8 +137,9 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         ``shapes[region]``
             Radius-one circles at the native cell positions, indexed by
             ``cell_id`` and linked to the table. The element is named after
-            the region: positive integers as decimal strings, names as given if
-            they are valid element names other than ``table`` and ``images``.
+            the region: literal CSV strings, or positive FCS integers as
+            decimal strings. Names must be valid element names other than
+            ``table`` and ``images``.
             The circles are display geometry, not cell boundaries.
         ``images["images"]`` (only with an image)
             Lazy CYX image of the selected series at full resolution, with the

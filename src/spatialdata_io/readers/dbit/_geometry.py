@@ -39,7 +39,7 @@ _INSET = np.array([[1, 1], [1, -1], [-1, -1], [-1, 1], [1, 1]], dtype=np.float64
 
 
 def make_grid(
-    coordinates: npt.NDArray[np.int64],
+    coordinates: npt.NDArray[np.uint16],
     *,
     include_border: bool,
     border_scale: float,
@@ -57,5 +57,8 @@ def make_grid(
         message = "border_scale leaves no representable positive square width at these coordinates."
         raise ValueError(message)
 
-    grid = gpd.GeoDataFrame(geometry=shapely.polygons(vertices), index=pd.RangeIndex(len(coordinates), name="pixel_id"))
+    grid = gpd.GeoDataFrame(
+        geometry=shapely.polygons(vertices),
+        index=pd.Index(np.arange(len(coordinates), dtype=np.uint16), name="pixel_id"),
+    )
     return ShapesModel.parse(grid, transformations=dict(transformations))

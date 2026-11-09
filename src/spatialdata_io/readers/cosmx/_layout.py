@@ -17,8 +17,8 @@ the prefix of the only ``*_exprMat_file.csv[.gz]`` in the directory; it may
 contain any character except path separators and NUL, including spaces. The
 element names derived from it are chosen by the reader, not here.
 
-FOV numbers come from the ``_F<number>`` raster suffix (positive, any number of
-digits, compared numerically, so ``F002`` and ``F2`` are the same FOV) and are
+FOV numbers come from the ``_F<number>`` raster suffix (positive uint64, with
+leading zeros permitted, so ``F002`` and ``F2`` are the same FOV) and are
 returned in numeric order. Dot files are ignored; any other unexpected file in
 a raster directory fails. An empty ``CellComposite`` directory is accepted; a
 ``CellLabels`` directory must contain at least one raster, because its presence
@@ -160,7 +160,7 @@ def _fov_files(
         if entry.name.startswith("."):
             continue
         match = _FOV_FILE.fullmatch(entry.name)
-        if match is None or match["suffix"].lower() not in suffixes or int(match["fov"]) < 1:
+        if match is None or match["suffix"].lower() not in suffixes:
             raise _error(
                 entry,
                 artifact,
@@ -168,6 +168,13 @@ def _fov_files(
                 expected=f"<prefix>_F<positive FOV>.<{'|'.join(sorted(suffixes))}>",
             )
         fov = int(match["fov"])
+        if not 1 <= fov <= 2**64 - 1:
+            raise _error(
+                entry,
+                artifact,
+                found=f"FOV {fov}",
+                expected="a positive FOV within uint64 (1 through 18446744073709551615)",
+            )
         if fov in files:
             raise _error(entry, artifact, found=f"two files for FOV {fov}", expected="one raster per FOV")
         files[fov] = require_metadata_file(root, f"{name}/{entry.name}", context=context)

@@ -111,12 +111,12 @@ def mcmicro(
         ``tables["table"]``
             Every quantification table in label order, then source row order,
             linked by categorical ``obs["region"]`` (the label element) and
-            ``obs["CellID"]`` (its exact int64 label value; unique within a
+            ``obs["CellID"]`` (its exact positive uint64 label value; unique within a
             region and representable in the label dtype; label pixels are
             never read to check membership).
 
-            - ``X``: canonical CSR float64 mean marker intensities, finite;
-              nonzero decimals that would round to zero fail.
+            - ``X``: canonical CSR float64 mean marker intensities, finite,
+              parsed directly with Arrow's correctly rounded float64 grammar.
               ``var_names`` are the canonical marker IDs and ``var`` keeps
               every ``markers.csv`` column as text.
             - ``obs_names`` are row positions ``"0"``, ``"1"``, ...; MCQuant
@@ -159,6 +159,13 @@ def mcmicro(
         or strips it overlaps; the source files must stay available. The
         quantification tables are streamed in bounded blocks and expression is
         never densified as a whole. Files are closed on return.
+
+        CSV integer fields accept hexadecimal and surrounding spaces or tabs,
+        and reject decimal/exponent integer spellings, signs such as ``+1``
+        and separators such as ``1_0``. Floating text rounds directly to
+        float64; underflow may become zero. Only empty optional morphology
+        fields become missing; IDs, intensities and centroids are required.
+        Text annotations preserve empty strings and missing-value words.
 
     Warns
     -----

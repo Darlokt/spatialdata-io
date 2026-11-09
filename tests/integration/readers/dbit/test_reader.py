@@ -571,9 +571,9 @@ class TestDbit:
         assert table.obs_names.tolist() == _ORDERED_NAMES
         for field in ("array_A", "array_B"):
             np.testing.assert_array_equal(table.obs[field], [1, 2])
-            assert table.obs[field].dtype == np.dtype(np.int64)
+            assert table.obs[field].dtype == np.dtype(np.uint16)
         np.testing.assert_array_equal(table.obs["pixel_id"], [0, 1])
-        assert table.obs["pixel_id"].dtype == np.dtype(np.int64)
+        assert table.obs["pixel_id"].dtype == np.dtype(np.uint16)
         assert table.obs["sample"].tolist() == ["sample", "sample"]
         assert table.obs["region"].tolist() == ["sample", "sample"]
         assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)

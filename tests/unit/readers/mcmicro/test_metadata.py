@@ -104,14 +104,21 @@ class TestReadMarkers:
         assert panel.features == ("DAPI_1", "CD3", "DAPI_2")
         assert panel.var["note"].tolist() == ["a, b", "", "0001"]
 
+    def test_open_error_preserves_type_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = ArtifactFile(tmp_path / "markers.csv")
+        mocker.patch("pathlib.Path.open", side_effect=PermissionError("denied"))
+        with pytest.raises(PermissionError) as caught:
+            read_markers(path)
+        assert any("mcmicro" in note and str(path) in note for note in caught.value.__notes__)
+
     @pytest.mark.parametrize(
         ("text", "match"),
         [
-            ("", "unique nonempty"),
-            ("marker_name,marker_name\nA,B\n", "unique nonempty"),
-            ('"unterminated\n', "malformed CSV header|unique nonempty"),
+            ("", "malformed CSV"),
+            ("marker_name,marker_name\nA,B\n", "repeated column"),
+            ('"unterminated\n', "malformed CSV"),
             ("marker_name\n", "no markers"),
-            ("marker_name,x\nA\n", r"malformed CSV records \("),
+            ("marker_name,x\nA\n", r"malformed CSV \("),
             ("channel_number\n1\n", "marker_name"),
         ],
     )

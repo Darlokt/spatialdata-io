@@ -67,8 +67,8 @@ _CSV_BLOCK_BYTES = 64 * 1024
 def read_alignment(path: ArtifactFile, *, context: ReaderErrorContext) -> NDArray[np.float64]:
     """Read a 3 x 3 alignment matrix without header, with last row ``[0, 0, 1]``.
 
-    Records must fit a 64 KiB parser block. Excess rows fail after bounded
-    read-ahead, without materializing the rest of the file.
+    Records should fit a 64 KiB parser block regardless of alignment. Excess
+    rows fail after bounded read-ahead, without materializing the rest of the file.
 
     Raises
     ------

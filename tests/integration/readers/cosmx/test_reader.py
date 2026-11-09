@@ -102,6 +102,65 @@ class TestCosmx:
         assert points["z_raw"].tolist() == [0, -1, 2] * 2
         assert points["cell_ID"].tolist() == [1, 0, 2] * 2
 
+    @pytest.mark.parametrize("compressed", [False, True])
+    @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "spatialdata"])
+    def test_full_uint64_keys_link_and_persist(self, tmp_path: Path, storage: str, *, compressed: bool) -> None:
+        fixture = write_cosmx_dataset(tmp_path, compressed=compressed)
+        identities = {"1": str(2**63 + 1), "2": str(2**64 - 1)}
+        fovs = {"2": str(2**64 - 1), "10": str(2**63 + 1)}
+        suffix = ".csv.gz" if compressed else ".csv"
+        for artifact in ("exprMat", "metadata", "tx", "fov_positions"):
+            path = fixture.root / f"Run_1_{artifact}_file{suffix}"
+            frame = pd.read_csv(path, dtype="str", keep_default_na=False)
+            frame["fov"] = frame["fov"].replace(fovs)
+            if "cell_ID" in frame:
+                frame["cell_ID"] = frame["cell_ID"].replace(identities)
+            frame.to_csv(path, index=False)
+        for directory in ("CellLabels", "CellComposite"):
+            for path in (fixture.root / directory).iterdir():
+                old = "2" if "_F002" in path.name else "10"
+                if directory == "CellLabels":
+                    labels = np.zeros((6, 8), dtype=np.uint64)
+                    for cell, (row, column) in LANDMARKS.items():
+                        labels[row, column] = int(identities[str(cell)])
+                    tifffile.imwrite(path, labels, photometric="minisblack")
+                path.rename(path.with_name(path.name.replace(f"_F{int(old):03d}", f"_F{fovs[old]}")))
+
+        result = cosmx(fixture.root)
+        table = result.tables["table"]
+        expected_ids = [2**63 + 1, 2**64 - 1] * 2
+        assert table.obs["cell_ID"].dtype == table.obs["fov"].dtype == np.dtype(np.uint64)
+        assert table.obs["cell_ID"].tolist() == expected_ids
+        assert table.obs["fov"].tolist() == [2**64 - 1, 2**64 - 1, 2**63 + 1, 2**63 + 1]
+        assert table.obs_names.name is None
+        expected_regions = [f"{2**63 + 1}_labels", f"{2**64 - 1}_labels"]
+        assert get_table_keys(table) == (expected_regions, "region", "cell_ID")
+        assert table.obs["region"].cat.categories.tolist() == expected_regions
+        for label in result.labels.values():
+            assert label.dtype == np.dtype(np.uint64)
+        if storage == "h5ad":
+            target = tmp_path / "table.h5ad"
+            table.write_h5ad(target)
+            restored = ad.read_h5ad(target)
+        elif storage == "anndata_zarr":
+            target = tmp_path / "table.zarr"
+            table.write_zarr(target)
+            restored = ad.read_zarr(target)
+        else:
+            target = tmp_path / "spatialdata.zarr"
+            result.write(target)
+            stored = read_zarr(target)
+            restored = stored.tables["table"]
+            assert stored.points["Run_1_transcripts"].compute()["cell_ID"].tolist() == [
+                2**63 + 1, 0, 2**64 - 1, 2**63 + 1, 0, 2**64 - 1
+            ]  # fmt: skip
+        assert restored.obs["cell_ID"].tolist() == expected_ids
+        assert restored.obs["cell_ID"].dtype == np.dtype(np.uint64)
+        assert restored.obs["fov"].tolist() == table.obs["fov"].tolist()
+        regions, region_key, instance_key = get_table_keys(restored)
+        assert list(regions) == expected_regions
+        assert (region_key, instance_key) == ("region", "cell_ID")
+
     def test_landmark_pixels_map_to_their_evidenced_local_and_global_coordinates(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path)
         result = cosmx(fixture.root)

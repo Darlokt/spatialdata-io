@@ -94,7 +94,7 @@ class TestCodex:
         write_csv(tmp_path / "cells.csv", frame)
         whole = codex(tmp_path).tables["table"]
 
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", 1)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BLOCK_BYTES", 512)
         partitioned = codex(tmp_path).tables["table"]
 
         assert isinstance(whole.obs, pd.DataFrame)
@@ -107,6 +107,29 @@ class TestCodex:
         np.testing.assert_array_equal(partitioned.X.indices, whole.X.indices)
         np.testing.assert_array_equal(partitioned.X.indptr, whole.X.indptr)
 
+    def test_zero_and_full_uint64_ids_link_and_persist_exactly(self, tmp_path: Path) -> None:
+        """Zero and unsigned identifiers retain exact target membership through storage."""
+        frame = cell_frame()
+        identifiers = [0, 2**63, 2**64 - 1]
+        frame["cell_id"] = pd.Series(identifiers, dtype="uint64")
+        frame["region"] = "reg001"
+        write_csv(tmp_path / "cells.csv", frame)
+
+        result = codex(tmp_path)
+        table = result.tables["table"]
+        assert table.obs["cell_id"].tolist() == identifiers
+        assert result.shapes["reg001"].index.tolist() == identifiers
+        assert get_table_keys(table) == ("reg001", "region", "cell_id")
+        assert isinstance(table.X, sparse.csr_array)
+        np.testing.assert_array_equal(table.X.data, [2, 3.25, -1.5, 5.5])
+
+        destination = tmp_path / "identifiers.zarr"
+        result.write(destination)
+        restored = read_zarr(destination)
+        assert restored.tables["table"].obs["cell_id"].tolist() == identifiers
+        assert restored.shapes["reg001"].index.tolist() == identifiers
+        assert get_table_keys(restored.tables["table"]) == ("reg001", "region", "cell_id")
+
     @pytest.mark.parametrize("source_format", ["csv", "fcs"])
     @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
     def test_annotation_roundtrip(self, tmp_path: Path, source_format: str, storage: str) -> None:
@@ -115,7 +138,7 @@ class TestCodex:
             frame = cell_frame()
             frame["optional"] = [0.25, np.nan, 0.75]
             frame["note"] = ["NA", "NULL", "sample"]
-            frame["cell_id"] = [str(2**53 + 1), "2.0", "11"]
+            frame["cell_id"] = [str(2**53 + 1), "2", "11"]
             write_csv(tmp_path / "cells.csv", frame)
         else:
             write_fcs(tmp_path / "cells.fcs")
@@ -140,7 +163,7 @@ class TestCodex:
         assert isinstance(loaded.X, sparse.csr_matrix | sparse.csr_array)
         np.testing.assert_array_equal(loaded.X.data, table.X.data)
 
-    @pytest.mark.parametrize("batch_bytes", [1, 32 * 1024 * 1024])
+    @pytest.mark.parametrize("batch_bytes", [1024, 1024 * 1024])
     @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
     def test_unknown_csv_annotations_remain_exact_lexemes(
         self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, storage: str
@@ -160,7 +183,7 @@ class TestCodex:
             }
         )
         write_csv(tmp_path / "cells.csv", frame)
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_MAX_DENSE_BYTES", batch_bytes)
+        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BLOCK_BYTES", batch_bytes)
 
         table = codex(tmp_path).tables["table"]
         destination = tmp_path / f"lexemes.{storage}"
@@ -233,7 +256,7 @@ class TestCodex:
             "homogeneity",
         ]
         assert table.obs["cell_id"].tolist() == [7, 2, 11]
-        assert table.obs["cell_id"].dtype == np.dtype(np.int64)
+        assert table.obs["cell_id"].dtype == np.dtype(np.int64 if source_format == "fcs" else np.uint64)
         assert table.obs["region"].tolist() == ["1"] * 3
         assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
         assert "spatial" not in table.obsm
@@ -471,15 +494,13 @@ class TestCodex:
         with pytest.raises(ReaderFormatError, match="valid element name"):
             codex(tmp_path)
 
-    def test_float_lexeme_does_not_round_other_cell_id(self, tmp_path: Path) -> None:
-        """Retain a large integer ID when another source ID uses an integral decimal token."""
+    def test_unsigned_integer_ids_with_leading_zero_spellings(self, tmp_path: Path) -> None:
         (tmp_path / "cells.csv").write_text(
-            "cell_id,region,x,y,cyc001_ch001\n9007199254740993,1,0,0,1\n2.0,1,1,1,2\n", encoding="utf-8"
+            "cell_id,region,x,y,cyc001_ch001\n9007199254740993,001,0,0,1\n002,001,1,1,-2\n", encoding="utf-8"
         )
-
         result = codex(tmp_path)
-
         assert result.tables["table"].obs["cell_id"].tolist() == [9007199254740993, 2]
+        assert result.shapes["001"].index.tolist() == [9007199254740993, 2]
 
 
 class TestCodexCalibration:

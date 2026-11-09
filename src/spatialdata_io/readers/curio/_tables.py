@@ -21,10 +21,10 @@ per frame or mapping before the reader adds its own columns and keys, which
 keep their names; ``uns`` values, their order and nested keys stay as stored.
 Metric categories are then sanitized against the sanitized ``uns`` keys.
 
-Text files are UTF-8, optionally with a byte-order mark. pandas' Python parser
-is used because it keeps NUL characters for rejection, distinguishes a missing
-field from an empty one and rejects malformed quoting; blank lines are skipped.
-The files are small (one row per bead, metric or listed feature).
+Text files are UTF-8, optionally with a byte-order mark. Arrow parses literal
+strings with explicit schemas and validates full record widths. Each artifact
+owns its eager read; NUL characters are rejected before alignment. The files
+are small (one row per bead, metric or listed feature).
 """
 
 from __future__ import annotations
@@ -33,19 +33,19 @@ from typing import TYPE_CHECKING, cast
 
 import anndata as ad
 import pandas as pd
+import pyarrow.csv as pacsv
 
-from spatialdata_io.readers._utils.csv import read_csv_header
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers.curio._layout import CLUSTER_FEATURES, CLUSTERS, COUNTS, METRICS, MORAN_FEATURES
 from spatialdata_io.readers.curio._schemas import (
-    CLUSTER_COLUMNS,
+    CLUSTER_TYPES,
     DEFINING_FEATURES_KEY,
     RESERVED_OBS,
     RESERVED_UNS,
-    STRING_DTYPE,
     normalize_moran,
-    schema_error,
+    text_types,
     validate_clusters,
     validate_counts,
     validate_header,
@@ -73,23 +73,65 @@ def read_table(layout: CurioLayout) -> ad.AnnData:
     var.columns = sanitize_column_names(list(var.columns), source="curio: the H5AD var")
     sanitize_uns_keys(table, source="curio: the H5AD uns", reserved=RESERVED_UNS)
 
-    clusters = _read_rows(layout.clusters, CLUSTERS, delimiter="\t", columns=CLUSTER_COLUMNS, header=False)
+    clusters = _read_clusters(layout.clusters)
     validate_clusters(clusters, table.obs_names, layout.clusters)
     labels = clusters.set_index("bead_id")["cluster"].reindex(table.obs_names)
     table.obs["cluster"] = pd.Categorical(labels, categories=labels.unique())
 
     _add_metrics(table, layout.metrics)
 
-    defining = _read_named_rows(layout.cluster_features, CLUSTER_FEATURES, delimiter="\t")
-    table.uns[DEFINING_FEATURES_KEY] = defining.replace("", pd.NA)
+    defining = _read_defining_features(layout.cluster_features)
+    table.uns[DEFINING_FEATURES_KEY] = defining
 
     table.var = _join_moran(var, layout.moran_features)
     return table
 
 
+def _read_clusters(path: ArtifactFile) -> pd.DataFrame:
+    """Read the two positional cluster-assignment fields as literal strings."""
+    context = ReaderErrorContext("curio", CLUSTERS)
+    try:
+        with path.open("rb") as source, csv_errors(context=context, path=path):
+            clusters = pacsv.read_csv(
+                source,
+                read_options=pacsv.ReadOptions(column_names=CLUSTER_TYPES.names, use_threads=False),
+                parse_options=pacsv.ParseOptions(delimiter="\t", newlines_in_values=True),
+                convert_options=pacsv.ConvertOptions(
+                    column_types=CLUSTER_TYPES,
+                    include_columns=CLUSTER_TYPES.names,
+                    null_values=[],
+                    strings_can_be_null=False,
+                ),
+            ).to_pandas(types_mapper=pd.ArrowDtype)
+    except OSError as error:
+        add_reader_context(error, context=context, path=path)
+        raise
+    validate_text(clusters, CLUSTERS, path)
+    return clusters
+
+
 def _add_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
     """Store each metric category as a ``{metric: value}`` dictionary in source order."""
-    metrics = _read_named_rows(path, METRICS, delimiter=",")
+    context = ReaderErrorContext("curio", METRICS)
+    columns = list(csv_header(path, context=context))
+    validate_header(columns, METRICS, path)
+    try:
+        with path.open("rb") as source, csv_errors(context=context, path=path):
+            metrics = pacsv.read_csv(
+                source,
+                read_options=pacsv.ReadOptions(use_threads=False),
+                parse_options=pacsv.ParseOptions(newlines_in_values=True),
+                convert_options=pacsv.ConvertOptions(
+                    column_types=text_types(columns),
+                    include_columns=columns,
+                    null_values=[],
+                    strings_can_be_null=False,
+                ),
+            ).to_pandas(types_mapper=pd.ArrowDtype)
+    except OSError as error:
+        add_reader_context(error, context=context, path=path)
+        raise
+    validate_text(metrics, METRICS, path)
     validate_metrics(metrics, path, set(table.uns))
 
     # Categories become top-level uns keys, which SpatialData checks like element names.
@@ -106,9 +148,53 @@ def _add_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
         table.uns[key_of[category]] = dict(zip(group[name], group[value], strict=True))
 
 
+def _read_defining_features(path: ArtifactFile) -> pd.DataFrame:
+    """Read every named defining-feature field literally, retaining source column order."""
+    context = ReaderErrorContext("curio", CLUSTER_FEATURES)
+    columns = list(csv_header(path, context=context, delimiter="\t"))
+    validate_header(columns, CLUSTER_FEATURES, path)
+    try:
+        with path.open("rb") as source, csv_errors(context=context, path=path):
+            defining = pacsv.read_csv(
+                source,
+                read_options=pacsv.ReadOptions(use_threads=False),
+                parse_options=pacsv.ParseOptions(delimiter="\t", newlines_in_values=True),
+                convert_options=pacsv.ConvertOptions(
+                    column_types=text_types(columns),
+                    include_columns=columns,
+                    null_values=[""],
+                    strings_can_be_null=True,
+                ),
+            ).to_pandas(types_mapper=pd.ArrowDtype)
+    except OSError as error:
+        add_reader_context(error, context=context, path=path)
+        raise
+    validate_text(defining, CLUSTER_FEATURES, path)
+    return defining
+
+
 def _join_moran(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
     """Join parsed Moran statistics onto ``var`` by feature ID, keeping feature order."""
-    moran = _read_named_rows(path, MORAN_FEATURES, delimiter="\t", feature_ids=True)
+    context = ReaderErrorContext("curio", MORAN_FEATURES)
+    columns = list(csv_header(path, context=context, delimiter="\t"))
+    validate_header(columns, MORAN_FEATURES, path, feature_ids=True)
+    try:
+        with path.open("rb") as source, csv_errors(context=context, path=path):
+            moran = pacsv.read_csv(
+                source,
+                read_options=pacsv.ReadOptions(use_threads=False),
+                parse_options=pacsv.ParseOptions(delimiter="\t", newlines_in_values=True),
+                convert_options=pacsv.ConvertOptions(
+                    column_types=text_types(columns),
+                    include_columns=columns,
+                    null_values=[],
+                    strings_can_be_null=False,
+                ),
+            ).to_pandas(types_mapper=pd.ArrowDtype)
+    except OSError as error:
+        add_reader_context(error, context=context, path=path)
+        raise
+    validate_text(moran, MORAN_FEATURES, path)
     moran = moran.set_index(moran.columns[0])
     validate_moran(moran, features, path)
     normalize_moran(moran, path)
@@ -119,54 +205,3 @@ def _join_moran(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
     # Match the H5AD index representation so the join keeps it.
     moran.index = moran.index.astype(features.index.dtype)
     return features.join(moran, how="left", validate="one_to_one")
-
-
-def _read_named_rows(path: ArtifactFile, artifact: str, *, delimiter: str, feature_ids: bool = False) -> pd.DataFrame:
-    """Read a text table whose header names its columns."""
-    columns = read_csv_header(path, context=ReaderErrorContext("curio", artifact), delimiter=delimiter)
-    validate_header(columns, artifact, path, feature_ids=feature_ids)
-    return _read_rows(path, artifact, delimiter=delimiter, columns=columns, header=True)
-
-
-def _read_rows(path: ArtifactFile, artifact: str, *, delimiter: str, columns: list[str], header: bool) -> pd.DataFrame:
-    """Read every cell as an exact string, requiring one field per column in every row."""
-    try:
-        with path.open(encoding="utf-8-sig", newline="") as source:
-            if header:
-                # The header was parsed strictly from the first physical line.
-                source.readline()
-
-            # pandas fails on input without records when index_col=[], so build the empty frame here.
-            position = source.tell()
-            if not source.read(1):
-                return pd.DataFrame({column: pd.Series([], dtype=STRING_DTYPE) for column in columns})
-            source.seek(position)
-
-            frame = pd.read_csv(
-                source,
-                sep=delimiter,
-                names=columns,
-                header=None,
-                index_col=[],
-                dtype=STRING_DTYPE,
-                keep_default_na=False,
-                engine="python",
-            )
-    except OSError as error:
-        add_reader_context(error, context=ReaderErrorContext("curio", artifact), path=path)
-        raise
-    except UnicodeDecodeError as error:
-        raise schema_error(artifact, path, found="text that is not valid UTF-8", expected="UTF-8 text") from error
-    except pd.errors.ParserError as error:
-        raise schema_error(
-            artifact, path, found=f"malformed rows ({error})", expected="one field per column in every row"
-        ) from error
-
-    # Short rows are padded with missing values; longer rows raise ParserError above.
-    if frame.isna().any(axis=None):
-        raise schema_error(
-            artifact, path, found="rows with missing fields", expected="one field per column in every row"
-        )
-
-    validate_text(frame, artifact, path)
-    return frame

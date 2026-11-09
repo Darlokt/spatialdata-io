@@ -149,7 +149,7 @@ Arrow parses CSV twins, a plain `transcripts.csv`, the secondary-analysis CSVs, 
 
 `metrics_summary.csv` has no fixed numeric schema because its metrics vary between releases. Fields are read as text: an empty field becomes `None`, decimal integer spellings (including `+2`) become integers, other finite Python float spellings become floats (`1_0` becomes `10.0`), and other values stay text (`0x10`, `NaN`, `inf`). Quoted metric values may contain newlines.
 
-Alignment matrices contain exactly three records and metrics contain exactly one data record. Both readers reject excess records with bounded read-ahead instead of loading the whole malformed file. Their headers and individual records must fit a 64 KiB parser block.
+Alignment matrices contain exactly three records and metrics contain exactly one data record. Both readers reject excess records with bounded read-ahead instead of loading the whole malformed file. Their headers must fit the bounded 64 KiB header read. Individual records should fit a 64 KiB parser block to be supported regardless of alignment; longer aligned records may parse, but records spanning two block boundaries fail.
 
 ## Invalid geometry
 

@@ -15,16 +15,18 @@ from spatialdata_io.readers.merscope._schemas import (
     _FLOAT_DTYPE,
     GEOMETRY_REPRESENTATION_DTYPE,
     STRING_DTYPE,
-    _float_values,
     blank_columns,
     boundary_columns,
     count_columns,
-    integer_values,
+    count_types,
     metadata_columns,
+    metadata_types,
     normalize_boundary_ids,
     normalize_cell_ids,
     normalize_metadata,
     normalize_transcript_partition,
+    require_finite,
+    transcript_types,
     validate_output_annotations,
     validate_transcript_columns,
 )
@@ -92,79 +94,54 @@ class TestNormalizeCellIds:
             normalize_cell_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), "cell metadata")
 
 
-class TestIntegerValues:
-    """Keep exact counts through parser spellings and integer-width promotion."""
+class TestCountTypes:
+    def test_unsigned_and_exact_identity(self, tmp_path: Path) -> None:
+        types = count_types(["", "B", "A"], ArtifactFile(tmp_path / "counts.csv"))
+        assert types == pa.schema([("", pa.string()), ("B", pa.uint64()), ("A", pa.uint64())])
 
-    def test_normal_and_unsigned(self, tmp_path: Path) -> None:
-        path = ArtifactFile(tmp_path / "count.csv")
-        assert integer_values(pd.Series(["0", "3"], dtype=STRING_DTYPE), path, "count matrix", "A").tolist() == [0, 3]
-        result = integer_values(
-            pd.Series([str(2**64 - 1), "2.0", "3e0"], dtype=STRING_DTYPE), path, "count matrix", "A"
-        )
-        assert result.tolist() == [2**64 - 1, 2, 3]
-        assert result.dtype == np.dtype(np.uint64)
-        assert integer_values(pd.Series([], dtype=STRING_DTYPE), path, "count matrix", "A").dtype == np.dtype(np.int64)
 
-    @pytest.mark.parametrize("chunked", [False, True])
-    @pytest.mark.parametrize(
-        ("tokens", "expected"),
-        [
-            ([], []),
-            (["0", str(2**63 - 1)], [0, 2**63 - 1]),
-            ([str(2**63), str(2**64 - 1)], [2**63, 2**64 - 1]),
-            (["+2.0", "3e0", "-0", str(2**64 - 1)], [2, 3, 0, 2**64 - 1]),
-        ],
-    )
-    def test_arrow_counts(self, tmp_path: Path, *, chunked: bool, tokens: list[str], expected: list[int]) -> None:
-        column = pa.array(tokens, type=pa.string())
-        source = pa.chunked_array([column.slice(0, 1), column.slice(1)]) if chunked else column
-        result = integer_values(source, ArtifactFile(tmp_path / "count.csv"), "count matrix", "A")
-        np.testing.assert_array_equal(result, np.asarray(expected, dtype=result.dtype))
-        assert result.dtype == np.dtype(np.uint64 if expected and max(expected) >= 2**63 else np.int64)
+class TestMetadataTypes:
+    def test_roles(self, tmp_path: Path) -> None:
+        assert metadata_types(
+            ["EntityID", "center_x", "center_y", "fov", "transcript_count", "extra"],
+            ArtifactFile(tmp_path / "metadata.csv"),
+        ) == {
+            "EntityID": pa.string(),
+            "center_x": pa.float64(),
+            "center_y": pa.float64(),
+            "fov": pa.uint64(),
+            "transcript_count": pa.uint64(),
+            "extra": pa.string(),
+        }
 
-    @pytest.mark.parametrize("chunked", [False, True])
-    @pytest.mark.parametrize(
-        "value", [None, "", "1.00000000000000001", "1e-400", "-1", "nan", "inf", str(2**64), "x", "1" * 129]
-    )
-    def test_invalid_arrow_counts(self, tmp_path: Path, *, chunked: bool, value: str | None) -> None:
-        path = ArtifactFile(tmp_path / "count.csv")
-        column = pa.array([value], type=pa.string())
-        source = pa.chunked_array([column]) if chunked else column
-        with pytest.raises(ReaderFormatError, match="exact integer 'A' values of at least 0") as caught:
-            integer_values(source, path, "count matrix", "A")
-        assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
-        assert caught.value.path == path
 
-    @pytest.mark.parametrize(
-        "value", [None, "", "1.00000000000000001", "1e-400", "-1", "nan", "inf", str(2**64), "x", "1" * 129]
-    )
-    def test_invalid(self, tmp_path: Path, value: str | None) -> None:
-        with pytest.raises(ReaderFormatError, match="exact integer 'A' values"):
-            integer_values(
-                pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "count.csv"), "count matrix", "A"
+class TestTranscriptTypes:
+    def test_roles(self, tmp_path: Path) -> None:
+        assert transcript_types(
+            ["gene", "global_x", "global_y", "global_z", "fov", "barcode_id", "cell_id", "transcript_id"],
+            ArtifactFile(tmp_path / "events.csv"),
+        ) == {
+            "gene": pa.string(),
+            "global_x": pa.float64(),
+            "global_y": pa.float64(),
+            "global_z": pa.uint64(),
+            "fov": pa.uint64(),
+            "barcode_id": pa.uint64(),
+            "cell_id": pa.string(),
+            "transcript_id": pa.string(),
+        }
+
+
+class TestRequireFinite:
+    @pytest.mark.parametrize("value", [None, float("inf"), float("nan")])
+    def test_invalid(self, tmp_path: Path, value: float | None) -> None:
+        with pytest.raises(ReaderFormatError, match="missing or nonfinite"):
+            require_finite(
+                pd.Series([value], dtype=_FLOAT_DTYPE),
+                ArtifactFile(tmp_path / "metadata.csv"),
+                "cell metadata",
+                "center_x",
             )
-
-
-class TestFloatValues:
-    """Decode Arrow-backed pandas text with the shared exact float64 contract."""
-
-    def test_precision(self, tmp_path: Path) -> None:
-        result = _float_values(
-            pd.Series(["0.10000000000000002", "-0.00e1000", str(2**53)], index=[2, 4, 6], dtype=STRING_DTYPE),
-            ArtifactFile(tmp_path / "tx.csv"),
-            "transcripts",
-            "global_x",
-        )
-        assert result.dtype == np.dtype(np.float64)
-        np.testing.assert_array_equal(result, [0.10000000000000002, 0, 2**53])
-
-    @pytest.mark.parametrize("value", [None, "", "nan", "inf", "1e400", "1e-400", str(2**53 + 1), "1" * 129])
-    def test_invalid(self, tmp_path: Path, value: str | None) -> None:
-        with pytest.raises(ReaderFormatError, match="float64 'global_x' values") as caught:
-            _float_values(
-                pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "tx.csv"), "transcripts", "global_x"
-            )
-        assert caught.value.context == ReaderErrorContext("merscope", "transcripts")
 
 
 class TestMetadataColumns:
@@ -190,26 +167,36 @@ class TestNormalizeMetadata:
                 "center_x": ["1", "2"],
                 "center_y": ["3", "4"],
                 "volume": ["0", "5"],
-                "fov": ["", "2"],
+                "fov": [None, "2"],
                 "transcript_count": ["0", str(2**63)],
                 "extra": ["0001", "NA"],
             },
             dtype=STRING_DTYPE,
         )
+        frame = (
+            pa.Table.from_pandas(frame)
+            .cast(
+                pa.schema(list(metadata_types(frame.columns.tolist(), ArtifactFile(tmp_path / "metadata.csv")).items()))
+            )
+            .to_pandas(types_mapper=pd.ArrowDtype)
+        )
         result = normalize_metadata(frame, ArtifactFile(tmp_path / "metadata.csv"))
         assert result.index.tolist() == ["a", "b"]
+        assert result.index.name is None
         assert result["center_x"].dtype == _FLOAT_DTYPE
         assert result["extra"].tolist() == ["0001", "NA"]
         assert result["fov"].isna().tolist() == [True, False]
         assert result["transcript_count"].tolist() == [0, 2**63]
 
     @pytest.mark.parametrize(
-        ("column", "values"), [("EntityID", ["a", "a"]), ("volume", ["-1", "2"]), ("fov", [str(2**63), "2"])]
+        ("column", "values"), [("EntityID", ["a", "a"]), ("volume", ["-1", "2"]), ("transcript_count", [None, "2"])]
     )
-    def test_invalid(self, tmp_path: Path, column: str, values: list[str]) -> None:
+    def test_invalid(self, tmp_path: Path, column: str, values: list[str | None]) -> None:
         frame = pd.DataFrame(
             {"EntityID": ["a", "b"], "center_x": ["1", "2"], "center_y": ["3", "4"], column: values}, dtype=STRING_DTYPE
         )
+        types = metadata_types(frame.columns.tolist(), ArtifactFile(tmp_path / "metadata.csv"))
+        frame = pa.Table.from_pandas(frame).cast(pa.schema(list(types.items()))).to_pandas(types_mapper=pd.ArrowDtype)
         with pytest.raises(ReaderFormatError):
             normalize_metadata(frame, ArtifactFile(tmp_path / "metadata.csv"))
 
@@ -251,6 +238,10 @@ class TestNormalizeBoundaryIds:
         table = pa.table({"EntityID": ["a", "a"], "ZIndex": planes, "Type": ["Cell", "Cell"]})
         assert normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet")).tolist() == ["a", "a"]
 
+    def test_uint64_planes(self, tmp_path: Path) -> None:
+        table = pa.table({"EntityID": ["a"], "ZIndex": pa.array([2**64 - 1], pa.uint64())})
+        assert normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet")).tolist() == ["a"]
+
     def test_repeated_planes_and_large_ids(self, tmp_path: Path) -> None:
         table = pa.table({"EntityID": [2**63 - 1, 2**63 - 1], "ZIndex": [0, 0], "Type": ["cell", "Cell"]})
         result = normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet"))
@@ -261,7 +252,9 @@ class TestNormalizeBoundaryIds:
         "table",
         [
             pa.table({"EntityID": [1.0], "ZIndex": [0]}),
-            pa.table({"EntityID": ["1"], "ZIndex": [str(2**63)]}),
+            pa.table({"EntityID": ["1"], "ZIndex": [True]}),
+            pa.table({"EntityID": ["1"], "ZIndex": [0.5]}),
+            pa.table({"EntityID": ["1"], "ZIndex": ["-1"]}),
             pa.table({"EntityID": ["1"], "ZIndex": [0], "Type": ["Nucleus"]}),
             pa.table({"EntityID": ["1"], "ZIndex": [0], "Type": pa.array([None], type=pa.string())}),
             pa.table({"EntityID": pa.array([], type=pa.string()), "ZIndex": pa.array([], type=pa.int64())}),
@@ -315,7 +308,7 @@ class TestNormalizeTranscriptPartition:
                 "gene": ["B", "A"],
                 "global_x": [".10000000000000002", "2"],
                 "global_y": ["3", "4"],
-                "global_z": ["0.0", "2"],
+                "global_z": ["0", "2"],
                 "cell_id": ["-1", str(2**63 + 1)],
                 "fov": ["0", "1"],
                 "barcode_id": ["2", "3"],
@@ -323,6 +316,8 @@ class TestNormalizeTranscriptPartition:
             },
             dtype=STRING_DTYPE,
         )
+        types = transcript_types(frame.columns.tolist(), ArtifactFile(tmp_path / "tx.csv"))
+        frame = pa.Table.from_pandas(frame).cast(pa.schema(list(types.items()))).to_pandas(types_mapper=pd.ArrowDtype)
         result = normalize_transcript_partition(
             frame,
             features=("A", "B", "Blank-1"),
@@ -339,10 +334,12 @@ class TestNormalizeTranscriptPartition:
 
     @pytest.mark.parametrize(
         ("column", "value"),
-        [("gene", "Unknown"), ("gene", None), ("global_z", str(2**63)), ("transcript_id", ""), ("cell_id", "other")],
+        [("gene", "Unknown"), ("gene", None), ("transcript_id", ""), ("cell_id", "other")],
     )
     def test_invalid(self, tmp_path: Path, column: str, value: str | None) -> None:
         frame = pd.DataFrame({"gene": ["A"], "global_x": ["1"], "global_y": ["2"], column: [value]}, dtype=STRING_DTYPE)
+        types = transcript_types(frame.columns.tolist(), ArtifactFile(tmp_path / "tx.csv"))
+        frame = pa.Table.from_pandas(frame).cast(pa.schema(list(types.items()))).to_pandas(types_mapper=pd.ArrowDtype)
         with pytest.raises(ReaderFormatError):
             normalize_transcript_partition(
                 frame,
@@ -353,7 +350,13 @@ class TestNormalizeTranscriptPartition:
             )
 
     def test_empty(self, tmp_path: Path) -> None:
-        frame = pd.DataFrame({name: pd.Series(dtype=STRING_DTYPE) for name in ("gene", "global_x", "global_y")})
+        frame = pa.table(
+            {
+                "gene": pa.array([], pa.string()),
+                "global_x": pa.array([], pa.float64()),
+                "global_y": pa.array([], pa.float64()),
+            }
+        ).to_pandas(types_mapper=pd.ArrowDtype)
         assert normalize_transcript_partition(
             frame, features=("A",), path=ArtifactFile(tmp_path / "tx.csv"), assignment="current"
         ).empty

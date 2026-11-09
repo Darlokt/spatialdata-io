@@ -1,4 +1,4 @@
-"""Schemas of the Visium spot positions and their exact numeric normalization.
+"""Typed Visium spot positions and their barcode, tissue and coordinate invariants.
 
 Every capture spot has one row, in or out of the tissue (in Space Ranger 1.x
 headerless, in 2.0 and later with this header)::
@@ -15,21 +15,19 @@ headerless, in 2.0 and later with this header)::
 A header names its fields, so they may come in any order and further columns
 are ignored; empty or duplicate names are rejected before a CSV parser could
 rename them. A headerless file has exactly these six fields in this order.
-Fields are read as text and then normalized: the grid fields as exact int64
-integer tokens (``2.0`` and ``2e0`` are rejected), the pixel fields as
-correctly rounded finite nonnegative float64, which may be fractional. A
-pixel value above 2**53 or one that rounds to zero must be exactly
-representable, so that no spot silently moves to another pixel.
+Arrow reads barcodes literally, tissue state as uint8, grid positions as
+uint64 and image-pixel positions directly as float64. Tissue state is binary;
+pixel positions must be finite and nonnegative. Numeric token grammar and
+rounding follow Arrow's declared types, without a second text decoder.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import TYPE_CHECKING, Literal
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 
@@ -50,7 +48,16 @@ POSITION_COLUMNS = (
     "pxl_col_in_fullres",
 )
 OBS_POSITION_COLUMNS = ("in_tissue", "array_row", "array_col")
-POSITION_SOURCE_SCHEMA = pa.schema([(column, pa.string()) for column in POSITION_COLUMNS])
+POSITION_SOURCE_SCHEMA = pa.schema(
+    [
+        ("barcode", pa.string()),
+        ("in_tissue", pa.uint8()),
+        ("array_row", pa.uint64()),
+        ("array_col", pa.uint64()),
+        ("pxl_row_in_fullres", pa.float64()),
+        ("pxl_col_in_fullres", pa.float64()),
+    ]
+)
 REGION_KEY = "region"
 INSTANCE_KEY = "spot_id"
 SPOT_ID_DTYPE = pd.ArrowDtype(pa.string())
@@ -87,82 +94,12 @@ def classify_position_row(columns: Sequence[str], *, path: Path, context: Reader
     return "headerless"
 
 
-def _grid_column(source: pd.Series, *, path: Path, context: ReaderErrorContext) -> pd.Series:
-    """Parse integer tokens exactly, without accepting decimal/exponent spellings."""
-    if source.isna().any():
-        raise ReaderFormatError(
-            context=context, path=path, found=f"null values in {source.name!r}", expected="finite numeric values"
-        )
-
-    try:
-        numeric = source.astype("int64[pyarrow]")
-    except pa.ArrowInvalid as error:
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"invalid integer token or overflow in {source.name!r}",
-            expected="integer tokens fitting int64",
-        ) from error
-
-    if (numeric < 0).any():
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"negative values in {source.name!r}",
-            expected="nonnegative integer values",
-        )
-
-    return numeric
-
-
-def _pixel_column(source: pd.Series, *, path: Path, context: ReaderErrorContext) -> pd.Series:
-    """Parse correctly rounded float64 coordinates and reject unsafe loss."""
-    if source.isna().any():
-        raise ReaderFormatError(
-            context=context, path=path, found=f"null values in {source.name!r}", expected="finite numeric values"
-        )
-
-    try:
-        numeric = source.astype("float64[pyarrow]")
-    except pa.ArrowInvalid as error:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"nonnumeric values in {source.name!r}", expected="finite numeric values"
-        ) from error
-
-    values = numeric.to_numpy(copy=False)
-    if not np.isfinite(values).all():
-        raise ReaderFormatError(
-            context=context, path=path, found=f"nonfinite values in {source.name!r}", expected="finite numeric values"
-        )
-    if (values < 0).any():
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"negative values in {source.name!r}",
-            expected="nonnegative pixel coordinates",
-        )
-
-    # Beyond exact-integer precision, or at underflow, compare source text
-    # directly so a valid coordinate cannot silently move to a different pixel.
-    for row in np.flatnonzero((values >= 2**53) | (values == 0)):
-        if Decimal(source.iloc[row]) != Decimal(float(values[row])):
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found=f"pixel precision loss in {source.name!r}",
-                expected="losslessly representable coordinates",
-            )
-
-    return numeric
-
-
 def normalize_positions(frame: pd.DataFrame, *, path: Path, context: ReaderErrorContext) -> pd.DataFrame:
     """Normalize owned projected source fields; preserve barcode and row order.
 
-    Source fields are Arrow strings selected by the storage parser. Barcodes
-    must be nonempty and unique, grid fields nonnegative int64, and pixel
-    coordinates finite nonnegative float64. Only in_tissue is restricted to
-    the binary values zero and one. No source rows are filtered.
+    Source fields have their declared Arrow types. Barcodes must be nonempty
+    and unique, pixel coordinates finite and nonnegative, and in_tissue binary.
+    No source rows are filtered.
     """
     if frame.empty:
         raise ReaderFormatError(context=context, path=path, found="zero rows", expected="at least one spot row")
@@ -181,15 +118,23 @@ def normalize_positions(frame: pd.DataFrame, *, path: Path, context: ReaderError
             context=context, path=path, found=f"duplicate barcodes {duplicates!r}", expected="unique barcode strings"
         )
 
-    for column in OBS_POSITION_COLUMNS:
-        frame[column] = _grid_column(frame[column], path=path, context=context)
-
     if not frame["in_tissue"].isin([0, 1]).all():
         raise ReaderFormatError(
             context=context, path=path, found="in_tissue values outside {0, 1}", expected="binary in_tissue values"
         )
 
     for column in POSITION_COLUMNS[-2:]:
-        frame[column] = _pixel_column(frame[column], path=path, context=context)
+        values = pa.array(frame[column])
+        if values.null_count or pc.call_function("all", [pc.call_function("is_finite", [values])]).as_py() is False:
+            raise ReaderFormatError(
+                context=context, path=path, found=f"nonfinite values in {column!r}", expected="finite numeric values"
+            )
+        if (frame[column] < 0).any():
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found=f"negative values in {column!r}",
+                expected="nonnegative pixel coordinates",
+            )
 
     return frame.set_index("barcode")

@@ -126,7 +126,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
           ``mosaic_pixels`` (identity).
         - ``points["<prefix>_transcripts"]``: lazy events with float64 ``x``,
           ``y`` (micrometres) and categorical ``gene`` in count-header order,
-          plus, when present, int64 ``z_raw`` (stack index, not a physical
+          plus, when present, uint64 ``z_raw`` (stack index, not a physical
           depth), ``fov`` and ``barcode_id``, text ``transcript_id``, and the
           text assignment ``cell_id`` (instance key; ``-1`` unassigned) or
           ``original_cell_id`` (instrument events read beside VPT cells).

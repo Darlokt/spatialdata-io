@@ -38,16 +38,24 @@ unsupported units fail. Linked-grid declarations must agree, including partial
 ones. Calibration applies at level zero and retains the native raster origin;
 OME plane stage positions are not used to invent registration.
 
-Steinbock discovers only root `images.csv`, parsed from an owned CSV stream.
+Steinbock discovers only root `images.csv`, projected as Arrow strings from an owned CSV stream.
 Its named fields are `image`, `width_px`, `height_px`, and optional paired
 `acquisition_width_um`, `acquisition_height_um`. Fields may be reordered and
 additional fields are allowed. The exact association is `<sample>.tiff` to
-`ome/<sample>.ome.tiff` and the selected mask. Duplicate names, malformed CSV,
+`ome/<sample>.ome.tiff` and the selected mask. Duplicate names, inconsistent CSV record widths,
 partial physical pairs, nonpositive values, unrepresentable scales, stale
 raster dimensions and conflicting OME declarations fail. Missing sample rows,
 absent physical columns or two empty extent fields provide no IMC calibration.
-The scale is acquisition width/width in pixels for X and height/height for Y;
-there is no hardcoded one-micrometre pixel size or stage-coordinate placement.
+The scale is acquisition width/width in pixels for X and height/height for Y.
+Extent text is interpreted as an exact decimal and divided exactly by the pixel
+dimension before the final float64 rounding; parsing the extent as float first
+can introduce an avoidable one-ULP error. Numerical metadata is interpreted only
+for selected images; image identities and CSV record widths are checked globally.
+Selected dimensions use checked unsigned conversion and retain the supported
+range `1..2**63-1`; see the [table contract](table_contracts.md#steinbock) for
+numeric grammar and projection rules. Arrow checks record widths but accepts
+some malformed quoting.
+There is no hardcoded one-micrometre pixel size or stage-coordinate placement.
 
 ## Table positions and independent frames
 

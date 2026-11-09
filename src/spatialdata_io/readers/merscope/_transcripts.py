@@ -1,7 +1,7 @@
 """Build lazy transcript points from ``detected_transcripts.csv``.
 
 The CSV is split into newline-aligned byte blocks; each partition decodes only
-the projected columns as text (``_schemas.validate_transcript_columns``) and
+the projected columns with Arrow types (``_schemas.transcript_types``) and
 normalizes them on compute, so building the points reads only the header.
 Every record must fit one physical line: quoted commas and quotes are allowed,
 quoted newlines are not. Records must have the full header width, even in
@@ -23,16 +23,17 @@ import warnings
 from typing import TYPE_CHECKING
 
 import pandas as pd
+import pyarrow as pa
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity
 
-from spatialdata_io.readers._utils.csv import read_csv_blocks, read_csv_header
+from spatialdata_io.readers._utils.csv import csv_header, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers.merscope._schemas import (
     STRING_DTYPE,
     TRANSCRIPTS,
     normalize_transcript_partition,
-    validate_transcript_columns,
+    transcript_types,
 )
 
 if TYPE_CHECKING:
@@ -54,12 +55,13 @@ def read_transcripts(
     ``cell_population`` must be unique; ``None`` skips the assignment check.
     """
     path = source.path
-    names = read_csv_header(path, context=_CONTEXT)
-    columns = validate_transcript_columns(names, path)
-    dataframe = read_csv_blocks(path, header=names, columns=columns, context=_CONTEXT)
+    names = csv_header(path, context=_CONTEXT)
+    types = transcript_types(names, path)
+    columns = tuple(types)
+    dataframe = read_csv_blocks(path, header=names, columns=columns, column_types=types, context=_CONTEXT)
 
     population = None if cell_population is None else pd.Index(cell_population, dtype=STRING_DTYPE)
-    empty = pd.DataFrame({name: pd.Series(dtype=STRING_DTYPE) for name in columns})
+    empty = pa.schema(list(types.items())).empty_table().to_pandas(types_mapper=pd.ArrowDtype)
     meta = normalize_transcript_partition(
         empty, features=features, path=path, assignment=source.assignment, cell_population=population
     )

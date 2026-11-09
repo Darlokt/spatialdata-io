@@ -119,7 +119,7 @@ def write_merscope_dataset(  # noqa: PLR0913, RUF100 - Independent source layout
             "barcode_id": [0, 1, 2, 3],
             "global_x": [2.0, 10.0, 21.0, 8.0],
             "global_y": [2.0, 1.0, 1.0, 6.0],
-            "global_z": [0.0, 2.0, 2.0, 0.0],
+            "global_z": [0, 2, 2, 0],
             "x": [20.0, 30.0, 40.0, 50.0],
             "y": [21.0, 31.0, 41.0, 51.0],
             "fov": [0, 0, 1, 1],

@@ -1,4 +1,4 @@
-"""Named and positional Visium contracts and exact normalization limits."""
+"""Named and positional Visium contracts and typed semantic validation."""
 
 from __future__ import annotations
 
@@ -6,28 +6,53 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers.visium._schemas import POSITION_COLUMNS, classify_position_row, normalize_positions
+from spatialdata_io.readers.visium._schemas import (
+    POSITION_COLUMNS,
+    POSITION_SOURCE_SCHEMA,
+    classify_position_row,
+    normalize_positions,
+)
 
 _PATH = Path("positions.csv")
 _CONTEXT = ReaderErrorContext("visium", "tissue positions", "2.1.0")
 
 
 def _frame() -> pd.DataFrame:
-    """Construct lexical input with integer grid fields and fractional pixels."""
-    return pd.DataFrame(
+    """Construct already typed input with integer grid fields and fractional pixels."""
+    return pa.Table.from_pydict(
         {
             "barcode": ["002-1", "001-1"],
-            "in_tissue": ["1", "0"],
-            "array_row": ["2", "1"],
-            "array_col": ["3", "0"],
-            "pxl_row_in_fullres": ["30.5", "10"],
-            "pxl_col_in_fullres": ["40.5", "20"],
+            "in_tissue": [1, 0],
+            "array_row": [2, 1],
+            "array_col": [3, 0],
+            "pxl_row_in_fullres": [30.5, 10.0],
+            "pxl_col_in_fullres": [40.5, 20.0],
         },
-        dtype="string[pyarrow]",
-    )
+        schema=POSITION_SOURCE_SCHEMA,
+    ).to_pandas(types_mapper=pd.ArrowDtype)
+
+
+class TestPositionSourceSchema:
+    """Keep the vendor scalar domains explicit at ingestion."""
+
+    def test_fixed_native_types_and_field_order(self) -> None:
+        assert (
+            pa.schema(
+                [
+                    ("barcode", pa.string()),
+                    ("in_tissue", pa.uint8()),
+                    ("array_row", pa.uint64()),
+                    ("array_col", pa.uint64()),
+                    ("pxl_row_in_fullres", pa.float64()),
+                    ("pxl_col_in_fullres", pa.float64()),
+                ]
+            )
+            == POSITION_SOURCE_SCHEMA
+        )
 
 
 class TestClassifyPositionRow:
@@ -63,36 +88,30 @@ class TestClassifyPositionRow:
 
 
 class TestNormalizePositions:
-    """Validate source data once and retain exact grid integers and coordinates."""
+    """Validate typed source semantics and retain source identity and order."""
 
     def test_explicit_arrow_storage_and_order(self) -> None:
-        """Explicit arrow storage and order."""
         result = normalize_positions(_frame(), path=_PATH, context=_CONTEXT)
 
         assert result.index.tolist() == ["002-1", "001-1"]
         assert result.index.name == "barcode"
-        for column in ("in_tissue", "array_row", "array_col"):
-            assert str(result[column].dtype) == "int64[pyarrow]"
+        assert result.index.dtype == pd.ArrowDtype(pa.string())
+        assert str(result["in_tissue"].dtype) == "uint8[pyarrow]"
+        for column in ("array_row", "array_col"):
+            assert str(result[column].dtype) == "uint64[pyarrow]"
         for column in ("pxl_row_in_fullres", "pxl_col_in_fullres"):
             assert str(result[column].dtype) == "double[pyarrow]"
         np.testing.assert_array_equal(result["array_row"], [2, 1])
         np.testing.assert_array_equal(result["pxl_row_in_fullres"], [30.5, 10.0])
 
-    @pytest.mark.parametrize(
-        ("token", "expected"),
-        [
-            ("9007199254740993", 2**53 + 1),
-            ("9223372036854775807", 2**63 - 1),
-        ],
-    )
-    def test_grid_integers_never_round_through_float(self, token: str, expected: int) -> None:
-        """Grid integers never round through float."""
+    @pytest.mark.parametrize("value", [0, 2**53 + 1, 2**63 - 1, 2**63, 2**64 - 1])
+    def test_grid_integers_never_round_through_float(self, value: int) -> None:
         frame = _frame()
-        frame.loc[0, "array_row"] = token
+        frame.loc[0, "array_row"] = value
 
         result = normalize_positions(frame, path=_PATH, context=_CONTEXT)
 
-        assert int(result["array_row"].iloc[0]) == expected
+        assert int(result["array_row"].iloc[0]) == value
         assert int(result["array_row"].iloc[1]) == 1
 
     @pytest.mark.parametrize(
@@ -102,36 +121,18 @@ class TestNormalizePositions:
             ("barcode", "001-1", "duplicate barcodes"),
             ("barcode", "a\x00b", "NUL"),
             ("barcode", None, "null"),
-            ("array_row", "nan", "integer tokens"),
-            ("array_row", None, "finite numeric"),
-            ("array_row", "not-a-number", "integer tokens"),
-            ("array_row", "-1.0", "integer tokens"),
-            ("array_col", "-1", "nonnegative integer"),
             ("pxl_row_in_fullres", None, "finite numeric"),
-            ("array_row", "inf", "integer tokens"),
-            ("array_row", "-1", "nonnegative integer"),
-            ("array_row", "0.5", "integer tokens"),
-            ("array_row", "9223372036854775808", "fitting int64"),
-            ("array_col", "9223372036854775808", "fitting int64"),
-            ("array_row", "9007199254740993.5", "integer tokens"),
-            ("array_row", "9223372036854775808.0", "fitting int64"),
-            ("array_row", "1.00000000000000001", "integer tokens"),
-            ("array_row", "9007199254740990.5", "integer tokens"),
-            ("array_row", "-1e-400", "integer tokens"),
-            ("array_row", "1e-400", "integer tokens"),
-            ("pxl_row_in_fullres", "1e-400", "precision loss"),
-            ("pxl_row_in_fullres", "nonnumeric", "finite numeric"),
-            ("pxl_row_in_fullres", "inf", "finite numeric"),
-            ("pxl_row_in_fullres", "9007199254740991.5", "precision loss"),
-            ("pxl_row_in_fullres", "-1e-400", "precision loss"),
-            ("in_tissue", "2", "binary"),
-            ("pxl_row_in_fullres", "-1", "nonnegative pixel"),
-            ("pxl_row_in_fullres", "9007199254740993", "precision loss"),
-            ("pxl_col_in_fullres", "9007199254740993.0", "precision loss"),
+            ("pxl_row_in_fullres", float("inf"), "finite numeric"),
+            ("pxl_row_in_fullres", float("nan"), "finite numeric"),
+            ("pxl_col_in_fullres", float("-inf"), "finite numeric"),
+            ("in_tissue", 2, "binary"),
+            ("in_tissue", 255, "binary"),
+            ("in_tissue", None, "binary"),
+            ("pxl_row_in_fullres", -1, "nonnegative pixel"),
+            ("pxl_col_in_fullres", -0.25, "nonnegative pixel"),
         ],
     )
-    def test_rejects_invalid_values(self, column: str, value: str | None, message: str) -> None:
-        """Rejects invalid values."""
+    def test_rejects_invalid_values(self, column: str, value: str | float | None, message: str) -> None:
         frame = _frame()
         frame.loc[0, column] = value
 
@@ -142,33 +143,5 @@ class TestNormalizePositions:
         assert "detected version '2.1.0'" in str(caught.value)
 
     def test_rejects_empty_positions(self) -> None:
-        """Rejects empty positions."""
         with pytest.raises(ReaderFormatError, match="zero rows"):
             normalize_positions(_frame().iloc[:0], path=_PATH, context=_CONTEXT)
-
-    @pytest.mark.parametrize("column", ["in_tissue", "array_row", "array_col"])
-    @pytest.mark.parametrize("token", ["1.0", "1e0", "9007199254740993.0"])
-    def test_rejects_decimal_and_exponent_grid_tokens(self, column: str, token: str) -> None:
-        frame = _frame()
-        frame.loc[0, column] = token
-
-        with pytest.raises(ReaderFormatError, match="integer tokens"):
-            normalize_positions(frame, path=_PATH, context=_CONTEXT)
-
-    def test_float_text_conversion_uses_correct_rounding(self) -> None:
-        """Float text conversion uses correct rounding."""
-        frame = _frame()
-        frame.loc[0, "pxl_row_in_fullres"] = "0.10000000000000002"
-
-        result = normalize_positions(frame, path=_PATH, context=_CONTEXT)
-
-        assert result["pxl_row_in_fullres"].iloc[0] == float("0.10000000000000002")
-
-    def test_exact_large_pixel_coordinate_is_allowed(self) -> None:
-        """Exact large pixel coordinate is allowed."""
-        frame = _frame()
-        frame.loc[0, "pxl_row_in_fullres"] = str(2**54)
-
-        result = normalize_positions(frame, path=_PATH, context=_CONTEXT)
-
-        assert result["pxl_row_in_fullres"].iloc[0] == float(2**54)

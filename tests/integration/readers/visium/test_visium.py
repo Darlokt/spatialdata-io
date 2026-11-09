@@ -295,8 +295,28 @@ class TestVisiumSyntheticWorkflow:
 
         _assert_table_contract(result)
         assert "quality" not in result.tables["table"].obs
-        for column in ("in_tissue", "array_row", "array_col"):
-            assert result.tables["table"].obs[column].dtype == np.dtype(np.int64)
+        assert result.tables["table"].obs["in_tissue"].dtype == np.dtype(np.uint8)
+        for column in ("array_row", "array_col"):
+            assert result.tables["table"].obs[column].dtype == np.dtype(np.uint64)
+
+    @pytest.mark.parametrize("version", ["v1_headered", "v2"])
+    def test_named_positions_preserve_multiline_extension_header(
+        self, tmp_path: Path, version: Literal["v1_headered", "v2"]
+    ) -> None:
+        """Classify the complete logical header before projecting an unused multiline field."""
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version=version)
+        filename = "tissue_positions_list.csv" if version == "v1_headered" else "tissue_positions.csv"
+        path = tmp_path / "spatial" / filename
+        header, *rows = path.read_text(encoding="utf-8").splitlines()
+        path.write_text(
+            '"quality\ncontinued",' + header + "\n" + "".join("good," + row + "\n" for row in rows), encoding="utf-8"
+        )
+
+        result = visium(tmp_path)
+
+        _assert_table_contract(result)
+        assert "quality\ncontinued" not in result.tables["table"].obs
 
     def test_duplicate_raw_header_names_are_rejected_before_projection(self, tmp_path: Path) -> None:
         """Duplicate raw header names are rejected before projection."""
@@ -309,10 +329,13 @@ class TestVisiumSyntheticWorkflow:
         with pytest.raises(ValueError, match="duplicate column"):
             visium(tmp_path)
 
-    def test_table_h5ad_roundtrip_preserves_values_and_annotations(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("grid_row", [0, 2**53 + 1, 2**63 - 1, 2**63, 2**64 - 1])
+    def test_table_h5ad_roundtrip_preserves_values_and_annotations(self, tmp_path: Path, grid_row: int) -> None:
         """Table h5ad roundtrip preserves values and annotations."""
         _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
         _write_spatial(tmp_path, version="v2")
+        positions = tmp_path / "spatial" / "tissue_positions.csv"
+        positions.write_text(positions.read_text().replace("barcode-a,1,0,2,10,20", f"barcode-a,1,{grid_row},2,10,20"))
         result = visium(tmp_path)
         path = tmp_path / "table.h5ad"
 
@@ -323,6 +346,9 @@ class TestVisiumSyntheticWorkflow:
         assert isinstance(restored.var, pd.DataFrame)
         assert isinstance(result.tables["table"].obs, pd.DataFrame)
         assert isinstance(result.tables["table"].var, pd.DataFrame)
+        assert restored.obs["array_row"].tolist()[0] == grid_row
+        assert restored.obs["array_row"].dtype == np.dtype(np.uint64)
+        assert restored.obs["in_tissue"].dtype == np.dtype(np.uint8)
         pd.testing.assert_frame_equal(restored.obs, result.tables["table"].obs, check_exact=True)
         pd.testing.assert_frame_equal(restored.var, result.tables["table"].var, check_exact=True)
         expression = restored.X
@@ -332,6 +358,32 @@ class TestVisiumSyntheticWorkflow:
         np.testing.assert_array_equal(expression.data, expected.data)
         np.testing.assert_array_equal(expression.indices, expected.indices)
         np.testing.assert_array_equal(expression.indptr, expected.indptr)
+
+    def test_full_uint64_grid_preserves_spatialdata_zarr_linkage(self, tmp_path: Path) -> None:
+        """Persist the largest grid coordinate without changing textual spot identity."""
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v2")
+        positions = tmp_path / "spatial" / "tissue_positions.csv"
+        positions.write_text(
+            positions.read_text().replace("barcode-a,1,0,2,10,20", f"barcode-a,1,{2**64 - 1},{2**64 - 1},10,20")
+        )
+        result = visium(tmp_path)
+        store = tmp_path / "result.zarr"
+
+        result.write(store)
+        restored = SpatialData.read(store)
+
+        for actual in (result, restored):
+            table = actual.tables["table"]
+            assert table.obs_names.tolist() == ["barcode-a", "barcode-b", "barcode-c"]
+            assert actual.shapes["sample"].index.name == "spot_id"
+            assert table.obs["spot_id"].tolist() == actual.shapes["sample"].index.tolist()
+            assert get_table_keys(table) == ("sample", "region", "spot_id")
+            assert table.obs["in_tissue"].dtype == np.dtype(np.uint8)
+            for column in ("array_row", "array_col"):
+                assert table.obs[column].dtype == np.dtype(np.uint64)
+                assert table.obs[column].tolist()[0] == 2**64 - 1
+            np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[20, 10], [40, 30], [60, 50]])
 
     @pytest.mark.parametrize(
         ("counts_kind", "position_version"),

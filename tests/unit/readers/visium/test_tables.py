@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 from anndata import AnnData
 from scipy import sparse
@@ -51,7 +52,7 @@ class TestReadPositions:
     """Validate both vendor CSV schemas and all coordinate columns."""
 
     @pytest.mark.parametrize("headered", [False, True])
-    @pytest.mark.parametrize("barcode", ["a,b", 'a"b', "a\nb", "NA", "NULL"])
+    @pytest.mark.parametrize("barcode", ["a,b", 'a"b', "a\nb", "NA", "NULL", "007"])
     def test_preserves_quoted_and_literal_barcodes(self, tmp_path: Path, *, headered: bool, barcode: str) -> None:
         """Keep source barcode text, escaped quotes, embedded newlines, and literal null-like words."""
         path = tmp_path / "positions.csv"
@@ -98,7 +99,7 @@ class TestReadPositions:
         path = tmp_path / "positions.csv"
         path.write_text(",".join((*POSITION_COLUMNS, "quality")) + "\n" + row + "\n", encoding="utf-8")
 
-        with pytest.raises(ReaderFormatError, match="record widths"):
+        with pytest.raises(ReaderFormatError, match="header's width"):
             read_positions(_layout(tmp_path, path, headered=True))
 
     @pytest.mark.parametrize("headered", [False, True])
@@ -111,9 +112,131 @@ class TestReadPositions:
         result = read_positions(_layout(tmp_path, path, headered=headered))
 
         assert result.index.tolist() == ["b", "a", "extra"]
-        assert str(result["in_tissue"].dtype) == "int64[pyarrow]"
+        assert str(result["in_tissue"].dtype) == "uint8[pyarrow]"
         assert result["array_row"].tolist() == [1, 0, 2]
         np.testing.assert_array_equal(result["pxl_col_in_fullres"], np.asarray([40.5, 20.0, 60.0]))
+
+    @pytest.mark.parametrize("headered", [False, True])
+    @pytest.mark.parametrize("column", ["in_tissue", "array_row", "array_col"])
+    @pytest.mark.parametrize("token", ["0x1", " 1 ", "\t1\t"])
+    def test_native_unsigned_integer_grammar(self, tmp_path: Path, column: str, token: str, *, headered: bool) -> None:
+        path = tmp_path / "positions.csv"
+        values = dict(zip(POSITION_COLUMNS, ["a", "1", "2", "3", "4", "5"], strict=True))
+        values[column] = token
+        header = ",".join(POSITION_COLUMNS) + "\n" if headered else ""
+        path.write_text(header + ",".join(values.values()) + "\n")
+
+        result = read_positions(_layout(tmp_path, path, headered=headered))
+
+        assert result[column].tolist() == [1]
+
+    @pytest.mark.parametrize("column", ["in_tissue", "array_row", "array_col"])
+    @pytest.mark.parametrize("token", ["", "NA", "NULL", "nan", "inf", "-1", "-0", "+1", "1.0", "1e0", "1_0", "a\x00b"])
+    def test_rejects_invalid_native_integer_tokens(self, tmp_path: Path, column: str, token: str) -> None:
+        path = tmp_path / "positions.csv"
+        values = dict(zip(POSITION_COLUMNS, ["a", "1", "2", "3", "4", "5"], strict=True))
+        values[column] = token
+        path.write_text(",".join(POSITION_COLUMNS) + "\n" + ",".join(values.values()) + "\n")
+
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
+            read_positions(_layout(tmp_path, path, headered=True))
+
+        assert caught.value.context.artifact == "tissue positions"
+        assert caught.value.path == path
+
+    @pytest.mark.parametrize(
+        ("column", "token"), [("in_tissue", "256"), ("array_row", str(2**64)), ("array_col", str(2**64))]
+    )
+    def test_checked_unsigned_overflow(self, tmp_path: Path, column: str, token: str) -> None:
+        path = tmp_path / "positions.csv"
+        values = dict(zip(POSITION_COLUMNS, ["a", "1", "2", "3", "4", "5"], strict=True))
+        values[column] = token
+        path.write_text(",".join(POSITION_COLUMNS) + "\n" + ",".join(values.values()) + "\n")
+
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
+            read_positions(_layout(tmp_path, path, headered=True))
+
+    @pytest.mark.parametrize("headered", [False, True])
+    @pytest.mark.parametrize("value", [0, 2**53 + 1, 2**63 - 1, 2**63, 2**64 - 1])
+    def test_grid_identifiers_are_exact_through_uint64_range(
+        self, tmp_path: Path, value: int, *, headered: bool
+    ) -> None:
+        path = tmp_path / "positions.csv"
+        header = ",".join(POSITION_COLUMNS) + "\n" if headered else ""
+        path.write_text(header + f"007,1,{value},{value},4,5\n")
+
+        result = read_positions(_layout(tmp_path, path, headered=headered))
+
+        assert result.index.tolist() == ["007"]
+        assert result["array_row"].dtype == pd.ArrowDtype(pa.uint64())
+        assert result["array_row"].tolist() == [value]
+        assert result["array_col"].tolist() == [value]
+
+    @pytest.mark.parametrize("column", ["pxl_row_in_fullres", "pxl_col_in_fullres"])
+    @pytest.mark.parametrize("token", ["", "NA", "NULL", "1_0", "a\x00b"])
+    def test_required_pixel_fields_reject_missing_and_nonnumeric_tokens(
+        self, tmp_path: Path, column: str, token: str
+    ) -> None:
+        path = tmp_path / "positions.csv"
+        values = dict(zip(POSITION_COLUMNS, ["a", "1", "2", "3", "4", "5"], strict=True))
+        values[column] = token
+        path.write_text(",".join(POSITION_COLUMNS) + "\n" + ",".join(values.values()) + "\n")
+
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
+            read_positions(_layout(tmp_path, path, headered=True))
+
+    @pytest.mark.parametrize(
+        ("token", "expected"),
+        [
+            ("0.10000000000000002", float("0.10000000000000002")),
+            ("9007199254740993", float(2**53)),
+            ("1e-400", 0.0),
+            ("-1e-400", -0.0),
+            ("-0", -0.0),
+            (" +1.25 ", 1.25),
+        ],
+    )
+    def test_pixels_round_directly_to_float64(self, tmp_path: Path, token: str, expected: float) -> None:
+        path = tmp_path / "positions.csv"
+        path.write_text(f"a,1,2,3,{token},{token}\n")
+
+        result = read_positions(_layout(tmp_path, path, headered=False))
+
+        actual = result["pxl_row_in_fullres"].iloc[0]
+        assert actual.hex() == expected.hex()
+        assert result["pxl_col_in_fullres"].iloc[0].hex() == expected.hex()
+
+    def test_source_closes_on_success(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "positions.csv"
+        path.write_text("a,1,2,3,4,5\n")
+        layout = _layout(tmp_path, path, headered=False)
+        opened = mocker.spy(type(layout.positions), "open")
+
+        read_positions(layout)
+
+        assert opened.spy_return.closed
+
+    @pytest.mark.parametrize("row", ["a,1,2,3,,5", "a,1,2,3,inf,5", "a\x00b,1,2,3,4,5"])
+    def test_source_closes_on_parser_and_validation_failure(
+        self, tmp_path: Path, row: str, mocker: MockerFixture
+    ) -> None:
+        path = tmp_path / "positions.csv"
+        path.write_text(row + "\n")
+        layout = _layout(tmp_path, path, headered=False)
+        opened = mocker.spy(type(layout.positions), "open")
+
+        with pytest.raises(ReaderFormatError):
+            read_positions(layout)
+
+        assert opened.spy_return.closed
+
+    def test_later_quoted_suffix_uses_arrow_grammar(self, tmp_path: Path) -> None:
+        path = tmp_path / "positions.csv"
+        path.write_text('a,1,2,3,4,5\n"b"suffix,1,2,3,4,5\n')
+
+        result = read_positions(_layout(tmp_path, path, headered=False))
+
+        assert result.index.tolist() == ["a", "bsuffix"]
 
     def test_rejects_missing_required_header_fields(self, tmp_path: Path) -> None:
         """Rejects missing required header fields."""

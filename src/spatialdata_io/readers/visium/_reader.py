@@ -162,7 +162,7 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
               entries are summed.
             - ``var``: ``gene_ids``, ``feature_types`` and, when present,
               ``genome``; ``var_names`` are the feature names.
-            - ``obs``: int64 ``in_tissue``, ``array_row`` and ``array_col``;
+            - ``obs``: uint8 ``in_tissue`` and uint64 ``array_row``/``array_col``;
               ``spot_id`` (the barcode, string) and categorical ``region``
               (``dataset_id``) link the rows to the circles.
             - ``obsm["spatial_pixels"]``: float64 spot centres ``x, y`` in

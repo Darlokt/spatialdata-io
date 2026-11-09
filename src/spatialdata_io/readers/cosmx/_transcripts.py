@@ -46,19 +46,17 @@ from dask import delayed
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.csv import read_csv_blocks
+from spatialdata_io.readers._utils.csv import csv_errors, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers.cosmx._schemas import (
     CELL,
     CELL_ID,
     FOV,
-    INTEGER_DTYPE,
-    STRING_DTYPE,
     TRANSCRIPTS,
-    float_values,
-    integer_values,
+    require_finite,
+    require_positive,
     schema_error,
-    transcript_columns,
+    transcript_types,
 )
 from spatialdata_io.readers.cosmx._tables import read_header
 from spatialdata_io.readers.cosmx._transforms import fov_frame, global_frame
@@ -66,8 +64,6 @@ from spatialdata_io.readers.cosmx._transforms import fov_frame, global_frame
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    import numpy as np
-    import numpy.typing as npt
     from dask.delayed import Delayed
     from spatialdata.transformations import BaseTransformation
 
@@ -79,39 +75,26 @@ _READ_BYTES = 1024 * 1024
 
 
 def _normalize(table: pa.Table, *, features: tuple[str, ...], path: ArtifactFile) -> pd.DataFrame:
-    """Validate one lexical partition and convert it to the returned point schema."""
-    target = pd.Series(table.column("target").to_pandas(types_mapper=pd.ArrowDtype), dtype=STRING_DTYPE)
-    if target.isna().any() or not target.isin(features).all():
+    """Validate one typed partition and convert only required point-model columns."""
+    require_positive(table[FOV], path, TRANSCRIPTS, FOV)
+    for name in ("x_global_px", "y_global_px", "x_local_px", "y_local_px"):
+        require_finite(table[name], path, TRANSCRIPTS, name)
+    names = ["x_global_px", "y_global_px", "target", FOV, CELL_ID, "x_local_px", "y_local_px"]
+    names.extend(name for name in ("z", "CellComp", CELL) if name in table.column_names)
+    frame = table.select(names).to_pandas(types_mapper=pd.ArrowDtype)
+    vocabulary = pd.Index(features)
+    codes = vocabulary.get_indexer(pd.Index(frame["target"].array))
+    if (codes < 0).any():
         raise schema_error(
             path, TRANSCRIPTS, found="missing or unknown targets", expected="targets from the count vocabulary"
         )
-
-    def floats(name: str) -> npt.NDArray[np.float64]:
-        return float_values(table.column(name), path, TRANSCRIPTS, name)
-
-    def integers(name: str, minimum: int | None) -> pd.Series:
-        return pd.Series(
-            integer_values(table.column(name), path, TRANSCRIPTS, name, minimum=minimum), dtype=INTEGER_DTYPE
-        )
-
-    frame = pd.DataFrame(
-        {
-            "x": floats("x_global_px"),
-            "y": floats("y_global_px"),
-            "target": pd.Categorical(target.to_numpy(), categories=features),
-            FOV: integers(FOV, 1),
-            CELL_ID: integers(CELL_ID, 0),
-            "x_local": floats("x_local_px"),
-            "y_local": floats("y_local_px"),
-        }
+    frame["target"] = pd.Categorical.from_codes(codes, categories=vocabulary)
+    # PointsModel requires NumPy coordinates; local coordinates stay Arrow annotations.
+    frame["x_global_px"] = frame["x_global_px"].to_numpy(dtype="float64")
+    frame["y_global_px"] = frame["y_global_px"].to_numpy(dtype="float64")
+    return frame.rename(
+        columns={"x_global_px": "x", "y_global_px": "y", "x_local_px": "x_local", "y_local_px": "y_local", "z": "z_raw"}
     )
-    if "z" in table.column_names:
-        # The vendor defines z as a slice number in arbitrary units; it can be negative.
-        frame["z_raw"] = integers("z", None)
-    for name in ("CellComp", CELL):
-        if name in table.column_names:
-            frame[name] = pd.Series(table.column(name).to_pandas(types_mapper=pd.ArrowDtype), dtype=STRING_DTYPE)
-    return frame
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,36 +102,28 @@ class _Projection:
     """Immutable task state: the source header, projected fields, and target vocabulary."""
 
     names: tuple[str, ...]
-    columns: tuple[str, ...]
+    types: pa.Schema
     features: tuple[str, ...]
     path: ArtifactFile
 
 
 def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
-    """Parse decoded gzip records like the shared plain-CSV block reader."""
-    names, columns, path = projection.names, projection.columns, projection.path
+    """Parse gzip records with the same physical types and null policy as plain blocks."""
+    path = projection.path
     if not payload:
-        # A compressed range crossed by an earlier member owns no records.
-        payload_table = pa.table({name: pa.array([], pa.string()) for name in columns})
-        return _normalize(payload_table, features=projection.features, path=path)
-    # Arrow checks full record widths but can accept malformed CSV quoting.
-    try:
-        with pa.BufferReader(payload) as source:
-            table = pacsv.read_csv(
-                source,
-                read_options=pacsv.ReadOptions(column_names=names, use_threads=False),
-                parse_options=pacsv.ParseOptions(newlines_in_values=False),
-                convert_options=pacsv.ConvertOptions(
-                    include_columns=columns, column_types=dict.fromkeys(columns, pa.string()), null_values=[]
-                ),
-            )
-    except pa.ArrowInvalid as error:
-        raise schema_error(
-            path,
-            TRANSCRIPTS,
-            found=f"malformed CSV records ({error})",
-            expected="records with one field per header column",
-        ) from error
+        return _normalize(projection.types.empty_table(), features=projection.features, path=path)
+    with pa.BufferReader(payload) as source, csv_errors(context=ReaderErrorContext("cosmx", TRANSCRIPTS), path=path):
+        table = pacsv.read_csv(
+            source,
+            read_options=pacsv.ReadOptions(column_names=projection.names, use_threads=False),
+            parse_options=pacsv.ParseOptions(newlines_in_values=True),
+            convert_options=pacsv.ConvertOptions(
+                include_columns=projection.types.names,
+                column_types=projection.types,
+                null_values=[],
+                strings_can_be_null=False,
+            ),
+        )
     return _normalize(table, features=projection.features, path=path)
 
 
@@ -213,7 +188,13 @@ def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
     path = projection.path
     if not path.name.endswith(".gz"):
         context = ReaderErrorContext("cosmx", TRANSCRIPTS)
-        blocks = read_csv_blocks(path, header=projection.names, columns=projection.columns, context=context)
+        blocks = read_csv_blocks(
+            path,
+            header=projection.names,
+            columns=projection.types.names,
+            column_types={field.name: field.type for field in projection.types},
+            context=context,
+        )
         return blocks.map_partitions(_normalize_block, projection, meta=meta)
 
     size = path.stat().st_size
@@ -238,11 +219,10 @@ def read_transcripts(
     Records must each occupy one physical line. Values are validated when their
     partition is computed.
     """
-    names = tuple(read_header(path, TRANSCRIPTS))
-    columns = transcript_columns(names, path)
-    empty = pa.table({name: pa.array([], pa.string()) for name in columns})
-    meta = _normalize(empty, features=features, path=path)
-    frame = _frame(_Projection(names, columns, features, path), meta)
+    names = read_header(path, TRANSCRIPTS)
+    types = transcript_types(names, path)
+    meta = _normalize(types.empty_table(), features=features, path=path)
+    frame = _frame(_Projection(names, types, features, path), meta)
 
     transformations: dict[str, BaseTransformation] = {
         global_frame(pixel_size_um): (

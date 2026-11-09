@@ -79,6 +79,31 @@ class TestReadTranscripts:
         assert_array_equal(result[["x", "y"]], np.tile([1.5, 2.5], (40, 1)))
         assert result["z_raw"].tolist() == [2] * 40
 
+    def test_unsigned_annotations_and_text_identity(self, tmp_path: Path) -> None:
+        source = _write_source(tmp_path / "transcripts.csv")
+        source.path.write_text(
+            "gene,global_x,global_y,global_z,cell_id,fov,barcode_id,transcript_id\n"
+            f"GeneB,1e-400,2,{2**64 - 1},007,{2**64 - 1},{2**64 - 1},007\n",
+            encoding="utf-8",
+        )
+        points = read_transcripts(source, features=_FEATURES, cell_population=pd.Index(["007"]))
+        result = points.compute()
+        assert result["cell_id"].tolist() == ["007"]
+        assert result["transcript_id"].tolist() == ["007"]
+        for name in ("z_raw", "fov", "barcode_id"):
+            assert str(result[name].dtype) == "uint64[pyarrow]"
+            assert points._meta[name].dtype == result[name].dtype
+            assert result[name].tolist() == [2**64 - 1]
+        assert result["x"].tolist() == [0.0]
+
+    @pytest.mark.parametrize("token", ["", "-1", "18446744073709551616", "2.0", "+1"])
+    def test_bad_unsigned_index_fails_lazily(self, tmp_path: Path, token: str) -> None:
+        source = _write_source(tmp_path / "transcripts.csv")
+        source.path.write_text(f"gene,global_x,global_y,fov\nGeneB,1,2,{token}\n", encoding="utf-8")
+        points = read_transcripts(source, features=_FEATURES, cell_population=None)
+        with pytest.raises(ReaderFormatError):
+            points.compute()
+
     def test_original_assignments_are_explicit_annotations(self, tmp_path: Path) -> None:
         source = _write_source(tmp_path / "transcripts.csv", assignment="original")
         points = read_transcripts(source, features=_FEATURES, cell_population=None)
@@ -132,7 +157,7 @@ class TestReadTranscripts:
         source = _write_source(tmp_path / "transcripts.csv")
         source.path.write_bytes(content)
         parser = mocker.spy(csv_blocks, "read_bytes")
-        with pytest.raises(ReaderFormatError, match="malformed CSV header"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_transcripts(source, features=_FEATURES, cell_population=None)
         parser.assert_not_called()
 

@@ -586,31 +586,53 @@ class TestMerscope:
         assert_array_equal(points["x"], [12.947243945462901])
         assert points["x"].iloc[0] != 12.9472439454629
 
-    def test_large_integer_cell_id_is_exact_across_all_public_products(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("identifier", [str(2**64 - 1), "007"])
+    def test_large_integer_cell_id_is_exact_across_all_public_products(self, tmp_path: Path, identifier: str) -> None:
         fixture = write_merscope_dataset(tmp_path)
-        identifier = 2**53 + 1
         for basename in ("cell_by_gene.csv", "cell_metadata.csv"):
             source = fixture.root / basename
             frame = pd.read_csv(source, index_col=0)
-            frame.index = pd.Index([str(identifier), "2002", "3003"], name=frame.index.name)
+            frame.index = pd.Index([identifier, "2002", "3003"], name=frame.index.name)
+            if basename == "cell_metadata.csv":
+                frame["fov"] = [None, str(2**64 - 1), "0"]
+                frame["transcript_count"] = [str(2**64 - 1), "0", "1"]
             frame.to_csv(source)
         boundary_source = fixture.root / "cell_boundaries.parquet"
         boundaries = gpd.read_parquet(boundary_source)
-        boundaries.loc[boundaries["EntityID"] == 1001, "EntityID"] = identifier
+        boundaries["EntityID"] = boundaries["EntityID"].astype("str")
+        boundaries.loc[boundaries["EntityID"] == "1001", "EntityID"] = identifier
         boundaries.to_parquet(boundary_source)
         transcript_source = fixture.root / "detected_transcripts.csv"
         events = pd.read_csv(transcript_source, index_col=0)
-        events.loc[events["cell_id"] == 1001, "cell_id"] = identifier
+        events["cell_id"] = events["cell_id"].astype("str")
+        events.loc[events["cell_id"] == "1001", "cell_id"] = identifier
         events["transcript_id"] = ["ENST000001", "ENST000002", "control-1", "ENST000004"]
+        events["global_z"] = str(2**64 - 1)
         events.to_csv(transcript_source)
         result = merscope(fixture.root)
-        assert result.tables["table"].obs_names.tolist() == [str(identifier), "2002", "3003"]
-        assert result.shapes["slide_region_polygons"].index.tolist() == [str(identifier), "2002", "3003"]
+        assert result.tables["table"].obs_names.tolist() == [identifier, "2002", "3003"]
+        assert result.shapes["slide_region_polygons"].index.tolist() == [identifier, "2002", "3003"]
         points = result.points["slide_region_transcripts"].compute()
-        assert points["cell_id"].tolist() == [str(identifier), "2002", "3003", "-1"]
+        assert points["cell_id"].tolist() == [identifier, "2002", "3003", "-1"]
         assert points["transcript_id"].tolist() == ["ENST000001", "ENST000002", "control-1", "ENST000004"]
         assert_array_equal(points["barcode_id"], [0, 1, 2, 3])
         assert_array_equal(points["fov"], [0, 0, 1, 1])
+
+        store = tmp_path / "identities.zarr"
+        result.write(store)
+        restored = read_zarr(store)
+        assert restored.tables["table"].obs_names.tolist() == [identifier, "2002", "3003"]
+        assert restored.shapes["slide_region_polygons"].index.tolist() == [identifier, "2002", "3003"]
+        assert restored.tables["table"].obs["fov"].isna().tolist() == [True, False, False]
+        assert restored.tables["table"].obs["fov"].iloc[1] == 2**64 - 1
+        assert restored.tables["table"].obs["transcript_count"].tolist() == [2**64 - 1, 0, 1]
+        assert restored.points["slide_region_transcripts"].compute()["z_raw"].tolist() == [2**64 - 1] * 4
+        assert restored.points["slide_region_transcripts"].compute()["cell_id"].tolist() == [
+            identifier,
+            "2002",
+            "3003",
+            "-1",
+        ]
 
     def test_wide_counts_and_blank_measurements_never_densify(self, tmp_path: Path, mocker: MockerFixture) -> None:
         fixture = write_merscope_dataset(tmp_path)

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import csv
 import shutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+import anndata as ad
 import numpy as np
+import pandas as pd
 import pytest
 import tifffile
+from dask.callbacks import Callback
 from scipy import sparse
+from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
 from spatialdata.transformations import Identity, get_transformation
 
@@ -21,6 +26,8 @@ if TYPE_CHECKING:
 
     from anndata import AnnData
     from spatialdata import SpatialData
+
+    from tests.integration.readers.mcmicro._fixtures import McmicroFixture
 
 
 def _expression(table: AnnData) -> sparse.csr_array:
@@ -35,6 +42,26 @@ def _frames(result: SpatialData, name: str) -> dict[str, object]:
     frames = get_transformation(element, get_all=True)
     assert isinstance(frames, dict)
     return dict(frames)
+
+
+def _write_large_ids(fixture: McmicroFixture, identifiers: tuple[int, int]) -> None:
+    """Write exact source IDs to uint64 TIFF labels and their matching textual quantification."""
+    for sample in fixture.samples:
+        height, width = (64, 80) if fixture.mode == "wsi" else ((30, 40) if sample == "1" else (21, 31))
+        labels = np.zeros((height, width), dtype=np.uint64)
+        labels[2, 2], labels[3, 3] = identifiers
+        tifffile.imwrite(
+            fixture.root / "segmentation" / f"method_a-{sample}" / "cells.ome.tif",
+            labels,
+            ome=False,
+            metadata={"axes": "YX"},
+            photometric="minisblack",
+        )
+        source = fixture.root / "quantification" / f"{sample}--method_a_cells.csv"
+        source.write_text(
+            f"CellID,CD3,DAPI,X_centroid,Y_centroid\n{identifiers[0]},1,0,2,2\n{identifiers[1]},0,2,3,3\n",
+            encoding="utf-8",
+        )
 
 
 class TestMcmicroCharacterization:
@@ -98,6 +125,97 @@ class TestMcmicroCharacterization:
         assert table.obs["CellID"].tolist() == [1, 2, 1, 2]
         np.testing.assert_array_equal(_expression(table).toarray(), [[10.125, 30.125], [20.5, 40.5]] * 2)
         assert get_table_keys(table) == (["core_1_method_a_cells", "core_2_method_a_cells"], "region", "CellID")
+
+    @pytest.mark.parametrize("mode", ["wsi", "tma"])
+    @pytest.mark.parametrize("legacy_directory", [False, True])
+    def test_csv_roles_and_panel_order(
+        self, tmp_path: Path, mode: Literal["wsi", "tma"], *, legacy_directory: bool
+    ) -> None:
+        """Reordered source columns keep panel order, nullable morphology and literal annotations."""
+        fixture = write_mcmicro_dataset(tmp_path, mode=mode, duplicate_markers=True, legacy_directory=legacy_directory)
+        panel = fixture.root / "markers.csv"
+        panel.write_text("marker_name,note\nDAPI,007\nCD3,NA\nDAPI,\n", encoding="utf-8")
+        for sample in fixture.samples:
+            source = fixture.root / "quantification" / f"{sample}--method_a_cells.csv"
+            with source.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(["note", "DAPI_2", "Y_centroid", "CellID", "Area", "CD3", "X_centroid", "DAPI_1"])
+                writer.writerow(["007,NA\nNULL", "0.10000000000000002", "2.5", "7", "", "-0.25", "1.5", "0"])
+                writer.writerow(["", "0", "4", "3", "12.5", "0", "3.5", "2"])
+
+        tasks: list[object] = []
+        with Callback(posttask=lambda key, *_: tasks.append(key)):
+            result = mcmicro(fixture.root)
+
+        assert tasks == []
+        table = result.tables["table"]
+        assert isinstance(table.obs, pd.DataFrame)
+        assert table.var_names.tolist() == ["DAPI_1", "CD3", "DAPI_2"]
+        assert table.var["note"].tolist() == ["007", "NA", ""]
+        assert table.obs["note"].tolist() == ["007,NA\nNULL", ""] * len(fixture.samples)
+        assert table.obs["CellID"].tolist() == [7, 3] * len(fixture.samples)
+        assert table.obs["Area"].isna().tolist() == [True, False] * len(fixture.samples)
+        assert table.obs["Area"].dropna().tolist() == [12.5] * len(fixture.samples)
+        np.testing.assert_array_equal(
+            _expression(table).toarray(), [[0, -0.25, float("0.10000000000000002")], [2, 0, 0]] * len(fixture.samples)
+        )
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[1.5, 2.5], [3.5, 4]] * len(fixture.samples))
+        for image in result.images.values():
+            assert image.coords["c"].to_numpy().tolist() == table.var_names.tolist()
+
+    @pytest.mark.parametrize("mode", ["wsi", "tma"])
+    @pytest.mark.parametrize("largest", [2**63 - 1, 2**63, 2**64 - 1])
+    def test_large_label_ids_remain_exact_without_pixel_tasks(
+        self, tmp_path: Path, mode: Literal["wsi", "tma"], largest: int
+    ) -> None:
+        """IDs above float precision retain source values through public linkage to uint64 labels."""
+        fixture = write_mcmicro_dataset(tmp_path, mode=mode)
+        identifiers = (2**53 + 1, largest)
+        _write_large_ids(fixture, identifiers)
+
+        tasks: list[object] = []
+        with Callback(posttask=lambda key, *_: tasks.append(key)):
+            result = mcmicro(fixture.root)
+
+        assert tasks == []
+        assert result.tables["table"].obs["CellID"].tolist() == list(identifiers) * len(fixture.samples)
+        for name, labels in result.labels.items():
+            if name.endswith("_cells"):
+                assert labels.dtype == np.dtype(np.uint64)
+
+    @pytest.mark.parametrize("mode", ["wsi", "tma"])
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    def test_full_uint64_linkage_persists(self, tmp_path: Path, mode: Literal["wsi", "tma"], storage: str) -> None:
+        fixture = write_mcmicro_dataset(tmp_path / "run", mode=mode)
+        identifiers = (2**63, 2**64 - 1)
+        _write_large_ids(fixture, identifiers)
+        result = mcmicro(fixture.root)
+        table = result.tables["table"]
+        destination = tmp_path / f"roundtrip.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            restored = ad.read_h5ad(destination)
+        else:
+            result.write(destination)
+            stored = read_zarr(destination)
+            restored = stored.tables["table"]
+            for name, labels in stored.labels.items():
+                if name.endswith("_cells"):
+                    assert labels.dtype == np.dtype(np.uint64)
+
+        assert restored.obs["CellID"].dtype == np.dtype(np.uint64)
+        assert restored.obs["CellID"].tolist() == list(identifiers) * len(fixture.samples)
+        actual_linkage, expected_linkage = get_table_keys(restored), get_table_keys(table)
+        np.testing.assert_array_equal(actual_linkage[0], expected_linkage[0])
+        assert actual_linkage[1:] == expected_linkage[1:]
+        assert restored.var_names.tolist() == table.var_names.tolist()
+        np.testing.assert_array_equal(restored.obsm["spatial_pixels"], table.obsm["spatial_pixels"])
+        actual = restored.X
+        assert isinstance(actual, sparse.csr_array | sparse.csr_matrix)
+        expected = _expression(table)
+        np.testing.assert_array_equal(actual.data, expected.data)
+        np.testing.assert_array_equal(actual.indices, expected.indices)
+        np.testing.assert_array_equal(actual.indptr, expected.indptr)
 
 
 class TestMcmicroCorrections:
@@ -176,7 +294,7 @@ class TestMcmicroCorrections:
 
     @pytest.mark.parametrize(
         ("old", "new", "match"),
-        [("10.125", "inf", "nonfinite"), ("custom_note", "CD3", "unique nonempty")],
+        [("10.125", "inf", "nonfinite"), ("custom_note", "CD3", "repeated column")],
     )
     def test_invalid_quantification_values_fail(self, tmp_path: Path, old: str, new: str, match: str) -> None:
         fixture = write_mcmicro_dataset(tmp_path)

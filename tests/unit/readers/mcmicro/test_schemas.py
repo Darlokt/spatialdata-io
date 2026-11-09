@@ -12,17 +12,15 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro._schemas import (
-    CELL_ID_DTYPE,
-    FLOAT_DTYPE,
     MARKERS_CONTEXT,
     QUANTIFICATION_CONTEXT,
     STRING_DTYPE,
     canonical_markers,
-    cell_ids,
     normalize_markers,
-    optional_float_values,
     quantification_columns,
     validate_columns,
+    validate_expression,
+    validate_measurements,
     validate_position_columns,
 )
 
@@ -99,6 +97,18 @@ class TestQuantificationColumns:
         assert columns.features == ("A", "B")
         assert columns.morphology == ("X_centroid", "Y_centroid", "Area")
         assert columns.text == ("note", "A_intensity_max")
+        assert columns.types == pa.schema(
+            [
+                ("CellID", pa.uint64()),
+                ("B", pa.float64()),
+                ("note", pa.string()),
+                ("A", pa.float64()),
+                ("X_centroid", pa.float64()),
+                ("Y_centroid", pa.float64()),
+                ("Area", pa.float64()),
+                ("A_intensity_max", pa.string()),
+            ]
+        )
 
     @pytest.mark.parametrize("feature", ["CellID", "X_centroid", "Y_centroid"])
     def test_required_roles_cannot_also_be_expression(self, tmp_path: Path, feature: str) -> None:
@@ -131,55 +141,77 @@ class TestQuantificationColumns:
         assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")
 
 
-class TestOptionalFloatValues:
-    """Only empty fields become missing; any other invalid value fails."""
+class TestValidateMeasurements:
+    """Typed values retain required fields, optional nulls and target-specific ID limits."""
 
-    def test_empty_is_missing(self, tmp_path: Path) -> None:
-        values = optional_float_values(pa.chunked_array([["1.5", ""], ["2"]]), _path(tmp_path), "Area")
-        assert values.dtype == FLOAT_DTYPE
-        assert values.isna().tolist() == [False, True, False]
-        assert values.dropna().tolist() == [1.5, 2.0]
+    @pytest.mark.parametrize("identifier", [1, 2**53 + 1, 2**63, 2**64 - 1])
+    def test_full_uint64_ids_and_optional_nulls(self, tmp_path: Path, identifier: int) -> None:
+        path = _path(tmp_path)
+        columns = quantification_columns(["CellID", "A", "X_centroid", "Y_centroid", "Area"], ("A",), path)
+        batch = pa.RecordBatch.from_arrays(
+            [
+                pa.array([identifier, identifier], pa.uint64()),
+                *[pa.array([1.0, -0.25])] * 3,
+                pa.array([None, None], pa.float64()),
+            ],
+            schema=columns.types,
+        )
+        validate_measurements(batch, columns, np.dtype(np.uint64), path)
+        assert batch.column("CellID").to_pylist() == [identifier, identifier]
 
-    def test_all_missing(self, tmp_path: Path) -> None:
-        assert optional_float_values(pa.array(["", ""]), _path(tmp_path), "Area").isna().all()
-
-    def test_invalid_fails(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="nonnumeric"):
-            optional_float_values(pa.array(["1", "NA"]), _path(tmp_path), "Area")
-
-
-class TestCellIds:
-    """Label IDs are exact positive integers that fit their segmentation dtype."""
-
-    def test_exact_values(self, tmp_path: Path) -> None:
-        identifiers = cell_ids(pa.array(["3", "9007199254740993", "2.0", "4e0"]), np.dtype(np.uint64), _path(tmp_path))
-        assert identifiers.dtype == CELL_ID_DTYPE
-        assert identifiers.tolist() == [3, 9007199254740993, 2, 4]
-
-    def test_duplicate_ids_are_preserved_for_final_table_validation(self, tmp_path: Path) -> None:
-        identifiers = cell_ids(pa.array(["3", "3"]), np.dtype(np.uint32), _path(tmp_path))
-        assert identifiers.tolist() == [3, 3]
-        assert identifiers.dtype == CELL_ID_DTYPE
+    @pytest.mark.parametrize("name", ["CellID", "A", "X_centroid", "Y_centroid"])
+    def test_required_nulls(self, tmp_path: Path, name: str) -> None:
+        path = _path(tmp_path)
+        columns = quantification_columns(["CellID", "A", "X_centroid", "Y_centroid"], ("A",), path)
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([None if field.name == name else 1], field.type) for field in columns.types],
+            schema=columns.types,
+        )
+        with pytest.raises(ReaderFormatError, match=f"missing '{name}'") as caught:
+            validate_measurements(batch, columns, np.dtype(np.uint64), path)
+        assert caught.value.context == QUANTIFICATION_CONTEXT
+        assert caught.value.path == path
 
     @pytest.mark.parametrize(
-        ("tokens", "dtype", "found"),
-        [
-            (["1", None], np.uint32, "missing 'CellID' values"),
-            (["1", "2.5"], np.uint32, "'CellID' value '2.5'"),
-            (["1", "x"], np.uint32, "'CellID' value 'x'"),
-            (["1", "0x10"], np.uint32, "'CellID' value '0x10'"),
-            (["1", "99999999999999999999"], np.uint64, "'CellID' value '99999999999999999999'"),
-            (["0"], np.uint32, "'CellID' value '0'"),
-            (["-1"], np.int32, "'CellID' value '-1'"),
-            (["256"], np.uint8, "'CellID' value 256 above 255"),
-            ([str(2**63)], np.uint64, f"'CellID' value {2**63} above {2**63 - 1}"),
-        ],
+        ("identifier", "dtype", "message"),
+        [(0, np.uint64, "zero CellID"), (256, np.uint8, "above 255"), (2**63, np.int64, f"above {2**63 - 1}")],
     )
-    def test_rejects(self, tmp_path: Path, tokens: list[str | None], dtype: type[np.integer], found: str) -> None:
-        with pytest.raises(ReaderFormatError) as caught:
-            cell_ids(pa.array(tokens, pa.string()), np.dtype(dtype), _path(tmp_path))
-        assert caught.value.found == found
+    def test_positive_target_range(
+        self, tmp_path: Path, identifier: int, dtype: type[np.integer], message: str
+    ) -> None:
+        path = _path(tmp_path)
+        columns = quantification_columns(["CellID", "A", "X_centroid", "Y_centroid"], ("A",), path)
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([identifier], pa.uint64()), *[pa.array([1.0])] * 3], schema=columns.types
+        )
+        with pytest.raises(ReaderFormatError, match=message):
+            validate_measurements(batch, columns, np.dtype(dtype), path)
+
+    @pytest.mark.parametrize("name", ["X_centroid", "Y_centroid", "Area"])
+    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+    def test_nonfinite_morphology(self, tmp_path: Path, name: str, value: float) -> None:
+        path = _path(tmp_path)
+        columns = quantification_columns(["CellID", "A", "X_centroid", "Y_centroid", "Area"], ("A",), path)
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([value if field.name == name else 1], field.type) for field in columns.types],
+            schema=columns.types,
+        )
+        with pytest.raises(ReaderFormatError, match=f"nonfinite '{name}'"):
+            validate_measurements(batch, columns, np.dtype(np.uint64), path)
+
+
+class TestValidateExpression:
+    """Signed finite intensities are valid; nonfinite values fail with source context."""
+
+    def test_finite_signed_values(self, tmp_path: Path) -> None:
+        validate_expression(np.array([[0, -0.25, 1e100]], dtype=np.float64), _path(tmp_path))
+
+    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+    def test_nonfinite_values(self, tmp_path: Path, value: float) -> None:
+        with pytest.raises(ReaderFormatError, match="nonfinite marker") as caught:
+            validate_expression(np.array([[value]], dtype=np.float64), _path(tmp_path))
         assert caught.value.context == QUANTIFICATION_CONTEXT
+        assert caught.value.path == _path(tmp_path)
 
 
 class TestValidatePositionColumns:

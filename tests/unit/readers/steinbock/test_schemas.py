@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import anndata as ad
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from spatialdata_io._positions import POSITIONS_KEY
@@ -17,7 +18,7 @@ from spatialdata_io.readers.steinbock._images import SampleGrid
 from spatialdata_io.readers.steinbock._schemas import (
     _format_error,
     centroid_columns,
-    image_metadata_columns,
+    image_metadata_types,
     instance_identifiers,
     metadata_columns,
     normalize_image_metadata,
@@ -280,25 +281,25 @@ class TestCentroidColumns:
         assert int(y[0]) == 2**64 - 1
 
 
-class TestImageMetadataColumns:
+class TestImageMetadataTypes:
     """Project named fields by source position and reject ambiguous header contracts."""
 
     def test_projects_reordered_named_fields(self, tmp_path: Path) -> None:
-        positions = image_metadata_columns(["height_px", "extra", "image", "width_px"], ArtifactFile(tmp_path))
-        assert positions == {"height_px": 0, "image": 2, "width_px": 3}
+        types = image_metadata_types(["height_px", "extra", "image", "width_px"], ArtifactFile(tmp_path))
+        assert types == pa.schema([("height_px", pa.string()), ("image", pa.string()), ("width_px", pa.string())])
 
     @pytest.mark.parametrize(
         "header",
         [
             [],
-            ["image", "image", "width_px", "height_px"],
+            ["image", "width_px", "height_px", "ignored\x00name"],
             ["image", "width_px"],
             ["image", "width_px", "height_px", "acquisition_height_um"],
         ],
     )
     def test_invalid_headers(self, tmp_path: Path, header: list[str]) -> None:
         with pytest.raises(ReaderFormatError):
-            image_metadata_columns(header, ArtifactFile(tmp_path))
+            image_metadata_types(header, ArtifactFile(tmp_path))
 
 
 class TestNormalizeImageMetadata:
@@ -312,6 +313,7 @@ class TestNormalizeImageMetadata:
             ("height_px", "0"),
             ("width_px", str(2**63)),
             ("acquisition_width_um", ""),
+            ("acquisition_width_um", "not-a-number"),
             ("acquisition_width_um", "-1"),
             ("acquisition_width_um", "nan"),
             ("acquisition_width_um", "inf"),
@@ -332,12 +334,16 @@ class TestNormalizeImageMetadata:
         }
         values[field] = value
         with pytest.raises(ReaderFormatError):
-            normalize_image_metadata(iter([values]), {"s.tiff"}, ArtifactFile(tmp_path))
+            normalize_image_metadata(pa.Table.from_pylist([values]), {"s.tiff"}, ArtifactFile(tmp_path))
 
     @pytest.mark.parametrize("names", [[""], ["s.tiff", "s.tiff"]])
     def test_invalid_identities(self, tmp_path: Path, names: list[str]) -> None:
         with pytest.raises(ReaderFormatError, match="image names"):
-            normalize_image_metadata(({"image": name} for name in names), set(), ArtifactFile(tmp_path))
+            normalize_image_metadata(
+                pa.table({"image": names, "width_px": ["unused"] * len(names), "height_px": ["unused"] * len(names)}),
+                set(),
+                ArtifactFile(tmp_path),
+            )
 
     def test_ratios_are_independent_of_decimal_context(self, tmp_path: Path) -> None:
         row = {
@@ -349,8 +355,61 @@ class TestNormalizeImageMetadata:
         }
         with localcontext() as context:
             context.prec = 2
-            metadata = normalize_image_metadata(iter([row]), {"s.tiff"}, ArtifactFile(tmp_path))
+            metadata = normalize_image_metadata(pa.Table.from_pylist([row]), {"s.tiff"}, ArtifactFile(tmp_path))
         assert metadata["s.tiff"].spacing_um == (3 / 11, 7 / 13)
+
+    def test_decimal_ratios_round_only_after_division(self, tmp_path: Path) -> None:
+        """Converting the physical extent to float first changes these spacings by one ULP."""
+        row = {
+            "image": "s.tiff",
+            "width_px": "7",
+            "height_px": "3",
+            "acquisition_width_um": "0.1",
+            "acquisition_height_um": "0.3",
+        }
+        metadata = normalize_image_metadata(pa.Table.from_pylist([row]), {"s.tiff"}, ArtifactFile(tmp_path))
+        assert metadata["s.tiff"].spacing_um == (float.fromhex("0x1.d41d41d41d41dp-7"), 0.1)
+        assert metadata["s.tiff"].spacing_um != (float("0.1") / 7, float("0.3") / 3)
+
+    @pytest.mark.parametrize("width", ["0x10", "\t0X10 ", " 16\t", str(2**63 - 1)])
+    def test_checked_unsigned_dimensions_with_original_semantic_limit(self, tmp_path: Path, width: str) -> None:
+        table = pa.table({"height_px": ["8"], "image": ["007.tiff"], "width_px": [width]})
+
+        metadata = normalize_image_metadata(table, {"007.tiff"}, ArtifactFile(tmp_path))
+
+        expected_width = 2**63 - 1 if width == str(2**63 - 1) else 16
+        assert metadata["007.tiff"].shape == (8, expected_width)
+        assert metadata["007.tiff"].spacing_um is None
+
+    @pytest.mark.parametrize(
+        "token", ["", "2.0", "2e0", "+1", "1_0", "-1", "0", str(2**63), str(2**64 - 1), str(2**64), "nan", "inf"]
+    )
+    def test_rejected_dimension_grammar_and_ranges(self, tmp_path: Path, token: str) -> None:
+        table = pa.table({"image": ["s.tiff"], "width_px": [token], "height_px": ["8"]})
+
+        with pytest.raises(ReaderFormatError, match="integral dimensions"):
+            normalize_image_metadata(table, {"s.tiff"}, ArtifactFile(tmp_path))
+
+    def test_selected_numeric_rows_across_chunks(self, tmp_path: Path) -> None:
+        """Unselected lexical junk cannot influence selected dimension types or row order."""
+        table = pa.table(
+            {
+                "image": pa.chunked_array([["unused.tiff", "b.tiff"], ["a.tiff"]]),
+                "height_px": pa.chunked_array([["unused", "\t3 "], ["4"]]),
+                "width_px": pa.chunked_array([["unused", "0x7"], ["9"]]),
+            }
+        )
+
+        metadata = normalize_image_metadata(table, {"a.tiff", "b.tiff"}, ArtifactFile(tmp_path))
+
+        assert list(metadata) == ["b.tiff", "a.tiff"]
+        assert metadata["b.tiff"].shape == (3, 7)
+        assert metadata["a.tiff"].shape == (4, 9)
+
+    def test_no_selected_rows_leave_numeric_text_unparsed(self, tmp_path: Path) -> None:
+        table = pa.table({"image": ["unused.tiff"], "height_px": ["unused"], "width_px": ["unused"]})
+
+        assert normalize_image_metadata(table, {"missing.tiff"}, ArtifactFile(tmp_path)) == {}
 
 
 class TestValidatePositionDestinations:

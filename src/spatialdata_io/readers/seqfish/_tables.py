@@ -52,8 +52,9 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _TABLE_CONTEXT = ReaderErrorContext("seqfish", "table")
-# Source text per count batch. A count takes at least two bytes of text and
-# eight as uint64, so a batch holds at most 4 MiB of values plus their dense copy.
+# A native batch can span the current block and the preceding partial record.
+# At two source bytes per count, its uint64 value payload is at most eight
+# times this block target; parser allocations, dense copies and CSR are extra.
 _BATCH_BYTES = 1024 * 1024
 # Quoted fields may contain newlines.
 _PARSE = pacsv.ParseOptions(newlines_in_values=True)

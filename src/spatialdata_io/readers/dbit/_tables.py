@@ -8,7 +8,7 @@ spot's two barcodes, B first::
 
 Both halves are looked up case-insensitively in the barcode map. A is the x axis
 and B the y axis; the one-based ordinals are written to ``obs["array_A"]``,
-``obs["array_B"]`` and ``obsm["spatial_grid"]`` (int64, columns A then B), and
+``obs["array_B"]`` and ``obsm["spatial_grid"]`` (uint16, columns A then B), and
 ``uns["spatialdata_io_positions"]`` declares ``spatial_grid`` as one-based
 ordinals of the ``grid_pixels`` frame. Imported ``obs`` and ``var`` column
 names and top-level ``uns`` keys that a SpatialData table does not accept
@@ -85,7 +85,7 @@ def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
     validate_mapped_positions(a, b, path)
 
     obs["array_A"], obs["array_B"] = a.array, b.array
-    table.obsm["spatial_grid"] = np.column_stack((a.to_numpy(np.int64), b.to_numpy(np.int64)))
+    table.obsm["spatial_grid"] = np.column_stack((a.to_numpy(np.uint16), b.to_numpy(np.uint16)))
     positions: PositionsMetadata = {
         "schema_version": 1,
         "coordinates": {
@@ -101,7 +101,7 @@ def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
     return table
 
 
-def grid_order(coordinates: npt.NDArray[np.int64]) -> npt.NDArray[np.intp]:
+def grid_order(coordinates: npt.NDArray[np.uint16]) -> npt.NDArray[np.intp]:
     """Return the row permutation that sorts ``(A, B)`` positions by A, then B."""
     return np.lexsort((coordinates[:, 1], coordinates[:, 0]))
 

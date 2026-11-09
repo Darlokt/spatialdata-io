@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
@@ -51,7 +52,7 @@ def _solve(
     positions: dict[int, FovPosition] | None = None,
 ) -> dict[int, Placement]:
     return solve_placements(
-        np.asarray(fovs, dtype=np.int64),
+        pd.Index(fovs, dtype="uint64[pyarrow]"),
         samples,
         required=required,
         positions=positions or {},

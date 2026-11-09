@@ -13,9 +13,9 @@ lists each set separately, one position and its eight-base sequence per row::
 A combined per-spot map (one 16-base pair per grid location, as published with
 the original E10 data) is not this format; split it into its two axes first.
 
-The schema is documented in ``_schemas``. The file is small by construction:
-at most fifty positions per axis, so at most 100 rows are parsed and one more
-is read to detect a longer file.
+The schema is documented in ``_schemas``. A single bounded read accepts at most
+64 KiB before parsing the file; at most 100 records describe fifty positions
+per axis. No expression or image data passes through this parser.
 """
 
 from __future__ import annotations
@@ -25,9 +25,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.csv as pacsv
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
-from spatialdata_io.readers.dbit._schemas import BARCODE_SOURCE_DTYPE, MAX_GRID_SIDE, normalize_barcodes
+from spatialdata_io.readers._utils.csv import csv_errors
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers.dbit._schemas import BARCODE_TYPES, normalize_barcodes
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -35,6 +38,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _CONTEXT = ReaderErrorContext("dbit", "barcode positions")
+MAX_BARCODE_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,22 +52,31 @@ class Barcodes:
 def read_barcodes(path: ArtifactFile) -> Barcodes:
     """Read and validate the barcode map."""
     try:
-        # The Python parser keeps NUL bytes, so the schema rejects them instead
-        # of a C parser silently truncating the field.
-        with path.open(encoding="utf-8-sig", newline="") as source:
-            frame = pd.read_csv(
-                source,
-                sep="\t",
-                header=None,
-                dtype=BARCODE_SOURCE_DTYPE,
-                keep_default_na=False,
-                engine="python",
-                nrows=2 * MAX_GRID_SIDE + 1,
-            )
-    except (OSError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as error:
+        with path.open("rb") as source:
+            payload = source.read(MAX_BARCODE_BYTES + 1)
+    except OSError as error:
         add_reader_context(error, context=_CONTEXT, path=path)
         raise
 
+    if len(payload) > MAX_BARCODE_BYTES:
+        raise ReaderFormatError(
+            context=_CONTEXT,
+            path=path,
+            found="barcode map larger than 64 KiB",
+            expected="a barcode map of at most 65536 bytes",
+        )
+    with csv_errors(context=_CONTEXT, path=path):
+        frame = pacsv.read_csv(
+            pa.py_buffer(payload),
+            read_options=pacsv.ReadOptions(column_names=BARCODE_TYPES.names, use_threads=False),
+            parse_options=pacsv.ParseOptions(delimiter="\t", newlines_in_values=True),
+            convert_options=pacsv.ConvertOptions(
+                column_types=BARCODE_TYPES,
+                include_columns=BARCODE_TYPES.names,
+                null_values=[],
+                strings_can_be_null=False,
+            ),
+        ).to_pandas(types_mapper=pd.ArrowDtype)
     normalize_barcodes(frame, path)
 
     a, b = (

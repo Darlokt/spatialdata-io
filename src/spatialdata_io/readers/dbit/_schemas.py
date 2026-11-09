@@ -24,7 +24,7 @@ Imported H5AD (named fields, any order, extra fields kept):
   unoccupied ``obsm["spatial_source"]``.
 
 Generated observation columns use exact Arrow intermediates until the final
-table conversion: ``array_A``, ``array_B`` and ``pixel_id`` are int64 and
+table conversion: ``array_A``, ``array_B`` and ``pixel_id`` are uint16 and
 ``sample`` is a string. ``region`` is categorical.
 
 DBiT files carry no physical calibration, so no element uses ``global``
@@ -48,14 +48,14 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
-BARCODE_SOURCE_DTYPE = pd.ArrowDtype(pa.string())
-GRID_DTYPE = pd.ArrowDtype(pa.int64())
+BARCODE_TYPES = pa.schema([("position", pa.string()), ("sequence", pa.string())])
+# The supported 50-by-50 grid has at most 2,500 spots; one unsigned type fits both ordinals and row IDs.
+GRID_DTYPE = pd.ArrowDtype(pa.uint16())
 SAMPLE_DTYPE = pd.ArrowDtype(pa.string())
 BARCODE_LENGTH = 8
 GRID_FRAME = "grid_pixels"
 IMAGE_FRAME = "image_pixels"
 MAX_GRID_SIDE = 50
-_BARCODE_COLUMNS = 2
 _BARCODE_CONTEXT = ReaderErrorContext("dbit", "barcode positions")
 _TABLE_CONTEXT = ReaderErrorContext("dbit", "expression table")
 
@@ -63,11 +63,12 @@ _TABLE_CONTEXT = ReaderErrorContext("dbit", "expression table")
 def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
     """Validate the positional barcode rows and normalize them in place.
 
-    On return ``frame`` has the columns ``position`` (int64 ordinal),
+    Storage parsing establishes the two named string columns. On return
+    ``frame`` has the columns ``position`` (uint16 ordinal),
     ``sequence`` (upper case) and ``axis`` (``"A"`` or ``"B"``), in source row
     order.
     """
-    if frame.shape[1] != _BARCODE_COLUMNS or not 0 < len(frame) <= 2 * MAX_GRID_SIDE:
+    if not 0 < len(frame) <= 2 * MAX_GRID_SIDE:
         raise ReaderFormatError(
             context=_BARCODE_CONTEXT,
             path=path,
@@ -75,7 +76,6 @@ def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
             expected="a nonempty headerless two-column TSV with at most fifty A and fifty B positions",
         )
 
-    frame.columns = ["position", "sequence"]
     frame["sequence"] = frame["sequence"].str.upper()
     positions, sequences = frame["position"], frame["sequence"]
     if (

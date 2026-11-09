@@ -1,20 +1,20 @@
 """Column contracts of the MERSCOPE count, metadata, boundary and transcript artifacts.
 
-Instrument output and VPT output share these schemas. CSV files are decoded as
-text and every field is normalized here, so integers never pass through an
-inferred float and coordinates are rounded once from their source spelling.
+Instrument output and VPT output share these schemas. Arrow parses numeric
+fields directly to their declared widths; identities and unknown annotations
+remain exact text. Semantic validation follows typed ingestion.
 
 ``cell_by_gene.csv``
     A positional cell-identity column, unnamed or named (``cell``), followed
     by one column per feature in source order. Values are nonnegative
-    integers, possibly spelled ``2.0`` or ``3e0``. Features named
+    uint64 integers under Arrow's typed CSV grammar. Features named
     ``Blank-<positive integer>`` are negative controls.
 
 ``cell_metadata.csv``
     Named columns in any order: ``EntityID``, ``center_x`` and ``center_y``
     (micrometres) are required. Known physical fields (``volume``, bounds,
-    shape descriptors) become float64, ``transcript_count`` an integer and
-    ``fov`` a nullable int64 (merged entities have no FOV). Other fields stay
+    shape descriptors) become float64, ``transcript_count`` uint64 and
+    ``fov`` a nullable uint64 (merged entities have no FOV). Other fields stay
     text.
 
 ``cell_boundaries.parquet``, ``{cellpose,watershed}_micron_space.parquet``
@@ -42,18 +42,15 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from spatialdata_io.readers._utils.csv import decode_float64, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-
-    import numpy as np
-    import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -67,7 +64,6 @@ TRANSCRIPTS: Artifact = "transcripts"
 STRING_DTYPE = pd.ArrowDtype(pa.string())
 GEOMETRY_REPRESENTATION_DTYPE = pd.CategoricalDtype(["union_footprint", "source_components"])
 _FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
-_INTEGER_DTYPE = pd.ArrowDtype(pa.int64())
 _BLANK_NAME = re.compile(r"Blank-[1-9][0-9]*")
 _METADATA_FLOATS = frozenset(
     {
@@ -141,18 +137,29 @@ def normalize_cell_ids(
     return identifiers
 
 
-def integer_values(
-    source: pd.Series | pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str
-) -> npt.NDArray[np.int64 | np.uint64]:
-    """Decode nonnegative integers without a floating intermediate; uint64 only above int64."""
-    # Parquet plane indexes arrive as Arrow integers; CSV fields as text.
-    text = pa.array(source) if isinstance(source, pd.Series) else pc.cast(source, pa.string())
-    return decode_integers(text, name=name, minimum=0, context=ReaderErrorContext("merscope", artifact), path=path)
+def count_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema:
+    """Declare exact textual cell identities and source-ordered unsigned counts."""
+    features = count_columns(columns, path)
+    return pa.schema([(columns[0], pa.string()), *((name, pa.uint64()) for name in features)])
 
 
-def _float_values(series: pd.Series, path: ArtifactFile, artifact: Artifact, name: str) -> npt.NDArray[np.float64]:
-    """Decode float64 values, rejecting nonfinite values, underflow and integer precision loss."""
-    return decode_float64(pa.array(series), name=name, context=ReaderErrorContext("merscope", artifact), path=path)
+def metadata_types(columns: Sequence[str], path: ArtifactFile) -> dict[str, pa.DataType]:
+    """Declare known numeric fields and keep every other annotation as text."""
+    return {
+        name: pa.float64()
+        if name in _METADATA_FLOATS
+        else pa.uint64()
+        if name in {"transcript_count", "fov"}
+        else pa.string()
+        for name in metadata_columns(columns, path)
+    }
+
+
+def require_finite(series: pd.Series, path: ArtifactFile, artifact: Artifact, name: str) -> None:
+    """Validate required finite physical values after typed ingestion."""
+    column = pa.array(series)
+    if column.null_count or pc.call_function("all", [pc.call_function("is_finite", [column])]).as_py() is False:
+        raise schema_error(path, artifact, found=f"missing or nonfinite {name!r}", expected=f"finite {name!r} values")
 
 
 def metadata_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
@@ -166,31 +173,18 @@ def metadata_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, .
 
 
 def normalize_metadata(frame: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
-    """Index owned annotations by exact identity and type the known physical fields."""
+    """Index owned typed annotations by exact identity and validate physical values."""
     identifiers = normalize_cell_ids(frame.pop("EntityID"), path, METADATA)
     if not identifiers.is_unique:
         raise schema_error(path, METADATA, found="duplicate metadata identities", expected="one metadata row per cell")
-    frame.index = pd.Index(identifiers.to_numpy(), name=None)
+    frame.index = pd.Index(identifiers.array, name=None)
     for column in frame.columns:
         if column in _METADATA_FLOATS:
-            frame[column] = pd.Series(
-                _float_values(frame[column], path, METADATA, column), index=frame.index, dtype=_FLOAT_DTYPE
-            )
+            require_finite(frame[column], path, METADATA, column)
     if "volume" in frame and frame["volume"].lt(0).any():
         raise schema_error(path, METADATA, found="negative volume", expected="nonnegative cell volumes")
-    if "transcript_count" in frame:
-        values = integer_values(frame["transcript_count"], path, METADATA, "transcript_count")
-        frame["transcript_count"] = pd.Series(
-            values, index=frame.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(values.dtype))
-        )
-    if "fov" in frame:
-        # Vendor metadata permits absent FOV assignments for merged entities.
-        missing = frame["fov"].eq("")
-        values = integer_values(frame.loc[~missing, "fov"], path, METADATA, "fov")
-        if values.dtype.kind == "u":
-            raise schema_error(path, METADATA, found="FOV overflow", expected="nullable nonnegative int64 FOV indexes")
-        frame["fov"] = pd.Series(pd.NA, index=frame.index, dtype=_INTEGER_DTYPE)
-        frame.loc[~missing, "fov"] = values
+    if "transcript_count" in frame and frame["transcript_count"].isna().any():
+        raise schema_error(path, METADATA, found="missing transcript_count", expected="nonnegative transcript counts")
     return frame
 
 
@@ -238,9 +232,23 @@ def normalize_boundary_ids(table: pa.Table, path: ArtifactFile) -> pd.Index:
     identifiers = normalize_cell_ids(pd.Series(ids, dtype=STRING_DTYPE), path, BOUNDARIES)
     # VPT permits absent plane annotations. XY footprint construction uses every
     # geometry row, independently of this optional 3D stack annotation.
-    planes = integer_values(table.column("ZIndex").drop_null(), path, BOUNDARIES, "ZIndex")
-    if planes.dtype.kind == "u":
-        raise schema_error(path, BOUNDARIES, found="ZIndex overflow", expected="nonnegative int64 plane indexes")
+    planes = table.column("ZIndex")
+    if not (
+        pa.types.is_integer(planes.type)
+        or pa.types.is_floating(planes.type)
+        or pa.types.is_string(planes.type)
+        or pa.types.is_large_string(planes.type)
+        or pa.types.is_null(planes.type)
+    ):
+        raise schema_error(
+            path, BOUNDARIES, found=f"ZIndex dtype {planes.type}", expected="numeric or text plane indexes"
+        )
+    try:
+        pc.cast(planes, pa.uint64(), safe=True)
+    except pa.ArrowInvalid as error:
+        raise schema_error(
+            path, BOUNDARIES, found=f"invalid ZIndex ({error})", expected="nonnegative uint64 plane indexes"
+        ) from error
     if "Type" in table.column_names:
         types = pd.Series(table.column("Type"), dtype=STRING_DTYPE)
         if types.isna().any() or not types.isin(("Cell", "cell")).all():
@@ -265,6 +273,18 @@ def validate_transcript_columns(columns: Sequence[str], path: ArtifactFile) -> t
     return ("gene", "global_x", "global_y", *(column for column in _TRANSCRIPT_OPTIONAL if column in columns))
 
 
+def transcript_types(columns: Sequence[str], path: ArtifactFile) -> dict[str, pa.DataType]:
+    """Declare the projected transcript fields without decoding textual identities."""
+    return {
+        name: pa.float64()
+        if name in {"global_x", "global_y"}
+        else pa.uint64()
+        if name in {"global_z", "fov", "barcode_id"}
+        else pa.string()
+        for name in validate_transcript_columns(columns, path)
+    }
+
+
 def normalize_transcript_partition(
     frame: pd.DataFrame,
     *,
@@ -285,17 +305,12 @@ def normalize_transcript_partition(
         )
     frame["gene"] = pd.Categorical(genes.to_numpy(), categories=features)
     for column, axis in (("global_x", "x"), ("global_y", "y")):
-        frame[axis] = _float_values(frame.pop(column), path, TRANSCRIPTS, column)
+        require_finite(frame[column], path, TRANSCRIPTS, column)
+        # PointsModel requires native NumPy coordinate columns.
+        frame[axis] = frame.pop(column).to_numpy(dtype=np.float64)
     for column in ("global_z", "fov", "barcode_id"):
         if column in frame:
-            values = integer_values(frame.pop(column), path, TRANSCRIPTS, column)
-            if values.dtype.kind == "u":
-                raise schema_error(
-                    path, TRANSCRIPTS, found=f"{column} overflow", expected="nonnegative int64 source indexes"
-                )
-            frame["z_raw" if column == "global_z" else column] = pd.Series(
-                values, index=frame.index, dtype=_INTEGER_DTYPE
-            )
+            frame["z_raw" if column == "global_z" else column] = frame.pop(column)
     if "transcript_id" in frame:
         values = frame["transcript_id"].astype(STRING_DTYPE)
         if values.isna().any() or values.eq("").any():

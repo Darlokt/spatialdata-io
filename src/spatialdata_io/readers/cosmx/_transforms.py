@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     import numpy.typing as npt
+    import pandas as pd
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -188,7 +189,7 @@ def _position_offset(
 
 
 def solve_placements(
-    fovs: npt.NDArray[np.int64],
+    fovs: pd.Index,
     samples: tuple[AxisSamples, AxisSamples],
     *,
     required: frozenset[int],
@@ -197,8 +198,10 @@ def solve_placements(
 ) -> dict[int, Placement]:
     """Derive every required FOV's placement from all of its cells, cross-checked by positions."""
     candidates: tuple[dict[int, dict[Sign, tuple[float, float]]], dict[int, dict[Sign, tuple[float, float]]]] = ({}, {})
-    for fov in np.unique(fovs).tolist():
-        rows = fovs == fov
+    for fov in fovs.unique().sort_values():
+        # Pandas otherwise boxes a Python scalar as signed int64, overflowing
+        # for valid large FOV IDs. Coordinates require one native boolean mask.
+        rows = np.asarray(fovs == np.uint64(fov), dtype=np.bool_)
         for axis, axis_samples in enumerate(samples):
             feasible = _intervals(axis_samples, rows, path)
             if not feasible:

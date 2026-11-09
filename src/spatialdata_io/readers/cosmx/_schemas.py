@@ -1,9 +1,9 @@
-"""CosMx flat-file column contracts and exact lexical value decoding.
+"""CosMx Arrow types, semantic validation and printed placement precision.
 
-Every flat file is read as text, so exact integers, correctly rounded floats and
-the printed precision of each coordinate come from the source spelling. Fields
-are named: any order and additional fields are accepted, but names must be
-unique, nonempty and free of NUL, so no parser can silently repair them.
+Arrow parses numeric fields directly to their declared widths. Placement
+coordinates retain their source spelling to derive exact printed rounding
+intervals; other annotations remain typed throughout ingestion. Named fields
+accept any order and additional columns, with unique nonempty names without NUL.
 
 Schemas (``<prefix>_<suffix>.csv`` or ``.csv.gz``)::
 
@@ -21,14 +21,13 @@ Values:
 
 - ``fov`` is an integer of at least 1. ``cell_ID`` is an integer of at least 0
   in counts and transcripts, where 0 marks per-FOV background or an unassigned
-  transcript, and at least 1 in metadata. Both become int64 without a floating
-  intermediate.
-- Counts are nonnegative integers. Every integer field accepts any exact
-  decimal spelling (``2``, ``2.0``, ``2e0``) and must fit int64.
-- Coordinates are finite float64 decimals; a nonzero value that rounds to zero,
-  or an integral value of at least 2**53 that float64 cannot hold exactly,
-  fails. Half a unit in the last printed decimal place of each value is its
-  rounding bound, used for placement.
+  transcript, and at least 1 in metadata. Both use uint64 without a floating
+  or signed intermediate. Counts are uint64 as well.
+- Arrow's typed numeric grammar applies: spaces and tabs are trimmed, integers
+  accept hexadecimal and reject ``2.0``, ``2e0``, ``+1`` and separators.
+  Floats round directly to float64; required coordinates must be finite.
+- Placement coordinates are plain decimal text. Half a unit in their last
+  printed decimal place is their rounding bound; it must be finite and positive.
 - Metadata annotations named ``Area``, ``Area.um2``, ``AspectRatio``,
   ``Width``, ``Height``, ``Mean.*`` and ``Max.*`` are nullable float64, with
   empty fields and ``NA`` missing; every other annotation stays exact text.
@@ -43,14 +42,13 @@ documents how these columns differ between releases.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
-from spatialdata_io.readers._utils.csv import decode_float64, decode_integer_block, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
@@ -72,8 +70,6 @@ IMAGES: Artifact = "composite images"
 LABELS: Artifact = "cell labels"
 
 STRING_DTYPE = pd.ArrowDtype(pa.string())
-FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
-INTEGER_DTYPE = pd.ArrowDtype(pa.int64())
 
 FOV = "fov"
 CELL_ID = "cell_ID"
@@ -95,9 +91,9 @@ def schema_error(path: ArtifactFile, artifact: Artifact, *, found: str, expected
     return ReaderFormatError(context=ReaderErrorContext("cosmx", artifact), path=path, found=found, expected=expected)
 
 
-def validate_label_ids(cell_ids: npt.NDArray[np.int64], dtype: np.dtype[np.generic], path: ArtifactFile) -> None:
+def validate_label_ids(cell_ids: pd.Index, dtype: np.dtype[np.generic], path: ArtifactFile) -> None:
     """Require positive cell IDs to fit their FOV's inspected integer label dtype."""
-    maximum = int(cell_ids.max(initial=0))
+    maximum = int(cell_ids.max()) if len(cell_ids) else 0
     limit = np.iinfo(dtype.str).max
     if maximum > limit:
         raise schema_error(
@@ -131,29 +127,36 @@ def count_features(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...
     return features
 
 
-@dataclass(frozen=True, slots=True)
-class MetadataColumns:
-    """Partition cell metadata by declared semantic type, in source order."""
-
-    names: tuple[str, ...]
-    numeric: tuple[str, ...]
-    text: tuple[str, ...]
+def count_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema:
+    """Declare exact unsigned keys and every count feature in source order."""
+    features = count_features(columns, path)
+    return pa.schema([(FOV, pa.uint64()), (CELL_ID, pa.uint64()), *((name, pa.uint64()) for name in features)])
 
 
-def metadata_columns(columns: Sequence[str], path: ArtifactFile) -> MetadataColumns:
-    """Type vendor morphology and intensities; keep every other annotation as text."""
+def metadata_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema:
+    """Declare numeric annotations and retain only placement coordinates as source text."""
     _require(columns, (FOV, CELL_ID, *CENTERS), path, METADATA)
     for name in (REGION_KEY, FRAME_KEY):
         if name in columns:
             raise schema_error(
                 path, METADATA, found=f"a source {name!r} column", expected="no column the reader adds to obs"
             )
-    annotations = [name for name in columns if name not in {FOV, CELL_ID, *CENTERS}]
-    numeric = tuple(name for name in annotations if _NUMERIC_METADATA.fullmatch(name))
-    return MetadataColumns(tuple(columns), numeric, tuple(name for name in annotations if name not in numeric))
+    return pa.schema(
+        [
+            (
+                name,
+                pa.uint64()
+                if name in {FOV, CELL_ID}
+                else pa.float64()
+                if _NUMERIC_METADATA.fullmatch(name)
+                else pa.string(),
+            )
+            for name in columns
+        ]
+    )
 
 
-def fov_position_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, str, str] | None:
+def fov_position_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema | None:
     """Return the FOV and pixel-position fields, or None for millimetre-only exports."""
     _validate_columns(columns, path, POSITIONS)
     identifiers = [name for name in (FOV, "FOV") if name in columns]
@@ -164,64 +167,56 @@ def fov_position_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[st
     pixels = [pair for pair in _FOV_POSITION_PIXELS if set(pair).issubset(columns)]
     if len(pixels) > 1:
         raise schema_error(path, POSITIONS, found="two pixel-position conventions", expected="one x/y pixel pair")
-    return (identifiers[0], *pixels[0]) if pixels else None
+    return pa.schema([(identifiers[0], pa.uint64()), *((name, pa.string()) for name in pixels[0])]) if pixels else None
 
 
-def transcript_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Project required event fields and the supported optional annotations."""
+def transcript_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema:
+    """Declare one projected event schema for plain and compressed sources."""
     _require(columns, TRANSCRIPT_REQUIRED, path, TRANSCRIPTS)
-    return (*TRANSCRIPT_REQUIRED, *(name for name in TRANSCRIPT_OPTIONAL if name in columns))
-
-
-def _lexical(column: pa.Array | pa.ChunkedArray) -> pd.Series:
-    """View Arrow source text through pandas string methods without copying it."""
-    return pd.Series(pd.arrays.ArrowExtensionArray(column), dtype=STRING_DTYPE)
-
-
-def integer_values(
-    column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str, *, minimum: int | None
-) -> npt.NDArray[np.int64]:
-    """Decode exact int64 values without a floating intermediate, optionally bounded below."""
-    values = decode_integers(
-        column, name=name, minimum=minimum, context=ReaderErrorContext("cosmx", artifact), path=path
+    names = (*TRANSCRIPT_REQUIRED, *(name for name in TRANSCRIPT_OPTIONAL if name in columns))
+    return pa.schema(
+        [
+            (
+                name,
+                pa.uint64()
+                if name in {FOV, CELL_ID}
+                else pa.int64()
+                if name == "z"
+                else pa.float64()
+                if name.endswith("_px")
+                else pa.string(),
+            )
+            for name in names
+        ]
     )
-    if values.dtype.kind == "u":
+
+
+def require_positive(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str) -> None:
+    """Reject missing or zero IDs after unsigned typed ingestion."""
+    if column.null_count or pc.call_function("min", [column]).as_py() == 0:
         raise schema_error(
-            path, artifact, found=f"{name!r} value {int(values.max())}", expected=f"{name!r} values within int64"
+            path, artifact, found=f"missing or zero {name!r}", expected=f"positive uint64 {name!r} values"
         )
-    return values.astype(np.int64, copy=False)
 
 
-def count_block(columns: Sequence[pa.Array], names: Sequence[str], path: ArtifactFile) -> npt.NDArray[np.int64]:
-    """Decode a bounded rows-by-features count block with one vectorized pass; errors name the feature."""
-    counts = decode_integer_block(
-        columns, names=names, minimum=0, context=ReaderErrorContext("cosmx", COUNTS), path=path
-    )
-    if counts.dtype.kind == "u":
-        maxima = counts.max(axis=0)
-        name = names[int(maxima.argmax())]
-        raise schema_error(
-            path, COUNTS, found=f"{name!r} value {int(maxima.max())}", expected=f"{name!r} values within int64"
-        )
-    return counts.astype(np.int64, copy=False)
+def require_finite(
+    column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str, *, nullable: bool = False
+) -> None:
+    """Validate finite physical values, permitting only declared optional nulls."""
+    if (column.null_count and not nullable) or pc.call_function(
+        "all", [pc.call_function("is_finite", [column])]
+    ).as_py() is False:
+        raise schema_error(path, artifact, found=f"missing or nonfinite {name!r}", expected=f"finite {name!r} values")
 
 
-def float_values(
+def placement_values(
     column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str
-) -> npt.NDArray[np.float64]:
-    """Decode correctly rounded finite float64 values without underflow or integer precision loss."""
-    return decode_float64(column, name=name, context=ReaderErrorContext("cosmx", artifact), path=path)
-
-
-def optional_float_values(
-    column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str
-) -> pd.Series:
-    """Decode an annotation, treating empty fields and vendor ``NA`` as missing."""
-    present = (~_lexical(column).isin(("", "NA"))).to_numpy(dtype=np.bool_)
-    decoded = np.full(len(present), np.nan)
-    if present.any():
-        decoded[present] = float_values(column.filter(pa.array(present)), path, artifact, name)
-    return pd.Series(pd.arrays.ArrowExtensionArray(pa.array(decoded, mask=~present)), dtype=FLOAT_DTYPE)
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Return correctly rounded placement coordinates and their original printed half-units."""
+    halves = half_units(column, path, artifact, name)
+    values = pc.cast(column, pa.float64(), safe=True)
+    require_finite(values, path, artifact, name)
+    return values.to_numpy(), halves
 
 
 def half_units(
@@ -232,7 +227,7 @@ def half_units(
     This is the exact rounding bound of each written coordinate, independent of
     how many digits a given export happens to print.
     """
-    lexical = _lexical(column)
+    lexical = pd.Series(pd.arrays.ArrowExtensionArray(column), dtype=STRING_DTYPE)
     if not lexical.str.fullmatch(_DECIMAL).all():
         raise schema_error(path, artifact, found=f"non-decimal {name!r} values", expected="plain decimal coordinates")
     # Unmatched optional groups are missing or empty depending on the string storage.

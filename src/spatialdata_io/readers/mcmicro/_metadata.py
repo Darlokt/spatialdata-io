@@ -24,10 +24,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.csv as pacsv
 import yaml
 
-from spatialdata_io.readers._utils.csv import parse_csv_header, read_csv_table
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers.mcmicro._schemas import (
     MARKERS_CONTEXT,
     MarkerPanel,
@@ -87,9 +89,22 @@ def read_workflow(path: ArtifactFile) -> Literal["wsi", "tma"]:
 
 def read_markers(path: ArtifactFile) -> MarkerPanel:
     """Parse the marker panel as exact text under one source owner."""
-    with path.open("rb") as source:
-        columns = parse_csv_header(source.readline(), context=MARKERS_CONTEXT, path=path)
-        validate_columns(columns, path, context=MARKERS_CONTEXT)
-        source.seek(0)
-        table = read_csv_table(source, header=columns, context=MARKERS_CONTEXT, path=path)
+    try:
+        with path.open("rb") as source, csv_errors(context=MARKERS_CONTEXT, path=path):
+            columns = csv_header(path, context=MARKERS_CONTEXT, source=source)
+            validate_columns(columns, path, context=MARKERS_CONTEXT)
+            source.seek(0)
+            table = pacsv.read_csv(
+                source,
+                parse_options=pacsv.ParseOptions(newlines_in_values=True),
+                convert_options=pacsv.ConvertOptions(
+                    column_types={name: pa.string() for name in columns},
+                    include_columns=list(columns),
+                    null_values=[],
+                    strings_can_be_null=False,
+                ),
+            )
+    except OSError as error:
+        add_reader_context(error, context=MARKERS_CONTEXT, path=path)
+        raise
     return normalize_markers(table.to_pandas(types_mapper=pd.ArrowDtype), path)

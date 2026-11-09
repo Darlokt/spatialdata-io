@@ -91,7 +91,14 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     The barcode map is a headerless two-column TSV of positions ``A1..AN`` and
     ``B1..BN`` (``1 <= N <= 50``, contiguous, each listed once) and their
     eight-base sequences (case-insensitive, unique within an axis), in any row
-    order. Each H5AD observation name starts with the eight B bases followed by
+    order. The UTF-8 file may include a byte-order mark and must fit in 64 KiB
+    with at most 100 records. Arrow parses both fields as literal strings:
+    empty strings and ``NA`` are not missing values, and fail the position or
+    DNA vocabulary. Every record has exactly two fields. Quoted fields and a
+    final record without a newline are accepted; Arrow may accept some
+    malformed quoting without a separate strict-syntax pass.
+
+    Each H5AD observation name starts with the eight B bases followed by
     the eight A bases of its spot; a suffix is kept. Every observation must map
     to a distinct grid location; the table may cover any subset of the grid.
 
@@ -171,11 +178,11 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
               are summed; an integer sum that overflows promotes to the
               smallest exact float32 or float64 storage. Other layers keep
               their representation.
-            - ``obs["array_A"]``, ``obs["array_B"]``: one-based int64 grid
-              positions; ``obsm["spatial_grid"]`` holds them as int64 ``x, y``
+            - ``obs["array_A"]``, ``obs["array_B"]``: one-based uint16 grid
+              positions; ``obsm["spatial_grid"]`` holds them as uint16 ``x, y``
               (A, B), declared in ``uns["spatialdata_io_positions"]`` as
               ordinals of the ``grid_pixels`` frame, also with an image.
-            - ``obs["pixel_id"]``: int64 row number, matching the shapes index;
+            - ``obs["pixel_id"]``: uint16 row number, matching the shapes index;
               ``obs["sample"]`` (string) and categorical ``obs["region"]``:
               ``dataset_id``. These five columns replace any imported columns
               of the same name, and any imported ``uns["spatialdata_attrs"]``
@@ -300,8 +307,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         step = max(scale0.sizes["y"], scale0.sizes["x"]) / len(barcodes.a)
         transformations[IMAGE_FRAME] = Scale([step, step], axes=("x", "y"))
 
-    # read_table stores exact int64 (A, B) positions in source row order.
-    coordinates = cast("npt.NDArray[np.int64]", table.obsm["spatial_grid"])
+    # read_table stores exact uint16 (A, B) positions in source row order.
+    coordinates = cast("npt.NDArray[np.uint16]", table.obsm["spatial_grid"])
     order = grid_order(coordinates)
     grid = make_grid(
         coordinates[order], include_border=include_border, border_scale=border_scale, transformations=transformations
@@ -310,8 +317,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     # Link in source order: linkage converts expression to CSR, so the row
     # sort below copies sparse storage, never a dense matrix. pixel_id is each
     # row's position after that sort.
-    pixel_ids = np.empty(table.n_obs, dtype=np.int64)
-    pixel_ids[order] = np.arange(table.n_obs, dtype=np.int64)
+    pixel_ids = np.empty(table.n_obs, dtype=np.uint16)
+    pixel_ids[order] = np.arange(table.n_obs, dtype=np.uint16)
     obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
     obs["region"] = pd.Categorical([dataset_id] * table.n_obs)
     obs["sample"] = pd.Series(dataset_id, index=obs.index, dtype=SAMPLE_DTYPE)

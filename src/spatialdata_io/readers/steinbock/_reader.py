@@ -162,6 +162,29 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
         the only sample, so ``global`` and ``<sample>`` always mean
         micrometres. Samples are never registered to each other.
 
+        Optional ``images.csv`` requires named ``image``, ``width_px`` and
+        ``height_px`` fields, and either both ``acquisition_width_um`` and
+        ``acquisition_height_um`` or neither, in any order. Image identities
+        must be nonempty and unique across every row. Supported fields are
+        read as literal UTF-8 strings (an optional byte-order mark is allowed);
+        all header names and supported values reject NUL. Every record must
+        have the header's complete width. Extra columns are ignored and their
+        values are not decoded or scanned for NUL. Blank records are skipped
+        and quoted multiline fields are accepted; Arrow may accept some
+        malformed quoting without a separate
+        strict-syntax pass.
+
+        Only discovered images' numerical values are interpreted. Dimensions
+        use Arrow's checked uint64 grammar after trimming spaces and tabs:
+        hexadecimal (``0x10``) is accepted; ``2.0``, ``2e0``, ``+1`` and ``1_0``
+        fail. Values must lie between one and ``2**63 - 1``. Acquisition
+        extents must be both empty or both finite positive decimal values.
+        Their exact decimal values are divided by the integer dimensions
+        before the final float64 spacing conversion, independently of the
+        ambient Decimal precision. Unselected images may contain arbitrary
+        numeric text, but still obey identity, supported-field NUL and record
+        width rules.
+
         ``attrs`` record the reader and package version. Pixels are not read
         until computed, and a partial computation decodes only the TIFF tiles
         or strips it overlaps. All files are closed on return; the source

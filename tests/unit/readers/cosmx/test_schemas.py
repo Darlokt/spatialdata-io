@@ -5,23 +5,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.cosmx._schemas import (
-    FLOAT_DTYPE,
     _validate_columns,
-    count_block,
     count_features,
-    float_values,
-    fov_position_columns,
+    count_types,
+    fov_position_types,
     half_units,
-    integer_values,
-    metadata_columns,
-    optional_float_values,
-    transcript_columns,
+    metadata_types,
+    placement_values,
+    require_finite,
+    require_positive,
+    transcript_types,
     validate_label_ids,
 )
 
@@ -51,15 +51,15 @@ class TestValidateLabelIds:
     def test_exact_limit_and_overflow(self, tmp_path: Path, dtype: str) -> None:
         label_dtype = np.dtype(dtype)
         limit = np.iinfo(label_dtype).max
-        validate_label_ids(np.array([1, limit], np.int64), label_dtype, _path(tmp_path))
+        validate_label_ids(pd.Index([1, limit], dtype="uint64[pyarrow]"), label_dtype, _path(tmp_path))
         with pytest.raises(ReaderFormatError, match=r"outside.*label range") as error:
-            validate_label_ids(np.array([limit + 1], np.int64), label_dtype, _path(tmp_path))
+            validate_label_ids(pd.Index([limit + 1], dtype="uint64[pyarrow]"), label_dtype, _path(tmp_path))
         assert error.value.context == ReaderErrorContext("cosmx", "cell labels")
 
     @pytest.mark.parametrize("dtype", ["uint64", "int64"])
     def test_64_bit_and_empty(self, tmp_path: Path, dtype: str) -> None:
-        validate_label_ids(np.array([2**63 - 1], np.int64), np.dtype(dtype), _path(tmp_path))
-        validate_label_ids(np.array([], np.int64), np.dtype(dtype), _path(tmp_path))
+        validate_label_ids(pd.Index([2**63 - 1], dtype="uint64[pyarrow]"), np.dtype(dtype), _path(tmp_path))
+        validate_label_ids(pd.Index([], dtype="uint64[pyarrow]"), np.dtype(dtype), _path(tmp_path))
 
 
 class TestCountFeatures:
@@ -76,16 +76,21 @@ class TestCountFeatures:
         assert error.value.context == ReaderErrorContext("cosmx", "count matrix")
 
 
-class TestMetadataColumns:
+class TestMetadataTypes:
     """Vendor morphology and intensities are typed; other annotations stay text."""
 
     def test_roles(self, tmp_path: Path) -> None:
-        columns = metadata_columns(
+        columns = metadata_types(
             ["cell", "fov", "cell_ID", *_CENTERS, "Area", "Area.um2", "Mean.DAPI", "Max.G", "Width", "version"],
             _path(tmp_path),
         )
-        assert columns.numeric == ("Area", "Area.um2", "Mean.DAPI", "Max.G", "Width")
-        assert columns.text == ("cell", "version")
+        assert columns.field("fov").type == columns.field("cell_ID").type == pa.uint64()
+        for name in _CENTERS:
+            assert columns.field(name).type == pa.string()
+        for name in ("Area", "Area.um2", "Mean.DAPI", "Max.G", "Width"):
+            assert columns.field(name).type == pa.float64()
+        for name in ("cell", "version"):
+            assert columns.field(name).type == pa.string()
 
     @pytest.mark.parametrize(
         ("columns", "match"),
@@ -97,11 +102,11 @@ class TestMetadataColumns:
     )
     def test_rejects(self, tmp_path: Path, columns: list[str], match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match) as error:
-            metadata_columns(columns, _path(tmp_path))
+            metadata_types(columns, _path(tmp_path))
         assert error.value.context == ReaderErrorContext("cosmx", "cell metadata")
 
 
-class TestFovPositionColumns:
+class TestFovPositionTypes:
     """Both pixel conventions are recognized; millimetre-only files provide none."""
 
     @pytest.mark.parametrize(
@@ -116,7 +121,11 @@ class TestFovPositionColumns:
         ],
     )
     def test_conventions(self, tmp_path: Path, columns: list[str], expected: tuple[str, ...] | None) -> None:
-        assert fov_position_columns(columns, _path(tmp_path)) == expected
+        result = fov_position_types(columns, _path(tmp_path))
+        if expected is None:
+            assert result is None
+        else:
+            assert result == pa.schema([(expected[0], pa.uint64()), *((name, pa.string()) for name in expected[1:])])
 
     @pytest.mark.parametrize(
         "columns",
@@ -124,116 +133,89 @@ class TestFovPositionColumns:
     )
     def test_rejects(self, tmp_path: Path, columns: list[str]) -> None:
         with pytest.raises(ReaderFormatError) as error:
-            fov_position_columns(columns, _path(tmp_path))
+            fov_position_types(columns, _path(tmp_path))
         assert error.value.context == ReaderErrorContext("cosmx", "FOV positions")
 
 
-class TestTranscriptColumns:
+class TestTranscriptTypes:
     """Required event fields and supported annotations are projected."""
 
     def test_projection(self, tmp_path: Path) -> None:
         names = ["fov", "cell_ID", "cell", "x_local_px", "y_local_px", "x_global_px", "y_global_px", "z", "target", "x"]
-        assert transcript_columns(names, _path(tmp_path)) == (
-            "fov", "cell_ID", "x_local_px", "y_local_px", "x_global_px", "y_global_px", "target", "z", "cell"
-        )  # fmt: skip
+        types = transcript_types(names, _path(tmp_path))
+        assert types.names == [
+            "fov",
+            "cell_ID",
+            "x_local_px",
+            "y_local_px",
+            "x_global_px",
+            "y_global_px",
+            "target",
+            "z",
+            "cell",
+        ]
+        assert types.field("fov").type == types.field("cell_ID").type == pa.uint64()
+        assert types.field("z").type == pa.int64()
+        assert types.field("target").type == types.field("cell").type == pa.string()
+        assert types.field("x_local_px").type == pa.float64()
 
     def test_missing_fields(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="missing") as error:
-            transcript_columns(["fov", "target"], _path(tmp_path))
+            transcript_types(["fov", "target"], _path(tmp_path))
         assert error.value.context == ReaderErrorContext("cosmx", "transcripts")
 
 
-class TestIntegerValues:
-    """Identifiers and counts are exact int64 integers, optionally bounded below."""
+class TestCountTypes:
+    def test_ordered_uint64_schema(self, tmp_path: Path) -> None:
+        types = count_types(["B", "cell_ID", "A", "fov"], _path(tmp_path))
+        assert types == pa.schema([(name, pa.uint64()) for name in ("fov", "cell_ID", "B", "A")])
 
-    def test_exact(self, tmp_path: Path) -> None:
-        values = integer_values(pa.array(["9007199254740993", "-1"]), _path(tmp_path), "transcripts", "z", minimum=None)
-        assert values.dtype == np.dtype(np.int64)
-        assert values.tolist() == [9007199254740993, -1]
 
-    @pytest.mark.parametrize("token", ["2.0", "2e0", "+2", "0.2e1", "02"])
-    def test_exact_decimal_spellings(self, tmp_path: Path, token: str) -> None:
-        values = integer_values(pa.array(["1", token]), _path(tmp_path), "count matrix", "fov", minimum=1)
-        assert values.dtype == np.dtype(np.int64)
-        assert values.tolist() == [1, 2]
+class TestRequirePositive:
+    @pytest.mark.parametrize("values", [[1, 2**64 - 1], []])
+    def test_positive_or_empty(self, tmp_path: Path, values: list[int]) -> None:
+        require_positive(pa.array(values, pa.uint64()), _path(tmp_path), "cell metadata", "fov")
+
+    @pytest.mark.parametrize("values", [[0], [None]])
+    def test_missing_or_zero(self, tmp_path: Path, values: list[int | None]) -> None:
+        with pytest.raises(ReaderFormatError, match="missing or zero") as error:
+            require_positive(pa.array(values, pa.uint64()), _path(tmp_path), "cell metadata", "fov")
+        assert error.value.context == ReaderErrorContext("cosmx", "cell metadata")
+
+
+class TestRequireFinite:
+    @pytest.mark.parametrize("values", [[1.5, -1.0], [], [None, 1.0]])
+    def test_finite_optional_values(self, tmp_path: Path, values: list[float | None]) -> None:
+        require_finite(pa.array(values, pa.float64()), _path(tmp_path), "cell metadata", "Area", nullable=True)
 
     @pytest.mark.parametrize(
-        ("token", "minimum", "found", "expected"),
+        ("value", "nullable"),
         [
-            (None, 1, "missing 'fov' values", "exact integer 'fov' values of at least 1 below 2**64"),
-            ("1.5", 1, "'fov' value '1.5'", "exact integer 'fov' values of at least 1 below 2**64"),
-            ("0x10", 1, "'fov' value '0x10'", "exact integer 'fov' values of at least 1 below 2**64"),
-            ("0", 1, "'fov' value '0'", "exact integer 'fov' values of at least 1 below 2**64"),
-            (str(2**63), 1, f"'fov' value {2**63}", "'fov' values within int64"),
-            (f"{2**63}.0", 0, f"'fov' value {2**63}", "'fov' values within int64"),
-            (str(2**63), None, f"'fov' value {str(2**63)!r}", "exact integer 'fov' values within int64"),
+            (None, False),
+            (np.nan, False),
+            (np.nan, True),
+            (np.inf, False),
+            (np.inf, True),
+            (-np.inf, False),
+            (-np.inf, True),
         ],
     )
-    def test_rejects(self, tmp_path: Path, token: str | None, minimum: int | None, found: str, expected: str) -> None:
-        with pytest.raises(ReaderFormatError) as caught:
-            integer_values(pa.array(["1", token], pa.string()), _path(tmp_path), "count matrix", "fov", minimum=minimum)
-        assert caught.value.found == found
-        assert caught.value.expected == expected
-        assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
+    def test_required_or_nonfinite(self, tmp_path: Path, value: float | None, *, nullable: bool) -> None:
+        with pytest.raises(ReaderFormatError, match="nonfinite"):
+            require_finite(pa.array([value], pa.float64()), _path(tmp_path), "cell metadata", "Area", nullable=nullable)
 
 
-class TestCountBlock:
-    """Count blocks decode in one pass and errors name their feature."""
+class TestPlacementValues:
+    def test_correct_rounding_and_printed_precision(self, tmp_path: Path) -> None:
+        tokens = ["162613.4", "159172.222222222", "0.10000000000000002", "-0"]
+        values, halves = placement_values(pa.array(tokens), _path(tmp_path), "cell metadata", "x")
+        np.testing.assert_array_equal(values, [float(token) for token in tokens])
+        np.testing.assert_array_equal(halves, [0.05, 5e-10, 5e-18, 0.5])
+        assert np.signbit(values[-1])
 
-    def test_rows_by_features(self, tmp_path: Path) -> None:
-        block = count_block([pa.array(["1", "0"]), pa.array(["0", "5.0"])], ("A", "B"), _path(tmp_path))
-        assert block.dtype == np.dtype(np.int64)
-        np.testing.assert_array_equal(block, [[1, 0], [0, 5]])
-
-    @pytest.mark.parametrize(
-        ("token", "found"), [("1.5", "'B' value '1.5'"), ("-1", "'B' value '-1'"), (str(2**63), f"'B' value {2**63}")]
-    )
-    def test_error_names_the_feature(self, tmp_path: Path, token: str, found: str) -> None:
-        with pytest.raises(ReaderFormatError) as error:
-            count_block([pa.array(["1"]), pa.array([token])], ("A", "B"), _path(tmp_path))
-        assert error.value.found == found
-        assert error.value.context == ReaderErrorContext("cosmx", "count matrix")
-
-
-class TestFloatValues:
-    """Coordinates are correctly rounded, finite, and never silently underflow or round integers."""
-
-    def test_correctly_rounded_against_lexical_oracle(self, tmp_path: Path) -> None:
-        tokens = ["162613.4", "159172.222222222", "0.1", "1e-320", "-0", str(2**53)]
-        np.testing.assert_array_equal(
-            float_values(pa.array(tokens), _path(tmp_path), "transcripts", "x"), [float(token) for token in tokens]
-        )
-
-    @pytest.mark.parametrize(
-        ("token", "match"),
-        [
-            (None, "missing"),
-            ("inf", "nonfinite"),
-            ("NA", "nonnumeric"),
-            ("1e-400", "underflow"),
-            ("9007199254740993", "beyond the exact float64 integers"),
-        ],
-    )
-    def test_rejects(self, tmp_path: Path, token: str | None, match: str) -> None:
-        with pytest.raises(ReaderFormatError, match=match) as caught:
-            float_values(pa.array(["1", token], pa.string()), _path(tmp_path), "transcripts", "x")
-        assert caught.value.context == ReaderErrorContext("cosmx", "transcripts")
-
-
-class TestOptionalFloatValues:
-    """Empty fields and the vendor NA spelling are missing; other text fails."""
-
-    def test_missing_spellings(self, tmp_path: Path) -> None:
-        values = optional_float_values(pa.array(["1.5", "", "NA"]), _path(tmp_path), "cell metadata", "Area")
-        assert values.dtype == FLOAT_DTYPE
-        assert values.isna().tolist() == [False, True, True]
-
-    def test_all_missing(self, tmp_path: Path) -> None:
-        assert optional_float_values(pa.array(["", "NA"]), _path(tmp_path), "cell metadata", "Area").isna().all()
-
-    def test_invalid_text(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="nonnumeric"):
-            optional_float_values(pa.array(["1", "x"]), _path(tmp_path), "cell metadata", "Area")
+    def test_nonfinite_coordinate(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="nonfinite"):
+            placement_values(pa.array(["1" * 400]), _path(tmp_path), "cell metadata", "x")
 
 
 class TestHalfUnits:
