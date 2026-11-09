@@ -242,7 +242,7 @@ class TestReadImage:
 class TestReadLabels:
     """Preserve integer labels and DAPI frame correspondence without eager validation."""
 
-    @pytest.mark.parametrize("maximum", [2**16 - 1, 2**16])
+    @pytest.mark.parametrize("maximum", [2**16 - 1, 2**16, 2**64 - 1])
     def test_instance_id_representability_without_pixel_tasks(
         self, tmp_path: Path, mocker: MockerFixture, maximum: int
     ) -> None:
@@ -251,7 +251,7 @@ class TestReadLabels:
         tifffile.imwrite(path, np.zeros((48, 64), dtype=np.uint16), photometric="minisblack")
         reference = read_dapi(ArtifactFile(dapi))
         pixels = mocker.spy(tiff_dask, "_read_tiff_selection")
-        if maximum == 2**16:
+        if maximum > np.iinfo(np.uint16).max:
             with pytest.raises(ReaderFormatError, match="label dtype"):
                 read_labels(
                     ArtifactFile(path),

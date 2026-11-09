@@ -111,7 +111,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
           feature-header order. ``X`` is a canonical CSR sparse array of the
           exact counts, float32 when every value fits exactly, else float64.
           ``obs`` holds ``area`` (µm²) and the integer cell ID
-          ``instance_id``; ``obsm["spatial"]`` the float64 centroids (µm).
+          ``instance_id`` (uint64); ``obsm["spatial"]`` the float64 centroids (µm).
           Observation names are positional strings from ``"0"``; dropped
           cells leave gaps. With labels, categorical ``region`` links the
           table to ``<ROI>_Segmentation``; otherwise it is unlinked.
@@ -123,7 +123,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         - ``points["<ROI>_TranscriptList"]``: lazy two-dimensional points
           ``x``, ``y`` with categorical ``name`` (categories in feature-header
           order), optional ``cell`` (``uint64[pyarrow]``, ``0`` unassigned)
-          and optional integer plane index ``z_raw``.
+          and optional ``uint64[pyarrow]`` plane index ``z_raw``.
         - ``shapes["<ROI>_Boundaries"]``: polygons indexed by cell ID in
           table order, with the GeoJSON properties as columns.
         - ``shapes["<ROI>_CellCoordinates"]``: circles at the centroids with
@@ -143,9 +143,11 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         A contextual ``ReaderFormatError`` naming the artifact and path if the
         layout, a schema or a value is malformed or files disagree: unknown
         ROIs, colliding ROI names, duplicate or mismatching cell IDs,
-        inexact counts or coordinates, missing DAPI calibration, a
-        segmentation off the DAPI grid or too narrow for the cell IDs.
-        Transcript records are validated when their partition is computed.
+        malformed CSV records or values (see Notes), counts that neither
+        float32 nor float64 holds exactly, nonfinite coordinates, missing
+        DAPI calibration, a segmentation off the DAPI grid or too narrow for
+        the cell IDs. Transcript records are validated when their partition
+        is computed.
 
     Warns
     -----
@@ -165,11 +167,20 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     ``obsm["spatial"]`` frame.
 
     Laziness: tables and shapes are read eagerly; counts are parsed in
-    bounded batches without a dense matrix. Pixels and transcript records
-    are not read until computed, so keep the files available until the data
-    are computed or written. The points' index is local to each partition.
-    CSV records must be well formed: Arrow checks the field count of each
-    record but accepts some malformed quoting.
+    bounded batches of about 1 MiB of text without a dense matrix, so a
+    CellxGene record must be shorter than that. Pixels and transcript
+    records are not read until computed, so keep the files available until
+    the data are computed or written. The points' index is local to each
+    partition.
+
+    CSV values: Arrow parses every field into its declared type (cell IDs
+    uint64, counts uint64, coordinates float64, transcript ``cell`` uint64,
+    ``z`` uint64) and checks that every record has the header's width. Its
+    grammar is the contract: spaces and tabs around numbers are trimmed,
+    hexadecimal integers such as ``0x10`` are read, ``2.0`` or ``+1`` is not
+    an integer, floats are correctly rounded (``1e-400`` reads as 0), and
+    some malformed quoting is accepted. Read numeric fields cannot be empty;
+    ignored annotation fields may be.
     """
     selection = make_selection(
         include_images=include_images,

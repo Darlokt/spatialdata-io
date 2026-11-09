@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
+from spatialdata_io.readers.xenium import _metadata
 from spatialdata_io.readers.xenium._metadata import (
     read_experiment,
     read_gene_panel,
@@ -18,6 +20,8 @@ from spatialdata_io.readers.xenium._metadata import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pytest_mock import MockerFixture
 
 EXPERIMENT = {
     "major_version": 5,
@@ -123,23 +127,62 @@ class TestReadMetrics:
         }
         assert isinstance(metrics["num_cells_detected"], int)
 
+    def test_quoted_newlines_and_text_metric_spellings(self, tmp_path: Path) -> None:
+        path = tmp_path / "metrics_summary.csv"
+        path.write_text('run_name,hex,plus,separator,empty\n"run\n1",0x10,+2,1_0,\n')
+
+        metrics = read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
+
+        assert metrics == {"run_name": "run\n1", "hex": "0x10", "plus": 2, "separator": 10.0, "empty": None}
+
+    def test_excess_rows_fail_without_reading_the_whole_file(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        payload = b"a,b\n" + b"1,2\n" * 4_000_000
+        source = io.BytesIO(payload)
+        reads = mocker.spy(source, "read")
+        mocker.patch("pathlib.Path.open", return_value=source)
+
+        with pytest.raises(ReaderFormatError, match="one nonempty header and one record"):
+            read_metrics(ArtifactFile(tmp_path / "metrics_summary.csv"), context=PANEL)
+
+        assert sum(len(chunk) for chunk in reads.spy_return_list) < len(payload) // 2
+        assert source.closed
+
+    def test_oversized_header_reads_at_most_one_block(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        source = io.BytesIO(b"a" * (2 * 1024 * 1024) + b"\n1\n")
+        reads = mocker.spy(source, "read")
+        lines = mocker.spy(source, "readline")
+        mocker.patch("pathlib.Path.open", return_value=source)
+        with pytest.raises(ReaderFormatError, match="oversized header"):
+            read_metrics(ArtifactFile(tmp_path / "metrics_summary.csv"), context=PANEL)
+        assert sum(len(chunk) for chunk in lines.spy_return_list) == 64 * 1024 + 1
+        reads.assert_not_called()
+        assert source.closed
+
+    def test_excess_row_in_another_batch_is_rejected(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        mocker.patch.object(_metadata, "_CSV_BLOCK_BYTES", 4)
+        path = tmp_path / "metrics_summary.csv"
+        path.write_text("a,b\n1,2\n3,4\n")
+
+        with pytest.raises(ReaderFormatError, match="more than one record"):
+            read_metrics(ArtifactFile(path), context=PANEL)
+
     @pytest.mark.parametrize(
-        "text",
+        ("text", "match"),
         [
-            "a,b\n1\n",
-            "a,a\n1,2\n",
-            "a,b\n1,2\n3,4\n",
-            "a,b\n",
-            ",b\n1,2\n",
-            'a,b\n"1,2\n',
+            ("a,b\n1\n", "Expected 2 columns, got 1"),
+            ("a,a\n1,2\n", "repeated column names"),
+            ("a,b\n1,2\n3,4\n", "one nonempty header and one record"),
+            ("a,b\n", "one nonempty header and one record"),
+            (",b\n1,2\n", "one nonempty header and one record"),
+            ('a,b\n"1,2\n', "malformed CSV"),
         ],
         ids=["width", "duplicate", "two-records", "no-record", "empty-name", "quote"],
     )
-    def test_rejects_malformed_tables(self, tmp_path: Path, text: str) -> None:
+    def test_rejects_malformed_tables(self, tmp_path: Path, text: str, match: str) -> None:
         path = tmp_path / "metrics_summary.csv"
         path.write_text(text)
 
-        with pytest.raises(ReaderFormatError, match="one unique header and one record"):
+        with pytest.raises(ReaderFormatError, match=match):
             read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
 
     def test_rejects_non_utf8(self, tmp_path: Path) -> None:
@@ -222,11 +265,23 @@ class TestReadProteinPanel:
             "spec_version": "1.0.0",
         }
 
+    @pytest.mark.parametrize("value", [0, 2**63 + 1, 2**64 - 1])
+    def test_codeword_index_unsigned_range(self, tmp_path: Path, value: int) -> None:
+        target = {"public_id": "TXP1", "long_name": "a", "clone": "c", "codeword_index": value}
+        panel = read_protein_panel(_json(tmp_path / "protein_panel.json", self._panel([target])), context=PANEL)
+        assert panel.targets["TXP1"].codeword_index == value
+
+    @pytest.mark.parametrize("value", [-1, 2**64, True])
+    def test_codeword_index_rejects_invalid_domain(self, tmp_path: Path, value: int) -> None:
+        target = {"public_id": "TXP1", "long_name": "a", "clone": "c", "codeword_index": value}
+        with pytest.raises(ReaderFormatError, match="uint64 codeword_index"):
+            read_protein_panel(_json(tmp_path / "protein_panel.json", self._panel([target])), context=PANEL)
+
     @pytest.mark.parametrize(
         ("targets", "match"),
         [
             ("none", "targets as a list"),
-            ([{"public_id": "TXP1", "long_name": "a", "clone": "c", "codeword_index": "16"}], "integer codeword_index"),
+            ([{"public_id": "TXP1", "long_name": "a", "clone": "c", "codeword_index": "16"}], "uint64 codeword_index"),
             (
                 [
                     {"public_id": "TXP1", "long_name": "a", "clone": "c", "codeword_index": 1},

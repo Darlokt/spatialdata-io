@@ -51,7 +51,7 @@ def read_boundaries(
         ],
         dtype=object,
     )
-    shapes.index = pd.Index(identifiers, name="instance_id")
+    shapes.index = identifiers.rename("instance_id")
     if len(shapes) != len(instance_ids) or (shapes.index.get_indexer(instance_ids) < 0).any():
         raise ReaderFormatError(
             context=BOUNDARIES_CONTEXT,
@@ -85,6 +85,7 @@ def make_circles(table: AnnData, *, frame: str, cells: ArtifactFile) -> gpd.GeoD
     # The reader-created table is eager; AnnData's backed Dataset2D alternative
     # does not apply at this private producer boundary.
     obs = cast("pd.DataFrame", table.obs)
+    # ShapesModel validates radii with NumPy, which Arrow-backed values do not support.
     areas = obs["area"].to_numpy(dtype=np.float64)
     if (areas <= 0).any():
         raise ReaderFormatError(
@@ -95,6 +96,6 @@ def make_circles(table: AnnData, *, frame: str, cells: ArtifactFile) -> gpd.GeoD
         )
     circles = gpd.GeoDataFrame(
         {"geometry": gpd.points_from_xy(coordinates[:, 0], coordinates[:, 1]), "radius": np.sqrt(areas / np.pi)},
-        index=pd.Index(obs["instance_id"].to_numpy(), name="instance_id"),
+        index=pd.Index(obs["instance_id"].array, name="instance_id"),
     )
     return ShapesModel.parse(circles, transformations={frame: Identity()})

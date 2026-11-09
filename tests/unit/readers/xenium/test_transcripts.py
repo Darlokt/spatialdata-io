@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 import pytest
 from dask.callbacks import Callback
@@ -18,6 +19,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium import _transcripts
 from spatialdata_io.readers.xenium._layout import TabularSource
+from spatialdata_io.readers.xenium._schemas import id_index, transcript_types
 from spatialdata_io.readers.xenium._transcripts import read_transcripts
 from tests.integration.readers.xenium import _fixtures as fx
 
@@ -40,7 +42,11 @@ def _cells(bundle: fx.XeniumFixture) -> pd.Index:
 
 
 def _read(bundle: fx.XeniumFixture, kind: str = "parquet") -> dd.DataFrame:
-    source = TabularSource(ArtifactFile(bundle.root / f"transcripts.{kind}"), "parquet" if kind == "parquet" else "csv")
+    source = TabularSource(
+        ArtifactFile(bundle.root / f"transcripts.{kind}"),
+        "parquet" if kind == "parquet" else "csv",
+        transcript_types(bundle.profile.family),
+    )
     return read_transcripts(
         source,
         bundle.profile.family,
@@ -64,6 +70,24 @@ def _rewrite(path: Path, column: str, values: pa.Array) -> None:
 
 class TestReadTranscripts:
     """Points stay lazy and reproduce every projected source row in file order."""
+
+    def test_csv_declared_types_preserve_numeric_text_and_single_rounding(self, tmp_path: Path) -> None:
+        path = tmp_path / "transcripts.csv"
+        path.write_text(
+            "transcript_id,cell_id,overlaps_nucleus,feature_name,x_location,y_location,z_location,qv\n"
+            "9223372036854775809,010,0,007,1.000000059604644776257986738,0,0,20\n"
+        )
+        source = TabularSource(ArtifactFile(path), "csv", transcript_types("hex_ids"))
+
+        points = read_transcripts(
+            source, "hex_ids", features=pd.Index(["007"]), cells=pd.Index(["010"]), context=CONTEXT
+        )
+        frame = points.compute()
+
+        assert frame["transcript_id"].tolist() == [2**63 + 1]
+        assert frame["cell_id"].tolist() == ["010"]
+        assert frame["feature_name"].tolist() == ["007"]
+        np.testing.assert_array_equal(frame["x"].to_numpy(), [np.nextafter(np.float32(1), np.float32(2))])
 
     @pytest.mark.parametrize(
         ("profile", "columns"),
@@ -99,12 +123,15 @@ class TestReadTranscripts:
         np.testing.assert_array_equal(frame["z"].to_numpy(), truth.z)
         np.testing.assert_array_equal(frame["qv"].to_numpy(), truth.qv)
         np.testing.assert_array_equal(frame["overlaps_nucleus"].to_numpy(), truth.overlaps_nucleus)
+        # PointsModel requires NumPy coordinates; every other column stays Arrow-backed.
         assert frame["x"].dtype == np.float32
-        assert frame["transcript_id"].dtype == np.uint64
+        assert frame["transcript_id"].dtype == pd.ArrowDtype(pa.uint64())
+        assert frame["overlaps_nucleus"].dtype == pd.ArrowDtype(pa.uint8())
+        assert frame["qv"].dtype == pd.ArrowDtype(pa.float32())
         assert frame["feature_name"].tolist() == [bundle.features[index] for index in truth.feature_index]
         assert frame["cell_id"].tolist() == _expected_cell_ids(bundle)
-        expected_ids = np.int64 if profile.family == "integer_ids" else pd.ArrowDtype(pa.string())
-        assert frame["cell_id"].dtype == expected_ids
+        expected_ids = pa.int64() if profile.family == "integer_ids" else pa.string()
+        assert frame["cell_id"].dtype == pd.ArrowDtype(expected_ids)
 
     def test_row_group_partitions_have_global_divisions(self, tmp_path: Path, mocker: MockerFixture) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcript_row_group=7))
@@ -196,6 +223,51 @@ class TestReadTranscripts:
         with pytest.raises(ReaderFormatError, match=match) as caught:
             points.get_partition(0).compute()
         assert caught.value.context == CONTEXT
+
+    @pytest.mark.parametrize("kind", ["csv", "parquet"])
+    def test_codeword_index_keeps_zero_and_uint32_unknown_sentinel(self, tmp_path: Path, kind: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        path = bundle.root / "transcripts.parquet"
+        values = pq.read_table(path)["codeword_index"].to_pylist()
+        _rewrite(path, "codeword_index", pa.array([0, 2**32 - 1, *values[2:]], pa.uint32()))
+        if kind == "csv":
+            pacsv.write_csv(pq.read_table(path), bundle.root / "transcripts.csv")
+        frame = _read(bundle, kind).compute()
+        assert frame["codeword_index"].dtype == pd.ArrowDtype(pa.uint32())
+        assert frame["codeword_index"].iloc[:2].tolist() == [0, 2**32 - 1]
+
+    @pytest.mark.parametrize("value", [-1, 2**32])
+    @pytest.mark.parametrize("kind", ["csv", "parquet"])
+    def test_codeword_index_rejects_negative_and_overflow(self, tmp_path: Path, value: int, kind: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        path = bundle.root / "transcripts.parquet"
+        values = pq.read_table(path)["codeword_index"].to_pylist()
+        _rewrite(path, "codeword_index", pa.array([value, *values[1:]], pa.int64()))
+        if kind == "csv":
+            pacsv.write_csv(pq.read_table(path), bundle.root / "transcripts.csv")
+        with pytest.raises(ReaderFormatError, match=r"codeword_index|uint32"):
+            _read(bundle, kind).compute()
+
+    def test_signed_assignments_use_unsigned_vocabulary_without_rounding(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)
+        path = bundle.root / "transcripts.parquet"
+        table = pq.read_table(path)
+        ids = table["cell_id"].to_pylist()
+        ids[:3] = [2**63 - 1, 2**63 - 2, -1]
+        _rewrite(path, "cell_id", pa.array(ids, pa.int64()))
+        source = TabularSource(ArtifactFile(path), "parquet", transcript_types("integer_ids"))
+        cells = id_index(pa.array([1, 2, 3, 4, 2**63 - 1, 2**63 - 2, 2**64 - 1], pa.uint64()))
+        points = read_transcripts(
+            source, "integer_ids", features=pd.Index(bundle.features), cells=cells, context=CONTEXT
+        )
+        frame = points.compute()
+        assert frame["cell_id"].iloc[:3].tolist() == [2**63 - 1, 2**63 - 2, -1]
+        assert frame["cell_id"].dtype == pd.ArrowDtype(pa.int64())
+        _rewrite(path, "cell_id", pa.array([2**63 - 3, *ids[1:]], pa.int64()))
+        with pytest.raises(ReaderFormatError, match="unknown cell_id"):
+            read_transcripts(
+                source, "integer_ids", features=pd.Index(bundle.features), cells=cells, context=CONTEXT
+            ).compute()
 
     def test_integer_sentinel_needs_integer_ids(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)

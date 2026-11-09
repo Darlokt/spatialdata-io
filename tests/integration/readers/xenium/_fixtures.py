@@ -326,7 +326,8 @@ def _write_table(table: pa.Table, root: Path, stem: str, *, kind: TableFormat, t
             continue
         text = table
         if pa.types.is_binary(table.schema.field("cell_id").type):
-            text = table.set_column(0, "cell_id", table.column("cell_id").cast(pa.string()))
+            index = table.schema.get_field_index("cell_id")
+            text = table.set_column(index, "cell_id", table.column("cell_id").cast(pa.string()))
         buffer = io.BytesIO()
         pacsv.write_csv(text, buffer, pacsv.WriteOptions(quoting_style="needed"))
         payload = buffer.getvalue()

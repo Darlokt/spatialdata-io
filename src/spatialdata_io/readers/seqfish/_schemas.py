@@ -1,31 +1,33 @@
-"""Column and feature contracts of the Spatial Genomics ROI tables, transcripts and boundaries.
+"""Arrow types and field contracts of the Spatial Genomics ROI tables, transcripts and boundaries.
 
 Every artifact is named ``<ROI>_<artifact>`` (see :mod:`._layout`). The tabular
-artifacts are UTF-8 CSV files with one header record:
+artifacts are UTF-8 CSV files with one header record, read by Arrow with the
+types declared here:
 
-- ``CellxGene.csv``: the first field is the positional cell-ID column (its
-  header is normally empty); every further, nonempty and unique header is a
-  feature, in source order. Values are finite nonnegative integral counts;
-  integral decimal and exponent spellings (``2.0``, ``3e0``) are accepted.
-- ``CellCoordinates.csv``: named fields ``label`` (cell ID), ``area`` (µm²,
-  nonnegative), ``center_x`` and ``center_y`` (cell centroid in µm), in any
-  order; additional columns are ignored.
+- ``CellxGene.csv``: the first field is the positional cell ID (its header is
+  normally empty); every further, nonempty header is a feature, in source
+  order, holding a count. Cell IDs are positive ``uint64``, counts ``uint64``.
+- ``CellCoordinates.csv``: named fields ``label`` (cell ID, positive
+  ``uint64``), ``area`` (µm², finite and nonnegative ``float64``), ``center_x``
+  and ``center_y`` (cell centroid in µm, finite ``float64``), in any order;
+  additional columns are ignored.
 - ``TranscriptList.csv``: named fields ``name`` (a feature of the CellxGene
-  header), ``x`` and ``y`` (µm), optional ``z`` (a nonnegative image-plane
-  index, not a physical distance) and optional ``cell`` (the assigned cell ID,
-  ``0`` when unassigned); additional columns are ignored.
+  header), ``x`` and ``y`` (µm, finite ``float64``), optional ``z`` (a
+  nonnegative ``uint64`` image-plane index, not a physical distance) and
+  optional ``cell`` (the assigned cell ID as ``uint64``, ``0`` when
+  unassigned); additional columns are ignored.
+
+Read numeric fields cannot be empty; ignored annotations may be. Numbers follow
+Arrow's CSV grammar: surrounding spaces are trimmed and integers may be hexadecimal (``0x10``), but ``2.0`` or ``+1``
+is not an integer; floats are correctly rounded, so ``1e-400`` reads as 0.
+Header names must be unique, nonempty (except the first CellxGene name) and
+free of NUL characters.
 
 ``Boundaries.geojson`` is a nonempty GeoJSON ``FeatureCollection`` of Polygon or
 MultiPolygon features in DAPI pixel coordinates. Each feature's top-level
-``id`` (string or integer) is its cell ID; ``properties`` are independent
-annotations, so ``properties.id`` need not match it.
-
-Cell IDs are exact positive integers below ``2**64`` and are kept as int64, or
-uint64 when a value needs it. Every artifact's header is checked for empty,
-duplicate or NUL-containing names before Arrow or pandas could repair them.
-Numbers are parsed from their text so that precision loss is detected:
-coordinates must be finite float64 values without destructive underflow or
-rounded integers.
+``id`` (string or integer) is its cell ID, cast by Arrow to the cell-ID type;
+``properties`` are independent annotations, so ``properties.id`` need not match
+it.
 """
 
 from __future__ import annotations
@@ -35,14 +37,12 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
-from spatialdata_io.readers._utils.csv import decode_float64, decode_integers
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -51,98 +51,93 @@ CELLS_CONTEXT = ReaderErrorContext("seqfish", "CellCoordinates")
 TRANSCRIPTS_CONTEXT = ReaderErrorContext("seqfish", "TranscriptList")
 BOUNDARIES_CONTEXT = ReaderErrorContext("seqfish", "Boundaries")
 
-STRING_DTYPE = pd.ArrowDtype(pa.string())
-FLOAT_DTYPE = pd.ArrowDtype(pa.float64())
-CELL_COLUMNS = ("label", "area", "center_x", "center_y")
+CELL_ID = pa.uint64()
+COUNT = pa.uint64()
+CELL_TYPES = {"label": CELL_ID, "area": pa.float64(), "center_x": pa.float64(), "center_y": pa.float64()}
+TRANSCRIPT_TYPES = {"name": pa.string(), "x": pa.float64(), "y": pa.float64(), "z": pa.uint64(), "cell": pa.uint64()}
+_TRANSCRIPT_REQUIRED = ("name", "x", "y")
 
 
-def _validate_columns(
-    columns: Sequence[str], path: ArtifactFile, *, context: ReaderErrorContext, allow_first_empty: bool = False
+def _validate_names(
+    header: Sequence[str], path: ArtifactFile, *, context: ReaderErrorContext, allow_first_empty: bool = False
 ) -> None:
-    """Reject ambiguous headers before a storage parser can repair names."""
-    invalid = not columns or len(set(columns)) != len(columns)
-    invalid |= any(
-        "\x00" in column or (not column and not (allow_first_empty and i == 0)) for i, column in enumerate(columns)
-    )
-    if invalid:
+    """Reject empty and NUL-containing names; Arrow keeps both."""
+    if any("\x00" in name or (not name and not (allow_first_empty and i == 0)) for i, name in enumerate(header)):
         raise ReaderFormatError(
             context=context,
             path=path,
-            found="empty, duplicate or NUL-containing names",
-            expected="unique nonempty column names",
+            found="empty or NUL-containing names",
+            expected="nonempty column names without NUL",
         )
 
 
-def validate_count_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Return the ordered count features that follow the positional cell-ID field."""
-    _validate_columns(columns, path, context=COUNTS_CONTEXT, allow_first_empty=True)
-    if not columns[1:]:
+def count_types(header: Sequence[str], path: ArtifactFile) -> pa.Schema:
+    """Return the Arrow types of a CellxGene header: the positional cell ID, then one count per feature."""
+    _validate_names(header, path, context=COUNTS_CONTEXT, allow_first_empty=True)
+    if len(header) < 2:  # noqa: PLR2004 - The ID field and one feature.
         raise ReaderFormatError(
             context=COUNTS_CONTEXT,
             path=path,
             found="no feature columns",
             expected="a cell-ID field and at least one count feature",
         )
-    return tuple(columns[1:])
+    return pa.schema([(header[0], CELL_ID), *((name, COUNT) for name in header[1:])])
 
 
-def validate_cell_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Return the projected cell fields, accepting any column order and extra annotations."""
-    _validate_columns(columns, path, context=CELLS_CONTEXT)
-    if not set(CELL_COLUMNS).issubset(columns):
+def validate_cell_columns(header: Sequence[str], path: ArtifactFile) -> None:
+    """Require the projected cell fields; any column order and extra annotations are accepted."""
+    _validate_names(header, path, context=CELLS_CONTEXT)
+    if not set(CELL_TYPES).issubset(header):
         raise ReaderFormatError(
             context=CELLS_CONTEXT,
             path=path,
-            found=f"columns {list(columns)!r}",
-            expected=f"cell fields {CELL_COLUMNS!r}",
+            found=f"columns {list(header)!r}",
+            expected=f"cell fields {tuple(CELL_TYPES)!r}",
         )
-    return CELL_COLUMNS
 
 
-def validate_transcript_columns(columns: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Return the projected transcript fields; additional vendor annotations are ignored."""
-    _validate_columns(columns, path, context=TRANSCRIPTS_CONTEXT)
-    if not {"name", "x", "y"}.issubset(columns):
+def transcript_types(header: Sequence[str], path: ArtifactFile) -> dict[str, pa.DataType]:
+    """Return the projected transcript fields and their types; additional vendor annotations are ignored."""
+    _validate_names(header, path, context=TRANSCRIPTS_CONTEXT)
+    if not set(_TRANSCRIPT_REQUIRED).issubset(header):
         raise ReaderFormatError(
             context=TRANSCRIPTS_CONTEXT,
             path=path,
-            found=f"columns {list(columns)!r}",
+            found=f"columns {list(header)!r}",
             expected="transcript fields name, x and y",
         )
-    return ("name", "x", "y", *(column for column in ("z", "cell") if column in columns))
+    return {name: kind for name, kind in TRANSCRIPT_TYPES.items() if name in _TRANSCRIPT_REQUIRED or name in header}
 
 
-def normalize_transcript_partition(
-    frame: pd.DataFrame, *, features: tuple[str, ...], path: ArtifactFile
-) -> pd.DataFrame:
-    """Validate one owned lazy partition without scanning any other source rows."""
-    names = frame["name"]
-    if names.isna().any() or not names.isin(features).all():
+def normalize_transcript_partition(frame: pd.DataFrame, *, features: pd.Index, path: ArtifactFile) -> pd.DataFrame:
+    """Validate one owned typed partition without scanning any other source rows.
+
+    ``name`` becomes categorical with ``features`` as categories, and ``x`` and
+    ``y`` become NumPy float64, as :class:`~spatialdata.models.PointsModel`
+    requires; ``cell`` keeps its Arrow type and ``z`` becomes ``z_raw``.
+    """
+    codes = features.get_indexer(pd.Index(frame["name"]))
+    if (codes < 0).any():
         raise ReaderFormatError(
             context=TRANSCRIPTS_CONTEXT,
             path=path,
-            found="missing or unknown transcript names",
+            found="unknown transcript names",
             expected="names in the expression vocabulary",
         )
-    frame["name"] = pd.Categorical(names.to_numpy(), categories=features)
+    frame["name"] = pd.Categorical.from_codes(codes, categories=features)
     for axis in ("x", "y"):
-        frame[axis] = decode_float64(pa.array(frame[axis]), name=axis, context=TRANSCRIPTS_CONTEXT, path=path)
-    if "cell" in frame:
-        identifiers = decode_integers(
-            pa.array(frame["cell"]), name="cell", minimum=0, context=TRANSCRIPTS_CONTEXT, path=path
-        )
-        frame["cell"] = pd.Series(identifiers, index=frame.index, dtype=pd.ArrowDtype(pa.uint64()))
-    if "z" in frame:
-        # Vendor z is a nonnegative image-plane index, not physical distance.
-        planes = decode_integers(pa.array(frame.pop("z")), name="z", minimum=0, context=TRANSCRIPTS_CONTEXT, path=path)
-        if planes.dtype.kind == "u":
+        values = frame[axis].to_numpy(dtype=np.float64)
+        if not np.isfinite(values).all():
             raise ReaderFormatError(
                 context=TRANSCRIPTS_CONTEXT,
                 path=path,
-                found="z plane overflow",
-                expected="nonnegative int64 image-plane indexes",
+                found=f"nonfinite {axis!r} values",
+                expected="finite coordinates",
             )
-        frame["z_raw"] = pd.Series(planes, index=frame.index, dtype=pd.ArrowDtype(pa.int64()))
+        frame[axis] = values
+    if "z" in frame:
+        # Vendor z is a nonnegative image-plane index, not physical distance.
+        frame["z_raw"] = frame.pop("z")
     return frame
 
 
@@ -158,10 +153,18 @@ class BoundaryFeature(TypedDict):
     properties: dict[str, object] | None
 
 
-def boundary_features(
-    document: dict[str, object], path: ArtifactFile
-) -> tuple[list[BoundaryFeature], npt.NDArray[np.int64 | np.uint64]]:
-    """Validate the Feature schema and normalize the independent top-level feature IDs."""
+def validate_cell_ids(ids: pa.Array | pa.ChunkedArray, *, context: ReaderErrorContext, path: ArtifactFile) -> pd.Index:
+    """Return positive unique typed cell IDs as an Arrow-backed index."""
+    index = pd.Index(pd.arrays.ArrowExtensionArray(ids))
+    if len(index) and index.min() == 0:
+        raise ReaderFormatError(context=context, path=path, found="nonpositive cell IDs", expected="positive cell IDs")
+    if not index.is_unique:
+        raise ReaderFormatError(context=context, path=path, found="duplicate cell IDs", expected="unique cell IDs")
+    return index
+
+
+def boundary_features(document: dict[str, object], path: ArtifactFile) -> tuple[list[BoundaryFeature], pd.Index]:
+    """Validate the Feature schema and cast the independent top-level feature IDs to the cell-ID type."""
     features = document.get("features")
     if document.get("type") != "FeatureCollection" or not isinstance(features, list) or not features:
         raise ReaderFormatError(
@@ -170,7 +173,7 @@ def boundary_features(
             found="empty or malformed boundary collection",
             expected="a nonempty FeatureCollection",
         )
-    raw_ids: list[str | int] = []
+    raw_ids: list[str] = []
     for feature in features:
         if not isinstance(feature, dict) or feature.get("type") != "Feature":
             raise ReaderFormatError(
@@ -187,7 +190,7 @@ def boundary_features(
                 found="missing or nonintegral feature id",
                 expected="an explicit positive string or integer id",
             )
-        raw_ids.append(identifier)
+        raw_ids.append(str(identifier))
         # GeoJSON requires this field; null properties carry no annotations.
         properties = feature.get("properties")
         if properties is not None and not isinstance(properties, dict):
@@ -205,20 +208,17 @@ def boundary_features(
                 expected="geometry only in Feature.geometry",
             )
         feature["properties"] = properties
-    identifiers = decode_integers(
-        pa.array([str(value) for value in raw_ids], pa.string()),
-        name="id",
-        minimum=1,
-        context=BOUNDARIES_CONTEXT,
-        path=path,
-    )
-    if len(np.unique(identifiers)) != len(identifiers):
+    expected = "unique positive uint64 feature ids"
+    try:
+        identifiers = pc.cast(pa.array(raw_ids, pa.string()), CELL_ID)
+    except pa.ArrowInvalid as error:
         raise ReaderFormatError(
             context=BOUNDARIES_CONTEXT,
             path=path,
-            found="duplicate boundary IDs",
-            expected="unique explicit boundary identifiers",
-        )
+            found=f"feature ids that are not integers ({error})",
+            expected=expected,
+        ) from error
+    index = validate_cell_ids(identifiers, context=BOUNDARIES_CONTEXT, path=path)
     # The schema above validates feature identity and properties. Geometry
     # structure belongs to the shared GeoJSON polygon constructor.
-    return cast("list[BoundaryFeature]", features), identifiers
+    return cast("list[BoundaryFeature]", features), index

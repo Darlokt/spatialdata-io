@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 import pytest
 import shapely
@@ -24,6 +25,7 @@ from spatialdata_io.readers.xenium._geometry import (
     read_polygons,
 )
 from spatialdata_io.readers.xenium._layout import TabularSource
+from spatialdata_io.readers.xenium._schemas import boundary_types, cell_types
 from spatialdata_io.readers.xenium._tables import read_cells
 from tests.integration.readers.xenium import _fixtures as fx
 
@@ -48,7 +50,7 @@ STRUCTURAL_DEFECTS: dict[str, tuple[str, Change, str]] = {
     "interleaved": ("label_id", lambda values: [*values[:2], values[5], *values[3:]], "interleaved polygon rows"),
     "several-cells": ("cell_id", lambda values: [values[0], "zzzzzzzz-1", *values[2:]], "spanning several cells"),
     "zero-label": ("label_id", lambda values: [0] * 5 + values[5:], "uint32 labels from 1"),
-    "oversized-label": ("label_id", lambda values: [2**32] * 5 + values[5:], "uint32 labels from 1"),
+    "oversized-label": ("label_id", lambda values: [2**32] * 5 + values[5:], "label_id as uint32"),
 }
 
 
@@ -63,7 +65,9 @@ def _store(bundle: fx.XeniumFixture) -> CellStore:
 
 def _source(bundle: fx.XeniumFixture, kind: str, suffix: str = "parquet") -> TabularSource:
     file_kind = "parquet" if suffix == "parquet" else "csv_gz"
-    return TabularSource(ArtifactFile(bundle.root / f"{kind}_boundaries.{suffix}"), file_kind)
+    return TabularSource(
+        ArtifactFile(bundle.root / f"{kind}_boundaries.{suffix}"), file_kind, boundary_types(bundle.profile.family)
+    )
 
 
 def _rewrite(path: Path, column: str, values: list[object]) -> None:
@@ -88,6 +92,33 @@ class TestReadPolygons:
             # The vendor files store float32 vertices, which the reader keeps exactly.
             ring = np.asarray(rect.ring(), dtype=np.float32).astype(np.float64)
             assert shapely.equals_exact(geometry, shapely.Polygon(ring), tolerance=0)
+
+    @pytest.mark.parametrize("suffix", ["parquet", "csv.gz"])
+    def test_boundary_label_uint32_maximum_is_preserved(self, tmp_path: Path, suffix: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+        path = bundle.root / "cell_boundaries.parquet"
+        table = pq.read_table(path)
+        labels = table["label_id"].to_pylist()
+        values = pa.array([2**32 - 1 if value == 1 else value for value in labels], pa.uint32())
+        table = table.set_column(table.column_names.index("label_id"), "label_id", values)
+        if suffix == "parquet":
+            pq.write_table(table, path)
+        else:
+            with pa.CompressedOutputStream(str(bundle.root / "cell_boundaries.csv.gz"), "gzip") as stream:
+                pacsv.write_csv(table, stream)
+        polygons = read_polygons(_source(bundle, "cell", suffix), "polygon_sets", "cell", None, context=CONTEXT)
+        assert polygons.labels is not None
+        assert polygons.labels.tolist() == [2**32 - 1, 2, 3, 4]
+        assert polygons.labels.dtype == np.uint32
+
+    @pytest.mark.parametrize("value", [-1, None])
+    def test_boundary_labels_reject_negatives_and_nulls(self, tmp_path: Path, value: int | None) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
+        path = bundle.root / "cell_boundaries.parquet"
+        labels = pq.read_table(path)["label_id"].to_pylist()
+        _rewrite(path, "label_id", [value, *labels[1:]])
+        with pytest.raises(ReaderFormatError, match="label_id"):
+            read_polygons(_source(bundle, "cell"), "polygon_sets", "cell", None, context=CONTEXT)
 
     def test_nuclei_of_polygon_sets_follow_label_id(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
@@ -297,7 +328,8 @@ class TestElements:
     def test_circles_have_the_exact_mask_area(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         cells = read_cells(
-            TabularSource(ArtifactFile(bundle.root / "cells.parquet"), "parquet"), "polygon_sets", context=CONTEXT
+            TabularSource(ArtifactFile(bundle.root / "cells.parquet"), "parquet", cell_types("polygon_sets")),
+            context=CONTEXT,
         )
 
         circles = make_circles(cells, np.array([True, True, False, True]))

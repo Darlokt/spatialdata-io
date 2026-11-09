@@ -25,12 +25,14 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import zarr
 from zarr.storage import ZipStore
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.xenium._cell_ids import decode_cell_ids
 from spatialdata_io.readers.xenium._labels import MaskSource
+from spatialdata_io.readers.xenium._schemas import cast_column
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -67,7 +69,7 @@ class CellStore:
     nucleus_cells: NDArray[np.int64] | None
     cell_methods: NDArray[np.str_] | None
     nucleus_centroids: NDArray[np.float64]
-    nucleus_counts: NDArray[np.int64] | None
+    nucleus_counts: NDArray[np.uint64] | None
     masks: Mapping[MaskRole, MaskSource]
 
 
@@ -174,7 +176,7 @@ def _polygon_sets(store: _Store, n_cells: int) -> tuple[NDArray[np.uint32], NDAr
     return cell_labels, nucleus_cells, cell_methods.astype(np.str_)
 
 
-def _summary(store: _Store, n_cells: int) -> tuple[NDArray[np.float64], NDArray[np.int64] | None]:
+def _summary(store: _Store, n_cells: int) -> tuple[NDArray[np.float64], NDArray[np.uint64] | None]:
     """Return nucleus centroids (NaN without a nucleus) and, when stored, nucleus counts."""
     summary = store.array("cell_summary")
     columns = summary.attrs.get("column_names")
@@ -195,14 +197,11 @@ def _summary(store: _Store, n_cells: int) -> tuple[NDArray[np.float64], NDArray[
     if "nucleus_count" not in columns:
         return centroids, None
     counts = column("nucleus_count")
-    if not np.isfinite(counts).all() or (counts < 0).any() or (counts != np.round(counts)).any():
-        raise store.error(found="non-integral nucleus_count values", expected="nonnegative integral nucleus counts")
-    # int64.max rounds up to 2**63 in float64, so the upper bound is exclusive.
-    if (counts >= 2**63).any():
-        raise store.error(
-            found="nucleus_count outside int64 range", expected="nonnegative integral nucleus counts below 2**63"
-        )
-    return centroids, counts.astype(np.int64)
+    # The checked cast rejects nonfinite, fractional, negative and overflowing counts.
+    counts_column = cast_column(
+        pa.chunked_array([counts]), pa.uint64(), "nucleus_count", path=store.path, context=store.context
+    )
+    return centroids, counts_column.to_numpy()
 
 
 def _masks(store: _Store, pixel_size: float) -> dict[MaskRole, MaskSource]:
@@ -258,8 +257,8 @@ def read_cells_store(
         nucleus_cells: NDArray[np.int64] | None = None
         if family == "integer_ids":
             raw = store.read("cell_id", ndim=1, kind="ui")
-            cell_ids = pd.Index(raw.astype(np.int64))
             cell_labels = _labels(store, raw, "integer cell IDs")
+            cell_ids = pd.Index(cell_labels)
         else:
             cell_ids = _hex_ids(store)
             if family == "hex_ids":

@@ -6,6 +6,7 @@ import io
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pyarrow.csv as pacsv
 import pytest
 import shapely
 from spatialdata.models import ShapesModel
@@ -85,11 +86,11 @@ class TestXeniumExplorerSelection:
             ("#a\n#b\nA,B\n1,2\n", r"header \['A', 'B'\]"),
             ("#Area: 1\n#b\nX,Y\n1,2\n", "without a selection name"),
             ("#Selection name:  \n#b\nX,Y\n1,2\n", "without a selection name"),
-            ("#a\n#b\nSelection,X,Y\nS,x,1\n", "non-numeric coordinates"),
-            ("#a\n#b\nSelection,X,Y\nS,1\n", "records of the wrong width"),
+            ("#a\n#b\nSelection,X,Y\nS,x,1\n", "CSV conversion error to double: invalid value 'x'"),
+            ("#a\n#b\nSelection,X,Y\nS,1\n", "Expected 3 columns, got 2"),
             ("#a\n#b\nSelection,X,Y\nS,inf,1\n", "nonfinite coordinates"),
             ("#a\n#b\nSelection,X,Y\n,1,1\n", "unnamed selections"),
-            ('#a\n#b\nSelection,X,Y\n"S,1,1\n', "malformed CSV text"),
+            ('#a\n#b\nSelection,X,Y\n"S,1,1\n', "malformed CSV"),
             ("#a\n#b\nSelection,X,Y\nA,0,0\nA,1,0\nB,1,1\nA,0,1\n", "a selection name in several runs"),
             ("#a\n#b\nSelection,X,Y\nA,0,0\nA,1,0\nA,0,0\n", "fewer than three distinct vertices"),
         ],
@@ -114,7 +115,7 @@ class TestXeniumExplorerSelection:
     def test_rejects_non_utf8(self, tmp_path: Path) -> None:
         latin = tmp_path / "latin.csv"
         latin.write_bytes(b"#Selection name: \xe9\n#b\nX,Y\n0,0\n1,0\n0,1\n")
-        with pytest.raises(ReaderFormatError, match="malformed CSV text"):
+        with pytest.raises(ReaderFormatError, match=r"malformed CSV .*'utf-8' codec"):
             xenium_explorer_selection(latin)
 
     @pytest.mark.parametrize("malformed", [False, True])
@@ -122,17 +123,24 @@ class TestXeniumExplorerSelection:
         self, tmp_path: Path, mocker: MockerFixture, *, malformed: bool
     ) -> None:
         path = _write(tmp_path / "coordinates.csv", SINGLE)
-        text = SINGLE + '\n"unfinished' if malformed else SINGLE
-        handle = io.StringIO(text)
-        read = mocker.spy(handle, "read")
+        text = SINGLE + '"unfinished,1\n' if malformed else SINGLE
+        handle = io.BytesIO(text.encode())
+        parser = mocker.spy(pacsv, "read_csv")
         mocker.patch.object(type(path), "open", return_value=handle)
         if malformed:
-            with pytest.raises(ReaderFormatError, match="malformed CSV text"):
+            with pytest.raises(ReaderFormatError, match="malformed CSV"):
                 xenium_explorer_selection(path)
         else:
             assert xenium_explorer_selection(path).index.tolist() == ["Selection 1"]
-        read.assert_not_called()
+        assert parser.call_args_list[-1].args[0] is handle
         assert handle.closed
+
+    @pytest.mark.parametrize("value", [" 10.5 ", "1.05e1"])
+    def test_coordinates_follow_arrow_grammar(self, tmp_path: Path, value: str) -> None:
+        shapes = xenium_explorer_selection(
+            _write(tmp_path / "coordinates.csv", SINGLE.replace("\n10.5,", f"\n{value},"))
+        )
+        assert shapely.get_coordinates(shapes.geometry.iloc[0])[0, 0] == 10.5
 
     def test_rejects_invalid_options_and_paths(self, tmp_path: Path) -> None:
         path = _write(tmp_path / "coordinates.csv", SINGLE)

@@ -65,15 +65,24 @@ class TestReadBoundaries:
         assert result.index.tolist() == [1]
         assert result.geometry.iloc[0].equals(polygon)
 
-    def test_reordered_explicit_ids_preserve_geometry_and_holes(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("identifiers", [(70001, 2), (2**64 - 1, 2**64 - 2)])
+    def test_reordered_explicit_ids_preserve_geometry_and_holes(
+        self, tmp_path: Path, identifiers: tuple[int, int]
+    ) -> None:
         polygon = Polygon([(0, 0), (4, 0), (4, 4), (0, 4)], holes=[[(1, 1), (2, 1), (2, 2), (1, 2)]])
         multipart = MultiPolygon([Polygon([(5, 0), (6, 0), (6, 1), (5, 1)]), Polygon([(8, 0), (9, 0), (9, 1), (8, 1)])])
-        path = _write_boundaries(tmp_path / "boundaries.geojson", [multipart, polygon], ("2", "70001"))
+        path = _write_boundaries(
+            tmp_path / "boundaries.geojson",
+            [multipart, polygon],
+            tuple(str(identifier) for identifier in reversed(identifiers)),
+        )
         scale = Scale([0.25, 0.5], axes=("y", "x"))
 
-        result = read_boundaries(path, instance_ids=pd.Index([70001, 2]), frame="Roi1", scale=scale, policy="keep")
+        result = read_boundaries(
+            path, instance_ids=pd.Index(identifiers, dtype="uint64"), frame="Roi1", scale=scale, policy="keep"
+        )
 
-        assert result.index.tolist() == [70001, 2]
+        assert result.index.tolist() == list(identifiers)
         assert result.geometry.iloc[0].equals(polygon)
         assert result.geometry.iloc[1].equals(multipart)
         assert get_transformation(result, to_coordinate_system="Roi1") == scale

@@ -38,6 +38,19 @@ def _directory(root: Path, members: dict[str, str]) -> AnalysisDirectory:
 class TestReadAnalysis:
     """Clusterings and projections follow the given barcodes; absent cells are missing."""
 
+    def test_cluster_ids_preserve_unsigned_width_and_numeric_order(self, tmp_path: Path) -> None:
+        source = _directory(tmp_path, {CLUSTERS: f"Barcode,Cluster\na-1,{2**64 - 1}\nb-1,{2**63 + 1}\nc-1,1\n"})
+        analysis = read_analysis(source, pd.Index(["a-1", "b-1", "c-1"]), context=CONTEXT)
+        values = next(iter(analysis.clusters.values()))
+        assert values.tolist() == [str(2**64 - 1), str(2**63 + 1), "1"]
+        assert values.categories.tolist() == ["1", str(2**63 + 1), str(2**64 - 1)]
+
+    @pytest.mark.parametrize("value", ["-1", str(2**64), ""])
+    def test_cluster_domain_violations(self, tmp_path: Path, value: str) -> None:
+        source = _directory(tmp_path, {CLUSTERS: f"Barcode,Cluster\na-1,{value}\n"})
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
+            read_analysis(source, pd.Index(["a-1"]), context=CONTEXT)
+
     @pytest.mark.parametrize("kind", ["directory", "archive"])
     def test_vendor_layouts(self, tmp_path: Path, kind: Literal["directory", "archive"]) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(analysis=kind))
@@ -94,8 +107,8 @@ class TestReadAnalysis:
             ({CLUSTERS: "Barcode,Cluster\na-1,0\n"}, "nonpositive clusters"),
             ({CLUSTERS: "Barcode,Cluster\na-1,x\n"}, "malformed CSV"),
             ({PCA: "Barcode,PC-1,PC-2\na-1,inf,2\n"}, "nonfinite projections"),
-            ({PCA: "Barcode,PC-1,PC-2\na-1,,2\n"}, "nonfinite projections"),
-            ({PCA: '"Barcode\n'}, "malformed CSV header"),
+            ({PCA: "Barcode,PC-1,PC-2\na-1,,2\n"}, r"malformed CSV \(.*invalid value ''"),
+            ({PCA: '"Barcode\n'}, "malformed CSV"),
         ],
         ids=[
             "cluster-header",

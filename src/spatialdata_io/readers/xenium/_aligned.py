@@ -26,18 +26,19 @@ file declares that cannot become ``c, y, x`` are malformed content and raise
 
 from __future__ import annotations
 
-import csv
 import math
 from dataclasses import replace
-from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.csv as pacsv
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Affine, Scale
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers._utils.csv import csv_errors
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
     RasterOptions,
@@ -48,6 +49,7 @@ from spatialdata_io.readers._utils.image import (
     validate_data_axes,
 )
 from spatialdata_io.readers._utils.paths import ArtifactFile, require_file
+from spatialdata_io.readers.xenium._schemas import ALIGNMENT_TYPES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -59,36 +61,60 @@ if TYPE_CHECKING:
 _AXES = ("c", "y", "x")
 _MATRIX_SHAPE = (3, 3)
 _CONTEXT = ReaderErrorContext("xenium", "aligned image")
+_CSV_BLOCK_BYTES = 64 * 1024
 
 
 def read_alignment(path: ArtifactFile, *, context: ReaderErrorContext) -> NDArray[np.float64]:
-    """Read a strict 3 x 3 alignment matrix with last row ``[0, 0, 1]``.
+    """Read a 3 x 3 alignment matrix without header, with last row ``[0, 0, 1]``.
+
+    Records must fit a 64 KiB parser block. Excess rows fail after bounded
+    read-ahead, without materializing the rest of the file.
 
     Raises
     ------
     ReaderFormatError
-        If the file is not three rows of three finite numbers, has another
+        If the file is not three records of three finite numbers, has another
         last row, or is not invertible.
     """
-    expected = "a 3 x 3 comma-separated finite invertible matrix with last row 0,0,1"
-    try:
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            records = (row for row in csv.reader(handle, strict=True) if row)
-            rows = list(islice(records, _MATRIX_SHAPE[0] + 1))
-    except (UnicodeDecodeError, csv.Error) as error:
-        raise ReaderFormatError(context=context, path=path, found="malformed CSV content", expected=expected) from error
-    if len(rows) != _MATRIX_SHAPE[0] or any(len(row) != _MATRIX_SHAPE[1] for row in rows):
-        raise ReaderFormatError(context=context, path=path, found="records of the wrong shape", expected=expected)
-    try:
-        matrix = np.asarray([[float(value) for value in row] for row in rows], dtype=np.float64)
-    except ValueError as error:
-        raise ReaderFormatError(context=context, path=path, found="non-numeric content", expected=expected) from error
+    batches: list[pa.RecordBatch] = []
+    rows = 0
+    with (
+        path.open("rb") as handle,
+        csv_errors(context=context, path=path),
+        pacsv.open_csv(
+            handle,
+            read_options=pacsv.ReadOptions(
+                column_names=ALIGNMENT_TYPES.names, block_size=_CSV_BLOCK_BYTES, use_threads=False
+            ),
+            convert_options=pacsv.ConvertOptions(
+                column_types=ALIGNMENT_TYPES,
+                include_columns=ALIGNMENT_TYPES.names,
+                null_values=[],
+                strings_can_be_null=False,
+            ),
+        ) as reader,
+    ):
+        for batch in reader:
+            rows += batch.num_rows
+            if rows > _MATRIX_SHAPE[0]:
+                raise ReaderFormatError(
+                    context=context, path=path, found="more than three records", expected="a 3 x 3 alignment matrix"
+                )
+            batches.append(batch)
+        table = pa.Table.from_batches(batches, schema=reader.schema)
+    matrix = np.column_stack([column.to_numpy() for column in table.columns])
     if (
-        not np.isfinite(matrix).all()
+        matrix.shape != _MATRIX_SHAPE
+        or not np.isfinite(matrix).all()
         or not np.array_equal(matrix[2], [0.0, 0.0, 1.0])
         or np.linalg.det(matrix[:2, :2]) == 0
     ):
-        raise ReaderFormatError(context=context, path=path, found=f"matrix {matrix.tolist()}", expected=expected)
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"matrix {matrix.tolist()}",
+            expected="a 3 x 3 comma-separated finite invertible matrix with last row 0,0,1",
+        )
     return matrix
 
 

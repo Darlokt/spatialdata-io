@@ -21,9 +21,7 @@ their method names.
 
 from __future__ import annotations
 
-import csv
 import gzip
-import io
 import tarfile
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -40,7 +38,7 @@ import pyarrow.parquet as pq
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
-from spatialdata_io.readers._utils.csv import parse_csv_header, read_csv_header
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.metadata import decode_hdf5_text
 from spatialdata_io.readers._utils.names import sanitize_column_names
@@ -61,9 +59,11 @@ from spatialdata_io.readers.xenium._schemas import (
     CELL_REQUIRED,
     CELL_REQUIRED_COUNTS,
     READER_OBS,
+    STRING,
     STRING_DTYPE,
+    arrow_series,
     cast_column,
-    cell_types,
+    header_types,
     id_index,
     normalize_ids,
     require_finite,
@@ -71,8 +71,6 @@ from spatialdata_io.readers.xenium._schemas import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
     from numpy.typing import NDArray
     from scipy import sparse
 
@@ -81,7 +79,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.xenium._cells import CellStore
     from spatialdata_io.readers.xenium._layout import CountSource, TableTarget, TabularSource
     from spatialdata_io.readers.xenium._metadata import ProteinPanel
-    from spatialdata_io.readers.xenium._version import Family
 
 type FeatureSelection = tuple[str, ...] | Literal["all"] | None
 
@@ -239,7 +236,7 @@ def _protein_annotations(
     var["long_name"] = pd.Series([t and t.long_name for t in targets], index=var.index, dtype=STRING_DTYPE)
     var["clone"] = pd.Series([t and t.clone for t in targets], index=var.index, dtype=STRING_DTYPE)
     var["codeword_index"] = pd.Series(
-        [t and t.codeword_index for t in targets], index=var.index, dtype=pd.ArrowDtype(pa.int64())
+        [t and t.codeword_index for t in targets], index=var.index, dtype=pd.ArrowDtype(pa.uint64())
     )
 
 
@@ -296,9 +293,19 @@ def read_counts(
     return Counts(table, source_table.var_names, protein)
 
 
-def _tsv_column(payload: bytes, column: int) -> pd.Index:
-    rows = csv.reader(io.StringIO(gzip.decompress(payload).decode("utf-8")), delimiter="\t", strict=True)
-    return pd.Index([row[column] for row in rows], dtype="str")
+def _tsv_column(payload: bytes, column: int, path: Path, context: ReaderErrorContext) -> pd.Index:
+    """Return one column of a headerless gzip TSV of the MatrixMarket metadata as text."""
+    name = f"f{column}"
+    with csv_errors(context=context, path=path):
+        table = pacsv.read_csv(
+            pa.py_buffer(gzip.decompress(payload)),
+            read_options=pacsv.ReadOptions(autogenerate_column_names=True),
+            parse_options=pacsv.ParseOptions(delimiter="\t"),
+            convert_options=pacsv.ConvertOptions(
+                column_types={name: STRING}, include_columns=[name], null_values=[], strings_can_be_null=False
+            ),
+        )
+    return pd.Index(arrow_series(table.column(0)), dtype="str")
 
 
 def read_feature_index(source: CountSource, *, context: ReaderErrorContext) -> FeatureIndex:
@@ -316,84 +323,67 @@ def read_feature_index(source: CountSource, *, context: ReaderErrorContext) -> F
             directory = _extract_archive(source.file, Path(temporary), context=context, metadata_only=True)
             features = (directory / "features.tsv.gz").read_bytes()
             barcodes_file = (directory / "barcodes.tsv.gz").read_bytes()
-    return FeatureIndex(_tsv_column(features, 1), _tsv_column(barcodes_file, 0))
+    path = _source_path(source)
+    return FeatureIndex(_tsv_column(features, 1, path, context), _tsv_column(barcodes_file, 0, path, context))
 
 
-def read_header(source: TabularSource, *, context: ReaderErrorContext) -> list[str]:
-    """Read only the first record of a CSV twin."""
+def read_header(source: TabularSource, *, context: ReaderErrorContext) -> tuple[str, ...]:
+    """Read only the header record of a CSV twin."""
     if source.kind == "csv":
-        return read_csv_header(source.file, context=context)
-    with gzip.open(source.file, "rb") as handle:
-        return parse_csv_header(handle.readline(), context=context, path=source.file)
+        return csv_header(source.file, context=context)
+    with gzip.open(source.file, "rb") as stream:
+        return csv_header(source.file, context=context, source=stream)
 
 
-def read_csv_table(
-    source: TabularSource,
-    names: list[str],
-    types: Mapping[str, pa.DataType],
-    *,
-    context: ReaderErrorContext,
-    columns: Sequence[str] | None = None,
-) -> pa.Table:
-    """Read a CSV twin with its validated header and explicit types; empty fields are never null text.
-
-    ``columns`` projects the result; Arrow still checks every record's full width
-    but accepts some malformed quoting. Numbers are parsed directly into their
-    declared float32 or float64 type, so each is rounded once.
-    """
-    try:
-        with pa.input_stream(source.file, compression="gzip" if source.kind == "csv_gz" else None) as stream:
-            return pacsv.read_csv(
-                stream,
-                read_options=pacsv.ReadOptions(column_names=names, skip_rows=1, use_threads=False),
-                convert_options=pacsv.ConvertOptions(
-                    include_columns=list(names if columns is None else columns),
-                    column_types={name: types[name] for name in names if name in types},
-                    strings_can_be_null=False,
-                    quoted_strings_can_be_null=False,
-                ),
-            )
-    except pa.ArrowInvalid as error:
-        raise ReaderFormatError(
-            context=context,
-            path=source.file,
-            found=f"malformed CSV: {error}",
-            expected="typed records of the header width",
-        ) from error
+def open_twin(source: TabularSource) -> pa.NativeFile:
+    """Open a CSV twin for Arrow, decompressing a gzip twin as it is read."""
+    return pa.input_stream(source.file, compression="gzip" if source.kind == "csv_gz" else None)
 
 
-def read_cells(source: TabularSource, family: Family, *, context: ReaderErrorContext) -> Cells:
+def read_cells(source: TabularSource, *, context: ReaderErrorContext) -> Cells:
     """Read ``cells.parquet`` or its CSV twin as validated, Arrow-backed annotations.
+
+    Columns are cast to their declared types; a CSV twin is parsed into them
+    directly, with an empty field as the missing value and other columns as
+    text.
 
     Raises
     ------
     ReaderFormatError
-        If columns are missing or repeated, identifiers are missing or repeated,
-        centroids or ``cell_area`` are not finite, areas or counts are negative,
-        or ``nucleus_area`` is infinite (NaN marks cells without a nucleus).
+        If columns are missing or repeated, the CSV is malformed, identifiers
+        are missing or repeated, centroids or ``cell_area`` are not finite,
+        areas or counts are negative, or ``nucleus_area`` is infinite (NaN
+        marks cells without a nucleus).
     """
     path = source.file
     if source.kind == "parquet":
         table = pq.read_table(path)
-        names = table.column_names
-        validate_header(names, CELL_REQUIRED, path=path, context=context)
+        validate_header(table.column_names, CELL_REQUIRED, path=path, context=context)
     else:
-        names = read_header(source, context=context)
-        validate_header(names, CELL_REQUIRED, path=path, context=context)
-        table = read_csv_table(source, names, cell_types(names, family), context=context)
+        header = read_header(source, context=context)
+        validate_header(header, CELL_REQUIRED, path=path, context=context)
+        with csv_errors(context=context, path=path), open_twin(source) as stream:
+            table = pacsv.read_csv(
+                stream,
+                convert_options=pacsv.ConvertOptions(
+                    column_types=header_types(header, source.types),
+                    include_columns=list(header),
+                    null_values=[""],
+                    strings_can_be_null=False,
+                ),
+            )
 
-    types = cell_types(names, family)
+    names, types = table.column_names, source.types
     for name in (*CELL_FLOATS, *CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS):
         if name in names:
-            column = cast_column(table[name], types[name], name, path=path, context=context)
+            column = cast_column(table[name], types.field(name).type, name, path=path, context=context)
             if name == "nucleus_area":
                 # Cells without a nucleus have no area: fastparquet-written files
                 # store null, Polars-written files and CSV twins NaN. Both become NaN.
                 column = column.fill_null(float("nan"))
             table = table.set_column(names.index(name), name, column)
-    table = table.set_column(
-        names.index(CELL_ID), CELL_ID, normalize_ids(table[CELL_ID], family, path=path, context=context)
-    )
+    ids = normalize_ids(table[CELL_ID], types.field(CELL_ID).type, path=path, context=context)
+    table = table.set_column(names.index(CELL_ID), CELL_ID, ids)
 
     if any(table[name].null_count for name in CELL_REQUIRED):
         raise ReaderFormatError(
@@ -401,7 +391,7 @@ def read_cells(source: TabularSource, family: Family, *, context: ReaderErrorCon
         )
     for name in CELL_FLOATS:
         require_finite(table[name].to_numpy(), name, path=path, context=context, allow_nan=name == "nucleus_area")
-    for name in (*CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS, "cell_area", "nucleus_area"):
+    for name in ("cell_area", "nucleus_area"):
         # NaN comparisons are false, so cells without a nucleus pass.
         if name in names and (np.asarray(table[name].to_numpy()) < 0).any():
             raise ReaderFormatError(
@@ -446,7 +436,9 @@ def build_table(  # noqa: PLR0913, RUF100 - Every table source and the error ori
     # Integer IDs (XOA 1.0-1.2) are written as canonical decimal barcodes.
     if not cells.ids.astype("str").equals(barcodes.astype("str")):
         raise error(found="cell IDs differing from the count barcodes", expected="identical IDs in order")
-    if store is not None and not store.cell_ids.equals(cells.ids):
+    # The Zarr store and Arrow table have different index storage types; linkage
+    # requires identical identifier values and order, not identical backends.
+    if store is not None and (len(store.cell_ids) != len(cells.ids) or not (store.cell_ids == cells.ids).all()):
         raise error(found="cell IDs differing from cells.zarr.zip", expected="identical IDs in order")
     conflicts = [name for name in READER_OBS if name in cells.frame]
     if conflicts:

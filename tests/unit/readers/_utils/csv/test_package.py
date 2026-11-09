@@ -9,6 +9,8 @@ class TestCsvPackage:
     def test_exports_header_record_and_number_readers(self) -> None:
         assert csv.__all__ == [
             "LITERAL_ZERO",
+            "csv_errors",
+            "csv_header",
             "decode_float64",
             "decode_float64_block",
             "decode_integer_block",

@@ -21,9 +21,24 @@ ROI names are the file-name prefixes before `_CellxGene.csv` or `_CellCoordinate
 
 The ROI name starts every element name and, with several ROIs, names the ROI's coordinate system. A prefix that is not a valid SpatialData element name is repaired once with a warning: characters other than letters, digits, `_`, `-` and `.` become `_`, a leading `__` becomes `_`, and an empty prefix becomes `unnamed` (`Roi 1` is read as `Roi_1`). The files keep their names; select such a ROI with its prefix, `rois=["Roi 1"]`. Selected ROIs whose names are equal ignoring letter case after this repair, such as `Roi1` and `roi1`, fail before any table is read, because SpatialData compares element names ignoring case; select one of them with `rois`.
 
-The first CellxGene field contains positive integer cell identifiers; the remaining nonempty, unique headers identify expression features in their source order. Counts must be finite nonnegative integers. Integer fields accept any exact decimal spelling such as `2`, `2.0` or `2e0`; fractions, hexadecimal such as `0x10`, surrounding whitespace and digit separators fail. Integral coordinates of at least 2⁵³ must be exactly representable in float64. CellCoordinates provides unique matching integer `label` values, finite `center_x` and `center_y`, and finite nonnegative `area`. Its rows may be reordered: alignment follows exact cell IDs, preserving the expression row order. IDs retain their integer values, including values above 65535. Zero area is accepted for the table and polygon output; centroid circles require strictly positive areas.
+The first CellxGene field contains positive cell identifiers; the remaining nonempty, unique headers identify expression features in their source order. CellCoordinates provides unique matching `label` values, finite `center_x` and `center_y`, and finite nonnegative `area`. Its rows may be reordered: alignment follows exact cell IDs, preserving the expression row order. Zero area is accepted for the table and polygon output; centroid circles require strictly positive areas.
 
-GeoJSON is an eagerly parsed UTF-8 FeatureCollection. It contains polygon features with explicit top-level Feature `id` values corresponding to cell identifiers. Property fields cannot substitute for these source identifiers. Properties, including `properties.id`, are independent annotations and do not need to match the top-level ID ([GeoJSON feature semantics](https://www.rfc-editor.org/rfc/rfc7946#section-3.2)). Property columns retain JSON values as objects, avoiding numerical inference of annotation IDs. The reserved property name `geometry` is rejected so annotations cannot replace the source geometry. Other source property annotations are retained. Features may be reordered. Integer polygon vertices must be exactly representable in float64. Missing, duplicate or mismatched IDs and malformed geometry fail in every policy; geometry is neither repaired nor assigned an ID by row position. Invalid topology follows `invalid_geometries`.
+Arrow parses every CSV field directly into its declared type:
+
+| File | Field | Type |
+| --- | --- | --- |
+| CellxGene | first field (cell ID) | uint64, positive |
+| CellxGene | every feature | uint64 count |
+| CellCoordinates | `label` | uint64, positive |
+| CellCoordinates | `area`, `center_x`, `center_y` | float64, finite |
+| TranscriptList | `name` | text, a CellxGene feature |
+| TranscriptList | `x`, `y` | float64, finite |
+| TranscriptList | `z` (optional) | uint64, nonnegative |
+| TranscriptList | `cell` (optional) | uint64, `0` unassigned |
+
+Arrow's CSV grammar is the contract. Spaces and tabs around a number are trimmed, and integers may be written in hexadecimal (`0x10` reads as 16). An integer field rejects `2.0`, `2e0`, `+2`, `1_0` and values outside its type, so positive cell IDs range from 1 through 2⁶⁴ − 1. Floats are correctly rounded: `1e-400` reads as 0 and `9007199254740993` as `9007199254740992.0`. Numeric fields read by the reader cannot be empty. Floating fields accept `nan` and `inf` during parsing and then fail the finiteness check; integer fields reject these spellings. Ignored annotation fields may be empty. Duplicate header names fail before parsing.
+
+GeoJSON is an eagerly parsed UTF-8 FeatureCollection. It contains polygon features with explicit top-level Feature `id` values corresponding to cell identifiers; Arrow casts each ID, a JSON string or integer, to the uint64 cell-ID type (`"01"` and `"0x10"` are accepted, `" 1"` and `"1.0"` are not). Property fields cannot substitute for these source identifiers. Properties, including `properties.id`, are independent annotations and do not need to match the top-level ID ([GeoJSON feature semantics](https://www.rfc-editor.org/rfc/rfc7946#section-3.2)). Property columns retain JSON values as objects, avoiding numerical inference of annotation IDs. The reserved property name `geometry` is rejected so annotations cannot replace the source geometry. Other source property annotations are retained. Features may be reordered. Integer polygon vertices must be exactly representable in float64. Missing, duplicate or mismatched IDs and malformed geometry fail in every policy; geometry is neither repaired nor assigned an ID by row position. Invalid topology follows `invalid_geometries`.
 
 ## Output and coordinates
 
@@ -38,13 +53,13 @@ A single selected ROI uses `global` in micrometres. When multiple independent RO
 | `shapes["<roi>_Boundaries"]` | Eager polygons indexed by explicit source IDs, retaining GeoJSON source annotations. |
 | `shapes["<roi>_CellCoordinates"]` | Eager centroid circles indexed by cell IDs, with radius `sqrt(area / pi)`. |
 
-The table retains `area`, integer `instance_id`, and `(center_x, center_y)` in `obsm["spatial"]`. Observation names are original positional strings starting at `"0"`, retaining gaps after geometry drops; biological identity comes from `instance_id`. When labels are included, categorical `region` and SpatialData table metadata explicitly link the table to `<roi>_Segmentation`. With labels excluded, the table is normalized and unlinked. Including polygons or circles does not change its annotation target.
+The table retains `area`, uint64 `instance_id`, and `(center_x, center_y)` in `obsm["spatial"]`. Observation names are original positional strings starting at `"0"`, retaining gaps after geometry drops; biological identity comes from `instance_id`. When labels are included, categorical `region` and SpatialData table metadata explicitly link the table to `<roi>_Segmentation`. With labels excluded, the table is normalized and unlinked. Including polygons or circles does not change its annotation target.
 
 DAPI OME metadata calibrates pixel X and Y independently into the ROI physical coordinate frame. The transform assigns PhysicalSizeX to X and PhysicalSizeY to Y, including anisotropic pixels. The same pixel-to-physical transform applies to segmentation and GeoJSON polygons. Segmentation OME physical sizes are optional: each size it declares must equal the DAPI one, and a size it does not declare is inherited from DAPI (a partial segmentation declaration previously failed). Cell centroids and transcript X/Y already use the physical ROI frame and have identity transforms. Area supplies square physical units for circle radii. OME micrometers, nanometers and millimeters are converted to micrometers in the ROI frame; absent OME unit attributes use the OME micrometer default. Unsupported units, missing calibration and inconsistent metadata fail.
 
 When polygons are requested with both images and labels excluded, DAPI is inspected only for calibration; no DAPI pixel graph is constructed. This mode still requires a valid TIFF with exactly one series and one unambiguous OME image with finite positive physical X/Y sizes in supported units. Raster CYX normalization and channel naming apply only when images or labels are requested, so unrelated nonspatial-axis or channel metadata does not restrict calibration-only loading.
 
-Transcript `z` is retained as integer `z_raw`. The export does not establish a physical calibration for this slice index, so transcript points have two spatial coordinates, X and Y. Optional `cell` values preserve source assignments, including unassigned zero values, in `uint64[pyarrow]` storage in every partition. This stable dtype preserves exact assignments through `2**64 - 1` even when partitions contain different identifier ranges. The complete CellxGene feature header supplies the transcript feature vocabulary; unknown transcript names fail when their partition is computed. Transcript name categories follow the CellxGene feature header order, including zero-count features.
+Transcript `z` is retained as `uint64[pyarrow]` `z_raw`, preserving the nonnegative image-plane index exactly. The export does not establish a physical calibration for this slice index, so transcript points have two spatial coordinates, X and Y. Optional `cell` values preserve source assignments, including unassigned zero values, in `uint64[pyarrow]` storage in every partition. This stable dtype preserves exact assignments through `2**64 - 1` even when partitions contain different identifier ranges. The complete CellxGene feature header supplies the transcript feature vocabulary; unknown transcript names fail when their partition is computed. Transcript name categories follow the CellxGene feature header order, including zero-count features.
 
 Table `uns["spatialdata_io_positions"]` describes unchanged float64 vendor cell-centroid XY micrometres: `global` for one ROI and each ROI name for multiple independent ROIs. These positions do not derive from polygon centroids.
 
@@ -58,9 +73,9 @@ Table `uns["spatialdata_io_positions"]` describes unchanged float64 vendor cell-
 
 Expression parsing uses bounded batches and preserves sparse counts without allocating a full dense expression table. Metadata, tables and shapes are eager. Pixels and transcript rows remain lazy through construction of the returned SpatialData. TIFF tasks reopen their path-backed source when computed and close their resources; retain the input files until computation or writing completes.
 
-Provide valid CSV inputs. Arrow checks complete record widths but does not enforce strict quoting, so some malformed quote forms may be accepted. Numeric precision and exact integer-identifier validation remain unchanged and apply to the values produced by the parser.
+Provide valid CSV inputs. Arrow checks complete record widths but does not enforce strict quoting, so some malformed quote forms may be accepted. CellxGene and CellCoordinates fields may contain quoted newlines. Counts are read in batches of about 1 MiB of text, so a single CellxGene record must be shorter than that.
 
-Transcript CSVs require one physical header line and one physical line per record; quoted commas and quotes are supported, while embedded newlines in quoted fields are unsupported. Every record must contain exactly the header field count, including projected-out fields. Transcript graph construction reads only the CSV header. Validation of unread transcript rows is deferred: malformed coordinates, unknown features and invalid assignments raise with source context when the affected partition is computed. The Dask index is a storage index local to each partition and may repeat; it is not a biological event identifier. Source row order is preserved without a global shuffle. Unsupported compressed transcript variants are not advertised as a bounded source format.
+Transcript CSVs require one physical header line and one physical line per record; quoted commas and quotes are supported, while embedded newlines in quoted fields are unsupported. Every record must contain exactly the header field count, including projected-out fields. Transcript graph construction reads only the CSV header. Validation of unread transcript rows is deferred: malformed records or values, nonfinite coordinates, negative `z` planes and unknown features raise with source context when the affected partition is computed. The Dask index is a storage index local to each partition and may repeat; it is not a biological event identifier. Source row order is preserved without a global shuffle. Unsupported compressed transcript variants are not advertised as a bounded source format.
 
 The reader owns newly created tables and annotations and does not mutate caller containers or source files. Provenance records the reader and package version without absolute input paths; the export has no version marker, so no format version is recorded. Missing or wrong-kind paths raise the corresponding filesystem exception. Malformed schemas, ambiguous layouts and inconsistent scientific relationships raise `ReaderFormatError`, a `ValueError` subclass naming the artifact (`CellxGene`, `CellCoordinates`, `DAPI`, `Segmentation`, `TranscriptList`, `Boundaries`) and its path. All options are validated in signature order before the directory is read: invalid option values raise `ValueError`; invalid types raise `TypeError`. Validation errors do not return partial results.
 
@@ -93,8 +108,17 @@ python -m spatialdata_io seqfish --input dataset --output counts.zarr \
 `rois` accepts any exact file prefix, including prefixes such as `Roi 1` that the reader repairs into element names; previously such prefixes produced element names that SpatialData rejected after all files had been read. The former `load_*`, `load_points`, `cells_as_circles`, `imread_kwargs` and `raster_models_scale_factors` options have been removed. Use the explicit inclusion flags, geometry choice, `chunks` and `scale_factors`. Automatic pyramids based on image size have been removed; request a pyramid explicitly when needed. The default chunks are `(1, 1024, 1024)` for images and `(1024, 1024)` for labels instead of storage-aligned chunks, and `scale_factors=()` replaces `None` for a single scale.
 
 Completed counts use float32 when every value is exactly representable, otherwise
-float64. Exact integer CSV decoding, including accepted integral decimal and
-exponent spellings, precedes this conversion. Values that neither floating dtype
-can preserve raise a contextual precision error. Completed bounded blocks are
-converted before sparse assembly; expression is never densified. Cell IDs and
-transcript assignments retain their independent exact integer ranges. Integer fields no longer accept hexadecimal (`0x10` was read as 16 in counts), surrounding whitespace or digit separators.
+float64. Values that neither floating dtype can preserve raise a contextual
+precision error. Completed bounded blocks are converted before sparse assembly;
+expression is never densified.
+
+CSV fields now follow Arrow's typed CSV grammar instead of exact decimal decoding:
+integer fields reject `2.0` and `2e0`, accept hexadecimal and surrounding spaces,
+and cell IDs (table, CellCoordinates and Boundaries) use fixed positive uint64
+through 2⁶⁴ − 1. Coordinates no longer fail for underflow to
+zero or for integral values above 2⁵³ that float64 rounds. Transcript `cell`
+assignments keep the full uint64 range. Shape indexes are Arrow-backed
+`uint64[pyarrow]`. Table `instance_id` becomes native uint64
+at the AnnData storage boundary, preserving full-range IDs through linkage and
+H5AD/Zarr writes. Shape indexes restored by SpatialData from GeoParquet use
+native uint64 and preserve the same IDs.

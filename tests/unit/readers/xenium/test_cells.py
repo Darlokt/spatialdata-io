@@ -79,7 +79,7 @@ STORE_DEFECTS: dict[str, tuple[fx.Profile, Mutation, str]] = {
         lambda g: g["cell_summary"].attrs.update({"column_names": ["a"]}),
         "one named column per value",
     ),
-    "nucleus-count": (fx.XOA_2_0, _assign("cell_summary", (0, 7), 1.5), "integral nucleus counts"),
+    "nucleus-count": (fx.XOA_2_0, _assign("cell_summary", (0, 7), 1.5), "nucleus_count"),
     "centroids": (fx.XOA_2_0, _assign("cell_summary", (0, 3), np.inf), "finite nucleus centroids"),
     "absent-array": (fx.XOA_2_0, lambda g: g.__delitem__("cell_summary"), "a 'cell_summary' array"),
     "id-dtype": (fx.XOA_1_0, lambda g: _replace(g, "cell_id", np.arange(1.0, 5.0)), "a 1-D 'cell_id' array"),
@@ -125,7 +125,7 @@ class TestReadCellsStore:
         store = _read(bundle)
 
         assert store.cell_ids.tolist() == [1, 2, 3, 4]
-        assert store.cell_ids.dtype == np.int64
+        assert store.cell_ids.dtype == np.uint32
         np.testing.assert_array_equal(store.cell_labels, [1, 2, 3, 4])
         assert store.cell_labels.dtype == np.uint32
         assert store.nucleus_cells is not None
@@ -137,6 +137,14 @@ class TestReadCellsStore:
         assert store.masks["cell"].shape == fx.SHAPE
         assert store.masks["cell"].chunks == fx.MASK_CHUNKS
         assert store.masks["cell"].key == "masks/1"
+
+    def test_integer_native_ids_preserve_uint32_maximum(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)
+        _rewrite(bundle.root / "cells.zarr.zip", _assign("cell_id", 3, 2**32 - 1))
+        store = _read(bundle)
+        assert store.cell_ids.tolist() == [1, 2, 3, 2**32 - 1]
+        assert store.cell_ids.dtype == np.uint32
+        assert store.cell_labels.tolist() == [1, 2, 3, 2**32 - 1]
 
     def test_hex_family_decodes_and_maps_seg_mask_value(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_9)
@@ -257,24 +265,26 @@ class TestReadCellsStore:
         np.testing.assert_array_equal(store.nucleus_cells, np.zeros(size, dtype=np.int64))
         assert store.nucleus_centroids.shape == (size, 2)
 
-    @pytest.mark.parametrize("value", [float(2**63), np.finfo(np.float64).max], ids=["int64-bound", "float64-maximum"])
-    def test_rejects_nucleus_count_overflow(self, tmp_path: Path, value: float) -> None:
+    @pytest.mark.parametrize(
+        "value", [-1.0, -0.1, 0.1, np.nan, np.inf, -np.inf, float(2**64), np.finfo(np.float64).max]
+    )
+    def test_rejects_invalid_nucleus_counts(self, tmp_path: Path, value: float) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
         _rewrite(bundle.root / "cells.zarr.zip", _assign("cell_summary", (0, 7), value))
 
         with pytest.raises(ReaderFormatError, match="nucleus_count"):
             _read(bundle)
 
-    def test_nucleus_count_last_representable_float64_below_int64_bound(self, tmp_path: Path) -> None:
+    def test_nucleus_count_last_representable_float64_below_uint64_bound(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
-        value = float(np.nextafter(float(2**63), 0))
+        value = float(np.nextafter(float(2**64), 0))
         _rewrite(bundle.root / "cells.zarr.zip", _assign("cell_summary", (0, 7), value))
 
         store = _read(bundle)
 
         assert store.nucleus_counts is not None
         assert store.nucleus_counts[0] == int(value)
-        assert store.nucleus_counts.dtype == np.int64
+        assert store.nucleus_counts.dtype == np.uint64
 
     def test_transcript_assignment_import_has_no_nuclei_or_labels(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(import_kind="transcripts"))

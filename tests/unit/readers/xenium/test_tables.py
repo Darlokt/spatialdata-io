@@ -5,12 +5,13 @@ from __future__ import annotations
 import io
 import tarfile
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import h5py
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 import pytest
 from scipy import sparse
@@ -23,6 +24,7 @@ from spatialdata_io.readers.xenium._analysis import Analysis
 from spatialdata_io.readers.xenium._cells import read_cells_store
 from spatialdata_io.readers.xenium._layout import H5Counts, MtxArchive, MtxDirectory, TabularSource
 from spatialdata_io.readers.xenium._metadata import ProteinPanel, ProteinTarget
+from spatialdata_io.readers.xenium._schemas import cell_types
 from spatialdata_io.readers.xenium._tables import (
     Cells,
     build_table,
@@ -331,16 +333,47 @@ class TestReadCells:
         bundle = fx.write_xenium_bundle(tmp_path, profile, fx.Options(csv_twins=True))
 
         parquet = read_cells(
-            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), profile.family, context=CELLS
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet", cell_types(profile.family)),
+            context=CELLS,
         )
         csv = read_cells(
-            TabularSource(ArtifactFile(tmp_path / "cells.csv.gz"), "csv_gz"), profile.family, context=CELLS
+            TabularSource(ArtifactFile(tmp_path / "cells.csv.gz"), "csv_gz", cell_types(profile.family)), context=CELLS
         )
 
         assert parquet.ids.tolist() == list(bundle.cell_ids)
-        assert parquet.ids.dtype == (np.int64 if profile.family == "integer_ids" else "str")
+        assert parquet.ids.dtype == pd.ArrowDtype(pa.uint64() if profile.family == "integer_ids" else pa.string())
         pd.testing.assert_frame_equal(parquet.frame, csv.frame)
         assert parquet.frame["nucleus_area"].dtype == pd.ArrowDtype(pa.float64())
+
+    @pytest.mark.parametrize("kind", ["csv", "parquet"])
+    def test_unsigned_ids_and_counts_preserve_full_width(self, tmp_path: Path, kind: Literal["csv", "parquet"]) -> None:
+        fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)
+        table = pq.read_table(tmp_path / "cells.parquet")
+        ids = [1, 2**63 - 1, 2**63 + 1, 2**64 - 1]
+        counts = [0, 2**63 - 1, 2**63 + 1, 2**64 - 1]
+        for name, values in (("cell_id", ids), ("total_counts", counts)):
+            table = table.set_column(table.column_names.index(name), name, pa.array(values, pa.uint64()))
+        path = tmp_path / f"cells.{kind}"
+        if kind == "parquet":
+            pq.write_table(table, path)
+        else:
+            pacsv.write_csv(table, path)
+        cells = read_cells(TabularSource(ArtifactFile(path), kind, cell_types("integer_ids")), context=CELLS)
+        assert cells.ids.tolist() == ids
+        assert cells.frame["total_counts"].tolist() == counts
+        assert cells.ids.dtype == pd.ArrowDtype(pa.uint64())
+        assert cells.frame["total_counts"].dtype == pd.ArrowDtype(pa.uint64())
+
+    @pytest.mark.parametrize("value", ["-1", str(2**64)])
+    def test_csv_counts_reject_unsigned_domain_violations(self, tmp_path: Path, value: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv"))
+        path = bundle.root / "cells.csv"
+        lines = path.read_text().splitlines()
+        first = lines[1].split(",")
+        first[lines[0].replace('"', "").split(",").index("total_counts")] = value
+        path.write_text("\n".join([lines[0], ",".join(first), *lines[2:]]) + "\n")
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
+            read_cells(TabularSource(ArtifactFile(path), "csv", cell_types("polygon_sets")), context=CELLS)
 
     def test_null_nucleus_area_becomes_nan(self, tmp_path: Path) -> None:
         fx.write_xenium_bundle(tmp_path, fx.XOA_2_0)
@@ -352,7 +385,8 @@ class TestReadCells:
         assert pq.read_table(tmp_path / "cells.parquet")["nucleus_area"].null_count == 1
 
         cells = read_cells(
-            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet", cell_types("polygon_sets")),
+            context=CELLS,
         )
 
         values = cells.frame["nucleus_area"].to_numpy(dtype=np.float64, na_value=np.nan)
@@ -365,7 +399,7 @@ class TestReadCells:
             ("cell_area", np.inf, "nonfinite cell_area"),
             ("x_centroid", np.nan, "nonfinite x_centroid"),
             ("nucleus_area", np.inf, "nonfinite nucleus_area"),
-            ("total_counts", -1, "negative total_counts"),
+            ("total_counts", -1, "total_counts as uint64"),
             ("cell_area", -1.0, "negative cell_area"),
             ("cell_id", "aaaaaaab-1", "one row per cell"),
             ("cell_id", None, "complete"),
@@ -385,18 +419,52 @@ class TestReadCells:
 
         with pytest.raises(ReaderFormatError, match=match):
             read_cells(
-                TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+                TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet", cell_types("polygon_sets")),
+                context=CELLS,
             )
 
     def test_csv_header_contracts(self, tmp_path: Path) -> None:
         path = tmp_path / "cells.csv"
         path.write_text("cell_id,cell_id\n")
-        with pytest.raises(ReaderFormatError, match="unique nonempty"):
-            read_cells(TabularSource(ArtifactFile(path), "csv"), "hex_ids", context=CELLS)
+        with pytest.raises(ReaderFormatError, match="repeated column names"):
+            read_cells(TabularSource(ArtifactFile(path), "csv", cell_types("hex_ids")), context=CELLS)
 
         path.write_text('"cell_id\n')
-        with pytest.raises(ReaderFormatError, match="malformed CSV header"):
-            read_header(TabularSource(ArtifactFile(path), "csv"), context=CELLS)
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
+            read_header(TabularSource(ArtifactFile(path), "csv", cell_types("hex_ids")), context=CELLS)
+
+    def test_csv_missing_values_and_arrow_grammar(self, tmp_path: Path) -> None:
+        """An empty typed field is missing, NaN text is NaN, other numbers follow Arrow's grammar."""
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv"))
+        path = bundle.root / "cells.csv"
+        lines = path.read_text().splitlines()
+        header = lines[0].replace('"', "").split(",")
+        first = lines[1].split(",")
+        first[header.index("nucleus_area")] = "NaN"
+        first[header.index("unassigned_codeword_counts")] = ""
+        first[header.index("total_counts")] = " 0x10 "
+        path.write_text("\n".join([lines[0], ",".join(first), *lines[2:]]) + "\n")
+
+        cells = read_cells(TabularSource(ArtifactFile(path), "csv", cell_types("polygon_sets")), context=CELLS)
+
+        assert np.isnan(cells.frame["nucleus_area"].to_numpy(dtype=np.float64, na_value=0.0)[0])
+        assert cells.frame["unassigned_codeword_counts"].isna().tolist() == [True, False, False, False]
+        assert cells.frame["unassigned_codeword_counts"].dtype == pd.ArrowDtype(pa.uint64())
+        assert cells.frame["total_counts"].tolist()[0] == 16
+
+    @pytest.mark.parametrize(("value", "found"), [("NA", "invalid value 'NA'"), ("2.0", "invalid value '2.0'")])
+    def test_csv_counts_are_integers(self, tmp_path: Path, value: str, found: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv"))
+        path = bundle.root / "cells.csv"
+        lines = path.read_text().splitlines()
+        first = lines[1].split(",")
+        first[lines[0].replace('"', "").split(",").index("total_counts")] = value
+        path.write_text("\n".join([lines[0], ",".join(first), *lines[2:]]) + "\n")
+
+        with pytest.raises(ReaderFormatError) as caught:
+            read_cells(TabularSource(ArtifactFile(path), "csv", cell_types("polygon_sets")), context=CELLS)
+        assert found in caught.value.found
+        assert caught.value.path == path
 
     def test_csv_record_width(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv"))
@@ -404,7 +472,7 @@ class TestReadCells:
         path.write_text(path.read_text() + "extra,1\n")
 
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_cells(TabularSource(ArtifactFile(path), "csv"), "polygon_sets", context=CELLS)
+            read_cells(TabularSource(ArtifactFile(path), "csv", cell_types("polygon_sets")), context=CELLS)
 
 
 def _assemble(
@@ -412,7 +480,7 @@ def _assemble(
 ) -> tuple[fx.XeniumFixture, ad.AnnData]:
     bundle = fx.write_xenium_bundle(tmp_path, profile, options)
     cells = read_cells(
-        TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), profile.family, context=CELLS
+        TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet", cell_types(profile.family)), context=CELLS
     )
     store = read_cells_store(
         ArtifactFile(tmp_path / "cells.zarr.zip"),
@@ -445,7 +513,7 @@ class TestBuildTable:
         assert obs["label_id"].dtype == np.uint32
         # XOA 2.0 parquet lacks nucleus_count and segmentation_method: the store supplies them.
         np.testing.assert_array_equal(obs["nucleus_count"], [1, 1, 2, 0])
-        assert obs["nucleus_count"].dtype == np.int64
+        assert obs["nucleus_count"].dtype == np.uint64
         assert obs["segmentation_method"].tolist() == [fx.SEGMENTATION_METHODS[m] for m in fx.CELL_METHODS]
         assert np.isnan(obs["nucleus_centroid_x"].to_numpy()[3])
         np.testing.assert_array_equal(
@@ -461,7 +529,8 @@ class TestBuildTable:
     def test_identity_mismatches_raise(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         cells = read_cells(
-            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet", cell_types("polygon_sets")),
+            context=CELLS,
         )
         counts = read_counts(_h5(bundle), None, None, context=COUNTS)
         store = read_cells_store(
@@ -479,6 +548,10 @@ class TestBuildTable:
         with pytest.raises(ReaderFormatError, match=r"differing from cells\.zarr\.zip"):
             build_table(cells, counts, shuffled_store, None, path=tmp_path, context=CELLS)
 
+        truncated_store = replace(store, cell_ids=store.cell_ids[:-1])
+        with pytest.raises(ReaderFormatError, match=r"differing from cells\.zarr\.zip"):
+            build_table(cells, counts, truncated_store, None, path=tmp_path, context=CELLS)
+
         frame = cells.frame.assign(label_id=1)
         with pytest.raises(ReaderFormatError, match=r"reserved columns \['label_id'\]"):
             build_table(Cells(frame, cells.ids), counts, store, None, path=tmp_path, context=CELLS)
@@ -490,7 +563,8 @@ class TestBuildTable:
     def test_unusable_column_names_are_renamed(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         cells = read_cells(
-            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet", cell_types("polygon_sets")),
+            context=CELLS,
         )
         counts = read_counts(_h5(bundle), None, None, context=COUNTS)
         store = _store(tmp_path, "polygon_sets")
@@ -520,7 +594,8 @@ class TestBuildTable:
     def test_analysis_annotates_the_table(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         cells = read_cells(
-            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet"), "polygon_sets", context=CELLS
+            TabularSource(ArtifactFile(tmp_path / "cells.parquet"), "parquet", cell_types("polygon_sets")),
+            context=CELLS,
         )
         counts = read_counts(_h5(bundle), None, None, context=COUNTS)
         clusters = pd.Categorical.from_codes([0, 1, 0, -1], categories=pd.Index(["1", "2"], dtype="str"))

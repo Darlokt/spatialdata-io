@@ -14,7 +14,6 @@ from scipy import sparse
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish import _tables as seqfish_tables
-from spatialdata_io.readers.seqfish._schemas import FLOAT_DTYPE
 from spatialdata_io.readers.seqfish._tables import _count_block, finalize_table, read_table, select_cells
 
 if TYPE_CHECKING:
@@ -41,13 +40,12 @@ def _sources(
 class TestReadTable:
     """Preserve count row/feature order while aligning metadata by exact identity."""
 
-    @pytest.mark.parametrize("batch_rows", [1, 2, 10])
-    def test_exact_mixed_count_columns_and_cross_batch_promotion(
-        self, tmp_path: Path, mocker: MockerFixture, batch_rows: int
+    @pytest.mark.parametrize("batch_bytes", [40, 64, 1024])
+    def test_exact_count_columns_and_cross_batch_promotion(
+        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
     ) -> None:
-        # 16 bytes per feature and row; three features.
-        mocker.patch("spatialdata_io.readers.seqfish._tables._BATCH_MEMORY_BYTES", 16 * 3 * batch_rows)
-        counts = f",digits,decimal,exponent\n2,0,2.0,3e0\n1,{2**63},0.0,16777217e0\n"
+        mocker.patch.object(seqfish_tables, "_BATCH_BYTES", batch_bytes)
+        counts = f",B,A,C\n2,0,2,3\n1,{2**63},0,16777217\n"
         result = read_table(*_sources(tmp_path, counts))
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.has_canonical_format
@@ -55,16 +53,17 @@ class TestReadTable:
         np.testing.assert_array_equal(result.X.data, np.array([2, 3, 2**63, 2**24 + 1], dtype=np.float64))
         np.testing.assert_array_equal(result.X.indices, [1, 2, 0, 2])
         np.testing.assert_array_equal(result.X.indptr, [0, 2, 4])
-        assert result.var_names.tolist() == ["digits", "decimal", "exponent"]
+        assert result.var_names.tolist() == ["B", "A", "C"]
         assert result.obs["instance_id"].tolist() == [2, 1]
 
-    @pytest.mark.parametrize("ids", [(2**53, 2**53 + 1), (2**63 - 1, 2**63), (2**64 - 2, 2**64 - 1)])
+    @pytest.mark.parametrize("ids", [(2**53, 2**53 + 1), (2**63 - 1, 2**63), (2**64 - 2, 2**64 - 1), (1, 2**64 - 1)])
     def test_reordered_exact_boundary_populations(self, tmp_path: Path, ids: tuple[int, int]) -> None:
         first, second = ids
         counts = f",A\n{first},11\n{second},13\n"
         cells = f"label,area,center_x,center_y\n{second},20,30,40\n{first},2,3,4\n"
         result = read_table(*_sources(tmp_path, counts, cells))
         assert result.obs["instance_id"].tolist() == [first, second]
+        assert result.obs["instance_id"].dtype == pd.ArrowDtype(pa.uint64())
         assert result.obs["area"].tolist() == [2, 20]
         np.testing.assert_array_equal(result.obsm["spatial"], [[3, 4], [30, 40]])
 
@@ -72,9 +71,8 @@ class TestReadTable:
         ("count_ids", "cell_ids"),
         [
             ((2**53, 2), (2**53 + 1, 2)),
-            ((2**63 - 1, 2), (2**63, 2)),
+            ((2**63 - 1, 2), (2**63 - 2, 2)),
             ((2**64 - 1, 2), (2**64 - 2, 2)),
-            ((2**63, 2), (2**63 - 1, 2)),
             ((1, 2), (1,)),
             ((1,), (1, 2)),
         ],
@@ -88,7 +86,7 @@ class TestReadTable:
             read_table(*_sources(tmp_path, counts, cells))
 
     def test_sparse_order_and_alignment(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.seqfish._tables._BATCH_MEMORY_BYTES", 1)
+        mocker.patch.object(seqfish_tables, "_BATCH_BYTES", 8)
         result = read_table(*_sources(tmp_path))
         assert isinstance(result.X, sparse.csr_array)
         assert not isinstance(result.X, sparse.spmatrix)
@@ -99,12 +97,12 @@ class TestReadTable:
         assert result.var_names.tolist() == ["B", "A"]
         assert result.obs["instance_id"].tolist() == [2, 1]
         assert result.obs["area"].tolist() == [6, 4]
-        assert result.obs["area"].dtype == FLOAT_DTYPE
+        assert result.obs["area"].dtype == pd.ArrowDtype(pa.float64())
         np.testing.assert_array_equal(result.obsm["spatial"], [[7, 5], [2, 3]])
         assert not result.uns
 
-    def test_row_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        """20,001 single-feature rows fit one 8 MiB block; 1,000-row blocks give the identical table."""
+    def test_count_batches_are_bounded_by_source_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        """20,001 single-feature rows fit one 1 MiB batch; 4 KiB batches give the identical table."""
         rows = 20_001
         counts = ",A\n" + "".join(f"{row + 1},{row % 3}\n" for row in range(rows))
         cells = "label,area,center_x,center_y\n" + "".join(f"{row + 1},1,{row},2\n" for row in range(rows))
@@ -114,11 +112,11 @@ class TestReadTable:
         table = read_table(*sources)
 
         assert [call.args[0].num_rows for call in blocks.call_args_list] == [rows]
-        # 16 bytes per feature and row; one feature.
-        mocker.patch.object(seqfish_tables, "_BATCH_MEMORY_BYTES", 16 * 1000)
+        mocker.patch.object(seqfish_tables, "_BATCH_BYTES", 4096)
         blocks.reset_mock()
         small = read_table(*sources)
-        assert len(blocks.call_args_list) == 21
+        assert len(blocks.call_args_list) == len(counts.encode()) // 4096 + 1
+        assert max(call.args[0].num_rows for call in blocks.call_args_list) < 4096 // 4
         expected, actual = table.X, small.X
         assert isinstance(expected, sparse.csr_array)
         assert isinstance(actual, sparse.csr_array)
@@ -128,16 +126,22 @@ class TestReadTable:
         np.testing.assert_array_equal(expected.indices, actual.indices)
         np.testing.assert_array_equal(expected.indptr, actual.indptr)
 
-    def test_unsigned_mixed_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.seqfish._tables._BATCH_MEMORY_BYTES", 1)
+    def test_records_must_fit_one_batch(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        mocker.patch.object(seqfish_tables, "_BATCH_BYTES", 1024)
+        with pytest.raises(ReaderFormatError, match="straddles two block boundaries") as caught:
+            read_table(*_sources(tmp_path, ",A\n1," + "0" * 2048 + "\n"))
+        assert caught.value.context.artifact == "CellxGene"
+
+    def test_unsigned_counts_across_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        mocker.patch.object(seqfish_tables, "_BATCH_BYTES", 24)
         large = 2**63
-        counts = f",A\n65537,1\n{large},{large}\n"
-        cells = f"label,area,center_x,center_y\n{large},1,2,3\n65537,4,5,6\n"
+        counts = f",A\n65537,1\n3,{large}\n"
+        cells = "label,area,center_x,center_y\n3,1,2,3\n65537,4,5,6\n"
         result = read_table(*_sources(tmp_path, counts, cells))
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.dtype == np.dtype(np.float32)
         assert result.X.data.tolist() == [1, large]
-        assert result.obs["instance_id"].tolist() == [65537, large]
+        assert result.obs["instance_id"].tolist() == [65537, 3]
 
     @pytest.mark.parametrize("value", [2**53 + 1, 2**63 + 1, 2**64 - 1])
     def test_completed_counts_reject_inexact_float64(self, tmp_path: Path, value: int) -> None:
@@ -147,50 +151,64 @@ class TestReadTable:
         assert caught.value.context.artifact == "CellxGene"
 
     @pytest.mark.parametrize(
-        "counts",
+        ("counts", "found"),
         [
-            ",A\n",
-            ",A\n1,1\n1.0,2\n",
-            ",A\n1,1.5\n",
-            ",A\n1,-1\n",
-            ",A\n1,1e-400\n",
-            ",A\n1,18446744073709551616\n",
-            ",A\n1,1,2\n",
-            ",A,B\n1,1\n",
-            ',A\n1,"bad\n',
-            '"unterminated\n',
-            ",A,A\n1,1,2\n",
-            ",A\n1,0x10\n",
-            ",A\n0x1,1\n",
-            ",A\n1,1_0\n",
+            (",A\n", "no count rows"),
+            (",A\n1,1\n1.0,2\n", "invalid value '1.0'"),
+            (",A\n1,1\n0,2\n", "nonpositive cell IDs"),
+            (",A\n1,1\n1,2\n", "duplicate cell IDs"),
+            (f",A\n{2**64},1\n", f"invalid value '{2**64}'"),
+            (",A\n-1,1\n", "invalid value '-1'"),
+            (",A\n1,1.5\n", "invalid value '1.5'"),
+            (",A\n1,2.0\n", "invalid value '2.0'"),
+            (",A\n1,+1\n", "invalid value '+1'"),
+            (",A\n1,-1\n", "invalid value '-1'"),
+            (",A\n1,1e-400\n", "invalid value '1e-400'"),
+            (",A\n1,1_0\n", "invalid value '1_0'"),
+            (",A\n1,\n", "invalid value ''"),
+            (",A\n1,18446744073709551616\n", "invalid value '18446744073709551616'"),
+            (",A\n1,1,2\n", "Expected 2 columns, got 3"),
+            (",A,B\n1,1\n", "Expected 3 columns, got 2"),
+            (',A\n1,"bad\n', "malformed CSV"),
+            ('"unterminated\n', "malformed CSV"),
+            (",A,A\n1,1,2\n", "repeated column names ['A']"),
+            ("\n", "malformed CSV"),
         ],
     )
-    def test_invalid_counts(self, tmp_path: Path, counts: str) -> None:
+    def test_invalid_counts(self, tmp_path: Path, counts: str, found: str) -> None:
         with pytest.raises(ReaderFormatError) as caught:
             read_table(*_sources(tmp_path, counts))
+        assert found in caught.value.found
         assert caught.value.context.artifact == "CellxGene"
         assert caught.value.path == tmp_path / "counts.csv"
 
     @pytest.mark.parametrize(
-        "cells",
+        ("cells", "found"),
         [
-            "label,area,center_x,center_y\n",
-            "label,area,center_x,center_y\n1,2,3,4\n",
-            "label,area,center_x,center_y\n1,2,3,4\n1,2,3,4\n",
-            "label,area,center_x,center_y\n1,-1,3,4\n2,1,3,4\n",
-            "label,area,center_x,center_y\n1,2,nan,4\n2,1,3,4\n",
-            "label,area,center_x,center_y\n1,2,3\n",
-            'label,area,center_x,center_y\n1,2,3,"bad\n',
+            ("label,area,center_x,center_y\n", "different count and metadata IDs"),
+            ("label,area,center_x,center_y\n1,2,3,4\n", "different count and metadata IDs"),
+            ("label,area,center_x,center_y\n0,2,3,4\n", "nonpositive cell IDs"),
+            ("label,area,center_x,center_y\n-1,2,3,4\n", "invalid value '-1'"),
+            ("label,area,center_x,center_y\n,2,3,4\n", "invalid value ''"),
+            (f"label,area,center_x,center_y\n{2**64},2,3,4\n", f"invalid value '{2**64}'"),
+            ("label,area,center_x,center_y\n1,2,3,4\n1,2,3,4\n", "duplicate cell IDs"),
+            ("label,area,center_x,center_y\n1,-1,3,4\n2,1,3,4\n", "negative cell area"),
+            ("label,area,center_x,center_y\n1,2,nan,4\n2,1,3,4\n", "nonfinite 'center_x' values"),
+            ("label,area,center_x,center_y\n1,2,3,inf\n2,1,3,4\n", "nonfinite 'center_y' values"),
+            ("label,area,center_x,center_y\n1,2,3,\n2,1,3,4\n", "invalid value ''"),
+            ("label,area,center_x,center_y\n1,2,3\n", "Expected 4 columns, got 3"),
+            ('label,area,center_x,center_y\n1,2,3,"bad\n', "malformed CSV"),
         ],
     )
-    def test_invalid_metadata(self, tmp_path: Path, cells: str) -> None:
+    def test_invalid_metadata(self, tmp_path: Path, cells: str, found: str) -> None:
         with pytest.raises(ReaderFormatError) as caught:
             read_table(*_sources(tmp_path, cells=cells))
+        assert found in caught.value.found
         assert caught.value.context.artifact == "CellCoordinates"
         assert caught.value.path == tmp_path / "cells.csv"
 
     def test_zero_area_and_quoted_records(self, tmp_path: Path) -> None:
-        counts = ',"Gene,A"\n1,1e0\n'
+        counts = ',"Gene,A"\n1,1\n'
         cells = 'label,area,center_x,center_y,extra\n1,0,0.10000000000000002,2,"line\nbreak"\n'
         result = read_table(*_sources(tmp_path, counts, cells))
         assert result.var_names.tolist() == ["Gene,A"]
@@ -198,64 +216,46 @@ class TestReadTable:
         assert result.obsm["spatial"][0, 0] == 0.10000000000000002
 
     def test_quoted_multiline_records(self, tmp_path: Path) -> None:
-        """Quoted fields may span lines; quoted numbers keep their exact spelling."""
-        counts = ',"Gene,A"\r\n"1","2"\r\n'
+        """Quoted fields may span lines; quoted numbers parse like unquoted ones."""
+        counts = ',"Gene,A",B\r\n"1","2","x\ny"\r\n'.replace('"x\ny"', "3")
         cells = 'label,area,center_x,center_y,ignored\r\n"1",0,"1.5",2,"line\nbreak"\r\n'
 
         result = read_table(*_sources(tmp_path, counts, cells))
 
         assert isinstance(result.X, sparse.csr_array)
-        assert result.X.data.tolist() == [2]
+        assert result.X.data.tolist() == [2, 3]
         assert result.obs["instance_id"].tolist() == [1]
-        assert result.var_names.tolist() == ["Gene,A"]
+        assert result.var_names.tolist() == ["Gene,A", "B"]
         np.testing.assert_array_equal(result.obsm["spatial"], [[1.5, 2]])
 
-    @pytest.mark.parametrize(
-        ("counts", "cells", "artifact", "found"),
-        [
-            (',A\n"1\n",2\n', _CELLS, "CellxGene", "'cell ID' value '1\\n'"),
-            (',A\n1,"2\n"\n', _CELLS, "CellxGene", "'A' value '2\\n'"),
-            (",A\n1,2\n", 'label,area,center_x,center_y\n" 1",0,1,2\n', "CellCoordinates", "'label' value ' 1'"),
-        ],
-    )
-    def test_numbers_padded_with_whitespace_fail(
-        self, tmp_path: Path, counts: str, cells: str, artifact: str, found: str
-    ) -> None:
-        with pytest.raises(ReaderFormatError) as caught:
-            read_table(*_sources(tmp_path, counts, cells))
-        assert caught.value.context.artifact == artifact
-        assert caught.value.found == found
+    def test_arrow_number_grammar(self, tmp_path: Path) -> None:
+        """Arrow trims spaces and tabs around numbers and reads hexadecimal integers."""
+        counts = ',A,B\n" 1",0x10,\t2\n'
+        cells = "label,area,center_x,center_y\n0x1, 0 ,1e-400,2.5\t\n"
+        result = read_table(*_sources(tmp_path, counts, cells))
+        assert result.obs["instance_id"].tolist() == [1]
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.data.tolist() == [16, 2]
+        assert result.obs["area"].tolist() == [0]
+        np.testing.assert_array_equal(result.obsm["spatial"], [[0, 2.5]])
 
 
 class TestCountBlock:
-    """Exercise exact column normalization at its bounded numerical owner."""
+    """Convert the typed count columns of one batch, never its cell IDs."""
 
-    @pytest.mark.parametrize("spelling", [str(2**64 - 1), f"{2**64 - 1}.0", f"{2**64 - 1}e0"])
-    def test_full_uint64_fallback_and_ordinary_columns(self, tmp_path: Path, spelling: str) -> None:
-        batch = pa.record_batch([["1"], ["9007199254740993.0"], [spelling], ["0"]], names=["", "A", "B", "C"])
-        result = _count_block(batch, ("A", "B", "C"), ArtifactFile(tmp_path / "counts.csv"))
-        assert result.dtype == np.dtype(np.uint64)
-        np.testing.assert_array_equal(result.data, np.array([2**53 + 1, 2**64 - 1], dtype=np.uint64))
-        np.testing.assert_array_equal(result.indices, [0, 1])
-        np.testing.assert_array_equal(result.indptr, [0, 2])
-
-    @pytest.mark.parametrize("tokens", [("0", "0.0", "0e0"), ("1", "2.0", "3e0")])
-    def test_signed_zero_and_fallback_columns(self, tmp_path: Path, tokens: tuple[str, str, str]) -> None:
+    def test_counts_of_a_typed_batch(self) -> None:
         batch = pa.record_batch(
-            [["1", "2"], [tokens[0], "0"], [tokens[1], "0"], [tokens[2], "0"]], names=["", "A", "B", "C"]
+            [pa.array([7, 9]), pa.array([0, 2**64 - 1], pa.uint64()), pa.array([0, 0], pa.uint64())],
+            names=["", "A", "B"],
         )
-        result = _count_block(batch, ("A", "B", "C"), ArtifactFile(tmp_path / "counts.csv"))
+        result = _count_block(batch)
         assert isinstance(result, sparse.csr_array)
         assert result.has_canonical_format
-        assert result.shape == (2, 3)
-        assert result.dtype == np.dtype(np.int64)
-        if tokens[0] == "0":
-            assert result.nnz == 0
-            np.testing.assert_array_equal(result.indptr, [0, 0, 0])
-        else:
-            np.testing.assert_array_equal(result.data, [1, 2, 3])
-            np.testing.assert_array_equal(result.indices, [0, 1, 2])
-            np.testing.assert_array_equal(result.indptr, [0, 3, 3])
+        assert result.shape == (2, 2)
+        assert result.dtype == np.dtype(np.uint64)
+        np.testing.assert_array_equal(result.data, np.array([2**64 - 1], dtype=np.uint64))
+        np.testing.assert_array_equal(result.indices, [0])
+        np.testing.assert_array_equal(result.indptr, [0, 0, 1])
 
 
 class TestSelectCells:
@@ -282,8 +282,12 @@ class TestFinalizeTable:
     """Normalize final owned annotations and link only to the selected target."""
 
     @pytest.mark.parametrize("region", [None, "Roi1_Segmentation"])
-    def test_linkage_and_serialization(self, tmp_path: Path, region: str | None) -> None:
-        table = read_table(*_sources(tmp_path))
+    @pytest.mark.parametrize("identifiers", [(2, 1), (2**64 - 1, 2**63)])
+    def test_linkage_and_serialization(self, tmp_path: Path, region: str | None, identifiers: tuple[int, int]) -> None:
+        first, second = identifiers
+        counts = f",B,A\n{first},0,4\n{second},7,0\n"
+        cells = f"label,area,center_x,center_y\n{second},4,2,3\n{first},6,7,5\n"
+        table = read_table(*_sources(tmp_path, counts, cells))
         native = table.obsm["spatial"]
         expression = table.X
         result = finalize_table(table, frame="global", region=region, counts=ArtifactFile(tmp_path / "counts.csv"))
@@ -291,7 +295,8 @@ class TestFinalizeTable:
         assert result.obsm["spatial"] is native
         assert result.X is expression
         assert result.uns["spatialdata_io_positions"]["coordinates"]["spatial"]["frame"] == "global"
-        assert result.obs["instance_id"].tolist() == [2, 1]
+        assert result.obs["instance_id"].tolist() == list(identifiers)
+        assert result.obs["instance_id"].dtype == np.dtype(np.uint64)
         assert isinstance(result.X, sparse.csr_array)
         if region is None:
             assert "spatialdata_attrs" not in result.uns
@@ -304,5 +309,6 @@ class TestFinalizeTable:
         destination = tmp_path / "table.h5ad"
         result.write_h5ad(destination)
         restored = ad.read_h5ad(destination)
-        assert restored.obs["instance_id"].tolist() == [2, 1]
+        assert restored.obs["instance_id"].tolist() == list(identifiers)
+        assert restored.obs["instance_id"].dtype == np.dtype(np.uint64)
         assert restored.var_names.tolist() == ["B", "A"]

@@ -1,10 +1,13 @@
-"""Column contracts of Xenium cells, boundaries, transcripts and analysis.
+"""Arrow types and column contracts of Xenium cells, boundaries, transcripts and analysis.
 
 Parquet files and their CSV twins share one header per artifact. Named columns may
-appear in any order; documented columns are typed explicitly, and duplicate or
-empty names are rejected before any parser could repair them. Cell identifiers
-are integers in the integer-ID family (XOA 1.0-1.2) and text otherwise; binary
-text (XOA 1.0 feature names, XOA 1.3 cell IDs) is decoded strictly as UTF-8.
+appear in any order; documented columns have declared Arrow types per bundle
+family, and duplicate or empty names are rejected before any parser could repair
+them. Cells/boundary identifiers are positive ``uint64`` in the integer-ID family
+(XOA 1.0-1.2); transcript assignments stay signed ``int64`` to retain ``-1``. Other
+families use text IDs; binary text (XOA 1.0 feature names, XOA 1.3 cell IDs) is decoded
+strictly as UTF-8. Parquet columns are cast to the declared types; CSV twins are
+parsed by Arrow directly into them, so numbers follow Arrow's CSV grammar.
 Secondary analysis instead requires exact clustering headers and ordered,
 consecutive PCA/UMAP component columns after its barcode field.
 """
@@ -33,7 +36,9 @@ STRING = pa.string()
 STRING_DTYPE = pd.ArrowDtype(STRING)
 FLOAT64 = pa.float64()
 FLOAT32 = pa.float32()
-INT64 = pa.int64()
+UINT64 = pa.uint64()
+ALIGNMENT_TYPES = pa.schema([(str(index), FLOAT64) for index in range(3)])
+SELECTION_TYPES = {"Selection": STRING, "X": FLOAT64, "Y": FLOAT64}
 
 CELL_ID = "cell_id"
 CELL_FLOATS = ("x_centroid", "y_centroid", "cell_area", "nucleus_area")
@@ -74,7 +79,7 @@ TRANSCRIPT_REQUIRED: dict[str, pa.DataType] = {
 TRANSCRIPT_OPTIONAL: dict[str, pa.DataType] = {
     "fov_name": STRING,
     "nucleus_distance": FLOAT32,
-    "codeword_index": pa.int32(),
+    "codeword_index": pa.uint32(),
     "codeword_category": STRING,
     "is_gene": pa.bool_(),
 }
@@ -93,8 +98,9 @@ def validate_header(names: Sequence[str], required: Sequence[str], *, path: Path
         )
 
 
-def validate_analysis_header(names: list[str], kind: str, *, path: Path, context: ReaderErrorContext) -> None:
+def validate_analysis_header(names: Sequence[str], kind: str, *, path: Path, context: ReaderErrorContext) -> None:
     """Require exact clustering fields or consecutive PCA/UMAP component fields."""
+    names = list(names)
     if kind == "clustering":
         if names != [BARCODE, CLUSTER]:
             raise ReaderFormatError(context=context, path=path, found=f"header {names!r}", expected="Barcode,Cluster")
@@ -107,24 +113,43 @@ def validate_analysis_header(names: list[str], kind: str, *, path: Path, context
         )
 
 
-def id_type(family: Family) -> pa.DataType:
+def _id_type(family: Family) -> pa.DataType:
     """Return the identifier type: integers before XOA 1.3, text afterwards."""
-    return INT64 if family == "integer_ids" else STRING
+    return UINT64 if family == "integer_ids" else STRING
 
 
-def cell_types(names: Sequence[str], family: Family) -> dict[str, pa.DataType]:
-    """Return explicit Arrow types for a cells header; unknown columns are kept as text."""
-    types: dict[str, pa.DataType] = dict.fromkeys(names, STRING)
-    types[CELL_ID] = id_type(family)
-    types |= dict.fromkeys(CELL_FLOATS, FLOAT64)
-    types |= {name: INT64 for name in (*CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS) if name in names}
-    return types
+def cell_types(family: Family) -> pa.Schema:
+    """Return the declared types of the documented cells-table columns."""
+    counts = (*CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS)
+    return pa.schema(
+        [(CELL_ID, _id_type(family)), *((name, FLOAT64) for name in CELL_FLOATS), *((name, UINT64) for name in counts)]
+    )
 
 
-def transcript_types(names: Sequence[str], *, path: Path, context: ReaderErrorContext) -> dict[str, pa.DataType]:
-    """Return the projected documented transcript columns and their output types."""
+def boundary_types(family: Family) -> pa.Schema:
+    """Return the declared types of the boundary vertex columns."""
+    return pa.schema(
+        [(CELL_ID, _id_type(family)), (VERTICES[0], FLOAT32), (VERTICES[1], FLOAT32), (LABEL_ID, pa.uint32())]
+    )
+
+
+def transcript_types(family: Family) -> pa.Schema:
+    """Return the declared transcript types, retaining signed unassigned ``-1`` IDs."""
+    assignment_type = pa.int64() if family == "integer_ids" else STRING
+    return pa.schema((TRANSCRIPT_REQUIRED | {CELL_ID: assignment_type} | TRANSCRIPT_OPTIONAL).items())
+
+
+def header_types(names: Sequence[str], declared: pa.Schema) -> dict[str, pa.DataType]:
+    """Return a type for every header column: the declared one, otherwise text."""
+    return {name: declared.field(name).type if name in declared.names else STRING for name in names}
+
+
+def transcript_columns(
+    names: Sequence[str], declared: pa.Schema, *, path: Path, context: ReaderErrorContext
+) -> dict[str, pa.DataType]:
+    """Return the projected documented transcript columns of a header and their types."""
     validate_header(names, tuple(TRANSCRIPT_REQUIRED), path=path, context=context)
-    return TRANSCRIPT_REQUIRED | {name: kind for name, kind in TRANSCRIPT_OPTIONAL.items() if name in names}
+    return {field.name: field.type for field in declared if field.name in TRANSCRIPT_REQUIRED or field.name in names}
 
 
 def cast_column(
@@ -172,10 +197,10 @@ def normalize_text(column: pa.ChunkedArray, name: str, *, path: Path, context: R
 
 
 def normalize_ids(
-    column: pa.ChunkedArray, family: Family, *, path: Path, context: ReaderErrorContext
+    column: pa.ChunkedArray, kind: pa.DataType, *, path: Path, context: ReaderErrorContext
 ) -> pa.ChunkedArray:
-    """Return non-null int64 identifiers (integer family) or UTF-8 text identifiers."""
-    if family != "integer_ids":
+    """Return non-null identifiers of the declared type: positive ``uint64``, signed assignments or UTF-8 text."""
+    if pa.types.is_string(kind):
         return normalize_text(column, CELL_ID, path=path, context=context)
     if not pa.types.is_integer(column.type) or column.null_count:
         raise ReaderFormatError(
@@ -184,26 +209,27 @@ def normalize_ids(
             found=f"identifiers of type {column.type}",
             expected="non-null integer identifiers",
         )
-    return cast_column(column, INT64, CELL_ID, path=path, context=context)
+    values = cast_column(column, kind, CELL_ID, path=path, context=context)
+    if pa.types.is_unsigned_integer(kind) and (values.to_numpy() == 0).any():
+        raise ReaderFormatError(context=context, path=path, found="zero cell IDs", expected="positive cell IDs")
+    return values
 
 
-def text_series(column: pa.Array | pa.ChunkedArray) -> pd.Series:
-    """View Arrow text as an Arrow-backed pandas series without copying it."""
-    return pd.Series(pd.arrays.ArrowExtensionArray(column), dtype=STRING_DTYPE)
+def arrow_series(column: pa.Array | pa.ChunkedArray) -> pd.Series:
+    """View Arrow values as an Arrow-backed pandas series without copying them."""
+    return pd.Series(pd.arrays.ArrowExtensionArray(column))
 
 
 def id_index(column: pa.Array | pa.ChunkedArray) -> pd.Index:
-    """Return normalized int64 or text identifiers as an index for exact lookups."""
-    if pa.types.is_integer(column.type):
-        return pd.Index(np.asarray(column.to_numpy(zero_copy_only=False), dtype=np.int64))
-    return pd.Index(text_series(column), dtype="str")
+    """Keep normalized identifiers in an Arrow-backed index for exact lookups."""
+    return pd.Index(arrow_series(column))
 
 
 def integer_ids(text: pd.Index, *, path: Path, context: ReaderErrorContext) -> pd.Index:
-    """Parse canonical decimal identifiers (XOA 1.0-1.2 barcodes) to int64 exactly."""
+    """Parse canonical decimal identifiers (XOA 1.0-1.2 barcodes) to positive uint64 exactly."""
     try:
-        values = pd.Index(text.to_numpy(dtype=np.str_).astype(np.int64))
-    except (ValueError, OverflowError) as error:
+        values = id_index(pc.cast(pa.array(text), UINT64))
+    except pa.ArrowInvalid as error:
         raise ReaderFormatError(
             context=context, path=path, found="non-integer cell IDs", expected="decimal integer cell IDs"
         ) from error
@@ -211,6 +237,8 @@ def integer_ids(text: pd.Index, *, path: Path, context: ReaderErrorContext) -> p
         raise ReaderFormatError(
             context=context, path=path, found="non-canonical integer cell IDs", expected="canonical decimal cell IDs"
         )
+    if (values == 0).any():
+        raise ReaderFormatError(context=context, path=path, found="zero cell IDs", expected="positive cell IDs")
     return values
 
 

@@ -20,13 +20,23 @@ outside tissue. Grid coordinates must be nonnegative integers fitting int64.
 Pixel coordinates must be finite, nonnegative float64 values; conversions
 that lose large integer precision or underflow to zero fail.
 
-seqFISH, MERSCOPE, MCMICRO and CosMx decode numeric CSV fields from their
-text with one rule. Float fields hold correctly rounded finite float64 values;
-a nonzero value that rounds to zero, or an integral value of at least 2⁵³ that
-float64 cannot hold exactly (such as `9007199254740993` or `1e300`), fails.
-Integer fields accept every exact decimal spelling of an integer (`2`, `+2`,
-`2.0`, `2e0`); fractions, hexadecimal such as `0x10`, surrounding whitespace,
-digit separators and values outside the reader's range fail.
+seqFISH and Xenium declare an Arrow type for every CSV field they read and
+let Arrow parse the field directly into it; Arrow's typed CSV grammar is their
+contract. Integer fields trim surrounding spaces and tabs, accept hexadecimal
+such as `0x10`, and reject `2.0`, `2e0`, `+2`, digit separators and values
+outside the declared type. Float fields are correctly rounded to the declared
+float32 or float64 type, so `1e-400` reads as 0 and `9007199254740993` as
+`9007199254740992.0`; `nan` and `inf` parse and fail where the reader requires
+finite values. Every record must have the header's width, also for columns
+that are not read. Each reader documents which fields may be empty.
+
+MERSCOPE, MCMICRO and CosMx decode numeric CSV fields from their text with one
+rule. Float fields hold correctly rounded finite float64 values; a nonzero value
+that rounds to zero, or an integral value of at least 2⁵³ that float64 cannot
+hold exactly (such as `9007199254740993` or `1e300`), fails. Integer fields
+accept every exact decimal spelling of an integer (`2`, `+2`, `2.0`, `2e0`);
+fractions, hexadecimal such as `0x10`, surrounding whitespace, digit separators
+and values outside the reader's range fail.
 
 Curio metric exports have a positional exception: their first two columns
 contain the metric name and value. A subsequent named `Category` column selects
@@ -404,8 +414,8 @@ not rewrite table positions or establish physical calibration. See [DBiT](dbit.m
 Every selected ROI returns `table_<roi>` in count-row and feature-header order.
 `X` contains exact float32/float64 counts; `var` has feature names and no columns.
 Observation names are original positional strings, retaining gaps after polygon
-drops. Required `obs` fields are float64 physical `area` (µm²) and integer
-`instance_id` (int64/uint64). Categorical `region` is added only when labels
+drops. Required `obs` fields are float64 physical `area` (µm²) and uint64
+`instance_id`. Categorical `region` is added only when labels
 are returned, linking to `<roi>_Segmentation`; range checks do not enumerate
 label pixels. Shapes-only reads remain unlinked.
 
@@ -565,16 +575,16 @@ division. Official int32 HDF5 counts become float32 through Scanpy.
 Selected completed counts use exact float32/float64 storage before protein
 division; the accepted source decoder remains unchanged. Required textual `var` fields are `gene_ids`, `feature_types`;
 modern source feature metadata are retained. Protein annotation adds nullable
-text `long_name`/`clone` and nullable int64 `codeword_index`.
+text `long_name`/`clone` and nullable uint64 `codeword_index`.
 When a protein panel enriches selected protein features, pre-existing source
 columns with those names raise rather than being overwritten. Without that
 enrichment, the source columns are retained.
 
-Required `obs` fields are `cell_id` (int64 for early IDs, text otherwise),
+Required `obs` fields are `cell_id` (uint64 for early IDs, text otherwise),
 float64 µm `x_centroid`/`y_centroid`, µm² `cell_area`/`nucleus_area`, and
-int64 `transcript_counts`, `control_probe_counts`, `control_codeword_counts`,
+uint64 `transcript_counts`, `control_probe_counts`, `control_codeword_counts`,
 `total_counts`. Nucleus area may be NaN for cells without a nucleus. Optional
-nullable int64 summaries are `unassigned_codeword_counts`, `deprecated_codeword_counts`,
+nullable uint64 summaries are `unassigned_codeword_counts`, `deprecated_codeword_counts`,
 `genomic_control_counts`, `nucleus_count`; other source fields retain their
 declared type. A cell store adds uint32 `label_id`, float64 µm nucleus
 centroids, and available nucleus counts/segmentation methods. Cells/counts/store

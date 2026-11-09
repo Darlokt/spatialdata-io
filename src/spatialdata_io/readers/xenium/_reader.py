@@ -443,11 +443,16 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
           half-pixel ``Translation``.
         - Shapes ``cell_circles``: index ``cell_id``, column ``radius``,
           ``Identity()``.
-        - Points ``transcripts``: lazy, ``Identity()``, with ``x, y, z``
+        - Points ``transcripts``: lazy, ``Identity()``, with NumPy ``x, y, z``
           (float32 µm), categorical ``feature_name`` (count-matrix features in
           source order), ``cell_id`` with the vendor unassigned sentinel,
-          ``qv`` and the other documented columns.
+          ``qv`` and the other documented columns, all Arrow-backed
+          (``uint64[pyarrow]`` ``transcript_id``, ``float[pyarrow]`` ``qv``,
+          ...).
         - Table ``table``: see below.
+
+        Shape cell-ID indexes and annotations retain Arrow integer or text
+        storage; nucleus mask-label indexes retain their NumPy integer type.
 
         The table has an eager canonical CSR ``X`` in source feature order,
         float32 when every value is exact in it, otherwise float64; values
@@ -526,11 +531,7 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         store = read_cells_store(
             layout.cells_store, experiment.family, pixel_size=experiment.pixel_size, context=context
         )
-    cells = (
-        None
-        if layout.cells is None
-        else read_cells(layout.cells, experiment.family, context=experiment.context("cells table"))
-    )
+    cells = None if layout.cells is None else read_cells(layout.cells, context=experiment.context("cells table"))
     panel = None
     if layout.protein_panel is not None:
         panel = read_protein_panel(layout.protein_panel, context=experiment.context("protein_panel.json"))

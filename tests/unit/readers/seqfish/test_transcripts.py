@@ -48,7 +48,7 @@ class TestReadTranscripts:
         assignments = [0, 2, 2**53 + 1, 2**63 + 1, 2**64 - 1] * 12
         path = ArtifactFile(tmp_path / "transcripts.csv")
         path.write_text(
-            "name,x,y,cell\n" + "".join(f"GeneB,{row},2,{cell}\n" for row, cell in enumerate(assignments)),
+            "name,x,y,cell,z\n" + "".join(f"GeneB,{row},2,{cell},{cell}\n" for row, cell in enumerate(assignments)),
             encoding="utf-8",
         )
         mocker.patch.object(transcript_module, "read_csv_blocks", partial(read_csv_blocks, block_bytes=96))
@@ -63,9 +63,11 @@ class TestReadTranscripts:
         result = points.compute()
         assert result["cell"].dtype == pd.ArrowDtype(pa.uint64())
         assert result["cell"].tolist() == assignments
+        assert result["z_raw"].dtype == pd.ArrowDtype(pa.uint64())
+        assert result["z_raw"].tolist() == assignments
         assert result["x"].tolist() == list(range(len(assignments)))
 
-    @pytest.mark.parametrize("invalid_cell", ["-1", str(2**64), "1.1", "NaN"])
+    @pytest.mark.parametrize("invalid_cell", ["-1", str(2**64), "1.1", "2.0", "NaN", ""])
     def test_invalid_later_assignment_is_checked_when_executed(
         self, tmp_path: Path, mocker: MockerFixture, invalid_cell: str
     ) -> None:
@@ -75,9 +77,10 @@ class TestReadTranscripts:
         mocker.patch.object(transcript_module, "read_csv_blocks", partial(read_csv_blocks, block_bytes=128))
         points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert not points.partitions[0].compute().empty
-        with pytest.raises(ReaderFormatError, match="'cell' value") as caught:
+        with pytest.raises(ReaderFormatError) as caught:
             points.partitions[-1].compute()
-        assert caught.value.found == f"'cell' value {invalid_cell!r}"
+        assert f"CSV conversion error to uint64: invalid value '{invalid_cell}'" in caught.value.found
+        assert caught.value.context.artifact == "TranscriptList"
 
     def test_projected_known_categories_construct_without_tasks_and_serialize(
         self, tmp_path: Path, mocker: MockerFixture
@@ -115,7 +118,11 @@ class TestReadTranscripts:
 
     @pytest.mark.parametrize(
         ("last_name", "last_x", "message"),
-        [("Unknown", "1.5", "unknown transcript"), ('"Gene,A"', "nan", "finite float64")],
+        [
+            ("Unknown", "1.5", "unknown transcript"),
+            ('"Gene,A"', "nan", "nonfinite 'x'"),
+            ('"Gene,A"', "-inf", "nonfinite 'x'"),
+        ],
     )
     def test_bad_later_partition_does_not_execute_with_first_partition(
         self, tmp_path: Path, mocker: MockerFixture, last_name: str, last_x: str, message: str
@@ -133,10 +140,10 @@ class TestReadTranscripts:
     @pytest.mark.parametrize(
         ("content", "message"),
         [
-            (b"name,x,x,y\nGeneB,1,2,3\n", "duplicate"),
+            (b"name,x,x,y\nGeneB,1,2,3\n", "repeated column names"),
             (b"name,x\nGeneB,1\n", "name, x and y"),
-            (b'"name,x,y\nGeneB,1,2\n', "malformed CSV header"),
-            (b"name,\xff,y\n", "malformed CSV header"),
+            (b'"name,x,y\nGeneB,1,2\n', "malformed CSV"),
+            (b"name,\xff,y\n", "malformed CSV"),
         ],
     )
     def test_malformed_header_fails_before_dask_parser(
@@ -186,16 +193,26 @@ class TestReadTranscripts:
         with pytest.raises(ValueError, match=r"CSV|columns|fields|malformed"):
             points.partitions[-1].compute()
 
-    def test_lexical_coordinates_and_large_mixed_numeric_cell_ids_remain_exact(self, tmp_path: Path) -> None:
+    def test_coordinates_and_large_cell_ids_follow_arrow_grammar(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "transcripts.csv")
         path.write_text(
-            "name,x,y,cell\nGeneB,0.10000000000000002,2.5,9007199254740993\nGeneB,1.5,2.5,2.0\n",
+            "name,x,y,z,cell\nGeneB,0.10000000000000002,2.5,0,9007199254740993\nGeneB, 1.5 ,1e-400,0x2,0x10\n",
             encoding="utf-8",
         )
         points = read_transcripts(path, features=_FEATURES, frame="Roi1")
         result = points.compute()
-        assert result["cell"].tolist() == [9007199254740993, 2]
-        assert result["x"].iloc[0] == float("0.10000000000000002")
+        assert result["cell"].tolist() == [9007199254740993, 16]
+        assert result["z_raw"].tolist() == [0, 2]
+        assert result["x"].tolist() == [0.10000000000000002, 1.5]
+        assert result["y"].tolist() == [2.5, 0.0]
+
+    @pytest.mark.parametrize("plane", ["-1", str(2**64), "2.0", "", "nan"])
+    def test_invalid_planes_fail_when_executed(self, tmp_path: Path, plane: str) -> None:
+        path = ArtifactFile(tmp_path / "transcripts.csv")
+        path.write_text(f"name,x,y,z\nGeneB,1,2,{plane}\n", encoding="utf-8")
+        points = read_transcripts(path, features=_FEATURES, frame="Roi1")
+        with pytest.raises(ReaderFormatError, match="conversion error to uint64"):
+            points.compute()
 
     def test_source_path_glob_characters_are_literal(self, tmp_path: Path) -> None:
         root = tmp_path / "[ROI]*?"

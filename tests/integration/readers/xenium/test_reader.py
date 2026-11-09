@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import json
 from typing import TYPE_CHECKING, Literal
 
 import anndata as ad
@@ -438,6 +440,10 @@ class TestXenium:
             xenium(stripped.root)
         result = _read_without_store(stripped.root, nuclei=nuclei)
         reference = _read_without_store(full.root, nuclei=nuclei)
+        identifier_type = pd.ArrowDtype(pa.uint64() if profile.family == "integer_ids" else pa.string())
+        assert result.shapes["cell_boundaries"].index.dtype == identifier_type
+        if nuclei:
+            assert result.shapes["nucleus_boundaries"]["cell_id"].dtype == identifier_type
 
         np.testing.assert_array_equal(_x(result.tables["table"]).toarray(), _x(reference.tables["table"]).toarray())
         obs, reference_obs = _frame(result.tables["table"].obs), _frame(reference.tables["table"].obs)
@@ -613,6 +619,91 @@ class TestXenium:
         translation = _transform(restored.shapes["cell_boundaries"])
         assert isinstance(translation, Translation)
         np.testing.assert_array_equal(translation.translation, [HALF, HALF])
+
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    def test_unsigned_ids_link_to_circles_and_persist_exactly(self, tmp_path: Path, storage: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_1_0, fx.Options(cells_store=False))
+        ids = [1, 2**63 - 1, 2**63 + 1, 2**64 - 1]
+        path = bundle.root / "cells.parquet"
+        cells = pq.read_table(path)
+        cells = cells.set_column(cells.column_names.index("cell_id"), "cell_id", pa.array(ids, pa.uint64()))
+        cells = cells.set_column(cells.column_names.index("total_counts"), "total_counts", pa.array(ids, pa.uint64()))
+        pq.write_table(cells, path)
+        with h5py.File(bundle.root / "cell_feature_matrix.h5", "r+") as handle:
+            del handle["matrix/barcodes"]
+            handle["matrix/barcodes"] = np.asarray([str(value).encode() for value in ids])
+        result = xenium(
+            bundle.root,
+            table_target="cell_circles",
+            cell_geometry="circles",
+            include_cell_labels=False,
+            include_nucleus_labels=False,
+            include_nucleus_boundaries=False,
+            include_transcripts=False,
+        )
+        table = result.tables["table"]
+        assert table.obs_names.tolist() == [str(value) for value in ids]
+        assert table.obs["cell_id"].tolist() == ids
+        assert table.obs["cell_id"].dtype == np.uint64
+        assert table.obs["total_counts"].tolist() == ids
+        circles = result.shapes["cell_circles"]
+        assert circles.index.tolist() == ids
+        assert circles.index.dtype == pd.ArrowDtype(pa.uint64())
+        assert get_table_keys(table) == ("cell_circles", "region", "cell_id")
+        destination = tmp_path / f"table.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            restored = ad.read_h5ad(destination)
+        else:
+            result.write(destination)
+            saved = read_zarr(destination)
+            restored = saved.tables["table"]
+            assert saved.shapes["cell_circles"].index.tolist() == ids
+        assert restored.obs["cell_id"].tolist() == ids
+        assert restored.obs["total_counts"].tolist() == ids
+        assert get_table_keys(restored) == ("cell_circles", "region", "cell_id")
+
+    @pytest.mark.parametrize("storage", ["h5ad", "zarr"])
+    def test_unsigned_protein_codeword_annotation_persists(self, tmp_path: Path, storage: str) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_4_0)
+        path = bundle.root / "protein_panel.json"
+        panel = json.loads(path.read_text())
+        panel["payload"]["panel"]["targets"][0]["codeword_index"] = 2**64 - 1
+        path.write_text(json.dumps(panel))
+        table = xenium(bundle.root, include_transcripts=False).tables["table"]
+        assert _frame(table.var)["codeword_index"].dropna().tolist() == [2**64 - 1, 17]
+        assert table.var["codeword_index"].dtype == pd.UInt64Dtype()
+        destination = tmp_path / f"table.{storage}"
+        if storage == "h5ad":
+            table.write_h5ad(destination)
+            restored = ad.read_h5ad(destination)
+        else:
+            table.write_zarr(destination)
+            restored = ad.read_zarr(destination)
+        assert _frame(restored.var)["codeword_index"].dropna().tolist() == [2**64 - 1, 17]
+        assert restored.var["codeword_index"].isna().tolist() == [True, True, True, False, False]
+
+    def test_csv_transcript_precision_survives_zarr(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_3_0, fx.Options(transcripts="csv"))
+        path = bundle.root / "transcripts.csv"
+        with path.open(newline="") as handle:
+            rows = list(csv.reader(handle))
+        for row, identifier in zip(rows[1:3], (2**63 + 1, 2**64 - 1), strict=True):
+            row[rows[0].index("transcript_id")] = str(identifier)
+            row[rows[0].index("x_location")] = "1.000000059604644776257986738"
+        with path.open("w", newline="") as handle:
+            csv.writer(handle).writerows(rows)
+
+        result = xenium(bundle.root)
+        output = tmp_path / "output.zarr"
+        result.write(output)
+        restored = read_zarr(output).points["transcripts"].compute()
+
+        assert restored["transcript_id"].dtype == pd.ArrowDtype(pa.uint64())
+        assert restored["transcript_id"].iloc[:2].tolist() == [2**63 + 1, 2**64 - 1]
+        np.testing.assert_array_equal(
+            restored["x"].to_numpy()[:2], np.full(2, np.nextafter(np.float32(1), np.float32(2)))
+        )
 
 
 class TestXeniumPathPolicy:

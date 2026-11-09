@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import csv
+import io
 import math
 import re
 from dataclasses import dataclass, replace
-from itertools import islice
 from typing import TYPE_CHECKING, cast
 
+import pyarrow as pa
+import pyarrow.csv as pacsv
+
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.metadata import read_json_object
 from spatialdata_io.readers.xenium._version import detect_version
@@ -24,8 +27,8 @@ if TYPE_CHECKING:
 _EXCLUDED_KEYS = frozenset({"images", "xenium_explorer_files"})
 _RANGER_KEYS = ("version", "run_id", "original_analysis_uuid")
 _PANEL_KEYS = ("num_gene_targets", "num_targets", "panel_type", "species", "tissue", "spec_version")
-_METRICS_RECORDS = 2  # header and one value record
 _INTEGER = re.compile(r"[+-]?[0-9]+")
+_CSV_BLOCK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,29 +142,66 @@ def _metric(token: str) -> object:
 
 
 def read_metrics(path: ArtifactFile, *, context: ReaderErrorContext) -> dict[str, object]:
-    """Read the one-row ``metrics_summary.csv`` with strict CSV syntax.
+    """Read the one-row ``metrics_summary.csv``; each value keeps the type its spelling states.
+
+    Arrow reads every field as text, because the metric names and their types
+    vary between releases. Each header and record must fit a 64 KiB parser
+    block; excess records fail without materializing the rest of the file.
 
     Raises
     ------
     ReaderFormatError
-        If the file is not UTF-8, or is not one unique header and one record
-        of equal width.
+        If the file is not UTF-8 CSV, or is not one unique, nonempty header and
+        one record of equal width.
     """
-    expected = "a UTF-8 CSV with one unique header and one record"
-    try:
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            records = (row for row in csv.reader(handle, strict=True) if row)
-            rows = list(islice(records, _METRICS_RECORDS + 1))
-    except (UnicodeDecodeError, csv.Error) as error:
-        raise ReaderFormatError(context=context, path=path, found="malformed CSV", expected=expected) from error
-    if (
-        len(rows) != _METRICS_RECORDS
-        or len(rows[0]) != len(rows[1])
-        or len(set(rows[0])) != len(rows[0])
-        or "" in rows[0]
-    ):
-        raise ReaderFormatError(context=context, path=path, found=f"{len(rows)} records", expected=expected)
-    return {name: _metric(token) for name, token in zip(rows[0], rows[1], strict=True)}
+    batches: list[pa.RecordBatch] = []
+    rows = 0
+    with path.open("rb") as handle, csv_errors(context=context, path=path):
+        line = handle.readline(_CSV_BLOCK_BYTES + 1)
+        if len(line) > _CSV_BLOCK_BYTES:
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found="oversized header",
+                expected=f"a header within {_CSV_BLOCK_BYTES} bytes",
+            )
+        with io.BytesIO(line) as header_stream:
+            header = csv_header(path, context=context, source=header_stream)
+        if "" in header:
+            raise ReaderFormatError(
+                context=context, path=path, found="empty column name", expected="one nonempty header and one record"
+            )
+        handle.seek(0)
+        with pacsv.open_csv(
+            handle,
+            read_options=pacsv.ReadOptions(block_size=_CSV_BLOCK_BYTES, use_threads=False),
+            parse_options=pacsv.ParseOptions(newlines_in_values=True),
+            convert_options=pacsv.ConvertOptions(
+                column_types=dict.fromkeys(header, pa.string()),
+                include_columns=list(header),
+                null_values=[],
+                strings_can_be_null=False,
+            ),
+        ) as reader:
+            for batch in reader:
+                rows += batch.num_rows
+                if rows > 1:
+                    raise ReaderFormatError(
+                        context=context,
+                        path=path,
+                        found="more than one record",
+                        expected="one nonempty header and one record",
+                    )
+                batches.append(batch)
+            table = pa.Table.from_batches(batches, schema=reader.schema)
+    if rows != 1:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"{table.num_rows} records with columns {list(header)!r}",
+            expected="one nonempty header and one record",
+        )
+    return {name: _metric(table[name][0].as_py()) for name in header}
 
 
 def _payload(path: ArtifactFile, context: ReaderErrorContext) -> tuple[dict[str, object], dict[str, object]]:
@@ -213,12 +253,13 @@ def read_protein_panel(path: ArtifactFile, *, context: ReaderErrorContext) -> Pr
             and isinstance(long_name, str)
             and isinstance(clone, str)
             and type(codeword) is int
+            and 0 <= codeword <= 2**64 - 1
         ):
             raise ReaderFormatError(
                 context=context,
                 path=path,
                 found=f"target {target!r}",
-                expected="text public_id, long_name, clone and an integer codeword_index",
+                expected="text public_id, long_name, clone and a uint64 codeword_index",
             )
         if public_id in targets:
             raise ReaderFormatError(

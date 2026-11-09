@@ -21,27 +21,27 @@ from typing import TYPE_CHECKING, Literal
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 import shapely
 from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity, Translation
 
+from spatialdata_io.readers._utils.csv import csv_errors
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
 from spatialdata_io.readers.xenium._schemas import (
     CELL_ID,
-    FLOAT32,
-    INT64,
     LABEL_ID,
     VERTICES,
     cast_column,
     id_index,
-    id_type,
     normalize_ids,
     require_no_nulls,
     validate_header,
 )
-from spatialdata_io.readers.xenium._tables import read_csv_table, read_header
+from spatialdata_io.readers.xenium._tables import open_twin, read_header
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -87,34 +87,42 @@ class _Vertices:
     """Projected vertex rows of one boundary file."""
 
     ids: pd.Index
-    labels: NDArray[np.int64] | None
+    labels: NDArray[np.uint32] | None
     coordinates: NDArray[np.float64]
 
 
-def _read_vertices(source: TabularSource, family: Family, context: ReaderErrorContext) -> _Vertices:
-    path = source.file
+def _read_vertices(source: TabularSource, context: ReaderErrorContext) -> _Vertices:
+    path, types = source.file, source.types
     names = pq.read_schema(path).names if source.kind == "parquet" else read_header(source, context=context)
     validate_header(names, (CELL_ID, *VERTICES), path=path, context=context)
     columns = [CELL_ID, *VERTICES, *((LABEL_ID,) if LABEL_ID in names else ())]
-    types = {CELL_ID: id_type(family), VERTICES[0]: FLOAT32, VERTICES[1]: FLOAT32, LABEL_ID: INT64}
-    table = (
-        pq.read_table(path, columns=columns)
-        if source.kind == "parquet"
-        else read_csv_table(source, names, types, columns=columns, context=context)
-    )
+    if source.kind == "parquet":
+        table = pq.read_table(path, columns=columns)
+    else:
+        with csv_errors(context=context, path=path), open_twin(source) as stream:
+            table = pacsv.read_csv(
+                stream,
+                convert_options=pacsv.ConvertOptions(
+                    column_types=types, include_columns=columns, null_values=[], strings_can_be_null=False
+                ),
+            )
     require_no_nulls(table, path=path, context=context)
 
-    ids = id_index(normalize_ids(table[CELL_ID], family, path=path, context=context))
+    ids = id_index(normalize_ids(table[CELL_ID], types.field(CELL_ID).type, path=path, context=context))
     # float32 vertices are exact in the float64 coordinates Shapely uses.
     coordinates = np.column_stack(
         [
-            np.asarray(cast_column(table[name], FLOAT32, name, path=path, context=context).to_numpy(), dtype=np.float64)
+            np.asarray(
+                cast_column(table[name], types.field(name).type, name, path=path, context=context).to_numpy(),
+                dtype=np.float64,
+            )
             for name in VERTICES
         ]
     )
     labels = None
     if LABEL_ID in columns:
-        labels = np.asarray(cast_column(table[LABEL_ID], INT64, LABEL_ID, path=path, context=context).to_numpy())
+        kind = types.field(LABEL_ID).type
+        labels = np.asarray(cast_column(table[LABEL_ID], kind, LABEL_ID, path=path, context=context).to_numpy())
     return _Vertices(ids, labels, coordinates)
 
 
@@ -158,7 +166,7 @@ def read_polygons(
         ``label_id``, labels disagree with ``cells.zarr.zip``, or IDs are unknown.
     """
     path = source.file
-    vertices = _read_vertices(source, family, context)
+    vertices = _read_vertices(source, context)
     if family == "polygon_sets" and kind == "nucleus" and vertices.labels is None:
         raise ReaderFormatError(
             context=context,
@@ -187,22 +195,25 @@ def read_polygons(
         labels = _uint32_labels(file_labels, path, context)
     elif family == "integer_ids":
         # Integer cell IDs are their own mask labels; nuclei carry their cell's label.
-        labels = _uint32_labels(cell_ids.to_numpy(dtype=np.int64), path, context)
+        labels = _uint32_labels(cell_ids.to_numpy(dtype=np.uint64), path, context)
     else:
         labels = None
     return Polygons(kind, cell_ids, labels, geometries, degenerate, path, context)
 
 
-def _uint32_labels(values: NDArray[np.int64], path: Path, context: ReaderErrorContext) -> NDArray[np.uint32]:
-    if (values <= 0).any() or values.max(initial=0) > np.iinfo(np.uint32).max:
+def _uint32_labels(
+    values: NDArray[np.uint32] | NDArray[np.uint64], path: Path, context: ReaderErrorContext
+) -> NDArray[np.uint32]:
+    labels = cast_column(pa.chunked_array([values]), pa.uint32(), LABEL_ID, path=path, context=context).to_numpy()
+    if (labels == 0).any():
         raise ReaderFormatError(
             context=context, path=path, found="nonpositive or oversized labels", expected="uint32 labels from 1"
         )
-    return values.astype(np.uint32)
+    return labels
 
 
 def _store_labels(  # noqa: PLR0913, RUF100 - Labels, owners and the error origin.
-    file_labels: NDArray[np.int64] | None,
+    file_labels: NDArray[np.uint32] | None,
     cell_ids: pd.Index,
     kind: BoundaryKind,
     store: CellStore,

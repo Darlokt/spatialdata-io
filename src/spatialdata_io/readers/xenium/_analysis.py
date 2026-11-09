@@ -32,11 +32,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
 
-from spatialdata_io.readers._utils.csv import parse_csv_header
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import list_directory
 from spatialdata_io.readers.xenium._layout import AnalysisDirectory
-from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, text_series, validate_analysis_header
+from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, arrow_series, validate_analysis_header
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -113,35 +113,28 @@ def _members(
                 yield kind, method, member_handle, source.file
 
 
-def _header(handle: IO[bytes], path: Path, context: ReaderErrorContext) -> list[str]:
-    header = parse_csv_header(handle.readline(), context=context, path=path)
-    # Arrow reads the header itself; no encoded body buffer is retained.
-    handle.seek(0)
-    return header
-
-
 def _table(
-    handle: IO[bytes], header: list[str], value: pa.DataType, path: Path, context: ReaderErrorContext
+    handle: IO[bytes], header: tuple[str, ...], value: pa.DataType, path: Path, context: ReaderErrorContext
 ) -> pa.Table:
-    """Parse an owned CSV stream directly with text barcodes and typed values."""
-    try:
+    """Parse an owned CSV stream with text barcodes and typed values."""
+    # Arrow reads the header again, so a header-only file is an empty table.
+    handle.seek(0)
+    with csv_errors(context=context, path=path):
         return pacsv.read_csv(
             handle,
             read_options=pacsv.ReadOptions(use_threads=False),
             convert_options=pacsv.ConvertOptions(
                 column_types={BARCODE: pa.string(), **dict.fromkeys(header[1:], value)},
+                include_columns=list(header),
+                null_values=[],
                 strings_can_be_null=False,
             ),
         )
-    except pa.ArrowInvalid as error:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"malformed CSV: {error}", expected=f"columns {header!r}"
-        ) from error
 
 
 def _rows(table: pa.Table, barcodes: pd.Index, path: Path, context: ReaderErrorContext) -> NDArray[np.intp]:
     """Return the cell row of every record; barcodes must be unique and known."""
-    rows = barcodes.get_indexer(pd.Index(text_series(table[BARCODE])))
+    rows = barcodes.get_indexer(pd.Index(arrow_series(table[BARCODE])))
     if (rows < 0).any() or not pd.Index(rows).is_unique:
         raise ReaderFormatError(
             context=context, path=path, found="unknown or repeated barcodes", expected="unique barcodes of known cells"
@@ -150,8 +143,8 @@ def _rows(table: pa.Table, barcodes: pd.Index, path: Path, context: ReaderErrorC
 
 
 def _clusters(table: pa.Table, barcodes: pd.Index, path: Path, context: ReaderErrorContext) -> pd.Categorical:
-    values = np.asarray(table[CLUSTER].to_numpy(), dtype=np.int64)
-    if (values <= 0).any():
+    values = table[CLUSTER].to_numpy()
+    if (values == 0).any():
         raise ReaderFormatError(
             context=context, path=path, found="nonpositive clusters", expected="positive integer clusters"
         )
@@ -162,9 +155,10 @@ def _clusters(table: pa.Table, barcodes: pd.Index, path: Path, context: ReaderEr
 
 
 def _projection(
-    table: pa.Table, header: list[str], barcodes: pd.Index, path: Path, context: ReaderErrorContext
+    table: pa.Table, header: tuple[str, ...], barcodes: pd.Index, path: Path, context: ReaderErrorContext
 ) -> NDArray[np.float64]:
-    values = np.column_stack([np.asarray(table[name].to_numpy(), dtype=np.float64) for name in header[1:]])
+    # AnnData stores the projection as one NumPy obsm array.
+    values = np.column_stack([table[name].to_numpy() for name in header[1:]])
     if not np.isfinite(values).all():
         raise ReaderFormatError(
             context=context, path=path, found="nonfinite projections", expected="finite projections"
@@ -188,10 +182,10 @@ def read_analysis(source: AnalysisSource, barcodes: pd.Index, *, context: Reader
     projections: dict[str, NDArray[np.float64]] = {}
     with closing(_members(source, context)) as members:
         for kind, method, handle, path in members:
-            header = _header(handle, path, context)
+            header = csv_header(path, context=context, source=handle)
             validate_analysis_header(header, kind, path=path, context=context)
             if kind == "clustering":
-                table = _table(handle, header, pa.int64(), path, context)
+                table = _table(handle, header, pa.uint64(), path, context)
                 clusters[method] = _clusters(table, barcodes, path, context)
             else:
                 table = _table(handle, header, pa.float64(), path, context)

@@ -58,7 +58,7 @@ def write_seqfish_dataset(  # noqa: PLR0913, RUF100 - Fixture source variations 
             rowsperstrip=2,
             compression="deflate",
         )
-        labels = np.zeros((8, 12), dtype=np.uint32)
+        labels = np.zeros((8, 12), dtype=np.uint32 if max(cell_ids) <= np.iinfo(np.uint32).max else np.uint64)
         labels[1:3, 2:5] = cell_ids[0]
         labels[4:7, 8:11] = cell_ids[1]
         tifffile.imwrite(root / f"{roi}_Segmentation.tiff", labels, rowsperstrip=2, compression="deflate")
@@ -66,7 +66,7 @@ def write_seqfish_dataset(  # noqa: PLR0913, RUF100 - Fixture source variations 
         if with_z:
             transcripts["z"] = [1, 2, 1]
         if with_cell:
-            transcripts["cell"] = [cell_ids[1], cell_ids[0], 0]
+            transcripts["cell"] = pd.Series([cell_ids[1], cell_ids[0], 0], dtype="uint64")
         transcripts.to_csv(root / f"{roi}_TranscriptList.csv", index=False)
         features = [
             {

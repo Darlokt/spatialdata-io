@@ -11,18 +11,18 @@ https://www.10xgenomics.com/support/software/xenium-explorer/latest/tutorials/xe
 
 from __future__ import annotations
 
-import csv
-import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyarrow.csv as pacsv
 import shapely
 from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity
 
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import (
     invalid_geometry_mask,
@@ -30,8 +30,11 @@ from spatialdata_io.readers._utils.geometry import (
     validate_invalid_geometry_policy,
 )
 from spatialdata_io.readers._utils.paths import require_file
+from spatialdata_io.readers.xenium._schemas import SELECTION_TYPES
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -46,46 +49,41 @@ def _error(path: Path, *, found: str) -> ReaderFormatError:
     return ReaderFormatError(context=_CONTEXT, path=path, found=found, expected=_EXPECTED)
 
 
-def _selection_name(header: list[str], comments: list[list[str]], path: ArtifactFile) -> str | None:
+def _selection_name(header: tuple[str, ...], comment: str, path: ArtifactFile) -> str | None:
     """Resolve the single-selection and named-selection header conventions."""
-    if not header or not all(row and row[0].startswith("#") for row in comments):
-        raise _error(path, found="records without two leading comment lines")
-    if header == ["Selection", "X", "Y"]:
+    if header == ("Selection", "X", "Y"):
         return None
-    if header != ["X", "Y"]:
-        raise _error(path, found=f"header {header!r}")
-    comment = ",".join(comments[0])
-    if not comment.startswith(_NAME_PREFIX) or not comment.removeprefix(_NAME_PREFIX).strip():
+    if header != ("X", "Y"):
+        raise _error(path, found=f"header {list(header)!r}")
+    name = comment.removeprefix(_NAME_PREFIX).strip()
+    if not comment.startswith(_NAME_PREFIX) or not name:
         raise _error(path, found=f"comment {comment!r} without a selection name")
-    return comment.removeprefix(_NAME_PREFIX).strip()
+    return name
 
 
-def _parse(path: ArtifactFile) -> tuple[list[str], list[tuple[float, float]]]:
-    """Parse one owned text stream, keeping only the returned names and coordinates."""
-    names: list[str] = []
-    vertices: list[tuple[float, float]] = []
-    try:
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            rows = (row for row in csv.reader(handle, strict=True) if row)
-            comments = [next(rows, []) for _ in range(_COMMENT_LINES)]
-            header: list[str] = next(rows, [])
-            single_name = _selection_name(header, comments, path)
-            for row in rows:
-                if len(row) != len(header):
-                    raise _error(path, found="records of the wrong width, unnamed selections or nonfinite coordinates")
-                name = single_name if single_name is not None else row[0]
-                try:
-                    x, y = float(row[-2]), float(row[-1])
-                except ValueError as caught:
-                    raise _error(path, found="non-numeric coordinates") from caught
-                if not name or not math.isfinite(x) or not math.isfinite(y):
-                    raise _error(path, found="records of the wrong width, unnamed selections or nonfinite coordinates")
-                names.append(name)
-                vertices.append((x, y))
-    except (UnicodeDecodeError, csv.Error) as caught:
-        raise _error(path, found="malformed CSV text") from caught
-    if not names:
+def _parse(path: ArtifactFile) -> tuple[list[str], NDArray[np.float64]]:
+    """Parse one owned stream: two comment lines, the header, then typed records."""
+    with path.open("rb") as handle, csv_errors(context=_CONTEXT, path=path):
+        comments = [handle.readline().decode("utf-8-sig").rstrip("\r\n") for _ in range(_COMMENT_LINES)]
+        if not all(comment.startswith("#") for comment in comments):
+            raise _error(path, found="records without two leading comment lines")
+        header = csv_header(path, context=_CONTEXT, source=handle)
+        single_name = _selection_name(header, comments[0], path)
+        # Arrow reads the header again, so a header-only file is an empty table.
+        handle.seek(0)
+        table = pacsv.read_csv(
+            handle,
+            read_options=pacsv.ReadOptions(skip_rows=_COMMENT_LINES),
+            convert_options=pacsv.ConvertOptions(
+                column_types=SELECTION_TYPES, include_columns=list(header), null_values=[], strings_can_be_null=False
+            ),
+        )
+    if not table.num_rows:
         raise _error(path, found="a header without records")
+    names = [single_name] * table.num_rows if single_name is not None else table["Selection"].to_pylist()
+    vertices = np.column_stack([table["X"].to_numpy(), table["Y"].to_numpy()])
+    if "" in names or not np.isfinite(vertices).all():
+        raise _error(path, found="unnamed selections or nonfinite coordinates")
     return names, vertices
 
 
@@ -127,7 +125,7 @@ def xenium_explorer_selection(
     """
     policy = validate_invalid_geometry_policy(invalid_geometries)
     file = require_file(Path(path).expanduser(), context=_CONTEXT)
-    names, vertices = _parse(file)
+    names, coordinates = _parse(file)
 
     order = list(dict.fromkeys(names))
     starts = [index for index, name in enumerate(names) if index == 0 or names[index - 1] != name]
@@ -139,7 +137,6 @@ def xenium_explorer_selection(
             expected="contiguous rows per selection",
         )
     ends = [*starts[1:], len(names)]
-    coordinates = np.asarray(vertices, dtype=np.float64)
     polygons = []
     for name, start, end in zip(order, starts, ends, strict=True):
         ring = coordinates[start:end]

@@ -7,12 +7,15 @@ whose indexes restart at zero; every numeric field must hold a number, so an
 empty one is a malformed record. A gzip CSV is one compressed stream that cannot
 be split and is rejected during discovery.
 
-Every task opens its source, reads only the documented columns of its partition,
-and validates it when computed: no nulls, finite floating-point values
-(coordinates, ``qv``, ``nucleus_distance``), features from the count matrix, and
-cell IDs from the cell population or the unassigned sentinel (``UNASSIGNED``;
-``-1`` with integer IDs). Rows keep their source order and every
-``qv``; the vendor count matrix uses only assigned transcripts with ``qv >= 20``.
+Every task opens its source, reads only the documented columns of its partition
+with their declared Arrow types, and validates it when computed: no nulls,
+finite floating-point values (coordinates, ``qv``, ``nucleus_distance``),
+features from the count matrix, and cell IDs from the cell population or the
+unassigned sentinel (``UNASSIGNED``; ``-1`` with integer IDs). Rows keep their
+source order and every ``qv``; the vendor count matrix uses only assigned
+transcripts with ``qv >= 20``. Columns stay Arrow-backed, except the NumPy
+coordinates ``x``, ``y``, ``z`` and the categorical ``feature_name`` that
+:class:`~spatialdata.models.PointsModel` requires.
 """
 
 from __future__ import annotations
@@ -33,13 +36,13 @@ from spatialdata.transformations import Identity
 from spatialdata_io.readers._utils.csv import read_csv_blocks
 from spatialdata_io.readers.xenium._schemas import (
     CELL_ID,
+    arrow_series,
     cast_column,
     normalize_ids,
     normalize_text,
     require_finite,
     require_no_nulls,
-    text_series,
-    transcript_types,
+    transcript_columns,
     vocabulary_codes,
 )
 from spatialdata_io.readers.xenium._tables import read_header
@@ -60,14 +63,14 @@ _FEATURE = "feature_name"
 class _Partitioning:
     """Immutable state shared by every partition task.
 
-    ``cells`` holds the assigned cell IDs and the unassigned sentinel.
+    ``cells`` holds only assigned cell IDs; the unassigned sentinel is checked separately.
     """
 
     source: TabularSource
-    family: Family
     types: tuple[tuple[str, pa.DataType], ...]
     features: pd.Index
     cells: pd.Index
+    unassigned: int | str
     context: ReaderErrorContext
 
 
@@ -84,25 +87,24 @@ def _normalize(table: pa.Table, spec: _Partitioning) -> pd.DataFrame:
         column = table[name]
         if name == _FEATURE:
             # XOA 1.0 stores binary feature names; they are decoded strictly as UTF-8.
-            names = text_series(normalize_text(column, name, path=path, context=spec.context))
+            names = arrow_series(normalize_text(column, name, path=path, context=spec.context))
             codes = vocabulary_codes(names, spec.features, name, path=path, context=spec.context)
             columns[name] = pd.Categorical.from_codes(codes, categories=spec.features)
         elif name == CELL_ID:
-            ids = normalize_ids(column, spec.family, path=path, context=spec.context)
-            values = (
-                pd.Series(np.asarray(ids.to_numpy(), dtype=np.int64))
-                if spec.family == "integer_ids"
-                else text_series(ids)
-            )
-            vocabulary_codes(values, spec.cells, name, path=path, context=spec.context)
-            columns[name] = values
+            ids = arrow_series(normalize_ids(column, kind, path=path, context=spec.context))
+            vocabulary_codes(ids[ids != spec.unassigned], spec.cells, name, path=path, context=spec.context)
+            columns[name] = ids
         elif pa.types.is_string(kind):
-            columns[name] = text_series(normalize_text(column, name, path=path, context=spec.context))
+            columns[name] = arrow_series(normalize_text(column, name, path=path, context=spec.context))
         else:
-            values = np.asarray(cast_column(column, kind, name, path=path, context=spec.context).to_numpy())
+            values = cast_column(column, kind, name, path=path, context=spec.context)
             if pa.types.is_floating(kind):
-                require_finite(values, name, path=path, context=spec.context)
-            columns[_COORDINATES.get(name, name)] = values
+                require_finite(values.to_numpy(), name, path=path, context=spec.context)
+            if name in _COORDINATES:
+                # PointsModel accepts only NumPy coordinate columns.
+                columns[_COORDINATES[name]] = values.to_numpy()
+            else:
+                columns[name] = arrow_series(values)
     return pd.DataFrame(columns)
 
 
@@ -150,7 +152,7 @@ def read_transcripts(
         Count-matrix feature names in source order; the known categories of
         ``feature_name``.
     cells
-        Cell IDs a transcript may be assigned to (int64 for integer IDs).
+        Cell IDs a transcript may be assigned to (uint64 for integer IDs).
     context
         Reader and artifact identity for header and partition failures.
     """
@@ -161,13 +163,12 @@ def read_transcripts(
             names = tuple(parquet.schema_arrow.names)
             row_counts = [parquet.metadata.row_group(index).num_rows for index in range(parquet.num_row_groups)]
     else:
-        names = tuple(read_header(source, context=context))
-    types = transcript_types(names, path=path, context=context)
-    if family == "integer_ids":
-        types |= {CELL_ID: pa.int64()}
+        names = read_header(source, context=context)
+    types = transcript_columns(names, source.types, path=path, context=context)
 
-    sentinel = pd.Index([-1]) if family == "integer_ids" else pd.Index(["UNASSIGNED"], dtype="str")
-    spec = _Partitioning(source, family, tuple(types.items()), features, cells.append(sentinel), context)
+    spec = _Partitioning(
+        source, tuple(types.items()), features, cells, -1 if family == "integer_ids" else "UNASSIGNED", context
+    )
     meta = _normalize(_empty(spec), spec)
     # One graph node holds the vocabularies that every partition task references.
     shared = dask.delayed(spec, pure=True)

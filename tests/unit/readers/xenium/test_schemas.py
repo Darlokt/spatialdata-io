@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -12,21 +13,29 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.xenium._schemas import (
     CELL_FLOATS,
+    CELL_OPTIONAL_COUNTS,
+    CELL_REQUIRED_COUNTS,
     TRANSCRIPT_REQUIRED,
+    arrow_series,
+    boundary_types,
     cast_column,
     cell_types,
+    header_types,
     id_index,
     integer_ids,
     normalize_ids,
     normalize_text,
     require_finite,
     require_no_nulls,
-    text_series,
+    transcript_columns,
     transcript_types,
     validate_analysis_header,
     validate_header,
     vocabulary_codes,
 )
+
+if TYPE_CHECKING:
+    from spatialdata_io.readers.xenium._version import Family
 
 PATH = Path("bundle/cells.parquet")
 CONTEXT = ReaderErrorContext("xenium", "cells table", "5.0.0")
@@ -136,35 +145,60 @@ class TestValidateAnalysisHeader:
 class TestCellTypes:
     """Cell tables declare explicit Arrow types per family."""
 
-    def test_explicit_types_by_family(self) -> None:
-        names = ["cell_id", *CELL_FLOATS, "transcript_counts", "nucleus_count", "segmentation_method", "extra"]
+    def test_declared_types_by_family(self) -> None:
+        text, integer = cell_types("hex_ids"), cell_types("integer_ids")
 
-        text = cell_types(names, "hex_ids")
-        integer = cell_types(names, "integer_ids")
+        assert text.field("cell_id").type == pa.string()
+        assert integer.field("cell_id").type == pa.uint64()
+        assert all(text.field(name).type == pa.float64() for name in CELL_FLOATS)
+        assert text.field("nucleus_count").type == pa.uint64()
+        assert all(text.field(name).type == pa.uint64() for name in (*CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS))
+        assert "segmentation_method" not in text.names
 
-        assert text["cell_id"] == pa.string()
-        assert integer["cell_id"] == pa.int64()
-        assert all(text[name] == pa.float64() for name in CELL_FLOATS)
-        assert text["nucleus_count"] == pa.int64()
-        assert text["segmentation_method"] == pa.string()
-        assert text["extra"] == pa.string()
-        assert "genomic_control_counts" not in text
+
+class TestBoundaryTypes:
+    """Boundary vertices are float32, identifiers follow the family."""
+
+    @pytest.mark.parametrize(("family", "kind"), [("integer_ids", pa.uint64()), ("polygon_sets", pa.string())])
+    def test_declared_types_by_family(self, family: Family, kind: pa.DataType) -> None:
+        assert boundary_types(family) == pa.schema(
+            [("cell_id", kind), ("vertex_x", pa.float32()), ("vertex_y", pa.float32()), ("label_id", pa.uint32())]
+        )
+
+
+class TestHeaderTypes:
+    """Undeclared header columns are read as text."""
+
+    def test_declared_and_text(self) -> None:
+        types = header_types(["extra", "cell_id", "x_centroid"], cell_types("integer_ids"))
+
+        assert types == {"extra": pa.string(), "cell_id": pa.uint64(), "x_centroid": pa.float64()}
 
 
 class TestTranscriptTypes:
+    """Transcript identifiers follow the family; the other documented types are fixed."""
+
+    def test_family_identifier_type(self) -> None:
+        assert transcript_types("integer_ids").field("cell_id").type == pa.int64()
+        assert transcript_types("hex_ids").field("cell_id").type == pa.string()
+        assert transcript_types("hex_ids").names[: len(TRANSCRIPT_REQUIRED)] == list(TRANSCRIPT_REQUIRED)
+
+
+class TestTranscriptColumns:
     """Transcript tables project the documented columns only."""
 
     def test_projects_documented_columns_only(self) -> None:
         names = [*TRANSCRIPT_REQUIRED, "codeword_index", "is_gene", "future_column"]
 
-        types = transcript_types(names, path=PATH, context=CONTEXT)
+        types = transcript_columns(names, transcript_types("integer_ids"), path=PATH, context=CONTEXT)
 
         assert list(types) == [*TRANSCRIPT_REQUIRED, "codeword_index", "is_gene"]
-        assert types["codeword_index"] == pa.int32()
+        assert types["codeword_index"] == pa.uint32()
+        assert types["cell_id"] == pa.int64()
 
     def test_requires_documented_columns(self) -> None:
         with pytest.raises(ReaderFormatError, match="missing columns"):
-            transcript_types(["cell_id", "feature_name"], path=PATH, context=CONTEXT)
+            transcript_columns(["cell_id", "feature_name"], transcript_types("hex_ids"), path=PATH, context=CONTEXT)
 
 
 class TestCastColumn:
@@ -225,10 +259,22 @@ class TestNormalizeIds:
     """Cell IDs normalize to integers or text by family."""
 
     def test_integer_family(self) -> None:
-        result = normalize_ids(_chunked([1, -1], pa.int32()), "integer_ids", path=PATH, context=CONTEXT)
+        result = normalize_ids(_chunked([1, -1], pa.int32()), pa.int64(), path=PATH, context=CONTEXT)
 
         assert result.type == pa.int64()
         assert result.to_pylist() == [1, -1]
+
+    @pytest.mark.parametrize("value", [0, -1, 2**64])
+    def test_unsigned_cell_ids_reject_zero_negative_and_overflow(self, value: int) -> None:
+        kind = pa.decimal128(21, 0) if value == 2**64 else pa.int64()
+        column = _chunked([value], kind)
+        with pytest.raises(ReaderFormatError):
+            normalize_ids(column, pa.uint64(), path=PATH, context=CONTEXT)
+
+    def test_unsigned_cell_ids_preserve_the_full_range(self) -> None:
+        values: list[object] = [1, 2**63 + 1, 2**64 - 1]
+        result = normalize_ids(_chunked(values, pa.uint64()), pa.uint64(), path=PATH, context=CONTEXT)
+        assert result.to_pylist() == values
 
     @pytest.mark.parametrize(
         "column",
@@ -237,10 +283,10 @@ class TestNormalizeIds:
     )
     def test_integer_family_rejects(self, column: pa.ChunkedArray) -> None:
         with pytest.raises(ReaderFormatError, match="non-null integer identifiers"):
-            normalize_ids(column, "integer_ids", path=PATH, context=CONTEXT)
+            normalize_ids(column, pa.int64(), path=PATH, context=CONTEXT)
 
     def test_text_families(self) -> None:
-        result = normalize_ids(_chunked([b"aaaaaaab-1"], pa.binary()), "hex_ids", path=PATH, context=CONTEXT)
+        result = normalize_ids(_chunked([b"aaaaaaab-1"], pa.binary()), pa.string(), path=PATH, context=CONTEXT)
 
         assert result.to_pylist() == ["aaaaaaab-1"]
 
@@ -252,9 +298,9 @@ class TestIdIndex:
         integers = id_index(_chunked([3, 1], pa.int64()))
         text = id_index(pa.array(["b", "a"]))
 
-        assert integers.dtype == np.int64
+        assert integers.dtype == pd.ArrowDtype(pa.int64())
         assert integers.tolist() == [3, 1]
-        assert isinstance(text.dtype, pd.StringDtype)
+        assert text.dtype == pd.ArrowDtype(pa.string())
         assert text.tolist() == ["b", "a"]
 
 
@@ -262,14 +308,21 @@ class TestIntegerIds:
     """Integer barcodes round-trip as canonical decimals."""
 
     def test_canonical_decimal(self) -> None:
-        result = integer_ids(pd.Index(["1", "20", "300"], dtype="str"), path=PATH, context=CONTEXT)
+        result = integer_ids(pd.Index(["1", "20", str(2**64 - 1)], dtype="str"), path=PATH, context=CONTEXT)
 
-        assert result.dtype == np.int64
-        assert result.tolist() == [1, 20, 300]
+        assert result.dtype == pd.ArrowDtype(pa.uint64())
+        assert result.tolist() == [1, 20, 2**64 - 1]
 
     @pytest.mark.parametrize(
         ("values", "match"),
-        [(["1", "x"], "non-integer"), (["1", "02"], "non-canonical"), (["99999999999999999999"], "non-integer")],
+        [
+            (["0"], "zero cell IDs"),
+            (["-1"], "non-integer"),
+            ([str(2**64)], "non-integer"),
+            (["1", "x"], "non-integer"),
+            (["1", "02"], "non-canonical"),
+            (["99999999999999999999"], "non-integer"),
+        ],
     )
     def test_rejects(self, values: list[str], match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match):
@@ -283,7 +336,7 @@ class TestVocabularyCodes:
         vocabulary = pd.Index(["GeneB", "GeneA", "GeneC"], dtype="str")
 
         codes = vocabulary_codes(
-            text_series(pa.array(["GeneA", "GeneC", "GeneA", "GeneB"])),
+            arrow_series(pa.array(["GeneA", "GeneC", "GeneA", "GeneB"])),
             vocabulary,
             "feature_name",
             path=PATH,
@@ -299,7 +352,7 @@ class TestVocabularyCodes:
 
     def test_empty_values(self) -> None:
         codes = vocabulary_codes(
-            text_series(pa.array([], pa.string())), pd.Index(["a"]), "x", path=PATH, context=CONTEXT
+            arrow_series(pa.array([], pa.string())), pd.Index(["a"]), "x", path=PATH, context=CONTEXT
         )
 
         assert codes.shape == (0,)
@@ -307,7 +360,7 @@ class TestVocabularyCodes:
     def test_unknown_values_raise_with_examples(self) -> None:
         with pytest.raises(ReaderFormatError, match=r"unknown feature_name values \['GeneZ'\]"):
             vocabulary_codes(
-                text_series(pa.array(["GeneA", "GeneZ"])),
+                arrow_series(pa.array(["GeneA", "GeneZ"])),
                 pd.Index(["GeneA"]),
                 "feature_name",
                 path=PATH,

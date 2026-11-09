@@ -24,6 +24,10 @@ Artifacts, with the alternatives discovery accepts::
 A morphology image in its own directory must be an OME-linked set equal to the
 ``.ome.tif`` files beside it; the set is compared by file name, so symlinked
 members keep their bundle names.
+
+Each tabular source carries the declared Arrow types of its documented columns
+in the bundle's family (:mod:`._schemas`), so element readers never map the
+family to column types.
 """
 
 from __future__ import annotations
@@ -44,9 +48,12 @@ from spatialdata_io.readers._utils.paths import (
     require_metadata_file,
 )
 from spatialdata_io.readers.xenium._metadata import Experiment, read_experiment
+from spatialdata_io.readers.xenium._schemas import boundary_types, cell_types, transcript_types
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import pyarrow as pa
 
     from spatialdata_io.readers._utils.paths import PathPolicy
 
@@ -81,10 +88,11 @@ class Selection:
 
 @dataclass(frozen=True, slots=True)
 class TabularSource:
-    """A parquet file or one CSV twin with an identical header."""
+    """A parquet file or one CSV twin with an identical header, and the declared types of its columns."""
 
     file: ArtifactFile
     kind: TabularKind
+    types: pa.Schema
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,13 +186,13 @@ class XeniumLayout:
     protein_panel: ArtifactFile | None
 
 
-def _tabular(root: DatasetRoot, stem: str, context: ReaderErrorContext) -> TabularSource:
+def _tabular(root: DatasetRoot, stem: str, types: pa.Schema, context: ReaderErrorContext) -> TabularSource:
     """Prefer ``<stem>.parquet``; otherwise require exactly one CSV twin."""
     parquet = optional_metadata_file(root, f"{stem}.parquet", context=context)
     if parquet is not None:
-        return TabularSource(parquet, "parquet")
+        return TabularSource(parquet, "parquet", types)
     twins = [
-        TabularSource(file, kind)
+        TabularSource(file, kind, types)
         for suffix, kind in _CSV_TWINS
         if (file := optional_metadata_file(root, f"{stem}{suffix}", context=context)) is not None
     ]
@@ -200,9 +208,9 @@ def _tabular(root: DatasetRoot, stem: str, context: ReaderErrorContext) -> Tabul
     return twins[0]
 
 
-def _transcripts(root: DatasetRoot, context: ReaderErrorContext) -> TabularSource:
+def _transcripts(root: DatasetRoot, types: pa.Schema, context: ReaderErrorContext) -> TabularSource:
     """Require parquet or a plain CSV; one gzip stream cannot be split into lazy partitions."""
-    source = _tabular(root, "transcripts", context)
+    source = _tabular(root, "transcripts", types, context)
     if source.kind == "csv_gz":
         raise ReaderFormatError(
             context=context,
@@ -302,7 +310,7 @@ def discover_layout(path: str | Path, selection: Selection, *, path_policy: Path
         require_metadata_file(root, "experiment.xenium", context=ReaderErrorContext("xenium", "experiment.xenium"))
     )
 
-    context = experiment.context
+    context, family = experiment.context, experiment.family
     # A cell_labels table target is validated to include the cell labels.
     labels = selection.cell_labels or selection.nucleus_labels
     uses_store = labels or selection.table or selection.cell_polygons or selection.nucleus_polygons
@@ -318,14 +326,18 @@ def discover_layout(path: str | Path, selection: Selection, *, path_policy: Path
         root=root,
         experiment=experiment,
         cells_store=cells_store,
-        cells=_tabular(root, "cells", context("cells table")) if selection.table or selection.cell_circles else None,
-        cell_boundaries=_tabular(root, "cell_boundaries", context("cell boundaries"))
+        cells=_tabular(root, "cells", cell_types(family), context("cells table"))
+        if selection.table or selection.cell_circles
+        else None,
+        cell_boundaries=_tabular(root, "cell_boundaries", boundary_types(family), context("cell boundaries"))
         if selection.cell_polygons
         else None,
-        nucleus_boundaries=_tabular(root, "nucleus_boundaries", context("nucleus boundaries"))
+        nucleus_boundaries=_tabular(root, "nucleus_boundaries", boundary_types(family), context("nucleus boundaries"))
         if selection.nucleus_polygons
         else None,
-        transcripts=_transcripts(root, context("transcripts")) if selection.transcripts else None,
+        transcripts=_transcripts(root, transcript_types(family), context("transcripts"))
+        if selection.transcripts
+        else None,
         counts=_counts(root, context("cell-feature matrix")) if counts_needed else None,
         focus=_morphology(root, experiment, "morphology_focus_filepath", "morphology focus image")
         if selection.morphology_focus

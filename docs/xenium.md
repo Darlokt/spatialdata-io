@@ -86,17 +86,17 @@ MatrixMarket archives must contain exactly one of each required `cell_feature_ma
 
 `X` is an eager canonical CSR sparse array (float32 for official int32 HDF5 and MTX inputs) in the feature order of `cell_feature_matrix`. `feature_types=None` selects Gene Expression and, when present, Protein Expression; `"all"` keeps every feature type (negative controls, unassigned and deprecated codewords, genomic controls); a sequence selects exactly the named types, each of which must exist. Observation names are the matrix barcodes. Source feature names must be unique; duplicates raise rather than being renamed. `var` retains all selected source feature annotations, including `gene_ids`, `feature_types`, and available HDF5 fields such as `genome`. MatrixMarket sources supply only their own feature annotations. Feature annotation names that a SpatialData table does not accept are renamed with a warning, as described for `obs` below.
 
-Selected protein features add `long_name`, `clone` and `codeword_index` from `protein_panel.json`. If any of those columns already exists in the source, panel enrichment raises rather than overwriting it. Without panel enrichment, those source columns are retained unchanged.
+Selected protein features add `long_name`, `clone` and `codeword_index` from `protein_panel.json`. The panel codeword annotation is nullable uint64, with missing values for nonprotein features; present values are nonnegative integers. If any of those columns already exists in the source, panel enrichment raises rather than overwriting it. Without panel enrichment, those source columns are retained unchanged.
 
 Float32 count storage retains its precision limits: integers above 2²⁴ may already have rounded in Scanpy. Negative and fractional entries retained by Scanpy fail before local duplicate summation. MatrixMarket inputs must declare integer coordinate records, but upstream parsing can truncate malformed tokens or sum invalid duplicates before returning; see [table numerical limits](table_contracts.md#persistence-ownership-and-numerical-limits). The Scanpy source decoder remains unchanged. Selected completed counts use float32 when exact, otherwise float64; values that neither type preserves raise. Protein division follows this conversion and retains fractional measurement values.
 
-`obs` holds the `cells` table columns in source order with documented types: integer IDs are int64, other IDs are text, `nucleus_area` is NaN for cells without a nucleus. With `cells.zarr.zip`, `label_id` (uint32), `nucleus_centroid_x` and `nucleus_centroid_y` are added; XOA 2.0 cells tables lack `nucleus_count` and `segmentation_method`, which then also come from the store. `obsm["spatial"]` holds the float64 µm centroids.
+`obs` holds the `cells` table columns in source order with documented types: integer IDs are positive uint64, counts are uint64, other IDs are text, `nucleus_area` is NaN for cells without a nucleus. A CSV twin is parsed by Arrow directly into these types (see [CSV twins](#csv-twins)); its undocumented columns stay text. With `cells.zarr.zip`, `label_id` (uint32), `nucleus_centroid_x` and `nucleus_centroid_y` are added; XOA 2.0 cells tables lack `nucleus_count` and `segmentation_method`, which then also come from the store. `obsm["spatial"]` holds the float64 µm centroids.
 
 Additional `cells` columns whose names a SpatialData table does not accept are renamed once with a warning: invalid characters become `_` (`CD45 RO` becomes `CD45_RO`), `_index` becomes `index`, and a name equal to another column ignoring letter case gets a `_1`, `_2`, ... suffix. The documented columns and the reader's own `label_id`, nucleus centroids and `region` keep their names; a `cells` column named exactly like a reader column raises.
 
 Table `uns["spatialdata_io_positions"]` describes unchanged canonical float64 XY as vendor cell centroids in `global` micrometres using the vendor cells schema. Nullable nucleus summaries are separate annotations.
 
-Polygon-set cell and segmentation-method indexes must be nonnegative and below their respective population bounds, including unsigned source values. Stored nucleus counts must be nonnegative integers representable as int64. Malformed values raise a contextual `ValueError` before conversion or indexing.
+Polygon-set cell and segmentation-method indexes must be nonnegative and below their respective population bounds, including unsigned source values. Stored nucleus counts must be finite nonnegative integers below 2⁶⁴; they become uint64 after validating the float64 summary. Malformed values raise a contextual `ValueError` before conversion or indexing.
 
 The table annotates one returned element, chosen with `table_target`:
 
@@ -115,9 +115,41 @@ With `include_analysis=True`, 10x secondary analysis from `analysis/` or `analys
 
 ## Transcripts
 
-Points have `x`, `y`, `z` (float32 µm), a categorical `feature_name` whose known categories are the count-matrix features in source order, `cell_id` with the vendor sentinel for unassigned transcripts (`UNASSIGNED`, or `-1` with integer IDs), `transcript_id`, `overlaps_nucleus`, `qv` and, when present, `fov_name`, `nucleus_distance`, `codeword_index`, `codeword_category` and `is_gene`. Binary columns of early bundles are decoded strictly as UTF-8. Every transcript is kept: the count matrix contains assigned transcripts with `qv >= 20`, so `points[points.qv >= 20]` reproduces it.
+Points have NumPy `x`, `y`, `z` (float32 µm), a categorical `feature_name` whose known categories are the count-matrix features in source order, `cell_id` with the vendor sentinel for unassigned transcripts (`UNASSIGNED`, or `-1` with integer IDs), `transcript_id`, `overlaps_nucleus`, `qv` and, when present, `fov_name`, `nucleus_distance`, `codeword_index`, `codeword_category` and `is_gene`. These other columns are Arrow-backed (`uint64[pyarrow]` `transcript_id`, `uint8[pyarrow]` `overlaps_nucleus`, `float[pyarrow]` `qv`, `int64[pyarrow]` or `string[pyarrow]` `cell_id`, ...); the coordinates are NumPy because `PointsModel` requires it. Binary columns of early bundles are decoded strictly as UTF-8. Every transcript is kept: the count matrix contains assigned transcripts with `qv >= 20`, so `points[points.qv >= 20]` reproduces it.
 
-Parquet partitions follow row groups and carry a global row index with known divisions. A plain CSV is split into newline-delimited blocks of 64 MiB whose indexes restart at zero. Construction reads only the parquet footer or the CSV header; unknown features or cells, missing values and nonfinite coordinates, `qv` or `nucleus_distance` fail when their partition is computed. A CSV has no spelling for a missing value: every numeric field must hold a number, so an empty or `NA` field is a malformed record, and `NaN` is a nonfinite value.
+Cell-ID indexes on cell polygons and circles, and owning `cell_id` annotations on nucleus polygons, also retain Arrow storage (`uint64[pyarrow]` or `string[pyarrow]`). Nucleus indexes derived from mask labels retain their NumPy integer type. Identifier values and order are unchanged.
+
+Parquet partitions follow row groups and carry a global row index with known divisions. A plain CSV is split into newline-delimited blocks of 64 MiB whose indexes restart at zero. Construction reads only the parquet footer or the CSV header; unknown features or cells, missing values and nonfinite coordinates, `qv` or `nucleus_distance` fail when their partition is computed. A CSV has no spelling for a missing value: every numeric field must hold a number, so an empty or `NA` field is a malformed record, and `NaN` is a nonfinite value. Each block is parsed directly into the documented types, with the grammar described under [CSV twins](#csv-twins).
+
+Integer domains are declared per artifact, so an unassigned transcript does not change a cells-table identifier type:
+
+| Artifact / field | Parsed type and domain | Returned representation |
+| --- | --- | --- |
+| Integer-family cells and boundaries / `cell_id` | uint64, positive | Arrow-backed shapes; NumPy uint64 in final table annotations |
+| Integer-family transcript / `cell_id` | int64, known cell ID or `-1` | Arrow-backed int64 |
+| Cells / documented count columns | uint64, zero allowed; optional counts may be missing | NumPy uint64, nullable pandas UInt64 when missing |
+| Boundaries / `label_id` | uint32, positive | NumPy uint32 mask labels |
+| Transcript / `transcript_id`, `overlaps_nucleus` | uint64 and uint8 | Arrow-backed unsigned integers |
+| Transcript / `codeword_index` | uint32, zero-based | Arrow-backed uint32; 2³²−1 is preserved verbatim |
+| Secondary analysis / `Cluster` | uint64, positive | Categorical decimal text, sorted numerically |
+| Protein panel / `codeword_index` | uint64, zero allowed | Nullable pandas UInt64 in `var` |
+
+The [10x output descriptions](https://www.10xgenomics.com/support/software/xenium-onboard-analysis/latest/analysis/xoa-output-understanding-outputs) define transcript codewords as panel indexes and boundary labels as nonzero mask values. The [native Zarr specification](https://www.10xgenomics.com/support/software/xenium-onboard-analysis/latest/advanced/xoa-output-zarr) specifies uint32 masks and zero-based uint32 codeword indexes, with the maximum uint32 value representing an unknown codeword. The reader keeps that value without translating it to a negative sentinel. Integer-family native store IDs and mask-linked boundaries must fit positive uint32 labels; cells and circle linkage retain the full uint64 range. Matrix barcodes are compared as exact canonical decimal text, and signed transcript assignments are matched against the unsigned cell population without floating-point conversion. Checked Arrow parsing and casts reject negatives and overflow in unsigned source columns; positive fields additionally reject zero.
+
+## CSV twins
+
+Arrow parses CSV twins, a plain `transcripts.csv`, the secondary-analysis CSVs, `metrics_summary.csv`, alignment matrices and Explorer selection exports directly into declared types. CSV twins and Parquet columns normalize to the same declared types; integer-family `cell_id` is positive uint64 in cells and boundaries, and signed int64 in transcripts to preserve `-1`; other families use text IDs. Arrow's CSV grammar is the contract:
+
+- spaces and tabs around a number are trimmed, and integers may be hexadecimal (`0x10` reads as 16);
+- an integer field rejects `2.0`, `2e0`, `+2` and values outside its type;
+- floats are correctly rounded directly to their type (float32 for vertices and transcript coordinates), so `1e-400` reads as 0;
+- every record has the header's width, also for columns that are not read; some malformed quoting is accepted;
+- in `cells.csv(.gz)` an empty field of a typed column is a missing value (nullable optional counts, NaN `nucleus_area`) and `NaN` reads as NaN; boundary, transcript, analysis, alignment and selection CSVs have no numeric missing values, so an empty numeric field is malformed;
+- header names must be unique.
+
+`metrics_summary.csv` has no fixed numeric schema because its metrics vary between releases. Fields are read as text: an empty field becomes `None`, decimal integer spellings (including `+2`) become integers, other finite Python float spellings become floats (`1_0` becomes `10.0`), and other values stay text (`0x10`, `NaN`, `inf`). Quoted metric values may contain newlines.
+
+Alignment matrices contain exactly three records and metrics contain exactly one data record. Both readers reject excess records with bounded read-ahead instead of loading the whole malformed file. Their headers and individual records must fit a 64 KiB parser block.
 
 ## Invalid geometry
 
@@ -207,4 +239,7 @@ python -m spatialdata_io xenium --input outs --output outs.zarr --feature-types 
 | aligned images: any three- or four-sample image named `r, g, b(, a)`; missing or repeated OME names gave `0, 1, ...` | `r, g, b(, a)` only for a declared RGB colour model; otherwise OME names or IDs; a channel-count mismatch raises |
 | unusable `cells` column, HDF5 feature annotation and clustering method names failed when the table was linked | renamed with a warning |
 | `xenium_explorer_selection(path, pixel_size, return_list)` | `xenium_explorer_selection(path, *, invalid_geometries="keep")` returning shapes in µm |
+| CSV numbers parsed by a strict text parser (alignment, selection) or by Arrow with its default missing-value spellings (cells and boundary twins, analysis) | Arrow with declared types throughout; empty numeric fields are missing only in `cells.csv(.gz)`, `NA` and `null` no longer mean missing; metrics retain their separate text interpretation |
+| transcript columns other than `x, y, z` and `feature_name` as NumPy (`uint64`, `float32`, ...) | Arrow-backed (`uint64[pyarrow]`, `float[pyarrow]`, ...) |
+| shape cell-ID indexes and annotations as NumPy integers or pandas text | Arrow-backed integers or text; mask-label indexes retain their NumPy type |
 | out-of-root symlinked artifacts accepted | rejected by default; `path_policy="relaxed"` accepts them, except a multi-file `morphology_focus/` set whose members link to separate targets ([Dataset paths and symlinks](dataset_paths.md#known-limitation-multi-file-ome-tiff-sets)) |

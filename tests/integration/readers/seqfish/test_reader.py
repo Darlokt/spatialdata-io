@@ -113,7 +113,7 @@ class TestSeqfish:
         root = write_seqfish_dataset(tmp_path / "source", rois=("Roi1",))
         assignments = [0, 2, 2**53 + 1, 2**63 + 1, 2**64 - 1] * 5
         (root / "Roi1_TranscriptList.csv").write_text(
-            "name,x,y,cell\n" + "".join(f"GeneA,{row},2,{cell}\n" for row, cell in enumerate(assignments)),
+            "name,x,y,cell,z\n" + "".join(f"GeneA,{row},2,{cell},{cell}\n" for row, cell in enumerate(assignments)),
             encoding="utf-8",
         )
         mocker.patch(
@@ -128,6 +128,8 @@ class TestSeqfish:
         restored = read_zarr(destination).points["Roi1_TranscriptList"].compute()
         assert restored["cell"].dtype == pd.ArrowDtype(pa.uint64())
         assert restored["cell"].tolist() == assignments
+        assert restored["z_raw"].dtype == pd.ArrowDtype(pa.uint64())
+        assert restored["z_raw"].tolist() == assignments
         assert restored["x"].tolist() == list(range(len(assignments)))
 
     @pytest.mark.parametrize("rois", [("Roi1",), ("Roi1", "Roi2")])
@@ -181,6 +183,41 @@ class TestSeqfish:
         if labels:
             assert 9 in np.unique(result.labels["Roi1_Segmentation"].data.compute())
         assert_array_equal(result.points["Roi1_TranscriptList"].compute()["cell"], [2, 9, 0])
+
+    @pytest.mark.parametrize("labels", [False, True])
+    def test_polygon_drop_preserves_full_uint64_membership_and_persistence(
+        self, tmp_path: Path, *, labels: bool
+    ) -> None:
+        identifiers = (2**63, 2**64 - 1)
+        root = write_seqfish_dataset(
+            tmp_path / "source",
+            rois=("Roi1",),
+            cell_ids=identifiers,
+            invalid_cell_ids=(identifiers[0],),
+            reorder_cells=True,
+            reorder_boundaries=True,
+        )
+        result = seqfish(root, include_labels=labels, shape_geometry="both", invalid_geometries="drop")
+        destination = tmp_path / "dropped.zarr"
+        result.write(destination)
+        restored = read_zarr(destination)
+        table = restored.tables["table_Roi1"]
+        assert table.obs["instance_id"].tolist() == [identifiers[1]]
+        assert table.obs["instance_id"].dtype == np.dtype(np.uint64)
+        assert table.obs_names.tolist() == ["1"]
+        assert isinstance(table.X, sparse.csr_array | sparse.csr_matrix)
+        assert_array_equal(table.X.data, [5])
+        for name in ("Roi1_Boundaries", "Roi1_CellCoordinates"):
+            assert restored.shapes[name].index.tolist() == [identifiers[1]]
+            assert result.shapes[name].index.dtype == pd.ArrowDtype(pa.uint64())
+            # GeoParquet round trips retain exact IDs in native uint64 indexes.
+            assert restored.shapes[name].index.dtype == np.dtype(np.uint64)
+        assert restored.points["Roi1_TranscriptList"].compute()["cell"].tolist() == [identifiers[1], identifiers[0], 0]
+        if labels:
+            assert get_table_keys(table) == ("Roi1_Segmentation", "region", "instance_id")
+            assert np.unique(restored.labels["Roi1_Segmentation"].data.compute()).tolist() == [0, *identifiers]
+        else:
+            assert "spatialdata_attrs" not in table.uns
 
     @pytest.mark.parametrize("retain_wide", [False, True])
     def test_polygon_drop_selects_retained_count_dtype(self, tmp_path: Path, *, retain_wide: bool) -> None:
@@ -611,8 +648,16 @@ class TestSeqfish:
         with pytest.raises(ReaderFormatError, match=r"duplicate|unique"):
             seqfish(root)
 
-    def test_write_read_preserves_values_and_linkage(self, tmp_path: Path) -> None:
-        root = write_seqfish_dataset(tmp_path / "source", rois=("Roi1",), cell_ids=(70000, 2))
+    @pytest.mark.parametrize("identifiers", [(70000, 2), (2**63, 2**64 - 1), (2**64 - 1, 1)])
+    def test_write_read_preserves_values_and_linkage(self, tmp_path: Path, identifiers: tuple[int, int]) -> None:
+        root = write_seqfish_dataset(
+            tmp_path / "source", rois=("Roi1",), cell_ids=identifiers, reorder_cells=True, reorder_boundaries=True
+        )
+        boundary_path = root / "Roi1_Boundaries.geojson"
+        document = json.loads(boundary_path.read_text(encoding="utf-8"))
+        # Cover JSON numeric IDs alongside the other feature's string ID.
+        document["features"][0]["id"] = int(document["features"][0]["id"])
+        boundary_path.write_text(json.dumps(document), encoding="utf-8")
         result = seqfish(root, shape_geometry="both")
         assert isinstance(result.tables["table_Roi1"].X, sparse.csr_array)
         output = tmp_path / "output.zarr"
@@ -639,11 +684,21 @@ class TestSeqfish:
                 exact=True,
             )
             assert_equal(restored_positions.obsm, source_table.obsm, exact=True)
+            assert restored_positions.obs["instance_id"].tolist() == list(identifiers)
+            assert restored_positions.obs["instance_id"].dtype == np.dtype(np.uint64)
+            assert get_table_keys(restored_positions) == ("Roi1_Segmentation", "region", "instance_id")
         assert isinstance(table.X, sparse.csr_array | sparse.csr_matrix)
         assert_array_equal(table.X.data, [3, 5])
-        assert_array_equal(table.obs["instance_id"], [70000, 2])
+        assert table.obs["instance_id"].tolist() == list(identifiers)
+        assert table.obs["instance_id"].dtype == np.dtype(np.uint64)
         assert get_table_keys(table) == ("Roi1_Segmentation", "region", "instance_id")
-        assert restored.shapes["Roi1_Boundaries"].index.tolist() == [70000, 2]
+        for name in ("Roi1_Boundaries", "Roi1_CellCoordinates"):
+            assert restored.shapes[name].index.tolist() == list(identifiers)
+            assert result.shapes[name].index.dtype == pd.ArrowDtype(pa.uint64())
+            # GeoParquet round trips retain exact IDs in native uint64 indexes.
+            assert restored.shapes[name].index.dtype == np.dtype(np.uint64)
+        assert np.unique(restored.labels["Roi1_Segmentation"].data.compute()).tolist() == sorted((0, *identifiers))
+        assert restored.points["Roi1_TranscriptList"].compute()["cell"].tolist() == [identifiers[1], identifiers[0], 0]
         assert_array_equal(restored.points["Roi1_TranscriptList"].compute()["z_raw"], [1, 2, 1])
 
     @pytest.mark.data
