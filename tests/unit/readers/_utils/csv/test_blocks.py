@@ -35,6 +35,54 @@ def _partitions(frame: dd.DataFrame) -> list[pd.DataFrame]:
 
 
 class TestReadCsvBlocks:
+    @pytest.mark.parametrize("record", [b"18446744073709551615,NA,0.10000000000000002\n", b"0,,1e-400\n"])
+    def test_native_types_preserve_exact_ids_rounding_and_literal_text(self, tmp_path: Path, record: bytes) -> None:
+        path = _file(tmp_path, b"id,gene,x\n" + record)
+        types = {"id": pa.uint64(), "gene": pa.string(), "x": pa.float64()}
+
+        frame = read_csv_blocks(path, header=_HEADER, columns=_HEADER, context=_CONTEXT, column_types=types)
+        result = frame.compute()
+
+        assert frame.dtypes.tolist() == result.dtypes.tolist() == [pd.ArrowDtype(dtype) for dtype in types.values()]
+        if record.startswith(b"0,"):
+            assert result.iloc[0].tolist() == [0, "", 0.0]
+        else:
+            assert result.iloc[0].tolist() == [2**64 - 1, "NA", 0.10000000000000002]
+        assert not result.isna().any(axis=None)
+
+    @pytest.mark.parametrize("token", [b"", b"NA", b"-1", b"18446744073709551616"])
+    def test_invalid_unsigned_values_fail_only_when_computed(self, tmp_path: Path, token: bytes) -> None:
+        path = _file(tmp_path, b"id,gene,x\n" + token + b",A,0\n")
+        frame = read_csv_blocks(
+            path, header=_HEADER, columns=("id",), context=_CONTEXT, column_types={"id": pa.uint64()}
+        )
+
+        with pytest.raises(ReaderFormatError) as caught:
+            frame.compute()
+
+        assert caught.value.context == _CONTEXT
+        assert caught.value.path == path
+        assert isinstance(caught.value.__cause__, pa.ArrowInvalid)
+
+    def test_empty_partition_keeps_declared_types(self, tmp_path: Path) -> None:
+        path = _file(tmp_path, b"id,gene,x\n")
+        types = {"id": pa.uint64(), "x": pa.float64()}
+
+        frame = read_csv_blocks(path, header=_HEADER, columns=tuple(types), context=_CONTEXT, column_types=types)
+
+        result = frame.compute()
+        assert result.empty
+        assert result.dtypes.tolist() == frame.dtypes.tolist() == [pd.ArrowDtype(dtype) for dtype in types.values()]
+
+    def test_native_quoting_and_source_line_endings(self, tmp_path: Path) -> None:
+        path = _file(tmp_path, b'\xef\xbb\xbfid,gene,x\r\n001,"say ""hi""",0\r\n002,A"B,1')
+
+        result = read_csv_blocks(path, header=_HEADER, columns=("gene", "id"), context=_CONTEXT).compute()
+
+        assert list(result.columns) == ["gene", "id"]
+        assert result["gene"].tolist() == ['say "hi"', 'A"B']
+        assert result["id"].tolist() == ["001", "002"]
+
     def test_construction_reads_no_record_and_serializes(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _file(tmp_path, b"id,gene,x\n1,A,0.5\n")
         parser = mocker.spy(_blocks, "_read_block")
@@ -133,7 +181,7 @@ class TestReadCsvBlocks:
         first = frame.partitions[0].compute()["gene"].tolist()
         assert first
         assert set(first) == {"A"}
-        with pytest.raises(ReaderFormatError, match="malformed CSV records") as raised:
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as raised:
             frame.partitions[-1].compute()
 
         assert raised.value.context == _CONTEXT
@@ -147,3 +195,22 @@ class TestReadCsvBlocks:
         result = read_csv_blocks(path, header=_HEADER, columns=("gene",), context=_CONTEXT).compute()
 
         assert result["gene"].tolist() == ["A"]
+
+
+class TestReadBlock:
+    @pytest.mark.parametrize("record", [b"1,A,0\n", b"1,A\n", b"1,\xff,0\n"])
+    def test_owned_buffer_closes_on_success_and_parse_failure(
+        self, tmp_path: Path, mocker: MockerFixture, record: bytes
+    ) -> None:
+        owner = pa.BufferReader(record)
+        mocker.patch.object(_blocks.pa, "BufferReader", return_value=owner)
+        schema = pa.schema([(name, pa.string()) for name in _HEADER])
+        spec = _blocks._BlockSpec(ArtifactFile(tmp_path / "transcripts.csv"), _HEADER, schema, _CONTEXT)
+
+        if record == b"1,A,0\n":
+            assert _blocks._read_block(record, spec, first=False)["gene"].tolist() == ["A"]
+        else:
+            with pytest.raises(ReaderFormatError):
+                _blocks._read_block(record, spec, first=False)
+
+        assert owner.closed

@@ -9,13 +9,14 @@ header line from the first block, and parses the requested columns with Arrow,
 which checks that every record has the header's width even for unprojected
 columns. A record longer than a block leaves the blocks it spans empty; they
 become empty partitions. Building the frame reads no record; the caller has
-already read the header with :func:`read_csv_header`.
+already read the header with :func:`csv_header`.
 
-Blocks are parsed with the options of the eager batch reader
-:func:`iter_csv_batches`, so Arrow does not reject every malformed quote either.
+Blocks are parsed directly with Arrow, which accepts some malformed quoting.
 Columns are text unless the caller supplies Arrow types. No text is a null:
 empty fields are empty strings, and an empty field in a column with a non-text
-type is a malformed record.
+type is a malformed record. The Arrow parser retains its 1 MiB input block
+size inside each Dask partition; the Dask block target does not bound the
+allocation of an oversized record.
 """
 
 from __future__ import annotations
@@ -27,10 +28,11 @@ from typing import TYPE_CHECKING, cast
 import dask.dataframe as dd
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pacsv
 from dask import delayed
 from dask.bytes import read_bytes
 
-from spatialdata_io.readers._utils.csv._batches import read_records
+from spatialdata_io.readers._utils.csv._arrow import csv_errors
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -62,13 +64,23 @@ def _empty(spec: _BlockSpec) -> pd.DataFrame:
 def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
     """Parse one owned byte block into the projected Arrow-backed columns."""
     if first:
-        # The header is one physical line, as read_csv_header requires.
+        # The header is one physical line, as csv_header requires.
         newline = block.find(b"\n")
         block = block[newline + 1 :] if newline >= 0 else b""
     if not block:
         return _empty(spec)
-    with pa.BufferReader(block) as source:
-        table = read_records(source, spec.names, spec.schema, skip_rows=0, context=spec.context, path=spec.path)
+    with pa.BufferReader(block) as source, csv_errors(context=spec.context, path=spec.path):
+        table = pacsv.read_csv(
+            source,
+            read_options=pacsv.ReadOptions(column_names=list(spec.names), block_size=1024 * 1024, use_threads=False),
+            parse_options=pacsv.ParseOptions(newlines_in_values=True),
+            convert_options=pacsv.ConvertOptions(
+                include_columns=spec.schema.names,
+                column_types=spec.schema,
+                null_values=[],
+                strings_can_be_null=False,
+            ),
+        )
     return table.to_pandas(types_mapper=pd.ArrowDtype)
 
 

@@ -169,7 +169,7 @@ class TestReadTranscripts:
         mocker.patch.object(transcript_module, "read_csv_blocks", partial(read_csv_blocks, block_bytes=256))
         points = read_transcripts(source, features=_FEATURES, cell_population=None)
         assert not points.partitions[0].compute().empty
-        with pytest.raises(ReaderFormatError, match="malformed CSV records"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV"):
             points.partitions[-1].compute()
 
     def test_model_failure_restores_warning_filters(self, tmp_path: Path, mocker: MockerFixture) -> None:

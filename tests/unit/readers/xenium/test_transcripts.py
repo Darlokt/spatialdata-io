@@ -292,14 +292,14 @@ class TestReadTranscripts:
         path = bundle.root / "transcripts.csv"
         path.write_text(path.read_text() + "1,2\n")
 
-        with pytest.raises(ReaderFormatError, match="malformed CSV records") as caught:
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
             _read(bundle, "csv").compute()
         assert caught.value.context == CONTEXT
 
     # CSV has no null spelling: an empty numeric field is malformed, and NaN text is a nonfinite number.
     @pytest.mark.parametrize(
         ("value", "match"),
-        [("", r"malformed CSV records .*invalid value ''"), ("NA", "malformed CSV records"), ("NaN", "nonfinite qv")],
+        [("", r"malformed CSV .*invalid value ''"), ("NA", "malformed CSV"), ("NaN", "nonfinite qv")],
         ids=["empty", "na", "nan"],
     )
     def test_csv_numeric_fields_hold_finite_numbers(self, tmp_path: Path, value: str, match: str) -> None:
