@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -222,7 +223,7 @@ class TestHalfUnits:
     """Each bound is half a unit in the last printed decimal place."""
 
     def test_bounds(self, tmp_path: Path) -> None:
-        tokens = pa.array(["806", "159172.222222222", "5.", ".25", "1.5e3", "-2E-2", "+7"])
+        tokens = pa.array(["806", "159172.222222222", "5.", ".25", "1.5e+3", "-2E-2", "+7"])
         np.testing.assert_allclose(
             half_units(tokens, _path(tmp_path), "cell metadata", "x"),
             [0.5, 5e-10, 0.5, 5e-3, 50.0, 5e-3, 0.5],
@@ -230,9 +231,21 @@ class TestHalfUnits:
             atol=0,
         )
 
-    def test_rejects_non_decimal(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("token", ["0x10", "", " ", "1\n", " 1", "1 ", "nan", "inf", ".", "1e+-3", "1_0"])
+    def test_rejects_non_decimal(self, tmp_path: Path, token: str) -> None:
         with pytest.raises(ReaderFormatError, match="non-decimal"):
-            half_units(pa.array(["1", "0x10"]), _path(tmp_path), "cell metadata", "x")
+            half_units(pa.array(["1", token]), _path(tmp_path), "cell metadata", "x")
+
+    @pytest.mark.parametrize("chunked", [False, True])
+    def test_every_representable_half_width_rounds_once(self, tmp_path: Path, *, chunked: bool) -> None:
+        powers = range(-323, 309)
+        tokens = [f"0e{power}" for power in powers]
+        column = pa.chunked_array([tokens[:317], tokens[317:]]) if chunked else pa.array(tokens)
+        # Exact rational arithmetic gives an independent oracle, including subnormals.
+        expected = [float(Fraction(10) ** power / 2) for power in powers]
+        with np.errstate(all="raise"):
+            actual = half_units(column, _path(tmp_path), "cell metadata", "x")
+        np.testing.assert_array_equal(actual, expected)
 
     def test_representable_extremes_and_exponent_cancellation(self, tmp_path: Path) -> None:
         tokens = ["0e-323", "-0.000e-320", "0e308", "0." + "0" * 400 + "e400"]
@@ -240,9 +253,21 @@ class TestHalfUnits:
             half_units(pa.array(tokens), _path(tmp_path), "cell metadata", "x"), [5e-324, 5e-324, 5e307, 0.5]
         )
 
+    @pytest.mark.parametrize(("sign", "expected"), [("+", 500.0), ("-", 0.0005)])
+    def test_zero_padded_exponent(self, tmp_path: Path, sign: str, expected: float) -> None:
+        tokens = pa.array(["0e" + sign + "0" * 10_000 + "3"])
+        np.testing.assert_array_equal(half_units(tokens, _path(tmp_path), "cell metadata", "x"), [expected])
+
     @pytest.mark.parametrize(
         "token",
-        ["5e-324", "0e-400", "0e309", "0e9223372036854775808", "0.0e-9223372036854775808"],
+        [
+            "5e-324",
+            "0e-400",
+            "0e309",
+            "0e9223372036854775807",
+            "0e9223372036854775808",
+            "0.0e-9223372036854775808",
+        ],
     )
     def test_unrepresentable_width_has_artifact_context(self, tmp_path: Path, token: str) -> None:
         with np.errstate(all="raise"), pytest.raises(ReaderFormatError, match=r"rounding.*(width|exponent)") as caught:

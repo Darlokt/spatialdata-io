@@ -1,7 +1,7 @@
 """CosMx Arrow types, semantic validation and printed placement precision.
 
 Arrow parses numeric fields directly to their declared widths. Placement
-coordinates retain their source spelling to derive exact printed rounding
+coordinates retain their source spelling to derive printed rounding
 intervals; other annotations remain typed throughout ingestion. Named fields
 accept any order and additional columns, with unique nonempty names without NUL.
 
@@ -85,6 +85,10 @@ TRANSCRIPT_OPTIONAL = ("z", "CellComp", CELL)
 _NUMERIC_METADATA = re.compile(r"Area|Area\.um2|AspectRatio|Width|Height|(?:Mean|Max)\..+")
 _FOV_POSITION_PIXELS = (("x_px", "y_px"), ("x_global_px", "y_global_px"))
 _DECIMAL = r"[+-]?(?:\d+(?:\.(?P<fraction>\d*))?|\.(?P<leading>\d+))(?:[eE](?P<exponent>[+-]?\d+))?"
+_MIN_HALF_POWER, _MAX_HALF_POWER = -323, 308
+# Round each representable decimal half-unit once; halving a rounded power of
+# ten can misround by one float64 step, including at subnormal widths.
+_HALF_UNITS = np.array([float(f"5e{power - 1}") for power in range(_MIN_HALF_POWER, _MAX_HALF_POWER + 1)])
 
 
 def schema_error(path: ArtifactFile, artifact: Artifact, *, found: str, expected: str) -> ReaderFormatError:
@@ -225,30 +229,45 @@ def half_units(
 ) -> npt.NDArray[np.float64]:
     """Return half a unit in the last printed decimal place of every source value.
 
-    This is the exact rounding bound of each written coordinate, independent of
-    how many digits a given export happens to print.
+    Each bound is rounded once to float64, independently of how many digits a
+    given export happens to print.
     """
-    lexical = pd.Series(pd.arrays.ArrowExtensionArray(column), dtype=STRING_DTYPE)
-    if not lexical.str.fullmatch(_DECIMAL).all():
+    parts = pc.call_function("extract_regex", [column], options=pc.ExtractRegexOptions(f"^{_DECIMAL}$"))
+    if parts.null_count:
         raise schema_error(path, artifact, found=f"non-decimal {name!r} values", expected="plain decimal coordinates")
-    # Unmatched optional groups are missing or empty depending on the string storage.
-    parts = lexical.str.extract(f"^{_DECIMAL}$").fillna("")
-    fraction = (parts["fraction"].str.len() + parts["leading"].str.len()).to_numpy(dtype=np.int64)
+
+    fraction, leading, exponent_text = parts.flatten()
+    fraction = (
+        pc.call_function(
+            "add", [pc.call_function("utf8_length", [fraction]), pc.call_function("utf8_length", [leading])]
+        )
+        .to_numpy()
+        .astype(np.int64, copy=False)
+    )
+    # Optional groups are empty strings; Arrow's integer parser rejects '+'.
+    exponent_text = pc.call_function(
+        "if_else",
+        [
+            pc.call_function("equal", [exponent_text, ""]),
+            "0",
+            pc.call_function("utf8_ltrim", [exponent_text], options=pc.TrimOptions("+")),
+        ],
+    )
     expected = "finite positive float64 printed rounding half-widths"
     try:
-        exponent = parts["exponent"].mask(parts["exponent"].eq(""), "0").astype(np.int64).to_numpy()
-    except (ValueError, OverflowError) as error:
+        exponent = pc.cast(exponent_text, pa.int64(), safe=True).to_numpy()
+    except pa.ArrowInvalid as error:
         raise schema_error(
             path, artifact, found=f"unrepresentable {name!r} rounding exponent", expected=expected
         ) from error
+
     # Compare before subtracting: a very negative exponent must not wrap to a
-    # positive power. 10**-323 / 2 is the smallest nonzero float64 half-unit.
-    if (exponent < fraction - 323).any():
+    # positive power. Powers -323 through 308 have finite positive half-units.
+    if (exponent < fraction + _MIN_HALF_POWER).any():
         raise schema_error(
             path, artifact, found=f"{name!r} rounding half-widths that underflow to zero", expected=expected
         )
-    with np.errstate(over="ignore", under="ignore"):
-        widths = 0.5 * np.power(10.0, exponent - fraction)
-    if not np.isfinite(widths).all():
+    power = exponent - fraction
+    if (power > _MAX_HALF_POWER).any():
         raise schema_error(path, artifact, found=f"nonfinite {name!r} rounding half-widths", expected=expected)
-    return widths
+    return _HALF_UNITS[power - _MIN_HALF_POWER]

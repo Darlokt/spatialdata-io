@@ -121,7 +121,8 @@ def _intervals(
 ) -> dict[Sign, tuple[float, float]]:
     """Return the offset interval consistent with every selected cell, for each sign."""
     local, global_ = samples.local[rows], samples.global_[rows]
-    with np.errstate(over="ignore", invalid="ignore"):
+    # A subnormal round-off allowance may underflow; printed bounds still apply.
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
         rounding_tolerance = (
             samples.local_half[rows]
             + samples.global_half[rows]
@@ -230,7 +231,5 @@ def solve_placements(
                     found=f"FOV {fov} without cells or a pixel position",
                     expected="a placement for every FOV with rasters",
                 )
-        if not np.isfinite(offsets).all():
-            raise _error(path, found=f"FOV {fov} nonfinite placement", expected="finite affine offsets")
         placements[fov] = Placement(signs[0], signs[1], offsets[0], offsets[1])
     return placements

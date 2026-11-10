@@ -191,6 +191,13 @@ class TestSolvePlacements:
         assert np.isfinite([placement.offset_x, placement.offset_y]).all()
         assert placement.offset_x == pytest.approx(1.5e308, rel=1e-15)
 
+    def test_subnormal_roundoff_allowance_under_strict_numpy_errors(self, tmp_path: Path) -> None:
+        samples = _samples([1e-300, 2e-300], [3e-300, 4e-300], half=5e-323)
+        with np.errstate(all="raise"):
+            placement = _solve(tmp_path, [1, 1], (samples, samples))[1]
+        assert placement.sign_x == placement.sign_y == 1
+        assert placement.offset_x == placement.offset_y == pytest.approx(2e-300, rel=1e-15, abs=0)
+
     def test_position_must_agree_with_cells(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="outside cell-derived"):
             _solve(

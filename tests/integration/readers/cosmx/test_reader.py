@@ -71,6 +71,19 @@ def _labels(result: SpatialData, fov: int) -> DataArray:
 class TestCosmx:
     """Assemble supported exports through the public reader."""
 
+    def test_position_half_width_does_not_round_twice(self, tmp_path: Path) -> None:
+        (tmp_path / "Run_exprMat_file.csv").write_text("fov,cell_ID,A\n1,1,1\n1,2,2\n")
+        (tmp_path / "Run_metadata_file.csv").write_text(
+            "fov,cell_ID,CenterX_local_px,CenterY_local_px,CenterX_global_px,CenterY_global_px\n"
+            "1,1,0.0,1.0,50000000000000029360128.0,11.0\n"
+            "1,2,99999999999999991611392.0,3.0,150000000000000020971520.0,13.0\n"
+        )
+        (tmp_path / "Run_fov_positions_file.csv").write_text("fov,x_px,y_px\n1,0e23,10.0\n")
+        # Even with float round-off allowance, the cell interval starts one float
+        # above 5e22. Rounding 10**23 before halving spuriously admits that point.
+        with pytest.raises(ReaderFormatError, match="outside cell-derived"):
+            cosmx(tmp_path, include_transcripts=False)
+
     @pytest.mark.parametrize("compressed", [False, True])
     def test_flat_2021_public_contract(self, tmp_path: Path, *, compressed: bool) -> None:
         fixture = write_cosmx_dataset(tmp_path, compressed=compressed)
