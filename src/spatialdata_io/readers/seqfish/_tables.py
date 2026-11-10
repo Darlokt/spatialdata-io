@@ -56,8 +56,6 @@ _TABLE_CONTEXT = ReaderErrorContext("seqfish", "table")
 # At two source bytes per count, its uint64 value payload is at most eight
 # times this block target; parser allocations, dense copies and CSR are extra.
 _BATCH_BYTES = 1024 * 1024
-# Quoted fields may contain newlines.
-_PARSE = pacsv.ParseOptions(newlines_in_values=True)
 
 
 def _count_block(batch: pa.RecordBatch) -> sparse.csr_array:
@@ -76,7 +74,6 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
         pacsv.open_csv(
             path,
             read_options=pacsv.ReadOptions(block_size=_BATCH_BYTES, use_threads=False),
-            parse_options=_PARSE,
             convert_options=pacsv.ConvertOptions(
                 column_types=types, include_columns=types.names, null_values=[], strings_can_be_null=False
             ),
@@ -104,7 +101,8 @@ def _read_cells(path: ArtifactFile) -> pd.DataFrame:
     with csv_errors(context=CELLS_CONTEXT, path=path):
         source = pacsv.read_csv(
             path,
-            parse_options=_PARSE,
+            # Quoted annotations may contain newlines.
+            parse_options=pacsv.ParseOptions(newlines_in_values=True),
             convert_options=pacsv.ConvertOptions(
                 column_types=CELL_TYPES, include_columns=list(CELL_TYPES), null_values=[], strings_can_be_null=False
             ),

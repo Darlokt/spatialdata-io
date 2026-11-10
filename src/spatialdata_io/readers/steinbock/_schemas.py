@@ -31,28 +31,25 @@ for other sources), one row per image::
 
 ``image``, ``width_px`` and ``height_px`` are required, the two acquisition
 extents (micrometres, from the IMC ROI) are optional but come as a pair; other
-columns are ignored. Arrow reads the supported fields as UTF-8 strings (a
-byte-order mark is allowed). Every record has the header's width; NUL is
-rejected in all header names and supported fields, while ignored extra values
-are not scanned. Image names are unique and nonempty in every row; numbers are
-interpreted only in discovered samples. Dimensions use checked uint64 parsing
-with a positive int64 bound; extents retain exact Decimal/Fraction arithmetic
-and are either both empty (no IMC calibration) or both finite and positive.
+columns are ignored. Arrow reads ``image`` as a literal UTF-8 string (a
+byte-order mark is allowed), the dimensions as uint64 and the extents as
+float64, in its typed CSV grammar, for every row; an empty extent is missing.
+Every record has the header's width. Image names are unique, nonempty and
+NUL-free in every row; NUL is also rejected in header names. Dimensions and
+extents are checked only for discovered samples: dimensions are positive, and
+extents are either both empty (no IMC calibration) or both give finite
+positive micrometres per pixel, ``extent / dimension`` in float64.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from fractions import Fraction
-from math import isfinite
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
 
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -74,6 +71,13 @@ CELL_ID_DTYPE = pd.ArrowDtype(pa.uint64())
 _OBJECT_NAME = re.compile(r"Object ([0-9]+) in (.+)")
 _IMAGE_FIELDS = frozenset({"image", "width_px", "height_px"})
 _EXTENT_FIELDS = frozenset({"acquisition_width_um", "acquisition_height_um"})
+IMAGE_METADATA_TYPES = {
+    "image": pa.string(),
+    "width_px": pa.uint64(),
+    "height_px": pa.uint64(),
+    "acquisition_width_um": pa.float64(),
+    "acquisition_height_um": pa.float64(),
+}
 _LEGACY_DILUTION = "Final_Concentration"
 
 
@@ -250,7 +254,7 @@ def metadata_columns(obs: pd.DataFrame, var: pd.DataFrame, path: ArtifactFile) -
 
 
 def image_metadata_types(header: Sequence[str], path: ArtifactFile) -> pa.Schema:
-    """Declare supported string fields in source order after unique header parsing."""
+    """Declare the supported fields in source order after unique header parsing."""
     if (
         any("\x00" in name for name in header)
         or not _IMAGE_FIELDS.issubset(header)
@@ -264,112 +268,56 @@ def image_metadata_types(header: Sequence[str], path: ArtifactFile) -> pa.Schema
                 "NUL-free names, image, width_px, height_px and either both acquisition extent fields or neither"
             ),
         )
-    return pa.schema([(name, pa.string()) for name in header if name in _IMAGE_FIELDS or name in _EXTENT_FIELDS])
-
-
-def _physical_extent(text: str, path: ArtifactFile, *, image: str, field: str) -> Decimal:
-    """Parse exact decimal text and bound its magnitude before any exact rational use.
-
-    Decimal comparisons and float conversion reject huge exponents cheaply;
-    building a Fraction from unchecked text such as ``1e999999999`` would not.
-    """
-    try:
-        value = Decimal(text)
-    except InvalidOperation as error:
-        raise ReaderFormatError(
-            context=IMAGE_METADATA_CONTEXT,
-            path=path,
-            found=f"{image!r} {field}={text!r}",
-            expected="finite positive numeric metadata",
-        ) from error
-    if not value.is_finite() or value <= 0 or not isfinite(float(value)) or float(value) <= 0:
-        raise ReaderFormatError(
-            context=IMAGE_METADATA_CONTEXT,
-            path=path,
-            found=f"{image!r} {field}={text!r}",
-            expected="finite positive physical extents",
-        )
-    return value
+    return pa.schema([(name, IMAGE_METADATA_TYPES[name]) for name in header if name in IMAGE_METADATA_TYPES])
 
 
 def normalize_image_metadata(table: pa.Table, selected: set[str], path: ArtifactFile) -> dict[str, ImageMetadata]:
-    """Validate projected strings globally and interpret only selected image rows."""
+    """Validate every image identity and return the dimensions and spacing of the ``selected`` images."""
     frame = table.to_pandas(types_mapper=pd.ArrowDtype)
     names = frame["image"]
-    if names.eq("").any() or not names.is_unique:
+    if names.eq("").any() or not names.is_unique or names.str.contains("\x00", regex=False).any():
         raise ReaderFormatError(
             context=IMAGE_METADATA_CONTEXT,
             path=path,
-            found="empty or duplicate image names",
+            found="empty, duplicate or NUL-containing image names",
             expected="unique exact image basenames",
         )
-    if any(frame[name].str.contains("\x00", regex=False).any() for name in frame):
-        raise ReaderFormatError(
-            context=IMAGE_METADATA_CONTEXT,
-            path=path,
-            found="NUL-containing metadata",
-            expected="NUL-free supported fields",
-        )
     frame = frame.set_index("image").loc[names.isin(selected).array]
-    for field in ("width_px", "height_px"):
-        try:
-            # Arrow casts do not trim the spaces/tabs accepted by its CSV parser.
-            values = pa.array(frame[field].str.strip(" \t"), type=pa.string())
-            dimensions = pc.cast(values, pa.uint64(), safe=True)
-        except pa.ArrowInvalid as error:
-            raise ReaderFormatError(
-                context=IMAGE_METADATA_CONTEXT,
-                path=path,
-                found=f"invalid {field} in selected image metadata",
-                expected="positive integral dimensions in Arrow's uint64 grammar",
-            ) from error
-        bounds = pc.call_function("min_max", [dimensions]).as_py()
-        if len(dimensions) and (bounds["min"] == 0 or bounds["max"] > 2**63 - 1):
-            raise ReaderFormatError(
-                context=IMAGE_METADATA_CONTEXT,
-                path=path,
-                found=f"{field} outside its supported range",
-                expected="positive integral dimensions at most 9223372036854775807",
-            )
-        frame[field] = pd.arrays.ArrowExtensionArray(dimensions)
 
-    fields = ["width_px", "height_px"]
+    dimensions = frame[["width_px", "height_px"]]
+    if dimensions.isna().any(axis=None) or dimensions.eq(0).any(axis=None):
+        raise ReaderFormatError(
+            context=IMAGE_METADATA_CONTEXT,
+            path=path,
+            found="missing or zero dimensions in selected image metadata",
+            expected="positive integral width_px and height_px",
+        )
+
+    spacings: dict[str, tuple[float, float]] = {}
     if "acquisition_width_um" in frame:
-        fields.extend(("acquisition_width_um", "acquisition_height_um"))
-    result: dict[str, ImageMetadata] = {}
-    for name, width, height, *extents in frame[fields].itertuples(name=None):
-        shape = (int(height), int(width))
-        spacing = None
-        if extents:
-            x, y = extents
-            spacing = _physical_spacing(x, y, shape, image=name, path=path)
-        result[name] = ImageMetadata(shape, spacing)
-    return result
+        extents = frame[["acquisition_width_um", "acquisition_height_um"]]
+        present = extents.notna()
+        if present.nunique(axis=1).gt(1).any():
+            raise ReaderFormatError(
+                context=IMAGE_METADATA_CONTEXT,
+                path=path,
+                found="partial physical extents in selected image metadata",
+                expected="both acquisition extents or two empty fields",
+            )
+        calibrated = present.all(axis=1).to_numpy()
+        # Rounding the extent to float64 before the division can differ from
+        # the exact decimal quotient by one unit in the last place.
+        ratios = extents[calibrated].to_numpy(np.float64) / dimensions[calibrated].to_numpy(np.float64)
+        if not (np.isfinite(ratios) & (ratios > 0)).all():
+            raise ReaderFormatError(
+                context=IMAGE_METADATA_CONTEXT,
+                path=path,
+                found="nonpositive, nonfinite or underflowing spacing in selected image metadata",
+                expected="finite positive acquisition extents giving positive micrometres per pixel",
+            )
+        spacings = {name: (x, y) for name, (x, y) in zip(frame.index[calibrated], ratios.tolist(), strict=True)}
 
-
-def _physical_spacing(
-    x: str, y: str, shape: tuple[int, int], *, image: str, path: ArtifactFile
-) -> tuple[float, float] | None:
-    """Divide exact decimal extents by integer dimensions before rounding the spacing."""
-    if bool(x) != bool(y):
-        raise ReaderFormatError(
-            context=IMAGE_METADATA_CONTEXT,
-            path=path,
-            found=f"partial physical extents for {image!r}",
-            expected="both acquisition extents or two empty fields",
-        )
-    if not x:
-        return None
-    # Exact rational division avoids ambient Decimal-context rounding.
-    width_um = _physical_extent(x, path, image=image, field="acquisition_width_um")
-    height_um = _physical_extent(y, path, image=image, field="acquisition_height_um")
-    height, width = shape
-    spacing = (float(Fraction(width_um) / width), float(Fraction(height_um) / height))
-    if not all(isfinite(value) and value > 0 for value in spacing):
-        raise ReaderFormatError(
-            context=IMAGE_METADATA_CONTEXT,
-            path=path,
-            found=f"unrepresentable spacing for {image!r}",
-            expected="finite positive micrometres per pixel",
-        )
-    return spacing
+    return {
+        name: ImageMetadata((int(height), int(width)), spacings.get(name))
+        for name, width, height in zip(frame.index, dimensions["width_px"], dimensions["height_px"], strict=True)
+    }

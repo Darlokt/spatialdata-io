@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-import pyarrow as pa
 import pyarrow.csv as pacsv
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Affine, Scale
@@ -61,14 +60,10 @@ if TYPE_CHECKING:
 _AXES = ("c", "y", "x")
 _MATRIX_SHAPE = (3, 3)
 _CONTEXT = ReaderErrorContext("xenium", "aligned image")
-_CSV_BLOCK_BYTES = 64 * 1024
 
 
 def read_alignment(path: ArtifactFile, *, context: ReaderErrorContext) -> NDArray[np.float64]:
     """Read a 3 x 3 alignment matrix without header, with last row ``[0, 0, 1]``.
-
-    Records should fit a 64 KiB parser block regardless of alignment. Excess
-    rows fail after bounded read-ahead, without materializing the rest of the file.
 
     Raises
     ------
@@ -76,32 +71,17 @@ def read_alignment(path: ArtifactFile, *, context: ReaderErrorContext) -> NDArra
         If the file is not three records of three finite numbers, has another
         last row, or is not invertible.
     """
-    batches: list[pa.RecordBatch] = []
-    rows = 0
-    with (
-        path.open("rb") as handle,
-        csv_errors(context=context, path=path),
-        pacsv.open_csv(
-            handle,
-            read_options=pacsv.ReadOptions(
-                column_names=ALIGNMENT_TYPES.names, block_size=_CSV_BLOCK_BYTES, use_threads=False
-            ),
+    with csv_errors(context=context, path=path):
+        table = pacsv.read_csv(
+            path,
+            read_options=pacsv.ReadOptions(column_names=ALIGNMENT_TYPES.names, use_threads=False),
             convert_options=pacsv.ConvertOptions(
                 column_types=ALIGNMENT_TYPES,
                 include_columns=ALIGNMENT_TYPES.names,
                 null_values=[],
                 strings_can_be_null=False,
             ),
-        ) as reader,
-    ):
-        for batch in reader:
-            rows += batch.num_rows
-            if rows > _MATRIX_SHAPE[0]:
-                raise ReaderFormatError(
-                    context=context, path=path, found="more than three records", expected="a 3 x 3 alignment matrix"
-                )
-            batches.append(batch)
-        table = pa.Table.from_batches(batches, schema=reader.schema)
+        )
     matrix = np.column_stack([column.to_numpy() for column in table.columns])
     if (
         matrix.shape != _MATRIX_SHAPE

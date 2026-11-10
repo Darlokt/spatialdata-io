@@ -8,8 +8,8 @@ quoted newlines are not. Records must have the full header width, even in
 columns that are not read.
 
 ``global_x``/``global_y`` become float64 ``x``/``y`` in micrometres, in the
-``global`` frame (identity). ``global_z`` is a stack index and stays the
-annotation ``z_raw``. ``gene`` is categorical in the order of the paired count
+``global`` frame (identity). ``global_z`` is a float64 z-stack position and
+stays the annotation ``z_raw``. ``gene`` is categorical in the order of the paired count
 header, which includes controls and features without counts; an unknown gene
 fails when its partition is computed. Assignments to current cells are
 ``cell_id`` (the instance key, checked against the current cell population when

@@ -160,7 +160,7 @@ class TestTransformations:
 
 
 class TestSquareProducts:
-    """Unsigned row identifiers leave signed grid coordinates unchanged."""
+    """Row-position identifiers leave signed grid coordinates unchanged."""
 
     def test_identifiers_and_signed_coordinates(self, tmp_path: Path) -> None:
         coordinates = np.array([[-(2**31), -1], [0, 0], [2**32 - 1, 2**31]], dtype=np.int64)
@@ -176,7 +176,9 @@ class TestSquareProducts:
         points, linked = _square_products(square, {"global": Identity()})
 
         frame = points.compute()
-        assert frame.index.dtype == linked.obs["instance_id"].dtype == np.uint64
+        # The points keep a RangeIndex, which stores no per-row array; the table IDs are uint64.
+        assert isinstance(frame.index, pd.RangeIndex)
+        assert linked.obs["instance_id"].dtype == np.uint64
         assert_array_equal(frame.index, [0, 1, 2])
         assert_array_equal(linked.obs["instance_id"], [0, 1, 2])
         assert linked.obs_names.tolist() == ["0", "1", "2"]

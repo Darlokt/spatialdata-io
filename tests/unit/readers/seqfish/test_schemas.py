@@ -50,11 +50,14 @@ class TestCountTypes:
 class TestValidateCellColumns:
     """Require named metadata independent of input column order."""
 
-    def test_order_and_extras(self, tmp_path: Path) -> None:
-        validate_cell_columns(("extra", "center_y", "area", "label", "center_x"), ArtifactFile(tmp_path / "cells.csv"))
+    @pytest.mark.parametrize(
+        "header", [("extra", "center_y", "area", "label", "center_x"), ("", "label", "area", "center_x", "center_y")]
+    )
+    def test_order_extras_and_unnamed_index(self, tmp_path: Path, header: tuple[str, ...]) -> None:
+        validate_cell_columns(header, ArtifactFile(tmp_path / "cells.csv"))
 
-    @pytest.mark.parametrize("header", [("label", "area"), ("label", "area", "center_x", "center_y", "")])
-    def test_missing_or_empty_fields(self, tmp_path: Path, header: tuple[str, ...]) -> None:
+    @pytest.mark.parametrize("header", [("label", "area"), ("label", "area", "center_x")])
+    def test_missing_fields(self, tmp_path: Path, header: tuple[str, ...]) -> None:
         with pytest.raises(ReaderFormatError) as caught:
             validate_cell_columns(header, ArtifactFile(tmp_path / "cells.csv"))
         assert caught.value.context.artifact == "CellCoordinates"
@@ -72,12 +75,13 @@ class TestTranscriptTypes:
             "z": pa.uint64(),
             "cell": pa.uint64(),
         }
-        assert list(transcript_types(("y", "x", "name"), ArtifactFile(tmp_path / "tx.csv"))) == ["name", "x", "y"]
+        # Ignored annotations may have any name, such as the unnamed index pandas writes.
+        header = ("", "y", "x", "name", "\x00")
+        assert list(transcript_types(header, ArtifactFile(tmp_path / "tx.csv"))) == ["name", "x", "y"]
 
-    @pytest.mark.parametrize("header", [("x", "y"), ("name", "x", "y", "\x00")])
-    def test_required_and_unusable(self, tmp_path: Path, header: tuple[str, ...]) -> None:
+    def test_required_fields(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError) as caught:
-            transcript_types(header, ArtifactFile(tmp_path / "tx.csv"))
+            transcript_types(("x", "y"), ArtifactFile(tmp_path / "tx.csv"))
         assert caught.value.context.artifact == "TranscriptList"
 
 
@@ -175,9 +179,7 @@ class TestBoundaryFeatures:
         assert validated[0]["properties"] == {"id": str(2**64 - 1), "objectType": "cell", "annotation": "retained"}
         assert validated is features
 
-    @pytest.mark.parametrize(
-        ("identifier", "expected"), [("01", 1), ("0x10", 16), (7, 7), (str(2**63), 2**63), (str(2**64 - 1), 2**64 - 1)]
-    )
+    @pytest.mark.parametrize(("identifier", "expected"), [("01", 1), (7, 7), (str(2**64 - 1), 2**64 - 1)])
     def test_ids_are_cast_with_arrow(self, tmp_path: Path, identifier: str | int, expected: int) -> None:
         document = _boundary_document()
         features = document["features"]
@@ -185,20 +187,7 @@ class TestBoundaryFeatures:
         features[0]["id"] = identifier
         assert boundary_features(document, ArtifactFile(tmp_path / "boundaries.geojson"))[1].tolist() == [expected]
 
-    @pytest.mark.parametrize(
-        "identifier",
-        [" 1", "1.0", "+1", "a", -1, "-1", 2**64, str(2**64)],
-        ids=[
-            "space",
-            "fraction",
-            "plus",
-            "text",
-            "negative_integer",
-            "negative_text",
-            "overflow_integer",
-            "overflow_text",
-        ],
-    )
+    @pytest.mark.parametrize("identifier", ["1.0", -1, 2**64], ids=["fraction", "negative", "overflow"])
     def test_ids_that_are_not_uint64(self, tmp_path: Path, identifier: str | int) -> None:
         document = _boundary_document()
         features = document["features"]

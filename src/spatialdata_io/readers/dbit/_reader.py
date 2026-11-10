@@ -91,8 +91,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     The barcode map is a headerless two-column TSV of positions ``A1..AN`` and
     ``B1..BN`` (``1 <= N <= 50``, contiguous, each listed once) and their
     eight-base sequences (case-insensitive, unique within an axis), in any row
-    order. The UTF-8 file may include a byte-order mark and must fit in 64 KiB
-    with at most 100 records. Arrow parses both fields as literal strings:
+    order. The UTF-8 file may include a byte-order mark and holds at most 100
+    records. Arrow parses both fields as literal strings:
     empty strings and ``NA`` are not missing values, and fail the position or
     DNA vocabulary. Every record has exactly two fields. Quoted fields and a
     final record without a newline are accepted; Arrow may accept some

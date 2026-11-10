@@ -41,16 +41,6 @@ class TestNormalizeBarcodes:
         assert frame["axis"].tolist() == ["B", "A"]
         assert frame.dtypes.astype(str).tolist() == ["uint16[pyarrow]", "string[pyarrow]", "string[pyarrow]"]
 
-    @pytest.mark.parametrize("column", [0, 1])
-    def test_null_source_fields(self, tmp_path: Path, column: int) -> None:
-        """Reject missing tokens before case conversion or position parsing."""
-        frame = pd.DataFrame(
-            [["A1", "AAAAAAAA"], ["B1", "CCCCCCCC"]], columns=BARCODE_TYPES.names, dtype=pd.ArrowDtype(pa.string())
-        )
-        frame.iloc[0, column] = None
-        with pytest.raises(ReaderFormatError, match="invalid barcode"):
-            normalize_barcodes(frame, ArtifactFile(tmp_path / "barcodes.txt"))
-
     def test_empty_rows(self, tmp_path: Path) -> None:
         """Reject empty positional input before extracting fields."""
         with pytest.raises(ReaderFormatError, match="barcode map shape"):

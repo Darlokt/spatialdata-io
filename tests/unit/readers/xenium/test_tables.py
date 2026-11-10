@@ -526,13 +526,17 @@ class TestBuildTable:
 
         obs = cast("pd.DataFrame", table.obs)
         assert table.obs_names.tolist() == list(fx.HEX_IDS)
+        # Store columns join the Arrow-backed cells columns until the table is linked.
         np.testing.assert_array_equal(obs["label_id"], [1, 2, 3, 4])
-        assert obs["label_id"].dtype == np.uint32
+        assert obs["label_id"].dtype == pd.ArrowDtype(pa.uint32())
         # XOA 2.0 parquet lacks nucleus_count and segmentation_method: the store supplies them.
         np.testing.assert_array_equal(obs["nucleus_count"], [1, 1, 2, 0])
-        assert obs["nucleus_count"].dtype == np.uint64
+        assert obs["nucleus_count"].dtype == pd.ArrowDtype(pa.uint64())
         assert obs["segmentation_method"].tolist() == [fx.SEGMENTATION_METHODS[m] for m in fx.CELL_METHODS]
-        assert np.isnan(obs["nucleus_centroid_x"].to_numpy()[3])
+        # A cell without a nucleus has a NaN centroid, not a missing value.
+        assert obs["nucleus_centroid_x"].dtype == pd.ArrowDtype(pa.float64())
+        assert np.isnan(obs["nucleus_centroid_x"].iloc[3])
+        assert not obs["nucleus_centroid_x"].isna().any()
         np.testing.assert_array_equal(
             table.obsm["spatial"], obs[["x_centroid", "y_centroid"]].to_numpy(dtype=np.float64)
         )

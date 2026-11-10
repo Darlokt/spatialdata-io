@@ -41,11 +41,14 @@ def _write_tables(path: Path, ids: tuple[str, ...], *, vpt: bool, extra_gene: bo
         counts["BlanketGene"] = [7, 8, 9]
         counts["blank-2"] = [10, 11, 12]
     counts.to_csv(path / "cell_by_gene.csv")
+    # Like VPT, pandas writes integer columns with missing values as 12.0 beside an empty field.
     pd.DataFrame(
         {
+            "fov": [12, None, 13],
             "center_x": [2.0, 10.0, 21.0],
             "center_y": [2.0, 1.0, 1.0],
             "volume": [12.0, 4.0, 8.0],
+            "transcript_count": [1, 3, None],
             "annotation": ["A", "B", "C"],
         },
         index=pd.Index(ids, name="EntityID"),
@@ -119,7 +122,8 @@ def write_merscope_dataset(  # noqa: PLR0913, RUF100 - Independent source layout
             "barcode_id": [0, 1, 2, 3],
             "global_x": [2.0, 10.0, 21.0, 8.0],
             "global_y": [2.0, 1.0, 1.0, 6.0],
-            "global_z": [0, 2, 2, 0],
+            # Vizgen writes the float z-stack position as 0.0.
+            "global_z": [0.0, 2.0, 2.0, 0.0],
             "x": [20.0, 30.0, 40.0, 50.0],
             "y": [21.0, 31.0, 41.0, 51.0],
             "fov": [0, 0, 1, 1],

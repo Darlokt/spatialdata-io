@@ -122,8 +122,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
               exists at once.
             - ``var``: indexed by the cycle field names; ``var["marker"]``
               holds FCS ``$PnS`` labels or Akoya long labels when present.
-            - ``obs``: every non-cycle field. CSV ``cell_id`` is uint64
-              (including zero); FCS IDs use int64 or uint64 as needed.
+            - ``obs``: every non-cycle field. ``cell_id`` is uint64
+              (including zero) for CSV and FCS alike.
               ``region`` is categorical; CSV ``x`` and ``y`` are float64
               native pixels. Other CSV fields keep their exact text
               (including ``NA``, ``NULL``, leading zeros and empty strings);
@@ -136,7 +136,7 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
 
         ``shapes[region]``
             Radius-one circles at the native cell positions, indexed by
-            ``cell_id`` and linked to the table. The element is named after
+            uint64 ``cell_id`` and linked to the table. The element is named after
             the region: literal CSV strings, or positive FCS integers as
             decimal strings. Names must be valid element names other than
             ``table`` and ``images``.
@@ -189,8 +189,9 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         table or image is ambiguous or malformed, for example a
         multi-series TIFF without ``tiff_series``, declared image axes that
         cannot be mapped to CYX, missing or duplicate fields,
-        lossy numbers, several regions, invalid or duplicate cell IDs, or an
-        unsupported experiment version.
+        lossy numbers, nonfinite intensities or coordinates, several regions,
+        negative, non-integral or duplicate cell IDs, or an unsupported
+        experiment version.
     """
     validate_calibration(pixel_size_um, image_to_table)
     validate_image_options(data_axes, tiff_series)

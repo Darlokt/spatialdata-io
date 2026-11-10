@@ -32,7 +32,8 @@ Values:
   ``Width``, ``Height``, ``Mean.*`` and ``Max.*`` are nullable float64, with
   empty fields and ``NA`` missing; every other annotation stays exact text.
 - ``z`` is the vendor's integer slice number in arbitrary units and can be
-  negative.
+  negative. Arrow reads its hexadecimal spellings above
+  ``0x7fffffffffffffff`` as wrapped negative values, which cannot be detected.
 
 The vendor-affiliated `flat-file comparison
 <https://nanostring-biostats.github.io/CosMx-Analysis-Scratch-Space/posts/flat-file-exports/flat-files-compare.html>`_
@@ -105,9 +106,9 @@ def validate_label_ids(cell_ids: pd.Index, dtype: np.dtype[np.generic], path: Ar
 
 
 def _validate_columns(columns: Sequence[str], path: ArtifactFile, artifact: Artifact) -> None:
-    """Reject empty, duplicate, or NUL-containing names before parser repair."""
-    if not columns or len(set(columns)) != len(columns) or any(not name or "\x00" in name for name in columns):
-        raise schema_error(path, artifact, found=f"header {list(columns)!r}", expected="unique nonempty field names")
+    """Reject empty or NUL-containing names; ``csv_header`` already rejects repeated names."""
+    if not columns or any(not name or "\x00" in name for name in columns):
+        raise schema_error(path, artifact, found=f"header {list(columns)!r}", expected="nonempty field names")
 
 
 def _require(columns: Sequence[str], required: Sequence[str], path: ArtifactFile, artifact: Artifact) -> None:

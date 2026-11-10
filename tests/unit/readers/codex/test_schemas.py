@@ -22,6 +22,8 @@ from spatialdata_io.readers.codex._schemas import (
     normalize_fcs_metadata,
     region_name,
     validate_csv_annotations,
+    validate_expression,
+    validate_observations,
 )
 
 if TYPE_CHECKING:
@@ -57,34 +59,62 @@ class TestCheckIntegerPromotion:
 
 
 class TestFcsCellIds:
-    """Preserve native integer buffers and the exact stored binary FCS float."""
+    """Cast native integer buffers and stored binary FCS floats exactly to uint64."""
 
-    @pytest.mark.parametrize("values", [[float(2**63)], [float(2**63 + 2048)]])
-    def test_stored_float_is_exact(self, tmp_path: Path, values: list[float]) -> None:
-        result = fcs_cell_ids(pd.Series(values), ArtifactFile(tmp_path / "cells.fcs"))
-        assert result.tolist() == [int(value) for value in values]
-        assert result.dtype == np.dtype(np.uint64)
-
-    @pytest.mark.parametrize("dtype", ["int32", "int64", "uint32", "uint64"])
-    def test_native_integer_ids(self, tmp_path: Path, dtype: str) -> None:
-        result = fcs_cell_ids(pd.Series([0, 2, 11], dtype=dtype), ArtifactFile(tmp_path / "cells.fcs"))
-        assert result.tolist() == [0, 2, 11]
-        assert result.dtype == np.dtype(np.int64)
-
-    def test_native_uint64_maximum(self, tmp_path: Path) -> None:
-        result = fcs_cell_ids(pd.Series([2**64 - 1], dtype="uint64"), ArtifactFile(tmp_path / "cells.fcs"))
-        assert result.tolist() == [2**64 - 1]
+    @pytest.mark.parametrize("dtype", ["int32", "int64", "uint32", "uint64", "float32", "float64"])
+    def test_native_ids(self, tmp_path: Path, dtype: str) -> None:
+        values = pd.Series([0, 2, 2**24], dtype=dtype)
+        result = fcs_cell_ids(values, ArtifactFile(tmp_path / "cells.fcs"))
+        assert result.tolist() == [0, 2, 2**24]
+        assert result.dtype == pd.ArrowDtype(pa.uint64())
 
     @pytest.mark.parametrize(
-        "values", [[0.5], [float("inf")], [float("nan")], [float(2**64)], [-float(2**64)], [-1.0, float(2**63)]]
+        "values", [pd.Series([float(2**63), float(2**64 - 2048)]), pd.Series([2**64 - 1], dtype="uint64")]
     )
-    def test_invalid_native_ids(self, tmp_path: Path, values: list[float]) -> None:
-        with pytest.raises(ReaderFormatError, match=r"cell_id|overflow"):
-            fcs_cell_ids(pd.Series(values), ArtifactFile(tmp_path / "cells.fcs"))
+    def test_large_ids_are_exact(self, tmp_path: Path, values: pd.Series) -> None:
+        result = fcs_cell_ids(values, ArtifactFile(tmp_path / "cells.fcs"))
+        assert result.tolist() == [int(value) for value in values]
 
-    def test_signed_native_ids_are_preserved(self, tmp_path: Path) -> None:
-        result = fcs_cell_ids(pd.Series([-2.0, 0.0, 1.0]), ArtifactFile(tmp_path / "cells.fcs"))
-        assert result.tolist() == [-2, 0, 1]
+    @pytest.mark.parametrize(
+        "values",
+        [
+            pd.Series([0.5]),
+            pd.Series([-1.0]),
+            pd.Series([-1], dtype="int64"),
+            pd.Series([float("inf")]),
+            pd.Series([float("nan")]),
+            pd.Series([float(2**64)]),
+        ],
+    )
+    def test_invalid_native_ids(self, tmp_path: Path, values: pd.Series) -> None:
+        with pytest.raises(ReaderFormatError, match="cell_id"):
+            fcs_cell_ids(values, ArtifactFile(tmp_path / "cells.fcs"))
+
+
+class TestValidateExpression:
+    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+    def test_nonfinite_intensities(self, tmp_path: Path, value: float) -> None:
+        with pytest.raises(ReaderFormatError, match="nonfinite cycle intensities"):
+            validate_expression(np.array([[1.0, value]]), ArtifactFile(tmp_path / "cells.csv"))
+
+    def test_finite_integer_and_float_intensities(self, tmp_path: Path) -> None:
+        validate_expression(np.array([[-1.5, 0.0]]), ArtifactFile(tmp_path / "cells.csv"))
+        validate_expression(np.array([[2**62, -1]], dtype=np.int64), ArtifactFile(tmp_path / "cells.fcs"))
+
+
+class TestValidateObservations:
+    def test_coordinates(self, tmp_path: Path) -> None:
+        frame = pd.DataFrame({"cell_id": [0, 5], "x": [1.5, -2.0], "y": [3.0, 4.0]}).astype(
+            {"cell_id": pd.ArrowDtype(pa.uint64()), "x": pd.ArrowDtype(pa.float64()), "y": pd.ArrowDtype(pa.float64())}
+        )
+        coordinates = validate_observations(frame, ArtifactFile(tmp_path / "cells.csv"))
+        np.testing.assert_array_equal(coordinates, [[1.5, 3.0], [-2.0, 4.0]])
+
+    def test_duplicate_cell_ids(self, tmp_path: Path) -> None:
+        frame = pd.DataFrame({"cell_id": [5, 5], "x": [1.0, 2.0], "y": [3.0, 4.0]})
+        frame = frame.astype({"cell_id": pd.ArrowDtype(pa.uint64())})
+        with pytest.raises(ReaderFormatError, match="duplicate cell_id"):
+            validate_observations(frame, ArtifactFile(tmp_path / "cells.csv"))
 
 
 class TestCsvTypes:

@@ -21,10 +21,11 @@ per frame or mapping before the reader adds its own columns and keys, which
 keep their names; ``uns`` values, their order and nested keys stay as stored.
 Metric categories are then sanitized against the sanitized ``uns`` keys.
 
-Text files are UTF-8, optionally with a byte-order mark. Arrow parses literal
-strings with explicit schemas and validates full record widths. Each artifact
-owns its eager read; NUL characters are rejected before alignment. The files
-are small (one row per bead, metric or listed feature).
+Text files are UTF-8, optionally with a byte-order mark. Arrow reads them with
+explicit types (literal strings, and float64 Moran statistics) and validates
+full record widths. One helper owns each eager read; NUL characters in text
+are rejected before alignment. The files are small (one row per bead, metric or
+listed feature).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from spatialdata_io.readers.curio._schemas import (
     DEFINING_FEATURES_KEY,
     RESERVED_OBS,
     RESERVED_UNS,
-    normalize_moran,
+    moran_types,
     text_types,
     validate_clusters,
     validate_counts,
@@ -55,6 +56,8 @@ from spatialdata_io.readers.curio._schemas import (
 )
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.curio._layout import CurioLayout
 
@@ -87,51 +90,52 @@ def read_table(layout: CurioLayout) -> ad.AnnData:
     return table
 
 
-def _read_clusters(path: ArtifactFile) -> pd.DataFrame:
-    """Read the two positional cluster-assignment fields as literal strings."""
-    context = ReaderErrorContext("curio", CLUSTERS)
+def _read_text(  # noqa: PLR0913 - each enrichment file states its own explicit Arrow read options.
+    path: ArtifactFile,
+    artifact: str,
+    types: pa.Schema,
+    *,
+    delimiter: str,
+    headerless: bool = False,
+    empty_is_missing: bool = False,
+) -> pd.DataFrame:
+    """Read one enrichment file with explicit Arrow types and reject NUL characters in its text.
+
+    Named files are read after ``csv_header`` has validated their header, so
+    ``types`` names every column in source order. Empty fields are kept as
+    empty strings unless ``empty_is_missing``.
+    """
+    context = ReaderErrorContext("curio", artifact)
     try:
         with path.open("rb") as source, csv_errors(context=context, path=path):
-            clusters = pacsv.read_csv(
+            frame = pacsv.read_csv(
                 source,
-                read_options=pacsv.ReadOptions(column_names=CLUSTER_TYPES.names, use_threads=False),
-                parse_options=pacsv.ParseOptions(delimiter="\t", newlines_in_values=True),
+                read_options=pacsv.ReadOptions(column_names=types.names if headerless else None, use_threads=False),
+                parse_options=pacsv.ParseOptions(delimiter=delimiter, newlines_in_values=True),
                 convert_options=pacsv.ConvertOptions(
-                    column_types=CLUSTER_TYPES,
-                    include_columns=CLUSTER_TYPES.names,
-                    null_values=[],
-                    strings_can_be_null=False,
+                    column_types=types,
+                    include_columns=types.names,
+                    null_values=[""] if empty_is_missing else [],
+                    strings_can_be_null=empty_is_missing,
                 ),
             ).to_pandas(types_mapper=pd.ArrowDtype)
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise
-    validate_text(clusters, CLUSTERS, path)
-    return clusters
+    validate_text(frame, artifact, path)
+    return frame
+
+
+def _read_clusters(path: ArtifactFile) -> pd.DataFrame:
+    """Read the two positional cluster-assignment fields as literal strings."""
+    return _read_text(path, CLUSTERS, CLUSTER_TYPES, delimiter="\t", headerless=True)
 
 
 def _add_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
     """Store each metric category as a ``{metric: value}`` dictionary in source order."""
-    context = ReaderErrorContext("curio", METRICS)
-    columns = list(csv_header(path, context=context))
+    columns = list(csv_header(path, context=ReaderErrorContext("curio", METRICS)))
     validate_header(columns, METRICS, path)
-    try:
-        with path.open("rb") as source, csv_errors(context=context, path=path):
-            metrics = pacsv.read_csv(
-                source,
-                read_options=pacsv.ReadOptions(use_threads=False),
-                parse_options=pacsv.ParseOptions(newlines_in_values=True),
-                convert_options=pacsv.ConvertOptions(
-                    column_types=text_types(columns),
-                    include_columns=columns,
-                    null_values=[],
-                    strings_can_be_null=False,
-                ),
-            ).to_pandas(types_mapper=pd.ArrowDtype)
-    except OSError as error:
-        add_reader_context(error, context=context, path=path)
-        raise
-    validate_text(metrics, METRICS, path)
+    metrics = _read_text(path, METRICS, text_types(columns), delimiter=",")
     validate_metrics(metrics, path, set(table.uns))
 
     # Categories become top-level uns keys, which SpatialData checks like element names.
@@ -150,54 +154,18 @@ def _add_metrics(table: ad.AnnData, path: ArtifactFile) -> None:
 
 def _read_defining_features(path: ArtifactFile) -> pd.DataFrame:
     """Read every named defining-feature field literally, retaining source column order."""
-    context = ReaderErrorContext("curio", CLUSTER_FEATURES)
-    columns = list(csv_header(path, context=context, delimiter="\t"))
+    columns = list(csv_header(path, context=ReaderErrorContext("curio", CLUSTER_FEATURES), delimiter="\t"))
     validate_header(columns, CLUSTER_FEATURES, path)
-    try:
-        with path.open("rb") as source, csv_errors(context=context, path=path):
-            defining = pacsv.read_csv(
-                source,
-                read_options=pacsv.ReadOptions(use_threads=False),
-                parse_options=pacsv.ParseOptions(delimiter="\t", newlines_in_values=True),
-                convert_options=pacsv.ConvertOptions(
-                    column_types=text_types(columns),
-                    include_columns=columns,
-                    null_values=[""],
-                    strings_can_be_null=True,
-                ),
-            ).to_pandas(types_mapper=pd.ArrowDtype)
-    except OSError as error:
-        add_reader_context(error, context=context, path=path)
-        raise
-    validate_text(defining, CLUSTER_FEATURES, path)
-    return defining
+    return _read_text(path, CLUSTER_FEATURES, text_types(columns), delimiter="\t", empty_is_missing=True)
 
 
 def _join_moran(features: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
-    """Join parsed Moran statistics onto ``var`` by feature ID, keeping feature order."""
-    context = ReaderErrorContext("curio", MORAN_FEATURES)
-    columns = list(csv_header(path, context=context, delimiter="\t"))
+    """Join the float64 Moran statistics onto ``var`` by feature ID, keeping feature order."""
+    columns = list(csv_header(path, context=ReaderErrorContext("curio", MORAN_FEATURES), delimiter="\t"))
     validate_header(columns, MORAN_FEATURES, path, feature_ids=True)
-    try:
-        with path.open("rb") as source, csv_errors(context=context, path=path):
-            moran = pacsv.read_csv(
-                source,
-                read_options=pacsv.ReadOptions(use_threads=False),
-                parse_options=pacsv.ParseOptions(delimiter="\t", newlines_in_values=True),
-                convert_options=pacsv.ConvertOptions(
-                    column_types=text_types(columns),
-                    include_columns=columns,
-                    null_values=[],
-                    strings_can_be_null=False,
-                ),
-            ).to_pandas(types_mapper=pd.ArrowDtype)
-    except OSError as error:
-        add_reader_context(error, context=context, path=path)
-        raise
-    validate_text(moran, MORAN_FEATURES, path)
+    moran = _read_text(path, MORAN_FEATURES, moran_types(columns), delimiter="\t")
     moran = moran.set_index(moran.columns[0])
     validate_moran(moran, features, path)
-    normalize_moran(moran, path)
     moran.columns = sanitize_column_names(
         list(moran.columns), source=f"curio: the {MORAN_FEATURES} header", reserved=list(features.columns)
     )

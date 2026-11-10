@@ -18,8 +18,8 @@ order, including features without counts.
 
 Only the header is read when the points are built; every record must occupy
 one physical line. Arrow parses each newline-aligned block with the declared
-types when its partition is computed, so a malformed record, an unknown feature
-or a nonfinite coordinate fails then.
+types when its partition is computed, so a malformed record, a line with an odd
+number of double quotes, an unknown feature or a nonfinite coordinate fails then.
 """
 
 from __future__ import annotations

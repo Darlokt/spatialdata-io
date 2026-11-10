@@ -180,7 +180,8 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     hexadecimal integers such as ``0x10`` are read, ``2.0`` or ``+1`` is not
     an integer, floats are correctly rounded (``1e-400`` reads as 0), and
     some malformed quoting is accepted. Read numeric fields cannot be empty;
-    ignored annotation fields may be.
+    ignored annotation fields may be. Every transcript record occupies one
+    line: a line with an odd number of double quotes fails when computed.
     """
     selection = make_selection(
         include_images=include_images,

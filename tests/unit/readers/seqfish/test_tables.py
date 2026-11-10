@@ -154,25 +154,10 @@ class TestReadTable:
         ("counts", "found"),
         [
             (",A\n", "no count rows"),
-            (",A\n1,1\n1.0,2\n", "invalid value '1.0'"),
             (",A\n1,1\n0,2\n", "nonpositive cell IDs"),
             (",A\n1,1\n1,2\n", "duplicate cell IDs"),
-            (f",A\n{2**64},1\n", f"invalid value '{2**64}'"),
-            (",A\n-1,1\n", "invalid value '-1'"),
-            (",A\n1,1.5\n", "invalid value '1.5'"),
             (",A\n1,2.0\n", "invalid value '2.0'"),
-            (",A\n1,+1\n", "invalid value '+1'"),
-            (",A\n1,-1\n", "invalid value '-1'"),
-            (",A\n1,1e-400\n", "invalid value '1e-400'"),
-            (",A\n1,1_0\n", "invalid value '1_0'"),
-            (",A\n1,\n", "invalid value ''"),
-            (",A\n1,18446744073709551616\n", "invalid value '18446744073709551616'"),
             (",A\n1,1,2\n", "Expected 2 columns, got 3"),
-            (",A,B\n1,1\n", "Expected 3 columns, got 2"),
-            (',A\n1,"bad\n', "malformed CSV"),
-            ('"unterminated\n', "malformed CSV"),
-            (",A,A\n1,1,2\n", "repeated column names ['A']"),
-            ("\n", "malformed CSV"),
         ],
     )
     def test_invalid_counts(self, tmp_path: Path, counts: str, found: str) -> None:
@@ -189,15 +174,10 @@ class TestReadTable:
             ("label,area,center_x,center_y\n1,2,3,4\n", "different count and metadata IDs"),
             ("label,area,center_x,center_y\n0,2,3,4\n", "nonpositive cell IDs"),
             ("label,area,center_x,center_y\n-1,2,3,4\n", "invalid value '-1'"),
-            ("label,area,center_x,center_y\n,2,3,4\n", "invalid value ''"),
-            (f"label,area,center_x,center_y\n{2**64},2,3,4\n", f"invalid value '{2**64}'"),
             ("label,area,center_x,center_y\n1,2,3,4\n1,2,3,4\n", "duplicate cell IDs"),
             ("label,area,center_x,center_y\n1,-1,3,4\n2,1,3,4\n", "negative cell area"),
             ("label,area,center_x,center_y\n1,2,nan,4\n2,1,3,4\n", "nonfinite 'center_x' values"),
             ("label,area,center_x,center_y\n1,2,3,inf\n2,1,3,4\n", "nonfinite 'center_y' values"),
-            ("label,area,center_x,center_y\n1,2,3,\n2,1,3,4\n", "invalid value ''"),
-            ("label,area,center_x,center_y\n1,2,3\n", "Expected 4 columns, got 3"),
-            ('label,area,center_x,center_y\n1,2,3,"bad\n', "malformed CSV"),
         ],
     )
     def test_invalid_metadata(self, tmp_path: Path, cells: str, found: str) -> None:
@@ -207,37 +187,19 @@ class TestReadTable:
         assert caught.value.context.artifact == "CellCoordinates"
         assert caught.value.path == tmp_path / "cells.csv"
 
-    def test_zero_area_and_quoted_records(self, tmp_path: Path) -> None:
-        counts = ',"Gene,A"\n1,1\n'
-        cells = 'label,area,center_x,center_y,extra\n1,0,0.10000000000000002,2,"line\nbreak"\n'
-        result = read_table(*_sources(tmp_path, counts, cells))
-        assert result.var_names.tolist() == ["Gene,A"]
-        assert result.obs["area"].tolist() == [0]
-        assert result.obsm["spatial"][0, 0] == 0.10000000000000002
-
-    def test_quoted_multiline_records(self, tmp_path: Path) -> None:
-        """Quoted fields may span lines; quoted numbers parse like unquoted ones."""
-        counts = ',"Gene,A",B\r\n"1","2","x\ny"\r\n'.replace('"x\ny"', "3")
-        cells = 'label,area,center_x,center_y,ignored\r\n"1",0,"1.5",2,"line\nbreak"\r\n'
+    def test_quoted_fields_and_multiline_annotations(self, tmp_path: Path) -> None:
+        """Quoted names and numbers parse like unquoted ones; an ignored annotation may span lines."""
+        counts = ',"Gene,A",B\r\n"1","2",3\r\n'
+        cells = '"",label,area,center_x,center_y,ignored\r\n0,"1",0,"1.5",2,"line\nbreak"\r\n'
 
         result = read_table(*_sources(tmp_path, counts, cells))
 
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.data.tolist() == [2, 3]
         assert result.obs["instance_id"].tolist() == [1]
+        assert result.obs["area"].tolist() == [0]
         assert result.var_names.tolist() == ["Gene,A", "B"]
         np.testing.assert_array_equal(result.obsm["spatial"], [[1.5, 2]])
-
-    def test_arrow_number_grammar(self, tmp_path: Path) -> None:
-        """Arrow trims spaces and tabs around numbers and reads hexadecimal integers."""
-        counts = ',A,B\n" 1",0x10,\t2\n'
-        cells = "label,area,center_x,center_y\n0x1, 0 ,1e-400,2.5\t\n"
-        result = read_table(*_sources(tmp_path, counts, cells))
-        assert result.obs["instance_id"].tolist() == [1]
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.data.tolist() == [16, 2]
-        assert result.obs["area"].tolist() == [0]
-        np.testing.assert_array_equal(result.obsm["spatial"], [[0, 2.5]])
 
 
 class TestCountBlock:

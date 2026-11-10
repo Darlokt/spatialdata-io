@@ -21,7 +21,7 @@ ROI names are the file-name prefixes before `_CellxGene.csv` or `_CellCoordinate
 
 The ROI name starts every element name and, with several ROIs, names the ROI's coordinate system. A prefix that is not a valid SpatialData element name is repaired once with a warning: characters other than letters, digits, `_`, `-` and `.` become `_`, a leading `__` becomes `_`, and an empty prefix becomes `unnamed` (`Roi 1` is read as `Roi_1`). The files keep their names; select such a ROI with its prefix, `rois=["Roi 1"]`. Selected ROIs whose names are equal ignoring letter case after this repair, such as `Roi1` and `roi1`, fail before any table is read, because SpatialData compares element names ignoring case; select one of them with `rois`.
 
-The first CellxGene field contains positive cell identifiers; the remaining nonempty, unique headers identify expression features in their source order. CellCoordinates provides unique matching `label` values, finite `center_x` and `center_y`, and finite nonnegative `area`. Its rows may be reordered: alignment follows exact cell IDs, preserving the expression row order. Zero area is accepted for the table and polygon output; centroid circles require strictly positive areas.
+The first CellxGene field contains positive cell identifiers; the remaining headers identify expression features in their source order and must be nonempty and free of NUL characters. Header names are unique in every file; CellCoordinates and TranscriptList may name their ignored columns freely, including the empty name of an index column written by pandas. CellCoordinates provides unique matching `label` values, finite `center_x` and `center_y`, and finite nonnegative `area`. Its rows may be reordered: alignment follows exact cell IDs, preserving the expression row order. Zero area is accepted for the table and polygon output; centroid circles require strictly positive areas.
 
 Arrow parses every CSV field directly into its declared type:
 
@@ -73,9 +73,9 @@ Table `uns["spatialdata_io_positions"]` describes unchanged float64 vendor cell-
 
 Expression parsing uses bounded batches and preserves sparse counts without allocating a full dense expression table. Metadata, tables and shapes are eager. Pixels and transcript rows remain lazy through construction of the returned SpatialData. TIFF tasks reopen their path-backed source when computed and close their resources; retain the input files until computation or writing completes.
 
-Provide valid CSV inputs. Arrow checks complete record widths but does not enforce strict quoting, so some malformed quote forms may be accepted. CellxGene and CellCoordinates fields may contain quoted newlines. Counts are read in batches of about 1 MiB of text, so a single CellxGene record must be shorter than that.
+Provide valid CSV inputs. Arrow checks complete record widths but does not enforce strict quoting, so some malformed quote forms may be accepted. Quoted CellCoordinates annotations may contain newlines. Counts are read in batches of about 1 MiB of text, so a single CellxGene record must be shorter than that.
 
-Transcript CSVs require one physical header line and one physical line per record; quoted commas and quotes are supported, while embedded newlines in quoted fields are unsupported. Every record must contain exactly the header field count, including projected-out fields. Transcript graph construction reads only the CSV header. Validation of unread transcript rows is deferred: malformed records or values, nonfinite coordinates, negative `z` planes and unknown features raise with source context when the affected partition is computed. The Dask index is a storage index local to each partition and may repeat; it is not a biological event identifier. Source row order is preserved without a global shuffle. Unsupported compressed transcript variants are not advertised as a bounded source format.
+Transcript CSVs require one physical header line and one physical line per record; quoted commas and doubled quotes are supported. A line with an odd number of double quotes, such as a quoted field spanning lines or a stray quote in `5" tall`, fails when its partition is computed. Every record must contain exactly the header field count, including projected-out fields. Transcript graph construction reads only the CSV header. Validation of unread transcript rows is deferred: malformed records or values, nonfinite coordinates, negative `z` planes and unknown features raise with source context when the affected partition is computed. The Dask index is a storage index local to each partition and may repeat; it is not a biological event identifier. Source row order is preserved without a global shuffle. Unsupported compressed transcript variants are not advertised as a bounded source format.
 
 The reader owns newly created tables and annotations and does not mutate caller containers or source files. Provenance records the reader and package version without absolute input paths; the export has no version marker, so no format version is recorded. Missing or wrong-kind paths raise the corresponding filesystem exception. Malformed schemas, ambiguous layouts and inconsistent scientific relationships raise `ReaderFormatError`, a `ValueError` subclass naming the artifact (`CellxGene`, `CellCoordinates`, `DAPI`, `Segmentation`, `TranscriptList`, `Boundaries`) and its path. All options are validated in signature order before the directory is read: invalid option values raise `ValueError`; invalid types raise `TypeError`. Validation errors do not return partial results.
 
@@ -122,3 +122,10 @@ assignments keep the full uint64 range. Shape indexes are Arrow-backed
 at the AnnData storage boundary, preserving full-range IDs through linkage and
 H5AD/Zarr writes. Shape indexes restored by SpatialData from GeoParquet use
 native uint64 and preserve the same IDs.
+
+Only CellxGene feature names must now be nonempty and free of NUL characters;
+CellCoordinates and TranscriptList files with an unnamed first column, as
+pandas writes with `to_csv(index=True)`, are accepted. A transcript line with
+an odd number of double quotes now fails: previously a quoted field spanning
+lines was read or split into an extra record depending on the block boundaries,
+and stray quotes were kept literally.

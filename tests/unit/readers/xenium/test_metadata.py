@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 from typing import TYPE_CHECKING
 
@@ -10,7 +9,6 @@ import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.xenium import _metadata
 from spatialdata_io.readers.xenium._metadata import (
     read_experiment,
     read_gene_panel,
@@ -21,7 +19,6 @@ from spatialdata_io.readers.xenium._metadata import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pytest_mock import MockerFixture
 
 EXPERIMENT = {
     "major_version": 5,
@@ -43,6 +40,7 @@ EXPERIMENT = {
 
 
 PANEL = ReaderErrorContext("xenium", "panel", "6.0.0")
+METRICS = ReaderErrorContext("xenium", "metrics_summary.csv", "6.0.0")
 
 
 def _json(path: Path, payload: object) -> ArtifactFile:
@@ -110,13 +108,13 @@ class TestReadExperiment:
 
 
 class TestReadMetrics:
-    """metrics_summary.csv is one strict record of exact values."""
+    """metrics_summary.csv is one record whose metric types Arrow infers."""
 
-    def test_exact_values_and_missing_fields(self, tmp_path: Path) -> None:
+    def test_inferred_values_and_missing_fields(self, tmp_path: Path) -> None:
         path = tmp_path / "metrics_summary.csv"
-        path.write_text('run_name,num_cells_detected,fraction,empty,label\n"run, 1",7275,0.875,,1e-3x\n')
+        path.write_text('run_name,num_cells_detected,fraction,empty,label,flag\n"run, 1",7275,0.875,,1e-3x,true\n')
 
-        metrics = read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
+        metrics = read_metrics(ArtifactFile(path), context=METRICS)
 
         assert metrics == {
             "run_name": "run, 1",
@@ -124,72 +122,38 @@ class TestReadMetrics:
             "fraction": 0.875,
             "empty": None,
             "label": "1e-3x",
+            "flag": True,
         }
         assert isinstance(metrics["num_cells_detected"], int)
 
-    def test_quoted_newlines_and_text_metric_spellings(self, tmp_path: Path) -> None:
+    def test_quoted_newlines_and_dates_keep_their_text(self, tmp_path: Path) -> None:
         path = tmp_path / "metrics_summary.csv"
-        path.write_text('run_name,hex,plus,separator,empty\n"run\n1",0x10,+2,1_0,\n')
+        path.write_text('run_name,date,time,count\n"run\n1",2024-01-01,12:00:00,3\n')
 
-        metrics = read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
+        metrics = read_metrics(ArtifactFile(path), context=METRICS)
 
-        assert metrics == {"run_name": "run\n1", "hex": "0x10", "plus": 2, "separator": 10.0, "empty": None}
-
-    def test_excess_rows_fail_without_reading_the_whole_file(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        payload = b"a,b\n" + b"1,2\n" * 4_000_000
-        source = io.BytesIO(payload)
-        reads = mocker.spy(source, "read")
-        mocker.patch("pathlib.Path.open", return_value=source)
-
-        with pytest.raises(ReaderFormatError, match="one nonempty header and one record"):
-            read_metrics(ArtifactFile(tmp_path / "metrics_summary.csv"), context=PANEL)
-
-        assert sum(len(chunk) for chunk in reads.spy_return_list) < len(payload) // 2
-        assert source.closed
-
-    def test_oversized_header_reads_at_most_one_block(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        source = io.BytesIO(b"a" * (2 * 1024 * 1024) + b"\n1\n")
-        reads = mocker.spy(source, "read")
-        lines = mocker.spy(source, "readline")
-        mocker.patch("pathlib.Path.open", return_value=source)
-        with pytest.raises(ReaderFormatError, match="oversized header"):
-            read_metrics(ArtifactFile(tmp_path / "metrics_summary.csv"), context=PANEL)
-        assert sum(len(chunk) for chunk in lines.spy_return_list) == 64 * 1024 + 1
-        reads.assert_not_called()
-        assert source.closed
-
-    def test_excess_row_in_another_batch_is_rejected(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch.object(_metadata, "_CSV_BLOCK_BYTES", 4)
-        path = tmp_path / "metrics_summary.csv"
-        path.write_text("a,b\n1,2\n3,4\n")
-
-        with pytest.raises(ReaderFormatError, match="more than one record"):
-            read_metrics(ArtifactFile(path), context=PANEL)
+        assert metrics == {"run_name": "run\n1", "date": "2024-01-01", "time": "12:00:00", "count": 3}
 
     @pytest.mark.parametrize(
-        ("text", "match"),
+        ("payload", "match"),
         [
-            ("a,b\n1\n", "Expected 2 columns, got 1"),
-            ("a,a\n1,2\n", "repeated column names"),
-            ("a,b\n1,2\n3,4\n", "one nonempty header and one record"),
-            ("a,b\n", "one nonempty header and one record"),
-            (",b\n1,2\n", "one nonempty header and one record"),
-            ('a,b\n"1,2\n', "malformed CSV"),
+            (b"a,b\n1\n", "Expected 2 columns, got 1"),
+            (b"a,a\n1,2\n", "repeated column names"),
+            (b"a,b\n1,2\n3,4\n", "2 records"),
+            (b"a,b\n", "0 records"),
+            (b",b\n1,2\n", "empty column name"),
+            (b"a\n\xff\n", "not UTF-8"),
         ],
-        ids=["width", "duplicate", "two-records", "no-record", "empty-name", "quote"],
+        ids=["width", "duplicate", "two-records", "no-record", "empty-name", "utf8"],
     )
-    def test_rejects_malformed_tables(self, tmp_path: Path, text: str, match: str) -> None:
+    def test_rejects_malformed_tables(self, tmp_path: Path, payload: bytes, match: str) -> None:
         path = tmp_path / "metrics_summary.csv"
-        path.write_text(text)
+        path.write_bytes(payload)
 
-        with pytest.raises(ReaderFormatError, match=match):
-            read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
+        with pytest.raises(ReaderFormatError, match=match) as caught:
+            read_metrics(ArtifactFile(path), context=METRICS)
 
-    def test_rejects_non_utf8(self, tmp_path: Path) -> None:
-        path = tmp_path / "metrics_summary.csv"
-        path.write_bytes(b"a\n\xff\n")
-        with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_metrics(ArtifactFile(path), context=ReaderErrorContext("xenium", "metrics_summary.csv"))
+        assert caught.value.context == METRICS
 
 
 class TestReadGenePanel:

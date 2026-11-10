@@ -8,7 +8,8 @@ described in :mod:`spatialdata_io.readers.codex._schemas`.
 CSV
     Arrow reads uint64 cell IDs, float64 XY and intensities, and literal
     region/annotation strings in batches with a 1 MiB source target. Each batch
-    becomes CSR immediately; expression is never dense as a whole. Records of
+    is checked for finite intensities and becomes CSR immediately; expression
+    is never dense as a whole. Records of
     at most one source block are supported reliably; larger aligned records
     may parse, but a record crossing two block boundaries fails.
 FCS
@@ -54,6 +55,7 @@ from spatialdata_io.readers.codex._schemas import (
     region_name,
     schema_error,
     validate_csv_annotations,
+    validate_expression,
     validate_observations,
 )
 
@@ -81,7 +83,7 @@ class CellTable:
     table
         Owned AnnData with CSR expression and source-order observations.
     cell_ids
-        Final integer cell IDs in observation order, identical to
+        Final uint64 cell IDs in observation order, identical to
         ``table.obs["cell_id"]``.
     coordinates
         Finite native ``x, y`` positions of shape ``(n_obs, 2)``.
@@ -90,7 +92,7 @@ class CellTable:
     """
 
     table: ad.AnnData
-    cell_ids: npt.NDArray[np.int64 | np.uint64]
+    cell_ids: npt.NDArray[np.uint64]
     coordinates: npt.NDArray[np.number]
     region: str
 
@@ -108,14 +110,15 @@ def _split_cells(
     if values.dtype.kind == "f":
         for feature in features:
             check_integer_promotion(frame[feature].to_numpy(copy=False), path)
-
+    validate_expression(values, path)
     return as_csr_array(values), frame[metadata]
 
 
-def _csv_expression(batch: pa.RecordBatch, features: list[str]) -> sparse.csr_array:
+def _csv_expression(batch: pa.RecordBatch, features: list[str], path: ArtifactFile) -> sparse.csr_array:
     """Convert one bounded float64 expression batch directly to canonical CSR."""
-    values = batch.select(features).to_tensor(row_major=True)
-    return as_csr_array(np.asarray(values))
+    values = np.asarray(batch.select(features).to_tensor(row_major=True))
+    validate_expression(values, path)
+    return as_csr_array(values)
 
 
 def _read_csv(path: ArtifactFile) -> ad.AnnData:
@@ -141,7 +144,7 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
             ) as reader,
         ):
             for batch in reader:
-                blocks.append(_csv_expression(batch, features))
+                blocks.append(_csv_expression(batch, features, path))
                 annotations.append(batch.select(metadata))
     except OSError as error:
         add_reader_context(error, context=CELL_TABLE_CONTEXT, path=path)
@@ -201,15 +204,10 @@ def read_cell_table(path: ArtifactFile) -> CellTable:
     # This reader constructs eager AnnData, never backed annotation frames.
     obs = cast("pd.DataFrame", table.obs)
     if fcs:
-        identifiers = fcs_cell_ids(obs["cell_id"], path)
-        obs["cell_id"] = pd.Series(
-            identifiers, index=obs.index, dtype=pd.ArrowDtype(pa.from_numpy_dtype(identifiers.dtype))
-        )
-    else:
-        # ShapesModel requires a native instance index; keep CSV annotations
-        # Arrow-backed instead of rebuilding them from this geometry buffer.
-        identifiers = obs["cell_id"].to_numpy(dtype=np.uint64, copy=False)
+        obs["cell_id"] = fcs_cell_ids(obs["cell_id"], path)
     coordinates = validate_observations(obs, path)
+    # ShapesModel requires a native instance index; obs keeps the Arrow column.
+    identifiers = obs["cell_id"].to_numpy(dtype=np.uint64, copy=False)
     region = region_name(obs["region"], path)
     obs["region"] = pd.Categorical([region] * table.n_obs)
     obs.columns = sanitize_column_names(

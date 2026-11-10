@@ -56,7 +56,7 @@ BARCODE_LENGTH = 8
 GRID_FRAME = "grid_pixels"
 IMAGE_FRAME = "image_pixels"
 MAX_GRID_SIDE = 50
-_BARCODE_CONTEXT = ReaderErrorContext("dbit", "barcode positions")
+BARCODE_CONTEXT = ReaderErrorContext("dbit", "barcode positions")
 _TABLE_CONTEXT = ReaderErrorContext("dbit", "expression table")
 
 
@@ -70,7 +70,7 @@ def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
     """
     if not 0 < len(frame) <= 2 * MAX_GRID_SIDE:
         raise ReaderFormatError(
-            context=_BARCODE_CONTEXT,
+            context=BARCODE_CONTEXT,
             path=path,
             found=f"barcode map shape {frame.shape}",
             expected="a nonempty headerless two-column TSV with at most fifty A and fifty B positions",
@@ -79,20 +79,18 @@ def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
     frame["sequence"] = frame["sequence"].str.upper()
     positions, sequences = frame["position"], frame["sequence"]
     if (
-        positions.isna().any()
-        or sequences.isna().any()
-        or not positions.str.fullmatch(r"[AB]([1-9]|[1-4][0-9]|50)").all()
+        not positions.str.fullmatch(r"[AB]([1-9]|[1-4][0-9]|50)").all()
         or not sequences.str.fullmatch(r"[ACGT]{8}").all()
     ):
         raise ReaderFormatError(
-            context=_BARCODE_CONTEXT,
+            context=BARCODE_CONTEXT,
             path=path,
             found="invalid barcode position or sequence",
             expected="positions A1..A50 or B1..B50 and eight A/C/G/T bases (case-insensitive)",
         )
     if not positions.is_unique:
         raise ReaderFormatError(
-            context=_BARCODE_CONTEXT, path=path, found="duplicate positions", expected="one barcode per A/B position"
+            context=BARCODE_CONTEXT, path=path, found="duplicate positions", expected="one barcode per A/B position"
         )
 
     frame["axis"] = positions.str.slice(0, 1)
@@ -104,7 +102,7 @@ def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
         numbers = frame.loc[selected, "position"]
         if not sequences[selected].is_unique or set(numbers) != set(range(1, len(numbers) + 1)):
             raise ReaderFormatError(
-                context=_BARCODE_CONTEXT,
+                context=BARCODE_CONTEXT,
                 path=path,
                 found=f"duplicate barcodes or noncontiguous {axis} positions",
                 expected="unique sequences within each axis and contiguous positions starting at one",
@@ -114,7 +112,7 @@ def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
     # Equal contiguous axes make their length the side of the square grid.
     if not extents[0] or extents[0] != extents[1]:
         raise ReaderFormatError(
-            context=_BARCODE_CONTEXT,
+            context=BARCODE_CONTEXT,
             path=path,
             found="unequal or missing grid axes",
             expected="the same nonempty A and B extent",

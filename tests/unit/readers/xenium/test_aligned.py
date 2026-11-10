@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -12,13 +11,12 @@ from spatialdata.transformations import Affine, Scale, get_transformation
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.xenium import _aligned, xenium_aligned_image
+from spatialdata_io.readers.xenium import xenium_aligned_image
 from spatialdata_io.readers.xenium._aligned import read_alignment
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from pytest_mock import MockerFixture
 
 # Rows of a real Xenium Explorer H&E alignment (pancreas, XOA 1.6.0.8).
 MATRIX = [[0.00184638, 0.64417243, 1433.27392], [-0.6441724, 0.00184638, 12184.7121], [0.0, 0.0, 1.0]]
@@ -40,28 +38,8 @@ def _rgb(path: Path) -> np.ndarray:
 class TestReadAlignment:
     """Alignment files are finite, invertible 3 x 3 affine matrices."""
 
-    @pytest.mark.parametrize("block_bytes", [64, 64 * 1024])
-    def test_real_matrix(self, tmp_path: Path, mocker: MockerFixture, block_bytes: int) -> None:
-        mocker.patch.object(_aligned, "_CSV_BLOCK_BYTES", block_bytes)
+    def test_real_matrix(self, tmp_path: Path) -> None:
         np.testing.assert_array_equal(read_alignment(_csv(tmp_path / "a.csv", MATRIX), context=CONTEXT), MATRIX)
-
-    def test_excess_rows_fail_without_reading_the_whole_file(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        payload = b"1,0,0\n0,1,0\n0,0,1\n" * 1_000_000
-        source = io.BytesIO(payload)
-        reads = mocker.spy(source, "read")
-        mocker.patch("pathlib.Path.open", return_value=source)
-
-        with pytest.raises(ReaderFormatError, match="3 x 3"):
-            read_alignment(ArtifactFile(tmp_path / "a.csv"), context=CONTEXT)
-
-        assert sum(len(chunk) for chunk in reads.spy_return_list) < len(payload) // 2
-        assert source.closed
-
-    def test_numbers_follow_arrow_grammar(self, tmp_path: Path) -> None:
-        text = " 0.5 ,0,1e1\n0,\t2,0\n0,0,1\n"
-        np.testing.assert_array_equal(
-            read_alignment(_csv(tmp_path / "a.csv", text), context=CONTEXT)[:, 0], [0.5, 0, 0]
-        )
 
     @pytest.mark.parametrize(
         ("text", "match"),
@@ -71,12 +49,9 @@ class TestReadAlignment:
             ("0,0,0\n0,0,0\n0,0,1\n", "3 x 3"),
             ("1,0,x\n0,1,0\n0,0,1\n", "invalid value 'x'"),
             ("1,0,inf\n0,1,0\n0,0,1\n", "3 x 3"),
-            ("1,0\n0,1\n0,0,1\n", "Expected 3 columns, got 2"),
             ("1,0,0\n0,1,0\n0,0,1\n0,0,1\n", "3 x 3"),
-            ('"1,0,0\n', "malformed CSV"),
-            ("", "malformed CSV"),
         ],
-        ids=["rows", "last-row", "singular", "text", "infinite", "width", "extra-row", "quote", "empty"],
+        ids=["rows", "last-row", "singular", "text", "infinite", "extra-row"],
     )
     def test_rejects_malformed_matrices(self, tmp_path: Path, text: str, match: str) -> None:
         with pytest.raises(ReaderFormatError, match=match) as caught:

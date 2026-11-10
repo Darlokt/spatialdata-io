@@ -399,13 +399,6 @@ class TestReadDefiningFeatures:
             check_exact=True,
         )
 
-    def test_native_quoting_grammar(self, tmp_path: Path) -> None:
-        """Arrow permits text after a closing quote without a second syntax pass."""
-        path = tmp_path / "features.tsv"
-        path.write_text('gene\tannotation\n"gene"suffix\tvalue\n', encoding="utf-8")
-
-        assert _read_defining_features(ArtifactFile(path))["gene"].tolist() == ["genesuffix"]
-
     def test_nul_is_rejected_without_truncation(self, tmp_path: Path) -> None:
         path = tmp_path / "features.tsv"
         path.write_text("gene\tannotation\n001\tbefore\x00after\n", encoding="utf-8")
@@ -542,7 +535,7 @@ class TestJoinMoran:
             "gene\tI\n\t0.5\n",
             "gene\tsymbol\ngene-b\t1\n",
             "gene\tI\ngene-b\tinf\n",
-            "gene\tI\ngene-b\tNA\n",
+            "gene\tI\ngene-b\tTRUE\n",
             "gene\tI\ngene-b\t\n",
             "gene\tI\tI\ngene-b\t0.1\t0.2\n",
             "gene\tI\ngene-b\t0.1\t0.2\n",
@@ -569,14 +562,17 @@ class TestJoinMoran:
         assert table.var["I"].isna().all()
         assert table.var_names.tolist() == ["gene-b", "gene-a", "gene-c"]
 
-    @pytest.mark.parametrize(("true", "false"), [("TRUE", "FALSE"), ("True", "False"), ("true", "false")])
-    def test_boolean_statistics(self, tmp_path: Path, true: str, false: str) -> None:
-        """Accept source boolean statistics as scientific booleans."""
+    def test_statistics_are_float64(self, tmp_path: Path) -> None:
+        """Read every statistic, including integer-looking ones, as float64 in feature order."""
         write_curio(tmp_path)
         path = tmp_path / "sample_variable_features_spatial_moransi.txt"
-        path.write_text(f"gene\tvariable\ngene-b\t{true}\ngene-a\t{false}\ngene-c\t{true}\n", encoding="utf-8")
+        path.write_text("gene\tI\trank\ngene-c\t 0.25 \t2\ngene-b\t-1e-1\t1\n", encoding="utf-8")
 
-        assert curio(tmp_path).tables["table"].var["variable"].tolist() == [True, False, True]
+        var = _join_moran(pd.DataFrame(index=["gene-b", "gene-a", "gene-c"]), discover_layout(tmp_path).moran_features)
+
+        assert var.dtypes.tolist() == [pd.ArrowDtype(pa.float64())] * 2
+        assert var["I"].tolist() == [-0.1, pd.NA, 0.25]
+        assert var["rank"].tolist() == [1.0, pd.NA, 2.0]
 
     def test_invalid_quoted_header_context(self, tmp_path: Path) -> None:
         """Preserve malformed-header parser identity and artifact context."""

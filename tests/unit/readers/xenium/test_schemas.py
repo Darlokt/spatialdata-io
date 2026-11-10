@@ -20,6 +20,7 @@ from spatialdata_io.readers.xenium._schemas import (
     boundary_types,
     cast_column,
     cell_types,
+    decimal_ids,
     header_types,
     id_index,
     integer_ids,
@@ -292,6 +293,37 @@ class TestNormalizeIds:
         result = normalize_ids(_chunked([b"aaaaaaab-1"], pa.binary()), pa.string(), path=PATH, context=CONTEXT)
 
         assert result.to_pylist() == ["aaaaaaab-1"]
+
+
+class TestDecimalIds:
+    """Signed CSV cell IDs are decimal digits or -1, never wrapped hexadecimal."""
+
+    def test_decimal_digits_and_unassigned(self) -> None:
+        values = _chunked(["-1", "007", "9223372036854775807"], pa.string())
+
+        result = decimal_ids(values, pa.int64(), path=PATH, context=CONTEXT)
+
+        assert result.type == pa.int64()
+        assert result.to_pylist() == [-1, 7, 2**63 - 1]
+        assert decimal_ids(_chunked([], pa.string()), pa.int64(), path=PATH, context=CONTEXT).to_pylist() == []
+
+    @pytest.mark.parametrize(
+        ("value", "match"),
+        [
+            ("0xffffffffffffffff", "other than decimal digits or -1"),
+            ("0x1", "other than decimal digits or -1"),
+            ("-2", "other than decimal digits or -1"),
+            ("+1", "other than decimal digits or -1"),
+            (" 1", "other than decimal digits or -1"),
+            ("", "other than decimal digits or -1"),
+            ("9223372036854775808", "outside int64"),
+        ],
+    )
+    def test_rejects(self, value: str, match: str) -> None:
+        with pytest.raises(ReaderFormatError, match=match) as caught:
+            decimal_ids(_chunked(["1", value], pa.string()), pa.int64(), path=PATH, context=CONTEXT)
+
+        assert caught.value.context == CONTEXT
 
 
 class TestIdIndex:

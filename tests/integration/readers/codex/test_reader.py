@@ -14,7 +14,7 @@ import readfcs
 import tifffile
 from dask.callbacks import Callback
 from scipy import sparse
-from spatialdata import read_zarr
+from spatialdata import concatenate, read_zarr
 from spatialdata.models import get_table_keys
 from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import Affine, BaseTransformation, get_transformation
@@ -36,6 +36,23 @@ if TYPE_CHECKING:
 
 class TestCodex:
     """Prove actual CSV/FCS decoding, scientific linkage, and lazy TIFF composition."""
+
+    def test_csv_and_fcs_regions_concatenate(self, tmp_path: Path) -> None:
+        """Both containers give uint64 instance IDs, so their linked tables concatenate."""
+        frame = cell_frame()
+        frame["region"] = 2
+        (tmp_path / "csv").mkdir()
+        (tmp_path / "fcs").mkdir()
+        write_csv(tmp_path / "csv" / "cells.csv", frame)
+        write_fcs(tmp_path / "fcs" / "cells.fcs")
+
+        result = concatenate([codex(tmp_path / "csv"), codex(tmp_path / "fcs")], concatenate_tables=True)
+
+        table = result.tables["table"]
+        assert sorted(result.shapes) == ["1", "2"]
+        assert table.obs["cell_id"].dtype == np.dtype(np.uint64)
+        assert table.obs["cell_id"].tolist() == [7, 2, 11, 7, 2, 11]
+        assert table.obs["region"].tolist() == ["2"] * 3 + ["1"] * 3
 
     def test_reordered_named_fields_and_metadata_extensions(self, tmp_path: Path) -> None:
         """Reordered source names retain metadata and distinguish complete cycle feature names."""
@@ -256,7 +273,7 @@ class TestCodex:
             "homogeneity",
         ]
         assert table.obs["cell_id"].tolist() == [7, 2, 11]
-        assert table.obs["cell_id"].dtype == np.dtype(np.int64 if source_format == "fcs" else np.uint64)
+        assert table.obs["cell_id"].dtype == np.dtype(np.uint64)
         assert table.obs["region"].tolist() == ["1"] * 3
         assert isinstance(table.obs["region"].dtype, pd.CategoricalDtype)
         assert "spatial" not in table.obsm
@@ -267,6 +284,7 @@ class TestCodex:
 
         circles = result.shapes["1"]
         assert circles.index.tolist() == [7, 2, 11]
+        assert circles.index.dtype == np.dtype(np.uint64)
         np.testing.assert_array_equal(circles.geometry.x, [20, 2.5, 13])
         np.testing.assert_array_equal(circles.geometry.y, [1.5, 30, 8])
         np.testing.assert_array_equal(circles["radius"], [1, 1, 1])

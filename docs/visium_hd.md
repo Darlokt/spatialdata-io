@@ -319,6 +319,7 @@ Changes to the reader's contract:
 | `make_var_names_unique` precedes `invalid_geometries` in the signature and the CLI | Keyword arguments are unaffected |
 | Invalid UTF-8 in HDF5 text attributes raises; feature-slice `sample_id` is no longer checked | — |
 | Requested boundaries without `segmented_outputs/` raise `FileNotFoundError` for that directory | — |
+| Bin, cell and nucleus `instance_id` columns and shape indexes are uint32: bins count from 1, cells and nuclei use the nine-digit barcode ID. Earlier releases used int64 bin positions from 0 and barcode-string cell IDs | Match cells by the integer ID; concatenation with int64 tables stays int64 |
 | Any `[spaceranger-]X.Y.Z` release is read (a release other than 3.0, 3.1, 4.0 or 4.1 warns that it is untested); other spellings and a missing `software_version` record no format version instead of raising | — |
 
 Discovered artifacts that are symlinks to targets outside the dataset directory are now rejected by default; earlier releases accepted them. Pass `path_policy="relaxed"` for git-annex or DVC datasets ([Dataset paths and symlinks](dataset_paths.md)).

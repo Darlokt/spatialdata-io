@@ -74,14 +74,14 @@ _GZIP_RANGE_BYTES = 8 * 1024 * 1024
 _READ_BYTES = 1024 * 1024
 
 
-def _normalize(table: pa.Table, *, features: tuple[str, ...], path: ArtifactFile) -> pd.DataFrame:
-    """Validate one typed partition and convert only required point-model columns."""
-    require_positive(table[FOV], path, TRANSCRIPTS, FOV)
+def _normalize(block: pd.DataFrame, *, features: tuple[str, ...], path: ArtifactFile) -> pd.DataFrame:
+    """Validate one typed Arrow-backed partition and convert only required point-model columns."""
+    require_positive(pa.array(block[FOV]), path, TRANSCRIPTS, FOV)
     for name in ("x_global_px", "y_global_px", "x_local_px", "y_local_px"):
-        require_finite(table[name], path, TRANSCRIPTS, name)
+        require_finite(pa.array(block[name]), path, TRANSCRIPTS, name)
     names = ["x_global_px", "y_global_px", "target", FOV, CELL_ID, "x_local_px", "y_local_px"]
-    names.extend(name for name in ("z", "CellComp", CELL) if name in table.column_names)
-    frame = table.select(names).to_pandas(types_mapper=pd.ArrowDtype)
+    names.extend(name for name in ("z", "CellComp", CELL) if name in block)
+    frame = block[names]
     vocabulary = pd.Index(features)
     codes = vocabulary.get_indexer(pd.Index(frame["target"].array))
     if (codes < 0).any():
@@ -111,7 +111,7 @@ def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
     """Parse gzip records with the same physical types and null policy as plain blocks."""
     path = projection.path
     if not payload:
-        return _normalize(projection.types.empty_table(), features=projection.features, path=path)
+        return _normalize(_empty(projection.types), features=projection.features, path=path)
     with pa.BufferReader(payload) as source, csv_errors(context=ReaderErrorContext("cosmx", TRANSCRIPTS), path=path):
         table = pacsv.read_csv(
             source,
@@ -124,14 +124,12 @@ def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
                 strings_can_be_null=False,
             ),
         )
-    return _normalize(table, features=projection.features, path=path)
+    return _normalize(table.to_pandas(types_mapper=pd.ArrowDtype), features=projection.features, path=path)
 
 
-def _normalize_block(block: pd.DataFrame, projection: _Projection) -> pd.DataFrame:
-    """Validate one parsed plain-CSV block."""
-    # Arrow-backed columns convert without copying; a thread pool would only add start-up time.
-    table = pa.Table.from_pandas(block, preserve_index=False, nthreads=1)
-    return _normalize(table, features=projection.features, path=projection.path)
+def _empty(types: pa.Schema) -> pd.DataFrame:
+    """Return an empty Arrow-backed frame of the projected fields."""
+    return types.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
 
 
 def _decode_member(
@@ -195,7 +193,7 @@ def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
             column_types={field.name: field.type for field in projection.types},
             context=context,
         )
-        return blocks.map_partitions(_normalize_block, projection, meta=meta)
+        return blocks.map_partitions(_normalize, features=projection.features, path=path, meta=meta)
 
     size = path.stat().st_size
     offset: int | Delayed = 0
@@ -221,7 +219,7 @@ def read_transcripts(
     """
     names = read_header(path, TRANSCRIPTS)
     types = transcript_types(names, path)
-    meta = _normalize(types.empty_table(), features=features, path=path)
+    meta = _normalize(_empty(types), features=features, path=path)
     frame = _frame(_Projection(names, types, features, path), meta)
 
     transformations: dict[str, BaseTransformation] = {

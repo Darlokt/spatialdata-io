@@ -143,9 +143,11 @@ def _population(source: CellSource) -> Literal["cells", "adjusted_cells"]:
 def _square_products(
     square: SquareCounts, transformations: Mapping[str, BaseTransformation]
 ) -> tuple[dd.DataFrame, ad.AnnData]:
-    """Build square points and their linked table with uint64 row-position IDs."""
+    """Build square points and their linked table; the IDs are the row positions."""
     name = f"bin{square.bin_size}"
-    index = pd.Index(np.arange(len(square.coordinates), dtype=np.uint64))
+    # A RangeIndex stores no per-row array; the table keeps the same IDs as uint64.
+    index = pd.RangeIndex(len(square.coordinates))
+    instance_ids = pd.Index(np.arange(len(square.coordinates), dtype=np.uint64))
     context = ReaderErrorContext("stereoseq", "square counts", square.format_version)
     finalize_positions(
         square.table,
@@ -156,7 +158,7 @@ def _square_products(
         path=square.file,
     )
     points = make_points(square.coordinates, index, transformations=transformations)
-    return points, link_table(square.table, f"{name}_genes", index, context=context, path=square.file)
+    return points, link_table(square.table, f"{name}_genes", instance_ids, context=context, path=square.file)
 
 
 def _cell_products(
@@ -359,7 +361,8 @@ def stereoseq(  # noqa: PLR0913 - every product selection is an explicit public 
 
         - square bin ``N``: points ``bin<N>_genes`` and table ``bin<N>_table``.
           Rows are the distinct stored positions in order of first occurrence,
-          with uint64 IDs ``0, 1, ...`` in the points index and table linkage.
+          with IDs ``0, 1, ...``: a ``RangeIndex`` on the points and uint64
+          ``instance_id`` in the table.
           Records with the same position and feature are summed. Features keep
           the GEF order, including features without counts.
         - cells: points ``cells_centroids`` or shapes ``cells_polygons`` and

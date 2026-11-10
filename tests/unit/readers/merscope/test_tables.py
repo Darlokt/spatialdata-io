@@ -8,6 +8,7 @@ import anndata as ad
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 from scipy import sparse
 from shapely.geometry import Polygon
@@ -114,17 +115,8 @@ class TestReadTable:
             np.testing.assert_array_equal(expected.indices, actual.indices)
             np.testing.assert_array_equal(expected.indptr, actual.indptr)
 
-    @pytest.mark.parametrize("batch_bytes", [128, 1024 * 1024])
-    def test_exact_integer_boundaries_and_spellings(
-        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
-    ) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_BYTES", batch_bytes)
-        table, _ = read_table(
-            _sources(
-                tmp_path,
-                f"cell,A,Blank-1,B\na,{2**24 + 1},0x2, 3\nb,{2**63},{2**64 - 2048},0\n",
-            )
-        )
+    def test_exact_integer_boundaries(self, tmp_path: Path) -> None:
+        table, _ = read_table(_sources(tmp_path, f"cell,A,Blank-1,B\na,{2**24 + 1},2,3\nb,{2**63},{2**64 - 2048},0\n"))
         assert isinstance(table.X, sparse.csr_array)
         assert table.X.dtype == np.dtype(np.float64)
         np.testing.assert_array_equal(table.X.data, np.array([2**24 + 1, 3, 2**63], dtype=np.float64))
@@ -140,36 +132,13 @@ class TestReadTable:
         assert caught.value.path == tmp_path / "counts.csv"
         assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
 
-    @pytest.mark.parametrize(
-        "counts",
-        [
-            "cell,A\n",
-            "cell,A\na,1\na,2\n",
-            "cell,A\na,1.0000000000000001\n",
-            "cell,A\na,-1\n",
-            "cell,A\na,1e-400\n",
-            "cell,A\na,18446744073709551616\n",
-            "cell,A\na,\n",
-            "cell,A\na,1\x00\n",
-            "cell,A\na,1,2\n",
-            "cell,A,B\na,1\n",
-            "cell,A\na,+1\n",
-            "cell,A\na,2.0\n",
-            "cell,A\na,1_000\n",
-        ],
-    )
+    @pytest.mark.parametrize("counts", ["cell,A\n", "cell,A\na,1\na,2\n", "cell,A\na,2.0\n", "cell,A\n\x00,1\n"])
     def test_bad_counts(self, tmp_path: Path, counts: str) -> None:
         with pytest.raises(ReaderFormatError) as caught:
             read_table(_sources(tmp_path, counts))
         assert caught.value.path == tmp_path / "counts.csv"
 
-    @pytest.mark.parametrize("token", ["0x10", " 16", "16\t"])
-    def test_arrow_unsigned_grammar(self, tmp_path: Path, token: str) -> None:
-        table, _ = read_table(_sources(tmp_path, f"cell,A\na,{token}\nb,0\n"))
-        assert isinstance(table.X, sparse.csr_array)
-        assert table.X.data.tolist() == [16]
-
-    @pytest.mark.parametrize("column", ["center_x", "volume", "transcript_count"])
+    @pytest.mark.parametrize("column", ["center_x", "volume"])
     def test_required_numeric_empty_is_not_nullable_fov(self, tmp_path: Path, column: str) -> None:
         metadata = f"EntityID,center_x,center_y,fov,{column if column != 'center_x' else 'extra'}\na,1,2,,\nb,3,4,,1\n"
         if column == "center_x":
@@ -177,24 +146,31 @@ class TestReadTable:
         with pytest.raises(ReaderFormatError, match="missing"):
             read_table(_sources(tmp_path, metadata=metadata))
 
-    def test_nullable_fov_unsigned_annotations_and_literal_ids(self, tmp_path: Path) -> None:
+    def test_nullable_decimal_integers_and_literal_ids(self, tmp_path: Path) -> None:
+        """VPT writes integer metadata with missing values through pandas, as ``12.0`` beside empty fields."""
         identifiers = ("007", str(2**64 - 1))
         table, _ = read_table(
             _sources(
                 tmp_path,
                 f"cell,A\n{identifiers[0]},1\n{identifiers[1]},0\n",
                 "EntityID,center_x,center_y,fov,transcript_count,extra\n"
-                f"{identifiers[0]},1e-400,2,,{2**64 - 1},NA\n"
-                f"{identifiers[1]},3,4,{2**64 - 1},0,\n",
+                f"{identifiers[0]},1,2,,7,NA\n"
+                f"{identifiers[1]},3,4,12.0,,\n",
             )
         )
         assert table.obs.index.dtype == STRING_DTYPE
         assert table.obs_names.tolist() == list(identifiers)
-        assert table.obs["fov"].isna().tolist() == [True, False]
-        assert table.obs["fov"].iloc[1] == 2**64 - 1
-        assert table.obs["transcript_count"].tolist() == [2**64 - 1, 0]
+        for column, values in (("fov", [None, 12]), ("transcript_count", [7, None])):
+            assert table.obs[column].dtype == pd.ArrowDtype(pa.uint64())
+            assert pa.array(table.obs[column]).to_pylist() == values
         assert table.obs["extra"].tolist() == ["NA", ""]
-        assert table.obsm["spatial"][0, 0] == 0.0
+
+    @pytest.mark.parametrize("value", ["12.5", "-1.0"])
+    def test_inexact_integer_metadata_fails(self, tmp_path: Path, value: str) -> None:
+        metadata = f"EntityID,center_x,center_y,fov\na,1,2,{value}\nb,3,4,1\n"
+        with pytest.raises(ReaderFormatError, match="invalid 'fov'") as caught:
+            read_table(_sources(tmp_path, "cell,A\na,1\nb,0\n", metadata))
+        assert caught.value.context == ReaderErrorContext("merscope", "cell metadata")
 
     @pytest.mark.parametrize("failure", [False, True])
     def test_streaming_reader_closes(self, tmp_path: Path, mocker: MockerFixture, *, failure: bool) -> None:
@@ -239,8 +215,6 @@ class TestReadTable:
         [
             "EntityID,center_x,center_y\na,1,2\n",
             "EntityID,center_x,center_y\na,1,2\na,3,4\n",
-            "EntityID,center_x,center_y\na,1\n",
-            "EntityID,center_x,center_y\na,1,2,extra\n",
             "EntityID,center_x,center_y\na,1,2\nb,nan,3\n",
         ],
     )

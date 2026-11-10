@@ -39,9 +39,9 @@ def _markers(**columns: list[str]) -> pd.DataFrame:
 class TestValidateColumns:
     """Duplicate and empty names fail before any parser can repair them."""
 
-    @pytest.mark.parametrize("columns", [[], ["a", "a"], ["a", ""], ["a\x00"]])
+    @pytest.mark.parametrize("columns", [[], ["a", ""], ["a\x00"]])
     def test_rejects(self, tmp_path: Path, columns: list[str]) -> None:
-        with pytest.raises(ReaderFormatError, match="unique nonempty") as caught:
+        with pytest.raises(ReaderFormatError, match="nonempty field names") as caught:
             validate_columns(columns, _path(tmp_path), context=MARKERS_CONTEXT)
         assert caught.value.context == MARKERS_CONTEXT
 
@@ -132,7 +132,7 @@ class TestQuantificationColumns:
             (["CellID", "A", "X_centroid"], "missing columns"),
             (["CellID", "X_centroid", "Y_centroid"], "missing columns"),
             (["CellID", "A", "X_centroid", "Y_centroid", "region"], "linkage column"),
-            (["CellID", "A", "A", "X_centroid", "Y_centroid"], "unique nonempty"),
+            (["CellID", "A", "", "X_centroid", "Y_centroid"], "nonempty field names"),
         ],
     )
     def test_rejects(self, tmp_path: Path, header: list[str], match: str) -> None:

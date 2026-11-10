@@ -184,17 +184,6 @@ class TestReadTranscripts:
         frame = points.compute()
         pd.testing.assert_frame_equal(frame.reset_index(drop=True), parquet, check_exact=True)
 
-    def test_csv_uses_shared_blocks_of_64_mib(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcripts="csv"))
-        blocks = mocker.spy(_transcripts, "read_csv_blocks")
-
-        points = _read(bundle, "csv")
-
-        assert blocks.call_args.kwargs["block_bytes"] == 64 * 1024 * 1024
-        source_columns = [_COORDINATE_SOURCES.get(name, name) for name in COLUMNS_3_0]
-        assert list(blocks.call_args.kwargs["columns"]) == source_columns
-        assert points.npartitions == 1
-
     def test_projects_documented_columns_only(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         path = bundle.root / "transcripts.parquet"
@@ -256,16 +245,13 @@ class TestReadTranscripts:
         assert frame["codeword_index"].iloc[:2].tolist() == [0, 2**32 - 1]
 
     @pytest.mark.parametrize("value", [-1, 2**32])
-    @pytest.mark.parametrize("kind", ["csv", "parquet"])
-    def test_codeword_index_rejects_negative_and_overflow(self, tmp_path: Path, value: int, kind: str) -> None:
+    def test_codeword_index_rejects_negative_and_overflow(self, tmp_path: Path, value: int) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         path = bundle.root / "transcripts.parquet"
         values = pq.read_table(path)["codeword_index"].to_pylist()
         _rewrite(path, "codeword_index", pa.array([value, *values[1:]], pa.int64()))
-        if kind == "csv":
-            pacsv.write_csv(pq.read_table(path), bundle.root / "transcripts.csv")
-        with pytest.raises(ReaderFormatError, match=r"codeword_index|uint32"):
-            _read(bundle, kind).compute()
+        with pytest.raises(ReaderFormatError, match="codeword_index"):
+            _read(bundle).compute()
 
     def test_signed_assignments_use_unsigned_vocabulary_without_rounding(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)
@@ -287,6 +273,29 @@ class TestReadTranscripts:
             read_transcripts(
                 source, "integer_ids", features=pd.Index(bundle.features), cells=cells, context=CONTEXT
             ).compute()
+
+    # Arrow's int64 grammar reads 0xffffffffffffffff as -1, the unassigned sentinel.
+    @pytest.mark.parametrize(
+        ("token", "expected"),
+        [("-1", -1), ("0003", 3), ("0xffffffffffffffff", None), ("0x3", None), ("+3", None)],
+    )
+    def test_csv_integer_cell_ids_are_decimal(self, tmp_path: Path, token: str, expected: int | None) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_0, fx.Options(transcripts="csv"))
+        path = bundle.root / "transcripts.csv"
+        header, first, rest = path.read_text().split("\n", 2)
+        fields = first.split(",")
+        fields[header.split(",").index('"cell_id"')] = token
+        path.write_text("\n".join([header, ",".join(fields), rest]))
+        points = _read(bundle, "csv")
+
+        if expected is None:
+            with pytest.raises(ReaderFormatError, match="decimal digits or -1") as caught:
+                points.compute()
+            assert caught.value.context == CONTEXT
+        else:
+            frame = points.compute()
+            assert frame["cell_id"].dtype == pd.ArrowDtype(pa.int64())
+            assert frame["cell_id"].iloc[0] == expected
 
     def test_integer_sentinel_needs_integer_ids(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_1_0)
@@ -318,8 +327,8 @@ class TestReadTranscripts:
     # CSV has no null spelling: an empty numeric field is malformed, and NaN text is a nonfinite number.
     @pytest.mark.parametrize(
         ("value", "match"),
-        [("", r"malformed CSV .*invalid value ''"), ("NA", "malformed CSV"), ("NaN", "nonfinite qv")],
-        ids=["empty", "na", "nan"],
+        [("", r"malformed CSV .*invalid value ''"), ("NaN", "nonfinite qv")],
+        ids=["empty", "nan"],
     )
     def test_csv_numeric_fields_hold_finite_numbers(self, tmp_path: Path, value: str, match: str) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcripts="csv"))

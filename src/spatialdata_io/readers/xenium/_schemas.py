@@ -7,7 +7,9 @@ them. Cells/boundary identifiers are positive ``uint64`` in the integer-ID famil
 (XOA 1.0-1.2); transcript assignments stay signed ``int64`` to retain ``-1``. Other
 families use text IDs; binary text (XOA 1.0 feature names, XOA 1.3 cell IDs) is decoded
 strictly as UTF-8. Parquet columns are cast to the declared types; CSV twins are
-parsed by Arrow directly into them, so numbers follow Arrow's CSV grammar.
+parsed by Arrow directly into them, so numbers follow Arrow's CSV grammar. The
+exception are signed transcript cell IDs, which a CSV must spell as decimal
+digits or ``-1``, because Arrow wraps hexadecimal in a signed type.
 Native cell summaries require float64 storage with unique nonempty string column
 names and the required nucleus centroid columns. Secondary analysis instead
 requires exact clustering headers and ordered,
@@ -65,6 +67,7 @@ LABEL_ID = "label_id"
 BARCODE = "Barcode"
 CLUSTER = "Cluster"
 _ANALYSIS_PROJECTION_PREFIXES = {"pca": "PC", "umap": "UMAP"}
+_DECIMAL_ID = r"-1|[0-9]+"
 _MIN_PROJECTION_COLUMNS = 2
 
 # Documented transcript columns; later builds add the optional ones. Unknown
@@ -246,6 +249,31 @@ def normalize_ids(
     if pa.types.is_unsigned_integer(kind) and (values.to_numpy() == 0).any():
         raise ReaderFormatError(context=context, path=path, found="zero cell IDs", expected="positive cell IDs")
     return values
+
+
+def decimal_ids(
+    column: pa.ChunkedArray, kind: pa.DataType, *, path: Path, context: ReaderErrorContext
+) -> pa.ChunkedArray:
+    """Cast text cell IDs of a CSV to the signed ``kind``; only decimal digits or ``-1`` are accepted.
+
+    Arrow's typed CSV grammar reads hexadecimal and wraps it in a signed type,
+    so ``0xffffffffffffffff`` would become ``-1``, the unassigned sentinel.
+    Signed CSV identifiers are therefore read as text and checked here; the
+    cast rejects values outside ``kind``.
+    """
+    if not arrow_series(column).str.fullmatch(_DECIMAL_ID).all():
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="cell_id values other than decimal digits or -1",
+            expected="decimal cell IDs or -1",
+        )
+    try:
+        return pc.cast(column, kind)
+    except pa.ArrowInvalid as error:
+        raise ReaderFormatError(
+            context=context, path=path, found=f"cell_id values outside {kind}", expected=f"cell_id as {kind}"
+        ) from error
 
 
 def arrow_series(column: pa.Array | pa.ChunkedArray) -> pd.Series:

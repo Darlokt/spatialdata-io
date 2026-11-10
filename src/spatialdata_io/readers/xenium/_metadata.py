@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import io
 import math
-import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
@@ -27,8 +25,8 @@ if TYPE_CHECKING:
 _EXCLUDED_KEYS = frozenset({"images", "xenium_explorer_files"})
 _RANGER_KEYS = ("version", "run_id", "original_analysis_uuid")
 _PANEL_KEYS = ("num_gene_targets", "num_targets", "panel_type", "species", "tissue", "spec_version")
-_INTEGER = re.compile(r"[+-]?[0-9]+")
-_CSV_BLOCK_BYTES = 64 * 1024
+# Quoted metric values may contain newlines.
+_PARSE = pacsv.ParseOptions(newlines_in_values=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,25 +126,13 @@ def read_experiment(path: ArtifactFile) -> Experiment:
     return Experiment(version, family, pixel_size, {key: str(value) for key, value in images.items()}, attrs)
 
 
-def _metric(token: str) -> object:
-    """Parse one metric exactly: empty is missing, integers stay integers, text stays text."""
-    if not token:
-        return None
-    if _INTEGER.fullmatch(token):
-        return int(token)
-    try:
-        value = float(token)
-    except ValueError:
-        return token
-    return value if math.isfinite(value) else token
-
-
 def read_metrics(path: ArtifactFile, *, context: ReaderErrorContext) -> dict[str, object]:
-    """Read the one-row ``metrics_summary.csv``; each value keeps the type its spelling states.
+    """Read the one-row ``metrics_summary.csv``; Arrow infers the type of each metric.
 
-    Arrow reads every field as text, because the metric names and their types
-    vary between releases. Each header and record must fit a 64 KiB parser
-    block; excess records fail without materializing the rest of the file.
+    The metric names and their types vary between releases, so no types are
+    declared. An empty field is missing (``None``); other fields become int64,
+    float64, boolean or text values as Arrow infers them. Dates and times,
+    which are not JSON values, keep their text.
 
     Raises
     ------
@@ -154,54 +140,32 @@ def read_metrics(path: ArtifactFile, *, context: ReaderErrorContext) -> dict[str
         If the file is not UTF-8 CSV, or is not one unique, nonempty header and
         one record of equal width.
     """
-    batches: list[pa.RecordBatch] = []
-    rows = 0
-    with path.open("rb") as handle, csv_errors(context=context, path=path):
-        line = handle.readline(_CSV_BLOCK_BYTES + 1)
-        if len(line) > _CSV_BLOCK_BYTES:
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found="oversized header",
-                expected=f"a header within {_CSV_BLOCK_BYTES} bytes",
-            )
-        with io.BytesIO(line) as header_stream:
-            header = csv_header(path, context=context, source=header_stream)
-        if "" in header:
-            raise ReaderFormatError(
-                context=context, path=path, found="empty column name", expected="one nonempty header and one record"
-            )
-        handle.seek(0)
-        with pacsv.open_csv(
-            handle,
-            read_options=pacsv.ReadOptions(block_size=_CSV_BLOCK_BYTES, use_threads=False),
-            parse_options=pacsv.ParseOptions(newlines_in_values=True),
-            convert_options=pacsv.ConvertOptions(
-                column_types=dict.fromkeys(header, pa.string()),
-                include_columns=list(header),
-                null_values=[],
-                strings_can_be_null=False,
-            ),
-        ) as reader:
-            for batch in reader:
-                rows += batch.num_rows
-                if rows > 1:
-                    raise ReaderFormatError(
-                        context=context,
-                        path=path,
-                        found="more than one record",
-                        expected="one nonempty header and one record",
-                    )
-                batches.append(batch)
-            table = pa.Table.from_batches(batches, schema=reader.schema)
-    if rows != 1:
+    header = csv_header(path, context=context)
+    if "" in header:
+        raise ReaderFormatError(
+            context=context, path=path, found="empty column name", expected="one nonempty header and one record"
+        )
+    options = pacsv.ConvertOptions(null_values=[""], strings_can_be_null=True)
+    with csv_errors(context=context, path=path):
+        table = pacsv.read_csv(path, parse_options=_PARSE, convert_options=options)
+        temporal = [field.name for field in table.schema if pa.types.is_temporal(field.type)]
+        if temporal:
+            options.column_types = dict.fromkeys(temporal, pa.string())
+            table = pacsv.read_csv(path, parse_options=_PARSE, convert_options=options)
+    if table.num_rows != 1:
         raise ReaderFormatError(
             context=context,
             path=path,
             found=f"{table.num_rows} records with columns {list(header)!r}",
             expected="one nonempty header and one record",
         )
-    return {name: _metric(table[name][0].as_py()) for name in header}
+    # Arrow infers binary for text that is not UTF-8.
+    binary = [field.name for field in table.schema if pa.types.is_binary(field.type)]
+    if binary:
+        raise ReaderFormatError(
+            context=context, path=path, found=f"metrics {binary!r} that are not UTF-8", expected="UTF-8 text"
+        )
+    return table.to_pylist()[0]
 
 
 def _payload(path: ArtifactFile, context: ReaderErrorContext) -> tuple[dict[str, object], dict[str, object]]:

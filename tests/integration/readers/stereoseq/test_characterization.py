@@ -13,7 +13,7 @@ import tifffile
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
 from scipy.sparse import csr_array, csr_matrix, sparray, spmatrix
-from spatialdata import SpatialData
+from spatialdata import SpatialData, join_spatialelement_table
 from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataTree
 
@@ -86,7 +86,9 @@ class TestStereoseq:
             points = result.points[target]
             frame = points.compute()
             assert frame.index.tolist() == identifiers
-            assert frame.index.dtype == table.obs["instance_id"].dtype == np.uint64
+            assert table.obs["instance_id"].dtype == np.uint64
+            # Square points keep a RangeIndex; cell points are indexed by the uint64 source cell IDs.
+            assert frame.index.dtype == (np.int64 if name == "bin1" else np.uint64)
             assert frame["x"].dtype == frame["y"].dtype == np.int64
             transformation = get_transformation(points, to_coordinate_system="global")
             assert isinstance(transformation, Scale)
@@ -509,8 +511,12 @@ class TestStereoseq:
             assert restored.tables[name].obs["instance_id"].dtype == np.uint64
             target = str(result.tables[name].obs["region"].iloc[0])
             restored_index = restored.points[target].compute().index
-            assert restored_index.dtype == np.uint64
+            assert restored_index.dtype == (np.int64 if name.startswith("bin") else np.uint64)
             assert_array_equal(restored_index, restored.tables[name].obs["instance_id"])
+            _, joined = join_spatialelement_table(
+                sdata=restored, spatial_element_names=[target], table_name=name, how="left", match_rows="left"
+            )
+            assert_array_equal(joined.obs["instance_id"], restored_index)
             table_path = tmp_path / f"{name}.h5ad"
             result.tables[name].write_h5ad(table_path)
             h5ad = ad.read_h5ad(table_path)

@@ -5,18 +5,27 @@ every record must occupy one physical line. Readers choose the block size
 (``block_bytes``, default ``CSV_BLOCK_BYTES``): larger blocks mean fewer tasks
 and faster streaming of large files, smaller blocks less memory per computed
 partition. Each block task reads its byte range from the path, removes the
-header line from the first block, and parses the requested columns with Arrow,
-which checks that every record has the header's width even for unprojected
-columns. A record longer than a block leaves the blocks it spans empty; they
-become empty partitions. Building the frame reads no record; the caller has
-already read the header with :func:`csv_header`.
+header line from the first block, checks the quotes of every line, and parses
+the requested columns with Arrow, which checks that every record has the
+header's width even for unprojected columns. A record longer than a block
+leaves the blocks it spans empty; they become empty partitions. Building the
+frame reads no record; the caller has already read the header with
+:func:`csv_header`.
 
-Blocks are parsed directly with Arrow, which accepts some malformed quoting.
+A line with an odd number of double quotes is malformed. This rejects quoted
+fields spanning lines, whose records Dask would split at whichever block
+boundary falls inside them, and also a single stray quote inside an unquoted
+field (``5" tall``). Within a line Arrow's quoting applies: quoted delimiters
+and doubled quotes are read, and some malformed quoting is accepted, such as
+two stray quotes kept literally. A line that combines a stray quote with a
+quoted field left open is malformed CSV with an undefined result.
+
 Columns are text unless the caller supplies Arrow types. No text is a null:
 empty fields are empty strings, and an empty field in a column with a non-text
-type is a malformed record. The Arrow parser retains its 1 MiB input block
-size inside each Dask partition; the Dask block target does not bound the
-allocation of an oversized record.
+type is a malformed record. Arrow parses each partition in 1 MiB blocks and
+rejects a record that straddles two of their boundaries, so records up to
+1 MiB are always read and records over 2 MiB never. The Dask block target does
+not bound the allocation of an oversized record.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import dask.dataframe as dd
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
@@ -33,6 +43,7 @@ from dask import delayed
 from dask.bytes import read_bytes
 
 from spatialdata_io.readers._utils.csv._arrow import csv_errors
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -44,6 +55,11 @@ if TYPE_CHECKING:
 
 CSV_BLOCK_BYTES = 8 * 1024 * 1024
 """Default approximate bytes per partition; one partition holds whole records only."""
+
+_QUOTE, _NEWLINE = ord('"'), ord("\n")
+# Quotes are counted in cache-sized slices: NumPy releases the GIL, so threaded
+# partitions check their blocks in parallel.
+_QUOTE_SLICE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +77,25 @@ def _empty(spec: _BlockSpec) -> pd.DataFrame:
     return spec.schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
 
 
+def _paired_quotes(block: bytes) -> bool:
+    """Return whether every line of a block has an even number of double quotes."""
+    if b'"' not in block:
+        return True
+    data = np.frombuffer(block, dtype=np.uint8)
+    quotes = 0
+    for offset in range(0, len(data), _QUOTE_SLICE_BYTES):
+        part = data[offset : offset + _QUOTE_SLICE_BYTES]
+        marks = part[(part == _QUOTE) | (part == _NEWLINE)]
+        newlines = np.flatnonzero(marks == _NEWLINE)
+        # Every line is even exactly when the quotes before each newline (those
+        # of earlier slices plus its position among the marks minus the
+        # newlines before it) and the quotes in total are even.
+        if ((quotes + newlines - np.arange(len(newlines))) % 2).any():
+            return False
+        quotes += len(marks) - len(newlines)
+    return quotes % 2 == 0
+
+
 def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
     """Parse one owned byte block into the projected Arrow-backed columns."""
     if first:
@@ -69,11 +104,19 @@ def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
         block = block[newline + 1 :] if newline >= 0 else b""
     if not block:
         return _empty(spec)
+    if not _paired_quotes(block):
+        line = next(line for line in block.split(b"\n") if line.count(b'"') % 2)
+        raise ReaderFormatError(
+            context=spec.context,
+            path=spec.path,
+            found=f"a line with an odd number of double quotes ({line[:80].decode(errors='replace')!r})",
+            expected="one record per line with paired quotes; quoted fields cannot span lines",
+        )
+    # Every record is one line now, so Arrow's default newline chunking applies.
     with pa.BufferReader(block) as source, csv_errors(context=spec.context, path=spec.path):
         table = pacsv.read_csv(
             source,
             read_options=pacsv.ReadOptions(column_names=list(spec.names), block_size=1024 * 1024, use_threads=False),
-            parse_options=pacsv.ParseOptions(newlines_in_values=True),
             convert_options=pacsv.ConvertOptions(
                 include_columns=spec.schema.names,
                 column_types=spec.schema,
@@ -126,7 +169,9 @@ def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error ori
     Notes
     -----
     Construction lists the file size only; no record is read. Every task opens
-    its byte range by path and closes it.
+    its byte range by path and closes it. Computing a partition raises
+    :class:`ReaderFormatError` for a line with an odd number of double quotes
+    and for malformed records.
     """
     types = column_types or {}
     schema = pa.schema([(name, types.get(name, pa.string())) for name in columns])

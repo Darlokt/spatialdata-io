@@ -1,4 +1,4 @@
-"""Verify the bounded two-column barcode schema and immutable lookups."""
+"""Verify the two-column barcode schema and immutable lookups."""
 
 from __future__ import annotations
 
@@ -7,12 +7,11 @@ from itertools import islice, product
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-import pyarrow.csv as pacsv
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile, require_file
-from spatialdata_io.readers.dbit._barcodes import MAX_BARCODE_BYTES, read_barcodes
+from spatialdata_io.readers.dbit._barcodes import read_barcodes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
 
 
 class TestReadBarcodes:
-    """Reject ambiguous grid positions and malformed bounded barcode maps."""
+    """Reject ambiguous grid positions and malformed barcode maps."""
 
     def test_unordered_case_insensitive_sequences(self, tmp_path: Path) -> None:
         path = tmp_path / "barcodes.txt"
@@ -93,10 +92,9 @@ class TestReadBarcodes:
         assert all(source.closed for source in opened.spy_return_list)
 
     @pytest.mark.parametrize("ending", [b"", b"\n"])
-    def test_last_record_and_native_quoting(self, tmp_path: Path, ending: bytes) -> None:
-        """Arrow accepts a last record without newline and text after a closing quote."""
+    def test_last_record_with_or_without_newline(self, tmp_path: Path, ending: bytes) -> None:
         path = tmp_path / "barcodes.txt"
-        path.write_bytes(b'A1\t"AAAA"AAAA\nB1\tCCCCCCCC' + ending)
+        path.write_bytes(b"A1\tAAAAAAAA\nB1\tCCCCCCCC" + ending)
 
         result = read_barcodes(ArtifactFile(path))
 
@@ -122,29 +120,6 @@ class TestReadBarcodes:
 
         with pytest.raises(ReaderFormatError, match="barcode map shape"):
             read_barcodes(ArtifactFile(path))
-
-    @pytest.mark.parametrize("size", [MAX_BARCODE_BYTES, MAX_BARCODE_BYTES + 1, MAX_BARCODE_BYTES * 3])
-    def test_single_bounded_read_and_size_limit(self, tmp_path: Path, size: int, mocker: MockerFixture) -> None:
-        """Read one detection byte, close, and reject oversize before invoking Arrow."""
-        path = ArtifactFile(tmp_path / "barcodes.txt")
-        records = b"A1\tAAAAAAAA\nB1\tCCCCCCCC\n"
-        source = io.BytesIO(records + b"\n" * (size - len(records)))
-        read = mocker.spy(source, "read")
-        opened = mocker.patch.object(type(path), "open", return_value=source)
-        parse = mocker.spy(pacsv, "read_csv")
-
-        if size > MAX_BARCODE_BYTES:
-            with pytest.raises(ReaderFormatError, match="larger than 64 KiB") as raised:
-                read_barcodes(path)
-            assert raised.value.path == path
-            parse.assert_not_called()
-        else:
-            result = read_barcodes(path)
-            assert result.a == {"AAAAAAAA": 1}
-            assert result.b == {"CCCCCCCC": 1}
-        opened.assert_called_once_with("rb")
-        read.assert_called_once_with(MAX_BARCODE_BYTES + 1)
-        assert source.closed
 
     def test_read_failure_closes_and_retains_filesystem_error(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = ArtifactFile(tmp_path / "barcodes.txt")

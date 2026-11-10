@@ -16,18 +16,18 @@ order. The four text files are aligned to it by exact identifier:
 
 Every header name must be nonempty and unique so that pandas cannot rename
 columns silently. Cells are kept as exact strings, without type inference;
-only Moran statistics are parsed, as exact integers, finite float64 or
-booleans. NUL characters are rejected everywhere because they would let two
-distinct identifiers compare equal after truncation.
+only Moran statistics are typed, as finite float64. NUL characters are
+rejected in every text field because they would let two distinct identifiers
+compare equal after truncation.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
 from spatialdata.models import TableModel
 
 from spatialdata_io._positions import POSITIONS_KEY
@@ -43,10 +43,6 @@ STRING_DTYPE = pd.ArrowDtype(pa.string())
 CLUSTER_TYPES = pa.schema([("bead_id", pa.string()), ("cluster", pa.string())])
 DEFINING_FEATURES_KEY = "Top_cluster_defining_features"
 
-_BOOLEANS = pa.array(["TRUE", "FALSE", "True", "False", "true", "false"])
-# Recognize unsupported signs too: an integer column must fail its checked
-# conversion instead of retrying as float and rounding exact integers.
-_INTEGER = r"^[+-]?(?:[0-9]+|0[xX][0-9a-fA-F]+)$"
 RESERVED_OBS = ("cluster", "region", "instance_id")
 # uns keys the reader writes; metric categories become uns keys too.
 RESERVED_UNS = frozenset({DEFINING_FEATURES_KEY, POSITIONS_KEY, TableModel.ATTRS_KEY})
@@ -114,10 +110,15 @@ def text_types(columns: list[str]) -> pa.Schema:
     return pa.schema([(name, pa.string()) for name in columns])
 
 
+def moran_types(columns: list[str]) -> pa.Schema:
+    """Declare literal feature IDs followed by float64 statistics for the validated Moran header."""
+    return pa.schema([(columns[0], pa.string()), *((name, pa.float64()) for name in columns[1:])])
+
+
 def validate_text(frame: pd.DataFrame, artifact: str, path: ArtifactFile) -> None:
     """Reject NUL characters in string cells."""
     for column in frame:
-        if frame[column].str.contains("\x00", regex=False).any():
+        if frame[column].dtype == STRING_DTYPE and frame[column].str.contains("\x00", regex=False).any():
             raise schema_error(
                 artifact, path, found=f"NUL character in {column!r}", expected="text fields without NUL characters"
             )
@@ -171,7 +172,7 @@ def validate_metrics(metrics: pd.DataFrame, path: ArtifactFile, uns_keys: set[st
 
 
 def validate_moran(moran: pd.DataFrame, features: pd.DataFrame, path: ArtifactFile) -> None:
-    """Require statistics for unique known feature IDs in columns new to ``var``."""
+    """Require finite statistics for unique known feature IDs in columns new to ``var``."""
     if moran.shape[1] == 0:
         raise schema_error(
             MORAN_FEATURES, path, found="missing Moran statistics", expected="feature IDs followed by Moran statistics"
@@ -194,63 +195,8 @@ def validate_moran(moran: pd.DataFrame, features: pd.DataFrame, path: ArtifactFi
             expected="Moran statistic columns distinct from existing variable metadata",
         )
 
-
-def normalize_moran(moran: pd.DataFrame, path: ArtifactFile) -> None:
-    """Parse every statistic column in place."""
-    for column in moran:
-        moran[column] = _parse_statistic(moran[column], path)
-
-
-def _parse_statistic(source: pd.Series, path: ArtifactFile) -> pd.Series:
-    """Classify one complete statistic column before its checked Arrow conversion."""
-    values = pa.array(source, type=pa.string())
-    try:
-        boolean_tokens = pc.call_function("is_in", [values], options=pc.SetLookupOptions(_BOOLEANS))
-        if len(values) and pc.call_function("all", [boolean_tokens]).as_py():
-            numeric = pc.cast(values, pa.bool_())
-        else:
-            # Arrow casts do not trim the spaces/tabs its CSV parser accepts.
-            values = pc.call_function("utf8_trim", [values], options=pc.TrimOptions(" \t"))
-            integer_tokens = pc.call_function(
-                "match_substring_regex", [values], options=pc.MatchSubstringOptions(_INTEGER)
-            )
-            if not len(values) or pc.call_function("all", [integer_tokens]).as_py():
-                numeric = _integer_statistic(values, path)
-            else:
-                numeric = pc.cast(values, pa.float64())
-                finite = pc.call_function("is_finite", [numeric])
-                if not pc.call_function("all", [finite]).as_py():
-                    raise schema_error(
-                        MORAN_FEATURES,
-                        path,
-                        found=f"nonfinite Moran statistic {source.name!r}",
-                        expected="finite numeric or boolean statistics",
-                    )
-    except pa.ArrowInvalid as error:
+    # Arrow parses nan and inf as float64 values; the statistics must be finite.
+    if not np.isfinite(moran.to_numpy(dtype=np.float64)).all():
         raise schema_error(
-            MORAN_FEATURES,
-            path,
-            found=f"invalid Moran statistic {source.name!r}",
-            expected="finite float64, exact int64/uint64, or boolean statistics in Arrow's numeric grammar",
-        ) from error
-
-    return pd.Series(pd.arrays.ArrowExtensionArray(numeric), index=source.index, name=source.name)
-
-
-def _integer_statistic(values: pa.Array | pa.ChunkedArray, path: ArtifactFile) -> pa.Array | pa.ChunkedArray:
-    """Choose one exact signed or unsigned domain without signed hexadecimal wrapping."""
-    negative = pc.call_function("starts_with", [values], options=pc.MatchSubstringOptions("-"))
-    # Arrow's int64 string cast wraps large hexadecimal magnitudes. Parse
-    # nonnegative magnitudes as uint64 before choosing the final signed width.
-    unsigned = pc.cast(pc.call_function("if_else", [negative, pa.scalar("0"), values]), pa.uint64())
-    if len(unsigned) and pc.call_function("max", [unsigned]).as_py() >= 2**63:
-        signed = pc.cast(values.filter(negative), pa.int64())
-        if len(signed) and pc.call_function("min", [signed]).as_py() < 0:
-            raise schema_error(
-                MORAN_FEATURES,
-                path,
-                found="integer Moran statistic mixes negative values and values above int64",
-                expected="one exact int64 or uint64 statistic domain",
-            )
-        return unsigned
-    return pc.cast(values, pa.int64())
+            MORAN_FEATURES, path, found="nonfinite Moran statistics", expected="finite float64 Moran statistics"
+        )

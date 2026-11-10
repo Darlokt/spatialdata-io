@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import shapely
 from shapely.geometry import MultiPolygon
@@ -102,7 +103,8 @@ def _read_slices(path: ArtifactFile) -> tuple[pd.Index, NDArray[np.object_]]:
                 stop = start + batch.num_rows
                 geometry[start:stop] = slices
                 start = stop
-    except (OSError, ValueError) as error:
+    except (OSError, pa.ArrowException) as error:
+        # Parquet access and decoding failures; ReaderFormatError already names the source.
         add_reader_context(error, context=_CONTEXT, path=path)
         raise
     return identifiers[0].append(identifiers[1:]), geometry

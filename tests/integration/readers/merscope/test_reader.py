@@ -5,14 +5,13 @@ from __future__ import annotations
 import pickle
 import shutil
 from functools import partial
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import anndata as ad
 import dask.array as da
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
 import pytest
 import tifffile
 from anndata.tests.helpers import assert_equal
@@ -29,6 +28,7 @@ from spatialdata_io import __version__
 from spatialdata_io.readers._utils.csv import read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
+from spatialdata_io.readers.merscope import _geometry as merscope_geometry
 from spatialdata_io.readers.merscope import merscope
 from tests.integration.readers.merscope._fixtures import write_merscope_dataset
 
@@ -42,29 +42,15 @@ if TYPE_CHECKING:
 class TestMerscope:
     """Read actual CSV, GeoParquet and TIFF artifacts through the public API."""
 
-    @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
-    @pytest.mark.parametrize("current", [False, True])
-    @pytest.mark.parametrize("policy", ["keep", "drop"])
-    def test_boundary_row_groups_preserve_complete_products(
-        self,
-        tmp_path: Path,
-        profile: Literal["standard", "cellpose", "watershed"],
-        policy: Literal["keep", "drop"],
-        *,
-        current: bool,
-    ) -> None:
+    def test_boundary_batches_preserve_complete_products(self, tmp_path: Path, mocker: MockerFixture) -> None:
         fixture = write_merscope_dataset(
-            tmp_path, profile=profile, invalid_first_cell=True, reassigned_transcripts=current
+            tmp_path, profile="cellpose", invalid_first_cell=True, reassigned_transcripts=True
         )
-        vpt = None if profile == "standard" else fixture.analysis
-        expected = merscope(fixture.root, vpt_directory=vpt, invalid_geometries=policy)
-        path = fixture.analysis / (
-            "cell_boundaries.parquet" if profile == "standard" else f"{profile}_micron_space.parquet"
-        )
-        table = pq.read_table(path)
-        pq.write_table(table, path, row_group_size=1)
+        expected = merscope(fixture.root, vpt_directory=fixture.analysis)
+        # One boundary row per decoding batch.
+        mocker.patch.object(merscope_geometry, "_BOUNDARY_BATCH_ROWS", 1)
 
-        actual = merscope(fixture.root, vpt_directory=vpt, invalid_geometries=policy)
+        actual = merscope(fixture.root, vpt_directory=fixture.analysis)
 
         assert_spatial_data_objects_are_identical(actual, expected)
 
@@ -354,9 +340,11 @@ class TestMerscope:
         ]
         table = result.tables["table"]
         assert table.obs.columns.tolist() == [
+            "fov",
             "center_x",
             "center_y",
             "volume",
+            "transcript_count",
             "annotation",
             "CD45_RO",
             "Region_1",
@@ -620,9 +608,6 @@ class TestMerscope:
             source = fixture.root / basename
             frame = pd.read_csv(source, index_col=0)
             frame.index = pd.Index([identifier, "2002", "3003"], name=frame.index.name)
-            if basename == "cell_metadata.csv":
-                frame["fov"] = [None, str(2**64 - 1), "0"]
-                frame["transcript_count"] = [str(2**64 - 1), "0", "1"]
             frame.to_csv(source)
         boundary_source = fixture.root / "cell_boundaries.parquet"
         boundaries = gpd.read_parquet(boundary_source)
@@ -634,7 +619,6 @@ class TestMerscope:
         events["cell_id"] = events["cell_id"].astype("str")
         events.loc[events["cell_id"] == "1001", "cell_id"] = identifier
         events["transcript_id"] = ["ENST000001", "ENST000002", "control-1", "ENST000004"]
-        events["global_z"] = str(2**64 - 1)
         events.to_csv(transcript_source)
         result = merscope(fixture.root)
         assert result.tables["table"].obs_names.tolist() == [identifier, "2002", "3003"]
@@ -650,10 +634,14 @@ class TestMerscope:
         restored = read_zarr(store)
         assert restored.tables["table"].obs_names.tolist() == [identifier, "2002", "3003"]
         assert restored.shapes["slide_region_polygons"].index.tolist() == [identifier, "2002", "3003"]
-        assert restored.tables["table"].obs["fov"].isna().tolist() == [True, False, False]
-        assert restored.tables["table"].obs["fov"].iloc[1] == 2**64 - 1
-        assert restored.tables["table"].obs["transcript_count"].tolist() == [2**64 - 1, 0, 1]
-        assert restored.points["slide_region_transcripts"].compute()["z_raw"].tolist() == [2**64 - 1] * 4
+        # The restored table is eager; AnnData also types obs as a backed Dataset2D.
+        observations = cast("pd.DataFrame", restored.tables["table"].obs)
+        assert observations["fov"].dtype == pd.UInt64Dtype()
+        assert observations["fov"].isna().tolist() == [False, True, False]
+        assert observations["fov"].dropna().tolist() == [12, 13]
+        assert observations["transcript_count"].isna().tolist() == [False, False, True]
+        assert observations["transcript_count"].dropna().tolist() == [1, 3]
+        assert restored.points["slide_region_transcripts"].compute()["z_raw"].tolist() == [0.0, 2.0, 2.0, 0.0]
         assert restored.points["slide_region_transcripts"].compute()["cell_id"].tolist() == [
             identifier,
             "2002",

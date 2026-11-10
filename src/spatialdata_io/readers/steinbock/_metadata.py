@@ -1,10 +1,10 @@
-"""Read the supported fields of ``images.csv`` as literal Arrow strings.
+"""Read the supported fields of ``images.csv`` with their declared Arrow types.
 
 One binary stream owns header inspection and the projected read. Arrow checks
-every record's complete width; ignored extra values are not decoded or scanned
-for NUL. The schema validates every image identity and supported field before
-interpreting numerical values only for selected images. The file is closed on
-success and failure.
+every record's complete width and parses the supported fields of every row;
+ignored extra values are not decoded or scanned for NUL. The schema validates
+every image identity, then the dimensions and extents of the selected images.
+The file is closed on success and failure.
 """
 
 from __future__ import annotations
@@ -36,8 +36,9 @@ def read_image_metadata(path: ArtifactFile, selected: set[str]) -> dict[str, Ima
                 source,
                 read_options=pacsv.ReadOptions(use_threads=False),
                 parse_options=pacsv.ParseOptions(newlines_in_values=True),
+                # Only an empty extent is missing; an empty image name stays an empty string.
                 convert_options=pacsv.ConvertOptions(
-                    column_types=types, include_columns=types.names, null_values=[], strings_can_be_null=False
+                    column_types=types, include_columns=types.names, null_values=[""], strings_can_be_null=False
                 ),
             )
     except OSError as error:

@@ -2,7 +2,7 @@
 
 The cell table has positions but no segmentation boundaries, so each cell is a
 circle of radius one native pixel centred at its ``x, y``, indexed by its
-integer cell ID. The circles are display geometry, not measured cells; their
+uint64 cell ID. The circles are display geometry, not measured cells; their
 coordinates stay native and the transformation maps them to the output frame.
 """
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def make_shapes(
-    cell_ids: npt.NDArray[np.int64 | np.uint64],
+    cell_ids: npt.NDArray[np.uint64],
     coordinates: npt.NDArray[np.number],
     *,
     frame: str,

@@ -50,9 +50,9 @@ from spatialdata_io.readers.merscope._schemas import (
     count_columns,
     count_types,
     metadata_types,
-    normalize_cell_ids,
     normalize_metadata,
     schema_error,
+    validate_cell_ids,
     validate_output_annotations,
 )
 
@@ -114,7 +114,8 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
         raise
     if not blocks:
         raise schema_error(path, COUNTS, found="no cells", expected="a nonempty count population")
-    ids = normalize_cell_ids(pd.Series(pa.chunked_array(identifiers, pa.string()), dtype=STRING_DTYPE), path, COUNTS)
+    ids = pd.Series(pa.chunked_array(identifiers, pa.string()), dtype=STRING_DTYPE)
+    validate_cell_ids(ids, path, COUNTS)
     if not ids.is_unique:
         raise schema_error(path, COUNTS, found="duplicate count identities", expected="one count row per exact cell ID")
     return sparse.vstack(blocks, format="csr"), pd.Index(ids, name=None), tuple(types.names[1:])

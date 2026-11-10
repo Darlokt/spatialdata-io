@@ -181,14 +181,17 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     not a translation and remain unsupported. No scale is inferred from
     stage positions, millimetre fields or TIFF metadata.
 
-    Counts and identifiers use typed uint64 CSV ingestion; transcript ``z``
-    remains signed int64. Integers accept hexadecimal and surrounding spaces
-    or tabs, reject decimal/exponent spellings and leading plus signs, and
-    are range-checked. Floats round directly to float64; coordinates must be
-    finite. Only empty fields and ``NA`` in optional numeric metadata are
-    missing. Text annotations remain literal. Cell-centre and pixel FOV
-    position spellings remain decimal text solely to preserve their printed
-    rounding intervals; placement thresholds are unchanged.
+    Counts and identifiers use typed uint64 CSV ingestion and reject values
+    outside uint64; transcript ``z`` remains signed int64. Integers accept
+    hexadecimal and surrounding spaces or tabs, and reject decimal/exponent
+    spellings and leading plus signs. Arrow reads hexadecimal ``z`` spellings
+    above ``0x7fffffffffffffff`` as wrapped negative values
+    (``0xffffffffffffffff`` is -1), which a signed field cannot detect.
+    Floats round directly to float64; coordinates must be finite. Only empty
+    fields and ``NA`` in optional numeric metadata are missing. Text
+    annotations remain literal. Cell-centre and pixel FOV position spellings
+    remain decimal text solely to preserve their printed rounding intervals;
+    placement thresholds are unchanged.
 
     Building the result reads the transcript header and no pixel or transcript
     task runs. Plain transcript CSV partitions hold about 8 MiB of records.

@@ -97,19 +97,19 @@ def classify_position_row(columns: Sequence[str], *, path: Path, context: Reader
 def normalize_positions(frame: pd.DataFrame, *, path: Path, context: ReaderErrorContext) -> pd.DataFrame:
     """Normalize owned projected source fields; preserve barcode and row order.
 
-    Source fields have their declared Arrow types. Barcodes must be nonempty
-    and unique, pixel coordinates finite and nonnegative, and in_tissue binary.
-    No source rows are filtered.
+    Source fields have their declared Arrow types and no nulls. Barcodes must
+    be nonempty and unique, pixel coordinates finite and nonnegative, and
+    in_tissue binary. No source rows are filtered.
     """
     if frame.empty:
         raise ReaderFormatError(context=context, path=path, found="zero rows", expected="at least one spot row")
 
     barcodes = frame["barcode"]
-    if barcodes.isna().any() or (barcodes.str.len() == 0).any() or barcodes.str.contains("\x00", regex=False).any():
+    if (barcodes.str.len() == 0).any() or barcodes.str.contains("\x00", regex=False).any():
         raise ReaderFormatError(
             context=context,
             path=path,
-            found="null, empty, or NUL-containing barcodes",
+            found="empty or NUL-containing barcodes",
             expected="nonempty barcode strings without NUL",
         )
     if not barcodes.is_unique:
@@ -125,7 +125,7 @@ def normalize_positions(frame: pd.DataFrame, *, path: Path, context: ReaderError
 
     for column in POSITION_COLUMNS[-2:]:
         values = pa.array(frame[column])
-        if values.null_count or pc.call_function("all", [pc.call_function("is_finite", [values])]).as_py() is False:
+        if not pc.call_function("all", [pc.call_function("is_finite", [values])]).as_py():
             raise ReaderFormatError(
                 context=context, path=path, found=f"nonfinite values in {column!r}", expected="finite numeric values"
             )

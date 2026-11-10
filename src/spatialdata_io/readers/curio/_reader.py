@@ -78,13 +78,12 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
         - ``obs["region"]`` (categorical, always ``"cells"``) and
           ``obs["instance_id"]`` (the bead IDs) link the table to
           ``shapes["cells"]``.
-        - One ``var`` column per Moran statistic, matched by feature ID:
-          int64 or uint64, float64 or bool. Unlisted features are missing,
-          which makes integer and boolean columns nullable and float
-          columns NaN. A statistic name that a SpatialData table does not
-          accept (``MoransI observed``) is sanitized with a warning
-          (``MoransI_observed``; a name that then equals another ``var``
-          column ignoring letter case gets a ``_1``, ``_2``, ... suffix).
+        - One float64 ``var`` column per Moran statistic, matched by feature
+          ID; unlisted features are NaN. A statistic name that a SpatialData
+          table does not accept (``MoransI observed``) is sanitized with a
+          warning (``MoransI_observed``; a name that then equals another
+          ``var`` column ignoring letter case gets a ``_1``, ``_2``, ...
+          suffix).
         - ``uns["Top_cluster_defining_features"]``: the cluster-features file
           as a DataFrame of strings, with empty cells missing.
         - ``uns[<Category>]``: one ``{metric: value}`` dictionary of strings
@@ -159,23 +158,13 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
     - Cluster features: tab-separated with named columns, kept in full.
     - Moran statistics: tab-separated; the first column holds known, unique
       feature IDs and may have an empty header. Every other column is a
-      statistic: finite numbers, or booleans spelled ``TRUE``/``FALSE``,
-      ``True``/``False`` or ``true``/``false``. Integers within the int64 or
-      uint64 range are stored exactly. Classification applies to each complete
-      column: the six boolean spellings are recognized first; otherwise a
-      column of integer-looking decimal or hexadecimal tokens uses int64 or
-      uint64, and every other numeric column uses finite float64. Integer
-      columns reject overflow, unsupported spellings and incompatible signed
-      and unsigned values instead of retrying as float. Mixed integer/fraction
-      or exponent columns use native float64 rounding, including large integer
-      tokens and underflow to zero. Header-only statistics use int64 before
-      the left join introduces missing values.
+      finite float64 statistic, also when its values look like integers.
 
-    Arrow's numeric grammar applies after trimming spaces and tabs: integers
-    accept hexadecimal (``0x10``), reject ``+1`` and ``1_0``, and are checked
-    against their declared width. Decimal/exponent spellings (``2.0``, ``2e0``)
-    declare a floating column. ``nan`` and ``inf`` parse but fail finiteness.
-    Numeric statistics cannot be empty; defining-feature empty fields become
+    Statistics follow Arrow's float64 grammar: surrounding spaces are trimmed,
+    values are correctly rounded to float64 (an integer above ``2**53`` may
+    round, ``1e-400`` reads as 0), ``nan`` and ``inf`` parse but fail
+    finiteness, and booleans, hexadecimal and ``1_0`` fail. Numeric
+    statistics cannot be empty; defining-feature empty fields become
     missing after parsing, and other string fields preserve empty strings and
     ``NA`` literally. Every record must have its header's full width, including
     ignored metric columns. Named headers occupy one newline-terminated

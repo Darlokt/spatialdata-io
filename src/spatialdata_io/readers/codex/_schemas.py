@@ -14,22 +14,24 @@ Only complete ``cyc<digits>_ch<digits>`` names denote expression; a name such as
 Akoya CSV exports may qualify every header as ``short_name:long_label``; the
 short names identify fields and the expression long labels become markers.
 
-CSV cell IDs are uint64 (zero allowed), coordinates and expression are
-float64, and regions and unknown annotations remain literal text. Numeric
-fields follow Arrow's typed CSV grammar and must be finite. FCS parameters
-retain their native numeric widths and exact integer-promotion checks. Processor output contract:
+Cell IDs are uint64 (zero allowed) in both containers, so CSV and FCS tables
+concatenate. CSV coordinates and expression are float64, and regions and
+unknown annotations remain literal text. CSV numeric fields follow Arrow's
+typed CSV grammar; expression and coordinates must be finite. FCS IDs are cast
+exactly from their stored values; other FCS parameters retain their native
+numeric widths and exact integer-promotion checks. Processor output contract:
 https://help.codex.bio/codex/processor/technical-notes/expected-output
 """
 
 from __future__ import annotations
 
 import re
-from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.names import validate_element_name
@@ -46,6 +48,7 @@ _CYCLE_COLUMN = re.compile(r"cyc\d+_ch\d+")
 # The region names the shapes element. Other element names are fixed, and
 # SpatialData compares names case-insensitively across element types.
 _RESERVED_REGIONS = frozenset({"table", "images"})
+_CELL_ID_EXPECTED = "unique uint64 cell identifiers"
 _REGION_EXPECTED = (
     "a positive integer region or a valid element name (letters, digits, '_-.') other than 'table' or 'images' "
     "in any letter case"
@@ -117,24 +120,17 @@ def check_integer_promotion(values: npt.NDArray[np.number], path: ArtifactFile) 
                 )
 
 
-def fcs_cell_ids(values: pd.Series, path: ArtifactFile) -> npt.NDArray[np.int64 | np.uint64]:
-    """Convert native FCS integral values without shortening stored binary floats."""
-    if values.isna().any():
-        raise schema_error(path, found="missing cell_id", expected="finite 64-bit integral cell identifiers")
-    if values.dtype.kind in "iu":
-        dtype = np.uint64 if int(values.max()) >= 2**63 else np.int64
-        return values.to_numpy(dtype=dtype, copy=False)
-
-    identifiers: list[int] = []
-    for value in values:
-        # Decimal(float) retains the stored binary value, unlike str(float).
-        exact = Decimal(float(value))
-        if not exact.is_finite() or exact != exact.to_integral_value() or exact < -(2**63) or exact >= 2**64:
-            raise schema_error(path, found=f"cell_id {value!r}", expected="finite 64-bit integral cell identifiers")
-        identifiers.append(int(exact))
-    if min(identifiers) < 0 and max(identifiers) >= 2**63:
-        raise schema_error(path, found="mixed signed/unsigned overflow", expected="one representable 64-bit ID dtype")
-    return np.asarray(identifiers, dtype=np.uint64 if max(identifiers) >= 2**63 else np.int64)
+def fcs_cell_ids(values: pd.Series, path: ArtifactFile) -> pd.Series:
+    """Cast native FCS cell IDs exactly to uint64; stored floats must be integral and nonnegative."""
+    try:
+        identifiers = pc.cast(pa.array(values), pa.uint64(), safe=True)
+    except pa.ArrowInvalid as error:
+        raise schema_error(
+            path, found=f"cell_id values that are not uint64 integers ({error})", expected=_CELL_ID_EXPECTED
+        ) from error
+    if identifiers.null_count:
+        raise schema_error(path, found="missing cell_id", expected=_CELL_ID_EXPECTED)
+    return pd.Series(identifiers, index=values.index, dtype=pd.ArrowDtype(pa.uint64()))
 
 
 def region_name(regions: pd.Series, path: ArtifactFile) -> str:
@@ -204,10 +200,16 @@ def expression_dtype(frame: pd.DataFrame, features: list[str], path: ArtifactFil
     return np.result_type(*dtypes)
 
 
+def validate_expression(values: npt.NDArray[np.number], path: ArtifactFile) -> None:
+    """Reject nonfinite cycle intensities before sparse construction."""
+    if not np.isfinite(values).all():
+        raise schema_error(path, found="nonfinite cycle intensities", expected="finite real cycle intensities")
+
+
 def validate_observations(observations: pd.DataFrame, path: ArtifactFile) -> npt.NDArray[np.number]:
-    """Validate normalized cell identity and exact finite region-pixel coordinates."""
+    """Validate normalized uint64 cell identity and exact finite region-pixel coordinates."""
     if not observations["cell_id"].is_unique:
-        raise schema_error(path, found="duplicate cell_id values", expected="unique cell identifiers within one region")
+        raise schema_error(path, found="duplicate cell_id values", expected=_CELL_ID_EXPECTED)
 
     # Geometry stores float64 centers even when the input coordinates are ints.
     for axis in ("x", "y"):

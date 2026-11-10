@@ -4,8 +4,11 @@ Parquet partitions follow row groups; their row counts come from the footer, so
 partitions carry a global, monotonic row index with known divisions. A plain CSV
 is split by the shared CSV block reader into newline-delimited 64 MiB blocks
 whose indexes restart at zero; every numeric field must hold a number, so an
-empty one is a malformed record. A gzip CSV is one compressed stream that cannot
-be split and is rejected during discovery.
+empty one is a malformed record. Integer cell IDs (XOA 1.0-1.2) are signed to
+keep ``-1``; they are read as text and must be decimal digits or ``-1``,
+because Arrow's grammar would wrap hexadecimal ``0xffffffffffffffff`` to ``-1``.
+A gzip CSV is one compressed stream that cannot be split and is rejected during
+discovery.
 
 Every task opens its source, reads only the documented columns of its partition
 with their declared Arrow types, and validates it when computed: no nulls,
@@ -36,8 +39,10 @@ from spatialdata.transformations import Identity
 from spatialdata_io.readers._utils.csv import read_csv_blocks
 from spatialdata_io.readers.xenium._schemas import (
     CELL_ID,
+    STRING,
     arrow_series,
     cast_column,
+    decimal_ids,
     normalize_ids,
     normalize_text,
     require_finite,
@@ -117,9 +122,14 @@ def _read_row_group(spec: _Partitioning, row_group: int, offset: int) -> pd.Data
 
 
 def _normalize_block(block: pd.DataFrame, spec: _Partitioning) -> pd.DataFrame:
-    """Validate one parsed CSV block."""
+    """Validate one parsed CSV block, whose ``cell_id`` is text."""
     # Arrow-backed columns convert without copying; a thread pool would only add start-up time.
-    return _normalize(pa.Table.from_pandas(block, preserve_index=False, nthreads=1), spec)
+    table = pa.Table.from_pandas(block, preserve_index=False, nthreads=1)
+    kind = dict(spec.types)[CELL_ID]
+    if pa.types.is_integer(kind):
+        ids = decimal_ids(table[CELL_ID], kind, path=spec.source.file, context=spec.context)
+        table = table.set_column(table.column_names.index(CELL_ID), CELL_ID, ids)
+    return _normalize(table, spec)
 
 
 def _parse(frame: dd.DataFrame, *, known_divisions: bool) -> dd.DataFrame:
@@ -187,7 +197,13 @@ def read_transcripts(
         divisions = (*offsets[:-1], offsets[-1] - 1)
         return _parse(dd.from_delayed(parts, meta=meta, divisions=divisions), known_divisions=True)
 
+    # Integer cell IDs are read as text: Arrow would wrap hexadecimal in their signed type.
     blocks = read_csv_blocks(
-        path, header=names, columns=tuple(types), context=context, column_types=types, block_bytes=_BLOCK_BYTES
+        path,
+        header=names,
+        columns=tuple(types),
+        context=context,
+        column_types=types | {CELL_ID: STRING},
+        block_bytes=_BLOCK_BYTES,
     )
     return _parse(blocks.map_partitions(_normalize_block, shared, meta=meta), known_divisions=False)

@@ -22,11 +22,11 @@ from spatialdata_io.readers.merscope._schemas import (
     metadata_columns,
     metadata_types,
     normalize_boundary_ids,
-    normalize_cell_ids,
     normalize_metadata,
     normalize_transcript_partition,
     require_finite,
     transcript_types,
+    validate_cell_ids,
     validate_output_annotations,
     validate_transcript_columns,
 )
@@ -54,7 +54,7 @@ class TestCountColumns:
             "A",
         )
 
-    @pytest.mark.parametrize("columns", [[], ["cell"], ["cell", ""], ["cell", "A", "A"], ["cell", "A\x00"]])
+    @pytest.mark.parametrize("columns", [[], ["cell"], ["cell", ""], ["cell", "A\x00"]])
     def test_bad_headers(self, tmp_path: Path, columns: list[str]) -> None:
         with pytest.raises(ReaderFormatError):
             count_columns(columns, ArtifactFile(tmp_path / "count.csv"))
@@ -75,23 +75,20 @@ class TestBlankColumns:
         )
 
 
-class TestNormalizeCellIds:
-    """Retain opaque text identities and exact integer representations."""
+class TestValidateCellIds:
+    """Retain opaque text identities; only assignments may be unassigned."""
 
-    def test_lexical_and_integer(self, tmp_path: Path) -> None:
+    def test_valid(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "cells.csv")
-        result = normalize_cell_ids(pd.Series(["001", "cell-a", str(2**63 + 1)]), path, "cell metadata")
-        assert result.tolist() == ["001", "cell-a", str(2**63 + 1)]
-        assert result.dtype == STRING_DTYPE
-        assert normalize_cell_ids(pd.Series([2**63 + 1], dtype="uint64"), path, "cell metadata").tolist() == [
-            str(2**63 + 1)
-        ]
-        assert normalize_cell_ids(pd.Series(["-1"]), path, "transcripts", allow_unassigned=True).tolist() == ["-1"]
+        validate_cell_ids(pd.Series(["001", "cell-a", str(2**63 + 1)], dtype=STRING_DTYPE), path, "cell metadata")
+        validate_cell_ids(pd.Series(["-1"], dtype=STRING_DTYPE), path, "transcripts", allow_unassigned=True)
 
-    @pytest.mark.parametrize("value", [None, "", "a\x00", "-1", 1.0, True])
-    def test_invalid(self, tmp_path: Path, *, value: str | float | bool | None) -> None:
+    @pytest.mark.parametrize("value", [None, "", "a\x00", "-1"])
+    def test_invalid(self, tmp_path: Path, value: str | None) -> None:
         with pytest.raises(ReaderFormatError):
-            normalize_cell_ids(pd.Series([value]), ArtifactFile(tmp_path / "cells.csv"), "cell metadata")
+            validate_cell_ids(
+                pd.Series([value], dtype=STRING_DTYPE), ArtifactFile(tmp_path / "cells.csv"), "cell metadata"
+            )
 
 
 class TestCountTypes:
@@ -109,8 +106,8 @@ class TestMetadataTypes:
             "EntityID": pa.string(),
             "center_x": pa.float64(),
             "center_y": pa.float64(),
-            "fov": pa.uint64(),
-            "transcript_count": pa.uint64(),
+            "fov": pa.float64(),
+            "transcript_count": pa.float64(),
             "extra": pa.string(),
         }
 
@@ -124,7 +121,7 @@ class TestTranscriptTypes:
             "gene": pa.string(),
             "global_x": pa.float64(),
             "global_y": pa.float64(),
-            "global_z": pa.uint64(),
+            "global_z": pa.float64(),
             "fov": pa.uint64(),
             "barcode_id": pa.uint64(),
             "cell_id": pa.string(),
@@ -160,15 +157,15 @@ class TestMetadataColumns:
 class TestNormalizeMetadata:
     """Interpret known physical fields and preserve extra annotation spellings."""
 
-    def test_typed_fields_and_nullable_fov(self, tmp_path: Path) -> None:
+    def test_typed_fields_and_nullable_integers(self, tmp_path: Path) -> None:
         frame = pd.DataFrame(
             {
                 "EntityID": ["a", "b"],
                 "center_x": ["1", "2"],
                 "center_y": ["3", "4"],
                 "volume": ["0", "5"],
-                "fov": [None, "2"],
-                "transcript_count": ["0", str(2**63)],
+                "fov": [None, "12.0"],
+                "transcript_count": ["7", None],
                 "extra": ["0001", "NA"],
             },
             dtype=STRING_DTYPE,
@@ -185,11 +182,19 @@ class TestNormalizeMetadata:
         assert result.index.name is None
         assert result["center_x"].dtype == _FLOAT_DTYPE
         assert result["extra"].tolist() == ["0001", "NA"]
-        assert result["fov"].isna().tolist() == [True, False]
-        assert result["transcript_count"].tolist() == [0, 2**63]
+        for column, values in (("fov", [None, 12]), ("transcript_count", [7, None])):
+            assert result[column].dtype == pd.ArrowDtype(pa.uint64())
+            assert pa.array(result[column]).to_pylist() == values
 
     @pytest.mark.parametrize(
-        ("column", "values"), [("EntityID", ["a", "a"]), ("volume", ["-1", "2"]), ("transcript_count", [None, "2"])]
+        ("column", "values"),
+        [
+            ("EntityID", ["a", "a"]),
+            ("volume", ["-1", "2"]),
+            ("fov", ["1.5", "2"]),
+            ("transcript_count", ["-1", "2"]),
+            ("transcript_count", ["nan", "2"]),
+        ],
     )
     def test_invalid(self, tmp_path: Path, column: str, values: list[str | None]) -> None:
         frame = pd.DataFrame(
@@ -214,9 +219,10 @@ class TestBoundaryColumns:
             "Geometry",
         )
 
-    def test_missing(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("names", [["EntityID"], ["EntityID", "ZIndex", "Geometry", "ZIndex"]])
+    def test_missing_or_repeated(self, tmp_path: Path, names: list[str]) -> None:
         with pytest.raises(ReaderFormatError):
-            boundary_columns(["EntityID"], ArtifactFile(tmp_path / "cells.parquet"))
+            boundary_columns(names, ArtifactFile(tmp_path / "cells.parquet"))
 
 
 class TestValidateOutputAnnotations:
@@ -233,7 +239,10 @@ class TestValidateOutputAnnotations:
 class TestNormalizeBoundaryIds:
     """Validate physical primitive types before WKB geometry decoding."""
 
-    @pytest.mark.parametrize("planes", [pa.array([None, 2], type=pa.int64()), pa.nulls(2)])
+    @pytest.mark.parametrize(
+        "planes",
+        [pa.array([None, 2], type=pa.int64()), pa.nulls(2), pa.array([0, None]).dictionary_encode()],
+    )
     def test_nullable_plane_annotations(self, tmp_path: Path, planes: pa.Array) -> None:
         table = pa.table({"EntityID": ["a", "a"], "ZIndex": planes, "Type": ["Cell", "Cell"]})
         assert normalize_boundary_ids(table, ArtifactFile(tmp_path / "cells.parquet")).tolist() == ["a", "a"]
@@ -254,7 +263,7 @@ class TestNormalizeBoundaryIds:
         "table",
         [
             pa.table({"EntityID": [1.0], "ZIndex": [0]}),
-            pa.table({"EntityID": ["1"], "ZIndex": [True]}),
+            pa.table({"EntityID": ["1"], "ZIndex": [{"plane": 0}]}),
             pa.table({"EntityID": ["1"], "ZIndex": [0.5]}),
             pa.table({"EntityID": ["1"], "ZIndex": ["-1"]}),
             pa.table({"EntityID": ["1"], "ZIndex": [0], "Type": ["Nucleus"]}),
@@ -310,7 +319,7 @@ class TestNormalizeTranscriptPartition:
                 "gene": ["B", "A"],
                 "global_x": [".10000000000000002", "2"],
                 "global_y": ["3", "4"],
-                "global_z": ["0", "2"],
+                "global_z": ["0.0", "2.5"],
                 "cell_id": ["-1", str(2**63 + 1)],
                 "fov": ["0", "1"],
                 "barcode_id": ["2", "3"],
@@ -330,15 +339,17 @@ class TestNormalizeTranscriptPartition:
         assert result["gene"].cat.categories.tolist() == ["A", "B", "Blank-1"]
         assert result["x"].dtype == np.dtype(np.float64)
         assert result["x"].iloc[0] == 0.10000000000000002
-        assert result["z_raw"].tolist() == [0, 2]
+        assert result["gene"].tolist() == ["B", "A"]
+        assert result["z_raw"].dtype == pd.ArrowDtype(pa.float64())
+        assert result["z_raw"].tolist() == [0.0, 2.5]
         assert result["original_cell_id" if assignment == "original" else "cell_id"].tolist() == ["-1", str(2**63 + 1)]
         assert result["transcript_id"].tolist() == ["ENST001.3", "123"]
 
     @pytest.mark.parametrize(
         ("column", "value"),
-        [("gene", "Unknown"), ("gene", None), ("transcript_id", ""), ("cell_id", "other")],
+        [("gene", "Unknown"), ("transcript_id", ""), ("cell_id", "other")],
     )
-    def test_invalid(self, tmp_path: Path, column: str, value: str | None) -> None:
+    def test_invalid(self, tmp_path: Path, column: str, value: str) -> None:
         frame = pd.DataFrame({"gene": ["A"], "global_x": ["1"], "global_y": ["2"], column: [value]}, dtype=STRING_DTYPE)
         types = transcript_types(frame.columns.tolist(), ArtifactFile(tmp_path / "tx.csv"))
         frame = pa.Table.from_pandas(frame).cast(pa.schema(list(types.items()))).to_pandas(types_mapper=pd.ArrowDtype)

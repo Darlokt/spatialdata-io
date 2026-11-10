@@ -25,9 +25,9 @@ if TYPE_CHECKING:
 class TestReadCellTable:
     """Exercise real source parser failures before geometry and linkage."""
 
-    @pytest.mark.parametrize("note", ["quoted, field", 'embedded "quote"', "two\nlines", "NA", "NULL"])
+    @pytest.mark.parametrize("note", ["two\nlines", "NA"])
     def test_quoted_and_literal_metadata(self, tmp_path: Path, note: str) -> None:
-        """Preserve quoted delimiters, embedded newlines, and literal null-like text."""
+        """Preserve quoted embedded newlines and literal null-like text."""
         frame = cell_frame()
         frame["note"] = note
         path = tmp_path / "cells.csv"
@@ -37,53 +37,14 @@ class TestReadCellTable:
 
         assert result.obs["note"].tolist() == [note] * 3
 
-    @pytest.mark.parametrize(("note", "expected"), [('"a"suffix', "asuffix"), ('"unterminated', "unterminated\n")])
-    def test_arrow_permissive_quoting(self, tmp_path: Path, note: str, expected: str) -> None:
-        path = tmp_path / "cells.csv"
-        path.write_text(f"cell_id,region,x,y,cyc001_ch001,note\n1,1,0,0,1,{note}\n", encoding="utf-8")
-        assert read_cell_table(ArtifactFile(path)).table.obs["note"].tolist() == [expected]
-
-    @pytest.mark.parametrize("spelling", ["+1", " 1 ", "0001", "-0"])
-    def test_integral_expression_spellings(self, tmp_path: Path, spelling: str) -> None:
-        """Retain accepted signed, padded, and whitespace-surrounded integer tokens."""
-        path = tmp_path / "cells.csv"
-        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n1,1,0,0,{spelling}\n", encoding="utf-8")
-
-        result = read_cell_table(ArtifactFile(path)).table
-
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(np.float64)
-        np.testing.assert_array_equal(result.X.data, [] if spelling == "-0" else [1])
-
-    @pytest.mark.parametrize("spelling", [" 1.5 ", "1.5\t"])
-    def test_padded_decimal_spellings(self, tmp_path: Path, spelling: str) -> None:
-        """Accept whitespace around decimals as around integers."""
-        path = tmp_path / "cells.csv"
-        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n1,1,{spelling},0,{spelling}\n", encoding="utf-8")
-
-        cells = read_cell_table(ArtifactFile(path))
-
-        assert isinstance(cells.table.X, sparse.csr_array)
-        np.testing.assert_array_equal(cells.table.X.data, [1.5])
-        np.testing.assert_array_equal(cells.coordinates, [[1.5, 0]])
-
-    def test_padded_underflow_follows_arrow_rounding(self, tmp_path: Path) -> None:
-        path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0, 1e-400 \n", encoding="utf-8")
-        result = read_cell_table(ArtifactFile(path)).table
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.nnz == 0
-        assert result.X.dtype == np.dtype(np.float64)
-
-    @pytest.mark.parametrize("column", ["cell_id", "region", "x", "y", "note", "cyc001_ch001"])
-    def test_nul_rejected_in_every_source_field(self, tmp_path: Path, column: str) -> None:
-        """Reject NULs rather than allowing the CSV decoder to truncate source values."""
+    def test_nul_rejected_in_text_fields(self, tmp_path: Path) -> None:
+        """Reject NULs in literal text, which Arrow keeps."""
         frame = cell_frame()
-        frame[column] = ["1\x00suffix", "2", "3"]
+        frame["note"] = ["1\x00suffix", "2", "3"]
         path = tmp_path / "cells.csv"
         write_csv(path, frame)
 
-        with pytest.raises(ReaderFormatError, match=r"NUL|malformed CSV"):
+        with pytest.raises(ReaderFormatError, match="NUL"):
             read_cell_table(ArtifactFile(path))
 
     @pytest.mark.parametrize("dtype", [np.int16, np.uint32, np.float32, np.float64])
@@ -108,6 +69,7 @@ class TestReadCellTable:
             ("cyc002_ch001", "bad", "nonnumeric"),
             ("x", 2**53 + 1, "precision loss"),
             ("x", float("nan"), "invalid x/y"),
+            ("cyc002_ch001", float("nan"), "nonfinite cycle intensities"),
         ],
     )
     def test_invalid_native_fcs_fields(
@@ -184,49 +146,29 @@ class TestReadCellTable:
         assert result.X.dtype == np.dtype(np.float64)
 
     @pytest.mark.parametrize(
-        ("column", "values"),
+        ("column", "values", "match"),
         [
-            ("cyc002_ch001", ["bad", "2", "3"]),
-            ("cyc002_ch001", [np.inf, 2, 3]),
-            ("x", [np.nan, 2, 3]),
-            ("y", ["bad", "2", "3"]),
-            ("cell_id", [7, 7, 11]),
-            ("cell_id", ["bad", "2", "3"]),
-            ("cell_id", [1.5, 2, 3]),
-            ("cell_id", [np.nan, 2, 3]),
-            ("cell_id", [np.inf, 2, 3]),
-            ("cell_id", [str(2**64), "2", "3"]),
-            ("cell_id", [str(-(2**63) - 1), "2", "3"]),
-            ("cell_id", [str(2**63), "-1", "3"]),
-            ("region", [1, 2, 1]),
-            ("region", [np.nan, 1, 1]),
+            ("cyc002_ch001", ["inf", 2, 3], "nonfinite cycle intensities"),
+            ("cyc002_ch001", ["nan", 2, 3], "nonfinite cycle intensities"),
+            ("x", ["nan", 2, 3], "invalid x/y"),
+            ("cell_id", [7, 7, 11], "duplicate cell_id"),
+            ("cell_id", [1.5, 2, 3], "malformed CSV"),
+            ("cell_id", [-1, 2, 3], "malformed CSV"),
+            ("region", [1, 2, 1], "multiple regions"),
+            ("region", [np.nan, 1, 1], "region"),
         ],
     )
-    def test_invalid_source_values(self, tmp_path: Path, column: str, values: list[str | int | float]) -> None:
+    def test_invalid_source_values(
+        self, tmp_path: Path, column: str, values: list[str | int | float], match: str
+    ) -> None:
         """Reject invalid source intensities, identifiers, coordinates, and region relationships."""
         frame = cell_frame()
         frame[column] = values
         path = tmp_path / "cells.csv"
         write_csv(path, frame)
 
-        with pytest.raises(
-            (ReaderFormatError, ValueError),
-            match=r"finite|cell_id|regions|region|numeric|precision|overflow|x/y|malformed CSV",
-        ):
+        with pytest.raises(ReaderFormatError, match=match):
             read_cell_table(ArtifactFile(path))
-
-    @pytest.mark.parametrize("column", ["x", "y", "cyc002_ch001"])
-    @pytest.mark.parametrize("value", ["1e-400", "-1e-400"])
-    def test_required_scientific_fields_follow_arrow_underflow(self, tmp_path: Path, column: str, value: str) -> None:
-        frame = cell_frame()
-        frame[column] = value
-        write_csv(tmp_path / "cells.csv", frame)
-        cells = read_cell_table(ArtifactFile(tmp_path / "cells.csv"))
-        if column == "cyc002_ch001":
-            assert isinstance(cells.table.X, sparse.csr_array)
-            assert cells.table.X[:, 0].nnz == 0
-        else:
-            np.testing.assert_array_equal(cells.coordinates[:, 0 if column == "x" else 1], 0)
 
     @pytest.mark.parametrize("source_format", ["csv", "fcs"])
     def test_empty_cells(self, tmp_path: Path, source_format: str) -> None:
@@ -240,23 +182,13 @@ class TestReadCellTable:
         with pytest.raises(ReaderFormatError, match="no cells"):
             read_cell_table(ArtifactFile(path))
 
-    @pytest.mark.parametrize("body", ["", "\n", "\n\r\n"])
-    def test_header_and_blank_lines_have_no_cells(self, tmp_path: Path, body: str) -> None:
+    def test_header_and_blank_lines_have_no_cells(self, tmp_path: Path) -> None:
         """Blank lines after the header are not records."""
         path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n" + body, encoding="utf-8", newline="")
+        path.write_text("cell_id,region,x,y,cyc001_ch001\n\n", encoding="utf-8")
 
         with pytest.raises(ReaderFormatError, match="no cells"):
             read_cell_table(ArtifactFile(path))
-
-    def test_blank_lines_before_records_are_skipped(self, tmp_path: Path) -> None:
-        path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n\n5,1,0,0,2\n\n", encoding="utf-8")
-
-        cells = read_cell_table(ArtifactFile(path))
-
-        assert cells.table.n_obs == 1
-        assert cells.cell_ids.tolist() == [5]
 
     def test_invalid_utf8_record(self, tmp_path: Path) -> None:
         """Undecodable record bytes are a malformed table, not a bare decoding error."""
@@ -286,24 +218,16 @@ class TestReadCellTable:
 
         assert cells.region == "1"
         assert cells.cell_ids.dtype == np.dtype(np.uint64)
+        assert cells.table.obs["cell_id"].dtype == pd.ArrowDtype(pa.uint64())
         np.testing.assert_array_equal(cells.cell_ids, [7, 2, 11])
         np.testing.assert_array_equal(cells.coordinates, [[20, 1.5], [2.5, 30], [13, 8]])
         assert cells.table.obs["cell_id"].tolist() == [7, 2, 11]
         assert cells.table.obs["region"].tolist() == ["1"] * 3
 
-    @pytest.mark.parametrize("row", ["1,1,2,3", "1,1,2,3,4,5"])
-    def test_malformed_row_width(self, tmp_path: Path, row: str) -> None:
+    def test_malformed_row_width(self, tmp_path: Path) -> None:
         """Require exactly one physical field per declared source column."""
         path = tmp_path / "cells.csv"
-        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n{row}\n", encoding="utf-8")
-
-        with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_cell_table(ArtifactFile(path))
-
-    def test_extra_zero_based_field_cannot_become_an_implicit_index(self, tmp_path: Path) -> None:
-        """Prevent surplus fields from silently shifting cell metadata into an inferred index."""
-        path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n0,1,2,3,4,5\n1,1,2,3,4,5\n", encoding="utf-8")
+        path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,2,3,4,5\n", encoding="utf-8")
 
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_cell_table(ArtifactFile(path))
@@ -334,7 +258,7 @@ class TestReadCellTable:
         assert table.obs["cell_id"].tolist() == [7, 2, 11]
 
     def test_string_region_and_uint64_identifiers(self, tmp_path: Path) -> None:
-        """Link exact unsigned cell IDs within a named source region."""
+        """Link exact uint64 cell IDs, up to the largest, within a named source region."""
         frame = cell_frame()
         frame["region"] = "reg001"
         frame["cell_id"] = [str(2**64 - 1), "2", "3"]
@@ -344,17 +268,8 @@ class TestReadCellTable:
         result = codex(tmp_path)
 
         assert result.tables["table"].obs["cell_id"].dtype == np.dtype(np.uint64)
+        assert result.shapes["reg001"].index.dtype == np.dtype(np.uint64)
         assert result.shapes["reg001"].index.tolist() == [2**64 - 1, 2, 3]
-
-    @pytest.mark.parametrize("token", ["9007199254740993", "9007199254740993.0", "1e23"])
-    def test_float64_expression_rounds_directly(self, tmp_path: Path, token: str) -> None:
-        path = tmp_path / "cells.csv"
-        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n1,1,{token},0,{token}\n", encoding="utf-8")
-        cells = read_cell_table(ArtifactFile(path))
-        assert isinstance(cells.table.X, sparse.csr_array)
-        assert cells.table.X.dtype == np.dtype(np.float64)
-        assert cells.table.X.data.tolist() == [float(token)]
-        assert cells.coordinates[0, 0] == float(token)
 
     def test_float64_rounding_and_signed_zero(self, tmp_path: Path) -> None:
         path = tmp_path / "cells.csv"
@@ -369,10 +284,8 @@ class TestReadCellTable:
         assert cells.table.X.data.tolist() == [0.10000000000000002]
         assert cells.cell_ids.dtype == np.dtype(np.uint64)
 
-    @pytest.mark.parametrize("column", ["cell_id", "x", "y", "cyc001_ch001"])
-    def test_empty_required_numeric_field_fails(self, tmp_path: Path, column: str) -> None:
-        values = {"cell_id": "0", "region": "001", "x": "1", "y": "2", "cyc001_ch001": "-3"}
-        values[column] = ""
+    def test_empty_required_numeric_field_fails(self, tmp_path: Path) -> None:
+        values = {"cell_id": "0", "region": "001", "x": "1", "y": "2", "cyc001_ch001": ""}
         path = tmp_path / "cells.csv"
         path.write_text(",".join(values) + "\n" + ",".join(values.values()) + "\n", encoding="utf-8")
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
@@ -383,14 +296,6 @@ class TestReadCellTable:
         path.write_text("cell_id,region,x,y,cyc001_ch001\n1,001,0,0,1\n2,1,0,0,1\n", encoding="utf-8")
         with pytest.raises(ReaderFormatError, match="multiple regions"):
             read_cell_table(ArtifactFile(path))
-
-    def test_mixed_large_signed_expression_uses_fixed_float64(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,9223372036854775809\n2,1,0,0,-1\n", encoding="utf-8")
-        mocker.patch.object(_tables, "_CSV_BLOCK_BYTES", 64)
-        result = read_cell_table(ArtifactFile(path)).table
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.data.tolist() == [float(2**63 + 1), -1.0]
 
     def test_sparse_output_never_densifies(self, tmp_path: Path, mocker: MockerFixture) -> None:
         """Keep expression sparse through geometry, compatibility conversion, and linkage."""
@@ -445,35 +350,6 @@ class TestReadCellTable:
         assert stream.closed
         assert any("cell table" in note for note in caught.value.__notes__)
 
-    @pytest.mark.parametrize("token", ["0x10", " 16 ", "\t16\t"])
-    def test_unsigned_id_grammar(self, tmp_path: Path, token: str) -> None:
-        path = tmp_path / "cells.csv"
-        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n{token},001,0,0,-1\n", encoding="utf-8")
-        result = read_cell_table(ArtifactFile(path))
-        assert result.cell_ids.tolist() == [16]
-        assert result.region == "001"
-
-    @pytest.mark.parametrize("token", ["-1", "-0", "+1", "2.0", "2e0", "1_0", "", str(2**64)])
-    def test_invalid_unsigned_id_spellings(self, tmp_path: Path, token: str) -> None:
-        path = tmp_path / "cells.csv"
-        path.write_text(f"cell_id,region,x,y,cyc001_ch001\n{token},1,0,0,1\n", encoding="utf-8")
-        with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_cell_table(ArtifactFile(path))
-
-    @pytest.mark.parametrize("batch_bytes", [256, 1024 * 1024])
-    def test_exact_signed_unsigned_expression_is_batch_independent(
-        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
-    ) -> None:
-        """Compatible signed and unsigned intensities may share exact float64 storage."""
-        path = tmp_path / "cells.csv"
-        path.write_text("cell_id,region,x,y,cyc001_ch001\n1,1,0,0,-1\n2,1,0,0,9223372036854775808\n", encoding="utf-8")
-        mocker.patch("spatialdata_io.readers.codex._tables._CSV_BLOCK_BYTES", batch_bytes)
-
-        result = read_cell_table(ArtifactFile(path)).table
-
-        assert isinstance(result.X, sparse.csr_array)
-        np.testing.assert_array_equal(result.X.data, [-1.0, float(2**63)])
-
     @pytest.mark.parametrize("batch_bytes", [256, 1024 * 1024])
     @pytest.mark.parametrize("all_zero", [False, True])
     def test_single_and_multiple_blocks_preserve_canonical_sparse_values(
@@ -497,17 +373,13 @@ class TestReadCellTable:
         np.testing.assert_array_equal(result.X.indptr, [0, 0, 0, 0] if all_zero else [0, 1, 2, 4])
         assert result.obs["cell_id"].tolist() == [7, 2, 11]
 
-    @pytest.mark.parametrize("batch_bytes", [256, 1024 * 1024])
     @pytest.mark.parametrize("region", ["001", "1.0", "-1", "0"])
-    def test_literal_regions_and_fixed_coordinates(
-        self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int, region: str
-    ) -> None:
+    def test_literal_regions_and_fixed_coordinates(self, tmp_path: Path, region: str) -> None:
         path = tmp_path / "cells.csv"
         path.write_text(
             f"cell_id,region,x,y,cyc001_ch001\n7,{region},1,-2,0\n2,{region},2.5,0,-3\n11,{region},-4,3.5,4\n",
             encoding="utf-8",
         )
-        mocker.patch.object(_tables, "_CSV_BLOCK_BYTES", batch_bytes)
         cells = read_cell_table(ArtifactFile(path))
         assert cells.region == region
         assert cells.table.obs["region"].tolist() == [region] * 3

@@ -88,6 +88,10 @@ def _assert_table(table: AnnData, fixture: MerscopeFixture) -> None:
     assert table.uns["blank_names"] == ["Blank-1"]
     np.testing.assert_array_equal(table.obsm["spatial"], [[2, 2], [10, 1], [21, 1]])
     assert table.obs["annotation"].tolist() == ["A", "B", "C"]
+    # Decimal integer spellings (12.0) and empty fields become nullable unsigned integers.
+    for column, values in (("fov", [12, None, 13]), ("transcript_count", [1, 3, None])):
+        assert table.obs[column].dtype == pd.UInt64Dtype()
+        assert table.obs[column].astype(object).where(table.obs[column].notna(), None).tolist() == values
     assert table.obs["EntityID"].tolist() == list(fixture.cell_ids)
     assert get_table_keys(table) == ("slide_region_polygons", "cells_region", "EntityID")
 
@@ -147,7 +151,8 @@ class TestMerscopeCharacterization:
         assert _instance_key(points) == ("cell_id" if profile == "standard" else None)
         assert "z" not in materialized
         np.testing.assert_array_equal(materialized[["x", "y"]], [[2, 2], [10, 1], [21, 1], [8, 6]])
-        np.testing.assert_array_equal(materialized["z_raw"], [0, 2, 2, 0])
+        assert str(materialized["z_raw"].dtype) == "double[pyarrow]"
+        np.testing.assert_array_equal(materialized["z_raw"], [0.0, 2.0, 2.0, 0.0])
 
     @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
     @pytest.mark.parametrize("included", list(product((False, True), repeat=4)))

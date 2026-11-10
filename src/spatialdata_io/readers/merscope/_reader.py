@@ -126,8 +126,9 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
           ``mosaic_pixels`` (identity).
         - ``points["<prefix>_transcripts"]``: lazy events with float64 ``x``,
           ``y`` (micrometres) and categorical ``gene`` in count-header order,
-          plus, when present, uint64 ``z_raw`` (stack index, not a physical
-          depth), ``fov`` and ``barcode_id``, text ``transcript_id``, and the
+          plus, when present, float64 ``z_raw`` (the source ``global_z``
+          stack position, not a physical depth), uint64 ``fov`` and
+          ``barcode_id``, text ``transcript_id``, and the
           text assignment ``cell_id`` (instance key; ``-1`` unassigned) or
           ``original_cell_id`` (instrument events read beside VPT cells).
         - ``shapes["<prefix>_polygons"]``: one XY footprint per cell, the
@@ -139,7 +140,8 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
           ``obsm["blank"]`` a CSR array of ``Blank-<n>`` controls named by
           ``uns["blank_names"]``; both float32 when every count is exact in
           float32, otherwise float64. ``obsm["spatial"]`` holds float64
-          micrometre centroids; ``obs`` holds the cell metadata, text
+          micrometre centroids; ``obs`` holds the cell metadata (``fov`` and
+          ``transcript_count`` as nullable uint64), text
           ``EntityID`` and categorical ``region``, ``slide`` and
           ``dataset_id``. Metadata column names that a SpatialData table
           does not accept (``cell type``) are sanitized with a warning

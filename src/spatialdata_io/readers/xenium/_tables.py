@@ -449,11 +449,12 @@ def build_table(  # noqa: PLR0913, RUF100 - Every table source and the error ori
         list(obs.columns), source="xenium: the cells table header", reserved=(*CELL_COLUMNS, *READER_OBS)
     )
     if store is not None:
-        obs["label_id"] = store.cell_labels
-        obs["nucleus_centroid_x"] = store.nucleus_centroids[:, 0]
-        obs["nucleus_centroid_y"] = store.nucleus_centroids[:, 1]
+        # Arrow-backed like the cells columns; pa.array keeps NaN centroids as NaN, not null.
+        obs["label_id"] = pd.arrays.ArrowExtensionArray(pa.array(store.cell_labels))
+        obs["nucleus_centroid_x"] = pd.arrays.ArrowExtensionArray(pa.array(store.nucleus_centroids[:, 0]))
+        obs["nucleus_centroid_y"] = pd.arrays.ArrowExtensionArray(pa.array(store.nucleus_centroids[:, 1]))
         if "nucleus_count" not in obs and store.nucleus_counts is not None:
-            obs["nucleus_count"] = store.nucleus_counts
+            obs["nucleus_count"] = pd.arrays.ArrowExtensionArray(pa.array(store.nucleus_counts))
         if store.cell_methods is not None:
             if "segmentation_method" in obs and not np.array_equal(
                 obs["segmentation_method"].to_numpy(dtype=np.str_), store.cell_methods

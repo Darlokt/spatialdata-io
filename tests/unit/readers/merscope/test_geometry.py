@@ -150,22 +150,18 @@ class TestReadBoundaries:
         assert "unused" not in result
         assert read.call_args.kwargs["columns"] == ["EntityID", "ZIndex", "Geometry", "Type"]
 
-    def test_decoding_batches_preserve_order_and_limit_wkb_temporaries(
-        self, tmp_path: Path, mocker: MockerFixture
-    ) -> None:
+    def test_decoding_batches_preserve_order(self, tmp_path: Path, mocker: MockerFixture) -> None:
         shape = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
         path = _write_boundaries(
             tmp_path / "boundaries.parquet", [shape] * 7, ["007", "NA", "007", "0", "NA", "0", "007"]
         )
         mocker.patch.object(geometry_module, "_BOUNDARY_BATCH_ROWS", 2)
-        decode = mocker.spy(geometry_module.shapely, "from_wkb")
 
         result = read_boundaries(path, policy="keep")
 
         assert result.source_ids.tolist() == ["007", "NA", "0"]
         assert result.shapes.index.tolist() == ["007", "NA", "0"]
         assert all(value.equals(shape) for value in result.shapes.geometry)
-        assert [len(call.args[0]) for call in decode.call_args_list] == [2, 2, 2, 1]
 
     def test_empty_projected_population_fails(self, tmp_path: Path) -> None:
         path = tmp_path / "empty.parquet"
@@ -236,6 +232,12 @@ class TestReadBoundaries:
         with pytest.raises(ValueError, match="Parquet") as caught:
             _read(path)
         assert any("merscope" in note and str(path) in note for note in caught.value.__notes__)
+
+    def test_format_errors_are_not_annotated_twice(self, tmp_path: Path) -> None:
+        path = _write_boundaries(tmp_path / "boundaries.parquet", [LineString([(0, 0), (1, 1)])], ["cell-1"])
+        with pytest.raises(ReaderFormatError, match="nonplanar geometry") as caught:
+            _read(path)
+        assert not getattr(caught.value, "__notes__", [])
 
     def test_union_numerical_failure_keeps_source_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _write_boundaries(

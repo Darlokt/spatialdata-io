@@ -36,11 +36,11 @@ def _path(tmp_path: Path) -> ArtifactFile:
 
 
 class TestValidateColumns:
-    """Duplicate and empty names fail before any parser can repair them."""
+    """Empty names fail; csv_header has already rejected repeated names."""
 
-    @pytest.mark.parametrize("columns", [[], ["a", "a"], ["a", ""], ["a\x00"]])
+    @pytest.mark.parametrize("columns", [[], ["a", ""], ["a\x00"]])
     def test_rejects(self, tmp_path: Path, columns: list[str]) -> None:
-        with pytest.raises(ReaderFormatError, match="unique nonempty"):
+        with pytest.raises(ReaderFormatError, match="nonempty field names"):
             _validate_columns(columns, _path(tmp_path), "transcripts")
 
 

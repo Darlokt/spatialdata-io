@@ -20,8 +20,8 @@ types declared here:
 Read numeric fields cannot be empty; ignored annotations may be. Numbers follow
 Arrow's CSV grammar: surrounding spaces are trimmed and integers may be hexadecimal (``0x10``), but ``2.0`` or ``+1``
 is not an integer; floats are correctly rounded, so ``1e-400`` reads as 0.
-Header names must be unique, nonempty (except the first CellxGene name) and
-free of NUL characters.
+Header names must be unique; CellxGene feature names must also be nonempty and
+free of NUL characters, because they name the table's features.
 
 ``Boundaries.geojson`` is a nonempty GeoJSON ``FeatureCollection`` of Polygon or
 MultiPolygon features in DAPI pixel coordinates. Each feature's top-level
@@ -58,35 +58,29 @@ TRANSCRIPT_TYPES = {"name": pa.string(), "x": pa.float64(), "y": pa.float64(), "
 _TRANSCRIPT_REQUIRED = ("name", "x", "y")
 
 
-def _validate_names(
-    header: Sequence[str], path: ArtifactFile, *, context: ReaderErrorContext, allow_first_empty: bool = False
-) -> None:
-    """Reject empty and NUL-containing names; Arrow keeps both."""
-    if any("\x00" in name or (not name and not (allow_first_empty and i == 0)) for i, name in enumerate(header)):
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="empty or NUL-containing names",
-            expected="nonempty column names without NUL",
-        )
-
-
 def count_types(header: Sequence[str], path: ArtifactFile) -> pa.Schema:
     """Return the Arrow types of a CellxGene header: the positional cell ID, then one count per feature."""
-    _validate_names(header, path, context=COUNTS_CONTEXT, allow_first_empty=True)
-    if len(header) < 2:  # noqa: PLR2004 - The ID field and one feature.
+    features = header[1:]
+    if not features:
         raise ReaderFormatError(
             context=COUNTS_CONTEXT,
             path=path,
             found="no feature columns",
             expected="a cell-ID field and at least one count feature",
         )
-    return pa.schema([(header[0], CELL_ID), *((name, COUNT) for name in header[1:])])
+    # Feature names become the table's var names; Arrow keeps empty and NUL names.
+    if any(not name or "\x00" in name for name in features):
+        raise ReaderFormatError(
+            context=COUNTS_CONTEXT,
+            path=path,
+            found="empty or NUL-containing feature names",
+            expected="nonempty feature names without NUL",
+        )
+    return pa.schema([(header[0], CELL_ID), *((name, COUNT) for name in features)])
 
 
 def validate_cell_columns(header: Sequence[str], path: ArtifactFile) -> None:
     """Require the projected cell fields; any column order and extra annotations are accepted."""
-    _validate_names(header, path, context=CELLS_CONTEXT)
     if not set(CELL_TYPES).issubset(header):
         raise ReaderFormatError(
             context=CELLS_CONTEXT,
@@ -98,7 +92,6 @@ def validate_cell_columns(header: Sequence[str], path: ArtifactFile) -> None:
 
 def transcript_types(header: Sequence[str], path: ArtifactFile) -> dict[str, pa.DataType]:
     """Return the projected transcript fields and their types; additional vendor annotations are ignored."""
-    _validate_names(header, path, context=TRANSCRIPTS_CONTEXT)
     if not set(_TRANSCRIPT_REQUIRED).issubset(header):
         raise ReaderFormatError(
             context=TRANSCRIPTS_CONTEXT,

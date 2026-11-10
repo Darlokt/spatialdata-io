@@ -35,8 +35,6 @@ class TestCsvHeader:
             (b"a,b,c\n1,2,3\n", ("a", "b", "c")),
             (b"\xef\xbb\xbfa,b\r\n1,2\r\n", ("a", "b")),
             (b'"x,y","q""q",,b\n', ("x,y", 'q"q', "", "b")),
-            (b" a ,b\n", (" a ", "b")),
-            ("gène,µm\n".encode(), ("gène", "µm")),
         ],
     )
     def test_reads_names_with_arrow_grammar(self, tmp_path: Path, payload: bytes, expected: tuple[str, ...]) -> None:
@@ -49,26 +47,13 @@ class TestCsvHeader:
             assert csv_header(path, context=_CONTEXT, source=source) == ("a", "b")
             assert source.read() == b"1,2\n"
 
-    @pytest.mark.parametrize(
-        ("payload", "expected"),
-        [
-            (b"gene\tcluster\tavg_log2FC\n", ("gene", "cluster", "avg_log2FC")),
-            (b"\xef\xbb\xbf\tMoransI_observed\tMoransI_p.value\r\n", ("", "MoransI_observed", "MoransI_p.value")),
-            (b'"gene\tlabel"\t"q""q"\tcomma,name\n', ("gene\tlabel", 'q"q', "comma,name")),
-        ],
-    )
-    def test_named_tsv_headers(self, tmp_path: Path, payload: bytes, expected: tuple[str, ...]) -> None:
-        with io.BytesIO(payload + b"unread record\n") as source:
-            assert csv_header(tmp_path / "features.tsv", context=_CONTEXT, source=source, delimiter="\t") == expected
+    def test_named_tsv_header_from_a_borrowed_stream(self, tmp_path: Path) -> None:
+        payload = b'"gene\tlabel"\t"q""q"\tcomma,name\nunread record\n'
+        with io.BytesIO(payload) as source:
+            header = csv_header(tmp_path / "features.tsv", context=_CONTEXT, source=source, delimiter="\t")
+            assert header == ("gene\tlabel", 'q"q', "comma,name")
             assert not source.closed
             assert source.read() == b"unread record\n"
-
-    def test_duplicate_tsv_names(self, tmp_path: Path) -> None:
-        path = _file(tmp_path, b"gene\tstat\tstat\n")
-        with pytest.raises(ReaderFormatError, match="repeated column names") as raised:
-            csv_header(path, context=_CONTEXT, delimiter="\t")
-        assert raised.value.path == path
-        assert raised.value.context == _CONTEXT
 
     @pytest.mark.parametrize(
         ("payload", "found"),

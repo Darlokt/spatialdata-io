@@ -85,10 +85,10 @@ QUANTIFICATION_CONTEXT = ReaderErrorContext("mcmicro", "quantification")
 
 
 def validate_columns(columns: Sequence[str], path: ArtifactFile, *, context: ReaderErrorContext) -> None:
-    """Reject empty, duplicate, or NUL-containing names before parser repair."""
-    if not columns or len(set(columns)) != len(columns) or any(not name or "\x00" in name for name in columns):
+    """Reject empty or NUL-containing names; ``csv_header`` already rejects repeated names."""
+    if not columns or any(not name or "\x00" in name for name in columns):
         raise ReaderFormatError(
-            context=context, path=path, found=f"header {list(columns)!r}", expected="unique nonempty field names"
+            context=context, path=path, found=f"header {list(columns)!r}", expected="nonempty field names"
         )
 
 

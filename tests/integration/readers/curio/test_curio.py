@@ -228,7 +228,7 @@ class TestCurio:
             "note\tavg_log2FC\tgene\tcluster\nextra\t2.5\tgene-c\t1\n", encoding="utf-8"
         )
         (tmp_path / "sample_variable_features_spatial_moransi.txt").write_text(
-            "gene\tcustom_statistic\tselected\ngene-c\t0.8\tTRUE\ngene-b\t0.4\tFALSE\n", encoding="utf-8"
+            "gene\tcustom_statistic\trank\ngene-c\t0.8\t2\ngene-b\t0.4\t1\n", encoding="utf-8"
         )
 
         table = curio(tmp_path).tables["table"]
@@ -241,8 +241,8 @@ class TestCurio:
         pd.testing.assert_series_equal(table.obs["retained"], original.obs["retained"], check_exact=True)
         pd.testing.assert_series_equal(table.var["feature_number"], original.var["feature_number"], check_exact=True)
         np.testing.assert_array_equal(table.var["custom_statistic"], [0.4, np.nan, 0.8])
-        assert table.var["selected"].loc[["gene-b", "gene-c"]].tolist() == [False, True]
-        assert pd.isna(table.var["selected"].iloc[1])
+        np.testing.assert_array_equal(table.var["rank"], [1.0, np.nan, 2.0])
+        assert table.var["rank"].dtype == np.dtype(np.float64)
         defining = table.uns["Top_cluster_defining_features"]
         assert defining.columns.tolist() == ["note", "avg_log2FC", "gene", "cluster"]
         assert defining.iloc[0].tolist() == ["extra", "2.5", "gene-c", "1"]
@@ -370,17 +370,14 @@ class TestCurio:
         assert loaded.shapes["cells"].index.tolist() == result.shapes["cells"].index.tolist()
 
     @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
-    @pytest.mark.parametrize("unsigned", [False, True])
-    def test_nullable_statistics_roundtrip(self, tmp_path: Path, storage: str, *, unsigned: bool) -> None:
-        """Persist exact large integers, missing statistics, and nullable uns annotations."""
+    def test_nullable_statistics_roundtrip(self, tmp_path: Path, storage: str) -> None:
+        """Persist exact float statistics, missing statistics, and nullable uns annotations."""
         write_curio(tmp_path)
         (tmp_path / "sample_variable_features_clusters.txt").write_text(
             "gene\tcluster\toptional\ngene-c\t1\t0.25\ngene-b\t0\t\ngene-a\t1\t0.75\n", encoding="utf-8"
         )
-        large_integer = 2**64 - 1 if unsigned else 2**53 + 1
         (tmp_path / "sample_variable_features_spatial_moransi.txt").write_text(
-            "gene\texact_integer\tselected\tprecision\ngene-c\t2\tTRUE\t0.10000000000000002\n"
-            f"gene-b\t{large_integer}\tFALSE\t0.25\n",
+            "gene\tcount\tprecision\ngene-c\t2\t0.10000000000000002\ngene-b\t9007199254740993\t0.25\n",
             encoding="utf-8",
         )
         result = curio(tmp_path)
@@ -397,11 +394,10 @@ class TestCurio:
             result.write(destination)
             loaded = SpatialData.read(destination).tables["table"]
 
-        assert table.var["exact_integer"].dtype == (pd.UInt64Dtype() if unsigned else pd.Int64Dtype())
-        assert table.var["selected"].dtype == pd.BooleanDtype()
-        assert loaded.var["exact_integer"].iloc[0] == large_integer
-        assert loaded.var["exact_integer"].isna().tolist() == [False, True, False]
-        assert loaded.var["selected"].isna().tolist() == [False, True, False]
+        assert table.var["count"].dtype == table.var["precision"].dtype == np.dtype(np.float64)
+        # Statistics are float64: an integer beyond 2**53 rounds to the nearest double.
+        assert loaded.var["count"].iloc[0] == float(2**53)
+        assert loaded.var["count"].isna().tolist() == [False, True, False]
         assert loaded.var["precision"].iloc[2] == float("0.10000000000000002")
         assert loaded.obs["instance_id"].tolist() == table.obs_names.tolist()
         defining = loaded.uns["Top_cluster_defining_features"]

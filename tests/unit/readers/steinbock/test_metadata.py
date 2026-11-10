@@ -20,7 +20,7 @@ _HEADER = b"image,width_px,height_px,acquisition_width_um,acquisition_height_um\
 
 
 class TestReadImageMetadata:
-    """Own one source, validate full record widths and preserve selected-row semantics."""
+    """Own one source, validate full record widths and interpret selected rows."""
 
     @pytest.mark.parametrize("row", [b"s.tiff,12,8,6,20\n", b"s.tiff,12,8,6\n"])
     def test_one_owned_read_closes_on_success_and_failure(
@@ -64,7 +64,7 @@ class TestReadImageMetadata:
 
     def test_empty_physical_fields_and_unselected_rows(self, tmp_path: Path) -> None:
         path = tmp_path / "images.csv"
-        path.write_bytes(_HEADER + b"s.tiff,12,8,,\nother.tiff,unused,unused,unused,unused\n")
+        path.write_bytes(_HEADER + b"s.tiff,12,8,,\nother.tiff,0,8,-1,\n")
         metadata = read_image_metadata(ArtifactFile(path), {"s.tiff", "absent.tiff"})
         assert set(metadata) == {"s.tiff"}
         assert metadata["s.tiff"].spacing_um is None
@@ -100,76 +100,34 @@ class TestReadImageMetadata:
         with pytest.raises(ReaderFormatError, match="repeated column names"):
             read_image_metadata(ArtifactFile(path), {"s.tiff"})
 
-    def test_native_quoting_and_blank_record_grammar(self, tmp_path: Path) -> None:
+    def test_malformed_numeric_token(self, tmp_path: Path) -> None:
+        """Every row's dimensions follow Arrow's uint64 grammar, also for unselected images."""
         path = tmp_path / "images.csv"
-        path.write_bytes(_HEADER + b'\n\ns.tiff,"1"2,8,6,20\n\n')
+        path.write_bytes(_HEADER + b"s.tiff,12,8,6,20\nother.tiff,12.0,8,6,20\n")
 
-        metadata = read_image_metadata(ArtifactFile(path), {"s.tiff"})
-
-        assert metadata["s.tiff"].shape == (8, 12)
-        assert metadata["s.tiff"].spacing_um == (0.5, 2.5)
-
-    def test_unselected_quoted_multiline_numeric_text_is_not_parsed(self, tmp_path: Path) -> None:
-        path = tmp_path / "images.csv"
-        path.write_bytes(_HEADER + b'other.tiff,"unused\nstill unused",unused,unused,unused\ns.tiff,12,8,6,20\n')
-
-        metadata = read_image_metadata(ArtifactFile(path), {"s.tiff"})
-
-        assert list(metadata) == ["s.tiff"]
-        assert metadata["s.tiff"].spacing_um == (0.5, 2.5)
-
-    @pytest.mark.parametrize(
-        "field", ["image", "width_px", "height_px", "acquisition_width_um", "acquisition_height_um"]
-    )
-    def test_known_unselected_fields_still_reject_nul(self, tmp_path: Path, field: str) -> None:
-        values = dict(
-            zip(
-                _HEADER.decode().strip().split(","), ["other.tiff", "unused", "unused", "unused", "unused"], strict=True
-            )
-        )
-        values[field] += "\x00"
-        path = tmp_path / "images.csv"
-        path.write_bytes(_HEADER + b"s.tiff,12,8,6,20\n" + (",".join(values.values()) + "\n").encode())
-
-        with pytest.raises(ReaderFormatError, match="NUL"):
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
             read_image_metadata(ArtifactFile(path), {"s.tiff"})
 
-    @pytest.mark.parametrize("selected_first", [True, False])
-    def test_selected_values_are_independent_of_unselected_row_order(
-        self, tmp_path: Path, *, selected_first: bool
-    ) -> None:
-        selected = b"s.tiff,12,8,6,20\n"
-        unselected = b"other.tiff,unused,unused,unused,unused\n"
+        assert caught.value.path == path
+
+    def test_unselected_image_names_reject_nul(self, tmp_path: Path) -> None:
         path = tmp_path / "images.csv"
-        path.write_bytes(_HEADER + (selected + unselected if selected_first else unselected + selected))
+        path.write_bytes(_HEADER + b"s.tiff,12,8,6,20\nother\x00.tiff,12,8,6,20\n")
 
-        metadata = read_image_metadata(ArtifactFile(path), {"s.tiff", "absent.tiff"})
-
-        assert set(metadata) == {"s.tiff"}
-        assert metadata["s.tiff"].shape == (8, 12)
-        assert metadata["s.tiff"].spacing_um == (0.5, 2.5)
-
-    @pytest.mark.parametrize(
-        "row",
-        [b"other.tiff,12,8,6\n", b'"other.tiff,12,8,6,20\n', b"other.tiff,12,8,6,20\x00\n"],
-    )
-    def test_unselected_records_still_require_valid_csv(self, tmp_path: Path, row: bytes) -> None:
-        path = tmp_path / "images.csv"
-        path.write_bytes(_HEADER + b"s.tiff,12,8,6,20\n" + row)
-        with pytest.raises(ReaderFormatError):
+        with pytest.raises(ReaderFormatError, match="NUL"):
             read_image_metadata(ArtifactFile(path), {"s.tiff"})
 
     @pytest.mark.parametrize("name", [b"", b"other.tiff"])
     def test_unselected_empty_or_duplicate_identities_fail(self, tmp_path: Path, name: bytes) -> None:
         path = tmp_path / "images.csv"
-        row = name + b",unused,unused,unused,unused\n"
+        row = name + b",12,8,6,20\n"
         path.write_bytes(_HEADER + b"s.tiff,12,8,6,20\n" + row + row)
         with pytest.raises(ReaderFormatError, match="image names"):
             read_image_metadata(ArtifactFile(path), {"s.tiff"})
 
     def test_semantic_failure_closes_stream(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        owner = io.BytesIO(_HEADER + b"other.tiff,unused,unused,unused,unused\ns.tiff,12.5,8,6,20\n")
+        owner = io.BytesIO(_HEADER + b"other.tiff,12,8,6,20\ns.tiff,0,8,6,20\n")
         mocker.patch("pathlib.Path.open", return_value=owner)
-        with pytest.raises(ReaderFormatError, match="integral dimensions"):
+        with pytest.raises(ReaderFormatError, match="positive integral width_px"):
             read_image_metadata(ArtifactFile(tmp_path / "images.csv"), {"s.tiff"})
         assert owner.closed
