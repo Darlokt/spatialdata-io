@@ -157,9 +157,10 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
             matrix order and every feature type (gene expression, antibody
             capture, ...).
 
-            - ``X``: canonical finite CSR sparse array of counts, float32 when
-              every value is exact in float32, else float64. Duplicate sparse
-              entries are summed.
+            - ``X``: canonical finite CSR sparse array of counts, float32
+              through 2**24, else float64 through 2**53; counts already
+              decoded to float32 retain that dtype above 2**24. Duplicate
+              HDF5 entries fail; Scanpy sums repeated MatrixMarket records.
             - ``var``: ``gene_ids``, ``feature_types`` and, when present,
               ``genome``; ``var_names`` are the feature names.
             - ``obs``: uint8 ``in_tissue`` and uint64 ``array_row``/``array_col``;

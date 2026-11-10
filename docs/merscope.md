@@ -119,8 +119,9 @@ The calibrated `global` frame is source micrometres. Native vector coordinates
 and table `obsm["spatial"]` remain unchanged; vectors carry identity. Mosaic
 images use the full **inverse** of the micron-to-mosaic affine. Its UTF-8 file
 contains a finite invertible homogeneous 3×3 matrix: exactly three nonempty
-whitespace-separated rows of three coefficients. Blank lines are ignored;
-a fourth nonempty row fails. There is no fixed byte limit. For example:
+whitespace-separated rows of three coefficients, each parsed as a Python
+float (`nan` and `inf` fail). Blank lines are ignored; a fourth nonempty row
+fails. There is no fixed byte limit. For example:
 
 ```text
 2  0.25  10
@@ -198,5 +199,6 @@ python -m spatialdata_io merscope --input slide/region --output counts.zarr \
 
 The former `vpt_outputs` mapping, `backend`, `imread_kwargs` and `image_models_kwargs` have been removed. Use `vpt_directory` and explicit raster options. Inclusion options are now `include_images`, `include_transcripts`, `include_cell_boundaries` and `include_table`. The default selects all image layers instead of z3; `z_layers=None` no longer disables images. Use `include_images=False` for that choice. Automatic four-level pyramids have been removed; request downsampling explicitly. Uncalibrated images no longer share `global` in pixel units, and the former `microns` frame for vectors beside them is gone: vectors are always in `global` and uncalibrated images in `mosaic_pixels`. Explicit `region_name` and `slide_name` values must now be valid element names. Images default to `(1, 1024, 1024)` chunks instead of `(1, 4096, 4096)`, and `scale_factors=None` and `chunks=None` are no longer accepted: pass `()` for a single scale and explicit sizes for other chunks. Image loading follows the same shared TIFF path in every environment.
 
-Gene counts and blank controls use one common floating dtype: float32 when all
-completed values are exact, otherwise float64. Native Arrow parsing replaces the former custom decimal/exponent integer decoder. Counts and the transcript `fov` and `barcode_id` now accept whitespace and hexadecimal, and reject `2.0`, `2e0`, leading plus signs and separators. Float fields follow Arrow rounding without a separate source-lexeme underflow or large-integral-value rule. Count exactness in the output floating dtype is still required, including for controls. Cell identifiers remain literal text. Transcript `fov` and `barcode_id` and metadata `fov` and `transcript_count` use uint64 instead of int64. `z_raw` is now float64, the documented type of `global_z`, instead of an integer. Metadata `transcript_count` may now be empty.
+Gene counts and blank controls use one common floating dtype: float32 when the
+maximum is at most 2²⁴, otherwise float64 through 2⁵³; larger counts fail.
+Native Arrow parsing replaces the former custom decimal/exponent integer decoder. Counts and the transcript `fov` and `barcode_id` now accept whitespace and hexadecimal, and reject `2.0`, `2e0`, leading plus signs and separators. Float fields follow Arrow rounding without a separate source-lexeme underflow or large-integral-value rule; transform coefficients are likewise rounded to float64 without the former exact-decimal underflow and integral-value checks. Count exactness in the output floating dtype is still required, including for controls. Cell identifiers remain literal text. Transcript `fov` and `barcode_id` and metadata `fov` and `transcript_count` use uint64 instead of int64. `z_raw` is now float64, the documented type of `global_z`, instead of an integer. Metadata `transcript_count` may now be empty.

@@ -62,7 +62,7 @@ A header names the fields, so they may come in any order and extra columns are i
 
 The six fields are parsed directly with their Arrow types. Barcode strings remain literal, including leading zeros, whitespace, `NA` and `NULL`; empty or NUL-containing barcodes fail. Numeric fields cannot be empty and have no implicit missing-value spellings. Spaces and tabs around numbers are accepted. Unsigned integers accept hexadecimal (`0x10`) and reject negative values, a leading plus sign, decimal/exponent spellings (`2.0`, `2e0`) and digit separators. Tissue values outside zero and one fail even when they fit uint8. Values outside the declared unsigned width fail conversion. Floats are rounded directly to float64: `9007199254740993` rounds to `9007199254740992` and `1e-400` to zero; negative zero is preserved. Parsed `nan`/`inf` and negative pixel coordinates fail semantic validation. Source number text is not decoded a second time to impose extra precision restrictions.
 
-`scalefactors_json.json` must give finite positive `tissue_hires_scalef` and `tissue_lowres_scalef`, whose inverses must be finite, and `spot_diameter_fullres`, whose half must be a positive float64. The whole object, including `fiducial_diameter_fullres` and any other key, is kept in `uns["spatial"]`.
+`scalefactors_json.json` must be strict JSON (no `NaN` or `Infinity`) and give positive numeric `tissue_hires_scalef`, `tissue_lowres_scalef` and `spot_diameter_fullres`. The whole object, including `fiducial_diameter_fullres` and any other key, is kept in `uns["spatial"]`.
 
 ## Elements
 
@@ -77,7 +77,7 @@ The circle radius is the display size Space Ranger draws, not a measured capture
 
 The table has one row per count-matrix barcode in matrix order, including spots outside the tissue when raw counts are read, and every feature type (gene expression, antibody capture, ...) in matrix order:
 
-- `X` is a canonical finite CSR sparse array, float32 when every count is exact in float32, else float64. Duplicate sparse entries are summed.
+- `X` is a canonical finite CSR sparse array under the [completed-count dtype policy](table_contracts.md#completed-raw-counts), normally float32 from Scanpy. Duplicate HDF5 entries for one barcode and feature fail; Scanpy sums repeated MatrixMarket records before validation.
 - `var` holds `gene_ids`, `feature_types` and, when present, `genome`; `var_names` are the feature names, made unique with `-1`, `-2`, ... unless `make_var_names_unique=False`.
 - `obs` holds uint8 `in_tissue` and uint64 `array_row`/`array_col`, the barcode again as `spot_id` (string) and categorical `region` (`dataset_id`); `spot_id` and `region` link the table to the circles.
 - `obsm["spatial_pixels"]` holds float64 spot centres `x, y` in full-resolution pixels, declared in `uns["spatialdata_io_positions"]`. There is no physical `obsm["spatial"]`.

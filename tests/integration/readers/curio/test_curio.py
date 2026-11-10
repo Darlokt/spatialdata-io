@@ -135,24 +135,6 @@ class TestCurio:
         assert defining["note"].iloc[:2].tolist() == ["TRUE", "NA"]
         assert pd.isna(defining["note"].iloc[2])
 
-    def test_disagreeing_mixed_coordinate_storage(self, tmp_path: Path) -> None:
-        """Reject lossy agreement at the public H5AD boundary."""
-        write_curio(tmp_path)
-        path = tmp_path / "sample_anndata.h5ad"
-        source = ad.read_h5ad(path)
-        xy = np.zeros((3, 2), dtype=np.float64)
-        xy[0, 0] = 2**53
-        duplicate = np.zeros((3, 2), dtype=np.int64)
-        duplicate[0, 0] = 2**53 + 1
-        source.obsm["X_spatial"] = xy
-        source.obsm["spatial"] = duplicate
-        source.write_h5ad(path)
-
-        with pytest.raises(ReaderFormatError, match=r"precision|disagree"):
-            curio(tmp_path)
-
-        assert "spatial_pixels" not in ad.read_h5ad(path).obsm
-
     @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "zarr"])
     def test_inherited_slots_and_raw_survive_persistence(self, tmp_path: Path, storage: str) -> None:
         """Keep inherited values aligned, including raw's independent feature vocabulary."""

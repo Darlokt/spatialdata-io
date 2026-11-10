@@ -4,7 +4,7 @@ Bin and cell matrices are 10x HDF5 feature-barcode matrices read through the
 shared Scanpy boundary, in source observation and feature order. A bin table
 holds::
 
-    X                  canonical CSR sparse array; float32 when exact, else float64
+    X                  canonical float32 or float64 CSR sparse array of counts
     obs                in_tissue, array_row, array_col, pxl_row_in_fullres,
                        pxl_col_in_fullres (aligned positions), region, instance_id
     obs_names          s_<size:03d>um_<row:05d>_<col:05d>-1 barcodes
@@ -30,7 +30,6 @@ from spatialdata_io.readers._utils.counts import read_10x_h5
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
-    finalize_count_arrays,
     parse_linked_table,
     prepare_anndata_dataframe,
 )
@@ -40,7 +39,6 @@ from spatialdata_io.readers.visium_hd._transforms import bin_centers
 if TYPE_CHECKING:
     from anndata import AnnData
     from numpy.typing import NDArray
-    from scipy.sparse import csr_array
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.visium_hd._layout import BinLayout
@@ -93,7 +91,6 @@ def link_table(  # noqa: PLR0913, RUF100 - Explicit table, target, IDs, position
 ) -> AnnData:
     """Link the final owned table once against its materialized target index."""
     context = ReaderErrorContext("visium_hd", "count matrix", version)
-    table.X = finalize_count_arrays((cast("csr_array", table.X),), context=context, path=counts_path)[0]
     if "spatial" in table.obsm:
         positions: PositionsMetadata = {
             "schema_version": 1,

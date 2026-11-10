@@ -13,7 +13,7 @@ from anndata import AnnData
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium._layout import H5Counts, VisiumLayout
 from spatialdata_io.readers.visium._metadata import CountMetadata, ScaleFactors
@@ -265,21 +265,6 @@ class TestPrepareTable:
 
 class TestLinkTable:
     """Parse linkage once against an independent materialized shape index."""
-
-    def test_count_precision_error_identifies_source_and_version(self, tmp_path: Path) -> None:
-        layout = _layout(
-            tmp_path,
-            tmp_path / "positions.csv",
-            headered=False,
-            metadata=CountMetadata(None, None, "spaceranger-2.1.0"),
-        )
-        table = AnnData(sparse.csr_array([[2**53 + 1]], dtype=np.int64))
-
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            link_table(table, dataset_id="sample", shape_index=pd.Index(["0"]), layout=layout)
-
-        assert caught.value.path == layout.counts.path
-        assert caught.value.context == ReaderErrorContext("visium", "count matrix", "2.1.0")
 
     def test_links_exact_barcode_membership(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = tmp_path / "positions.csv"

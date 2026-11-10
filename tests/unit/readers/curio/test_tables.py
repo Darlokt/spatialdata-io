@@ -40,7 +40,7 @@ class TestReadTable:
         with h5py.File(path, "r+") as source:
             source["X/indices"][0] = 3
 
-        with pytest.raises(ValueError, match="active indices") as raised:
+        with pytest.raises(ValueError, match="indices must be < 3") as raised:
             curio(tmp_path)
 
         assert "while normalizing adata.X" in raised.value.__notes__

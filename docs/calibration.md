@@ -73,10 +73,10 @@ descriptions identify pixel-index frames separately from the unchanged raster
 corner-coordinate frame. Do not apply that offset to vendor cell centres, chip
 reference positions or arbitrary imported embeddings.
 
-Steinbock, MCMICRO and CosMx reject nonfinite physical results and a nonzero
-pre-scaled coordinate becoming zero during multiplication. For the regionprops
-convention, this check uses the coordinate after the half-pixel shift, so a
-genuine shifted zero remains valid. MACSima additionally requires normalized
+Steinbock, MCMICRO and CosMx reject nonfinite physical results. MCMICRO also
+rejects a nonzero pre-scaled coordinate becoming zero during multiplication;
+this check uses the coordinate after the half-pixel shift, so a genuine shifted
+zero remains valid. MACSima additionally requires normalized
 pixel spacing to remain finite and strictly positive after unit conversion.
 
 Missing calibration is a native-only output. Present malformed or conflicting

@@ -59,28 +59,28 @@ def validate_data_axes(data_axes: object, /) -> str | None:
     return axes
 
 
-def _normalize_axes(axes: Sequence[str], *, parameter: str) -> tuple[str, ...]:
-    """Return lowercased axis names, requiring unique single alphabetic letters."""
+def _normalize_axes(axes: Sequence[str]) -> tuple[str, ...]:
+    """Return lowercased source axis names, requiring unique single alphabetic letters."""
     normalized = tuple(axis.lower() for axis in axes)
     if any(len(axis) != 1 or not axis.isalpha() for axis in normalized):
-        message = f"{parameter} must contain single alphabetic axis names; found {tuple(axes)!r}."
+        message = f"source_axes must contain single alphabetic axis names; found {tuple(axes)!r}."
         raise ValueError(message)
     if len(set(normalized)) != len(normalized):
-        message = f"{parameter} contains duplicate axes: {tuple(axes)!r}."
+        message = f"source_axes contains duplicate axes: {tuple(axes)!r}."
         raise ValueError(message)
     return normalized
 
 
-def _validate_axes_contract(data: da.Array, source: tuple[str, ...], target: tuple[str, ...]) -> None:
-    """Require the source rank to match ``data`` and both axis sets to contain ``x`` and ``y``."""
+def _validate_source_axes(data: da.Array, source: tuple[str, ...]) -> None:
+    """Require the source rank to match ``data`` and the source axes to contain ``x`` and ``y``."""
     if len(source) != data.ndim:
         message = (
             f"source_axes rank {len(source)} does not match array rank {data.ndim}; "
             f"shape={data.shape}, axes={source!r}."
         )
         raise ValueError(message)
-    if not {"x", "y"}.issubset(source) or not {"x", "y"}.issubset(target):
-        message = f"Raster source and target axes must both contain 'x' and 'y'; source={source}, target={target}."
+    if not {"x", "y"}.issubset(source):
+        message = f"Raster source axes must contain 'x' and 'y'; found {source!r}."
         raise ValueError(message)
 
 
@@ -110,15 +110,10 @@ def _add_target_axes(
 
     Return the expanded array and the updated axis order; any other absent target axis is an error.
     """
-    allowed = set(_normalize_axes(tuple(add_missing), parameter="add_missing"))
-    invalid = allowed.difference(target)
-    if invalid:
-        message = f"add_missing contains axes absent from target_axes: {sorted(invalid)}."
-        raise ValueError(message)
     for axis in target:
         if axis in remaining:
             continue
-        if axis not in allowed:
+        if axis not in add_missing:
             message = f"Target axis {axis!r} is absent from source_axes and was not listed in add_missing."
             raise ValueError(message)
         data = da.expand_dims(data, axis=data.ndim)
@@ -130,17 +125,17 @@ def normalize_raster_axes(
     data: da.Array,
     source_axes: Sequence[str],
     *,
-    target_axes: Sequence[str],
+    target_axes: tuple[str, ...],
     add_missing: Collection[str] = (),
 ) -> da.Array:
     """Drop, add, and transpose explicitly named raster axes without computing pixels.
 
-    Names are case-insensitive single letters. Readers may use a format's
-    declared axis labels or an explicit reader-owned override; this helper does
-    not assign semantics to unfamiliar labels. Singleton source axes absent
-    from the target are dropped; a non-singleton one is an error, so no plane
-    is ever selected implicitly. Missing target axes are added only when named
-    in ``add_missing``. Both source and target must contain the spatial axes
+    Source names are case-insensitive single letters. Readers may use a
+    format's declared axis labels or an explicit reader-owned override; this
+    helper does not assign semantics to unfamiliar labels. Singleton source
+    axes absent from the target are dropped; a non-singleton one is an error,
+    so no plane is ever selected implicitly. Missing target axes are added only
+    when named in ``add_missing``. The source must contain the spatial axes
     ``x`` and ``y``.
 
     Parameters
@@ -148,11 +143,13 @@ def normalize_raster_axes(
     data
         Lazy source array. Its rank must equal the number of ``source_axes``.
     source_axes
-        File-declared axes in current array order.
+        File-declared or caller-overridden axes in current array order.
     target_axes
-        Required axes and their returned order.
+        Reader-owned distinct lowercase axes, including ``x`` and ``y``, in
+        their returned order.
     add_missing
-        Target axes that may be inserted as length-one dimensions.
+        Reader-owned lowercase subset of ``target_axes`` that may be inserted
+        as length-one dimensions.
 
     Returns
     -------
@@ -166,9 +163,8 @@ def normalize_raster_axes(
         If axes are invalid, ambiguous or incomplete, or a non-singleton source
         axis is absent from the target.
     """
-    source = _normalize_axes(source_axes, parameter="source_axes")
-    target = _normalize_axes(target_axes, parameter="target_axes")
-    _validate_axes_contract(data, source, target)
-    result, remaining = _drop_source_axes(data, source, target)
-    result, remaining = _add_target_axes(result, remaining, target, add_missing)
-    return result.transpose(tuple(remaining.index(axis) for axis in target))
+    source = _normalize_axes(source_axes)
+    _validate_source_axes(data, source)
+    result, remaining = _drop_source_axes(data, source, target_axes)
+    result, remaining = _add_target_axes(result, remaining, target_axes, add_missing)
+    return result.transpose(tuple(remaining.index(axis) for axis in target_axes))

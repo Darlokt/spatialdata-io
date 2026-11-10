@@ -36,8 +36,8 @@ class TestReadSquare:
         table = result.table
         assert isinstance(table.X, csr_array)
         assert table.X.dtype == np.dtype(np.float64 if wide else np.float32)
-        assert_array_equal(table.X.data, [2**53 + 2 if wide else 6, 3])
-        assert_array_equal(table.layers["exon"].data, [2**53 + 4 if wide else 3, 1])
+        assert_array_equal(table.X.data, [2**53 if wide else 6, 3])
+        assert_array_equal(table.layers["exon"].data, [2**53 - 1 if wide else 3, 1])
         assert_array_equal(result.coordinates, [[5, 6], [1, 2]])
 
     def test_unsupported_modality_fails_before_square_payload_discovery(self, tmp_path: Path) -> None:
@@ -254,17 +254,18 @@ class TestReadSquare:
 class TestReadSquareAggregation:
     """Compare aggregation and output with independent Python integer totals."""
 
-    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**53 + 2, 2**54])
+    def test_integer_count_limit_error_identifies_source(self, tmp_path: Path, value: int) -> None:
         path = write_square_gef(tmp_path / "s.gef", bins=(1,))
         with h5py.File(path, "a") as handle:
             group = handle["geneExp/bin1"]
             attrs = dict(group["expression"].attrs)
             del group["expression"]
             group["expression"] = np.array(
-                [(5, 6, 2**53 + 1), (5, 6, 0), (1, 2, 3)], dtype=[("x", "i4"), ("y", "i4"), ("count", "u8")]
+                [(5, 6, value), (5, 6, 0), (1, 2, 3)], dtype=[("x", "i4"), ("y", "i4"), ("count", "u8")]
             )
             group["expression"].attrs.update(attrs)
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53") as caught:
             read_square(SquareSource(ArtifactFile(path), (1,)))
         assert caught.value.path == path
 
@@ -302,26 +303,43 @@ class TestReadSquareAggregation:
         assert isinstance(result.table.X, csr_array)
         assert int(result.table.X.data[0]) == maximum + 1
 
-    @pytest.mark.parametrize(("second", "fails"), [(1, False), (2**64 - 1, True)])
-    def test_exon_exactness_is_checked_independently(self, tmp_path: Path, second: int, *, fails: bool) -> None:
+    @pytest.mark.parametrize(
+        ("first", "second", "error"),
+        [
+            (2**53 - 1, 1, None),
+            (2**53, 1, r"above 2\*\*53"),
+            (2**64 - 1, 1, "lossless"),
+            (2**64 - 1, 2**64 - 1, "lossless"),
+        ],
+    )
+    def test_exon_limits_are_checked_independently(
+        self, tmp_path: Path, first: int, second: int, error: str | None
+    ) -> None:
         path = write_square_gef(tmp_path / "s.gef", bins=(1,))
         with h5py.File(path, "a") as handle:
             del handle["geneExp/bin1/exon"]
-            handle["geneExp/bin1/exon"] = np.array([2**64 - 1, second, 0], dtype="u8")
-        if fails:
-            with pytest.raises(ReaderFormatError, match="lossless"):
+            handle["geneExp/bin1/exon"] = np.array([first, second, 0], dtype="u8")
+        if error is not None:
+            with pytest.raises(ReaderFormatError, match=error):
                 read_square(SquareSource(ArtifactFile(path), (1,)))
         else:
             (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
             assert isinstance(result.table.X, csr_array)
-            assert result.table.X.dtype == result.table.layers["exon"].dtype == np.dtype(np.float32)
-            assert int(result.table.layers["exon"].data[0]) == 2**64
+            assert result.table.X.dtype == result.table.layers["exon"].dtype == np.dtype(np.float64)
+            assert int(result.table.layers["exon"].data[0]) == 2**53
 
     @pytest.mark.parametrize(
-        ("values", "fails"),
-        [([2**64 - 4096, 2048], False), ([2**64 - 1, 1], False), ([2**64 - 1, 2**64 - 1], True)],
+        ("values", "error"),
+        [
+            ([2**53 - 1, 1], None),
+            ([2**32, 1], None),
+            ([2**53, 1], r"above 2\*\*53"),
+            ([2**64 - 4096, 2048], "lossless"),
+            ([2**64 - 1, 1], "lossless"),
+            ([2**64 - 1, 2**64 - 1], "lossless"),
+        ],
     )
-    def test_exact_uint64_duplicates(self, tmp_path: Path, values: list[int], *, fails: bool) -> None:
+    def test_uint64_duplicate_sum_limits(self, tmp_path: Path, values: list[int], error: str | None) -> None:
         path = write_square_gef(tmp_path / "s.gef", bins=(1,))
         with h5py.File(path, "a") as handle:
             group = handle["geneExp/bin1"]
@@ -335,8 +353,8 @@ class TestReadSquareAggregation:
             )
             dataset.attrs.update(attrs)
 
-        if fails:
-            with pytest.raises(ReaderFormatError, match="lossless"):
+        if error is not None:
+            with pytest.raises(ReaderFormatError, match=error):
                 read_square(SquareSource(ArtifactFile(path), (1,)))
         else:
             (result,) = read_square(SquareSource(ArtifactFile(path), (1,)))
@@ -385,7 +403,6 @@ class TestAggregateCounts:
             ([2**24, 1, 1], "u4", "float64"),
             ([2**53, 1, 1], "u8", "uint64"),
             ([2**53 + 1, 1], "u8", "uint64"),
-            ([2**64 - 1, 1], "u8", "float32"),
         ],
     )
     def test_exact_sums_and_source_ownership(
@@ -402,6 +419,19 @@ class TestAggregateCounts:
         assert_array_equal(source, np.array(values, dtype=source_dtype))
         assert_array_equal(rows, np.zeros(len(source), dtype=np.int64))
         assert_array_equal(indptr, [0, len(source)])
+
+    @pytest.mark.parametrize("values", [[2**64 - 4096, 2048], [2**64 - 1, 1], [2**64 - 1, 2**64 - 1]])
+    def test_rejects_duplicate_sums_outside_uint64_arithmetic_bound(self, tmp_path: Path, values: list[int]) -> None:
+        source = np.array(values, dtype=np.uint64)
+        rows = np.zeros(2, dtype=np.int64)
+        indptr = np.array([0, 2], dtype=np.int64)
+        path = ArtifactFile(tmp_path / "s.gef")
+
+        with pytest.raises(ReaderFormatError, match="uint64 arithmetic") as caught:
+            _square._aggregate_counts(source, rows, indptr, 1, path)
+
+        assert caught.value.path == path
+        assert_array_equal(source, np.array(values, dtype=np.uint64))
 
     def test_unrelated_feature_records_do_not_force_float64(self, tmp_path: Path) -> None:
         source = np.full(50, 1_000_000, dtype=np.uint32)

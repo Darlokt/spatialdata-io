@@ -115,7 +115,7 @@ class TestCompressedSparseIntegrity:
             handle[f"{slot if slot == 'X' else 'layers/' + slot}/indices"][0] = 2
         table = ad.read_h5ad(path)
 
-        with pytest.raises(ValueError, match="active indices") as error:
+        with pytest.raises(ValueError, match="indices must be <") as error:
             normalize_owned_anndata(table, expression_layers=() if slot == "X" else (slot,))
 
         assert any(slot in note for note in error.value.__notes__)
@@ -125,7 +125,7 @@ class TestCompressedSparseIntegrity:
         with h5py.File(path, "r+") as handle:
             handle["X/indices"][0] = 2
 
-        with pytest.raises(ValueError, match="active indices"):
+        with pytest.raises(ValueError, match="indices must be <"):
             stereoseq(tmp_path, analysis_files=(path,))
 
     def test_iss_rejects_malformed_expression(self, tmp_path: Path) -> None:
@@ -146,5 +146,5 @@ class TestCompressedSparseIntegrity:
         with h5py.File(path, "r+") as handle:
             handle["X/indices"][0] = 3
 
-        with pytest.raises(ValueError, match="active indices"):
+        with pytest.raises(ValueError, match="indices must be <"):
             iss(tmp_path, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")

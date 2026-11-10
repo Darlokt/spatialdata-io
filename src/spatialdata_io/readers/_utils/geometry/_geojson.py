@@ -1,8 +1,7 @@
-"""Construct exact GeoJSON Polygon and MultiPolygon geometries without repair."""
+"""Construct GeoJSON Polygon and MultiPolygon geometries from strict JSON without repair."""
 
 from __future__ import annotations
 
-from math import inf
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -18,16 +17,6 @@ if TYPE_CHECKING:
 
 _MIN_RING_VERTICES = 4
 _SPATIAL_DIMENSIONS = 2
-# Every integer of at most this magnitude is exactly representable in float64.
-_MAX_SAFE_INTEGER = 2**53
-
-
-def _exact_float(value: int) -> bool:
-    """Return whether ``value`` converts to ``float`` without rounding or overflow."""
-    try:
-        return float(value) == value
-    except OverflowError:
-        return False
 
 
 def _ring_violation(ring: object) -> str | None:
@@ -38,28 +27,23 @@ def _ring_violation(ring: object) -> str | None:
     for vertex in ring:
         if not isinstance(vertex, list) or len(vertex) != _SPATIAL_DIMENSIONS:
             return "a nonplanar or malformed vertex"
-        for value in vertex:
-            # Exact types reject bool and numeric strings that NumPy would coerce.
-            if type(value) is float:
-                if not -inf < value < inf:
-                    return "a nonfinite coordinate"
-            elif type(value) is not int:
-                return "a nonnumeric coordinate"
-            elif abs(value) > _MAX_SAFE_INTEGER and not _exact_float(value):
-                return "integer precision loss"
+        # Exact types reject bool and numeric strings that NumPy would coerce.
+        if any(type(value) not in (int, float) for value in vertex):
+            return "a nonnumeric coordinate"
     return None
 
 
 def geojson_polygons(
     geometries: Sequence[object], /, *, context: ReaderErrorContext, path: Path
 ) -> NDArray[np.object_]:
-    """Return exact Shapely geometries for decoded GeoJSON geometry objects.
+    """Return Shapely geometries for decoded GeoJSON geometry objects.
 
     Parameters
     ----------
     geometries
-        Borrowed decoded GeoJSON geometry objects, one per output row. They are
-        not mutated.
+        Borrowed GeoJSON geometry objects decoded by the strict JSON reader
+        (``read_json_object``), whose numbers are finite and within the float
+        range; one per output row. They are not mutated.
     context
         Reader and artifact identity for structural errors.
     path
@@ -75,11 +59,12 @@ def geojson_polygons(
     ------
     ReaderFormatError
         If a geometry is missing, nonpolygonal or empty, or a ring is open,
-        shorter than four vertices, nonplanar, nonnumeric, nonfinite or loses
-        integer precision in float64. Nothing is closed, reprojected or repaired.
+        shorter than four vertices, nonplanar or nonnumeric. Nothing is closed,
+        reprojected or repaired.
 
     Notes
     -----
+    Coordinates become float64, so integers beyond ``2**53`` may round.
     Topology is not classified; use :func:`invalid_geometry_mask` for that.
     Coordinates are validated in Python, then every geometry is built in one
     vectorized ragged-array call instead of one Shapely object per feature.
@@ -121,9 +106,8 @@ def geojson_polygons(
                         context=context,
                         path=path,
                         found=f"{violation} in geometry {position}",
-                        expected="closed 2D rings of at least four finite vertices exactly representable in float64",
+                        expected="closed 2D rings of at least four numeric vertices",
                     )
-                # Validated vertices convert to float64 exactly.
                 rings.append(np.array(ring, dtype=np.float64))
             part_rings.append(len(rings))
         geometry_parts.append(len(part_rings) - 1)

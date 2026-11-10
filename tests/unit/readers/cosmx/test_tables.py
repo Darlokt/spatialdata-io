@@ -84,16 +84,20 @@ class TestReadCounts:
         assert counts.fovs.tolist() == [2, 1, 1]
         assert counts.cell_ids.tolist() == [1, 2, 1]
 
-    @pytest.mark.parametrize(("value", "dtype"), [(7, "float32"), (2**24 + 1, "float64"), (2**24 + 2, "float32")])
+    @pytest.mark.parametrize(
+        ("value", "dtype"),
+        [(7, "float32"), (2**24, "float32"), (2**24 + 1, "float64"), (2**24 + 2, "float64"), (2**53, "float64")],
+    )
     def test_adaptive_exact_counts(self, tmp_path: Path, value: int, dtype: str) -> None:
         text = f"fov,cell_ID,A,B\n1,1,1,0\n1,2,{value},2\n"
         counts = read_counts(_write(tmp_path, "c.csv", text))
         assert counts.expression.dtype == np.dtype(dtype)
         np.testing.assert_array_equal(counts.expression.data, [1, value, 2])
 
-    def test_rejects_inexact_float64_counts(self, tmp_path: Path) -> None:
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            read_counts(_write(tmp_path, "c.csv", f"fov,cell_ID,A\n1,1,{2**53 + 1}\n"))
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**53 + 2, 2**63, 2**63 + 2048, 2**64 - 1])
+    def test_rejects_counts_above_float64_integer_range(self, tmp_path: Path, value: int) -> None:
+        with pytest.raises(ReaderFormatError, match=r"counts above 2\*\*53") as caught:
+            read_counts(_write(tmp_path, "c.csv", f"fov,cell_ID,A\n1,1,{value}\n"))
         assert caught.value.path == tmp_path / "c.csv"
         assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
 
@@ -136,14 +140,14 @@ class TestReadCounts:
         assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
         assert caught.value.path == path
 
-    @pytest.mark.parametrize(("count", "dtype"), [(2**63, "float32"), (2**63 + 2048, "float64")])
-    def test_unsigned_counts_above_signed_range_are_exact(self, tmp_path: Path, count: int, dtype: str) -> None:
+    @pytest.mark.parametrize("count", [2**24 + 2, 2**53])
+    def test_maximum_unsigned_identifiers_remain_exact(self, tmp_path: Path, count: int) -> None:
         source = f"fov,cell_ID,A\n{2**64 - 1},{2**64 - 1},{count}\n"
         counts = read_counts(_write(tmp_path, "c.csv", source))
         assert str(counts.fovs.dtype) == str(counts.cell_ids.dtype) == "uint64[pyarrow]"
         assert counts.fovs.tolist() == counts.cell_ids.tolist() == [2**64 - 1]
         assert counts.fovs.name is counts.cell_ids.name is None
-        assert counts.expression.dtype == np.dtype(dtype)
+        assert counts.expression.dtype == np.dtype(np.float64)
         assert int(counts.expression.data[0]) == count
 
     @pytest.mark.parametrize("compressed", [False, True])
@@ -385,15 +389,6 @@ class TestBuildTable:
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS.replace("2,1,0,3,0\n", "2,7,0,3,0\n")))
         with pytest.raises(ReaderFormatError, match="identical positive count and metadata populations"):
             build_table(counts, read_metadata(metadata_path), path=metadata_path, linked=True)
-
-    @pytest.mark.parametrize("coordinate", [0.25, -0.25])
-    def test_nonzero_physical_underflow_fails(self, tmp_path: Path, coordinate: float) -> None:
-        metadata_path = _write(tmp_path, "m.csv", _METADATA)
-        metadata = read_metadata(metadata_path)
-        metadata.global_[0, 0] = coordinate
-        counts = read_counts(_write(tmp_path, "c.csv", _COUNTS))
-        with np.errstate(all="raise"), pytest.raises(ValueError, match=r"nonzero physical.*underflow to zero"):
-            build_table(counts, metadata, path=metadata_path, linked=False, pixel_size_um=5e-324)
 
     def test_zero_and_signed_nonzero_subnormal_products_are_preserved(self, tmp_path: Path) -> None:
         metadata_path = _write(tmp_path, "m.csv", _METADATA)

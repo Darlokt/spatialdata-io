@@ -72,12 +72,12 @@ class TestReadExperiment:
     @pytest.mark.parametrize(
         ("key", "value", "match"),
         [
-            ("pixel_size", 0, "finite positive pixel_size"),
-            ("pixel_size", -0.2, "finite positive pixel_size"),
-            ("pixel_size", True, "finite positive pixel_size"),
-            ("pixel_size", "0.2125", "finite positive pixel_size"),
-            ("pixel_size", None, "finite positive pixel_size"),
-            ("z_step_size", 0, "finite positive z_step_size"),
+            ("pixel_size", 0, "a positive pixel_size"),
+            ("pixel_size", -0.2, "a positive pixel_size"),
+            ("pixel_size", True, "a positive pixel_size"),
+            ("pixel_size", "0.2125", "a positive pixel_size"),
+            ("pixel_size", None, "a positive pixel_size"),
+            ("z_step_size", 0, "a positive z_step_size"),
             ("analysis_sw_version", 1, "software version string"),
             ("images", [], "images as a JSON object"),
             ("images", {"morphology_focus_filepath": ""}, "nonempty relative image paths"),

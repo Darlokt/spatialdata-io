@@ -36,10 +36,10 @@ class TestReadCells:
         table = result.table
         assert isinstance(table.X, csr_array)
         assert table.X.dtype == np.dtype(np.float64 if wide else np.float32)
-        assert_array_equal(table.X.data, [12, 2**64 - 2048 if wide else 11, 22])
+        assert_array_equal(table.X.data, [12, 2**53 if wide else 11, 22])
         assert_array_equal(table.X.indices, [0, 1, 1])
         assert_array_equal(table.X.indptr, [0, 2, 3])
-        assert_array_equal(table.layers["exon"].data, [4, 2**64 - 4096 if wide else 7, 6])
+        assert_array_equal(table.layers["exon"].data, [4, 2**53 - 1 if wide else 7, 6])
         assert table.obs["cellTypeID"].tolist() == [2**64 - 1, 0]
         assert table.obs["clusterID"].tolist() == [0, 2**64 - 1]
         for name in ("cellTypeID", "clusterID"):
@@ -47,30 +47,32 @@ class TestReadCells:
         assert_array_equal(result.coordinates, [[10, 20], [30, 40]])
         assert result.coordinates.dtype == np.dtype(np.int64)
 
-    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**53 + 2, 2**63, 2**64 - 1])
+    def test_integer_count_limit_error_identifies_source(self, tmp_path: Path, value: int) -> None:
         path = write_cell_gef(tmp_path / "s.gef")
         with h5py.File(path, "a") as handle:
             del handle["cellBin/cellExp"]
-            handle["cellBin/cellExp"] = np.array([(0, 2**53 + 1), (1, 22)], dtype=[("geneID", "u4"), ("count", "u8")])
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+            handle["cellBin/cellExp"] = np.array([(0, value), (1, 22)], dtype=[("geneID", "u4"), ("count", "u8")])
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53") as caught:
             read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
         assert caught.value.path == path
 
     @pytest.mark.parametrize("slot", ["cellExp", "cellExpExon"])
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**53 + 2, 2**63])
     def test_non_native_count_precision_failure_closes_source(
-        self, tmp_path: Path, mocker: MockerFixture, slot: str
+        self, tmp_path: Path, mocker: MockerFixture, slot: str, value: int
     ) -> None:
         path = write_cell_gef(tmp_path / "s.gef")
         with h5py.File(path, "a") as handle:
             group = handle["cellBin"]
             del group[slot]
             if slot == "cellExp":
-                group[slot] = np.array([(0, 2**53 + 1), (1, 22)], dtype=[("geneID", ">u4"), ("count", ">u8")])
+                group[slot] = np.array([(0, value), (1, 22)], dtype=[("geneID", ">u4"), ("count", ">u8")])
             else:
-                group[slot] = np.array([2**53 + 1, 6], dtype=">u8")
+                group[slot] = np.array([value, 6], dtype=">u8")
         handle = h5py.File(path, "r")
         mocker.patch.object(h5py, "File", return_value=handle)
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53") as caught:
             read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
         assert caught.value.path == path
         assert not handle.id.valid
@@ -162,15 +164,13 @@ class TestReadCells:
             genes["cellCount"] = [1, 2]
             group["gene"][:] = genes
             del group["cellExp"]
-            group["cellExp"] = np.array(
-                [(1, 2**64 - 2048), (0, 12), (1, 22)], dtype=[("geneID", "u4"), ("count", "u8")]
-            )
+            group["cellExp"] = np.array([(1, 2**53), (0, 12), (1, 22)], dtype=[("geneID", "u4"), ("count", "u8")])
             del group["cellExpExon"]
             group["cellExpExon"] = np.array([7, 4, 6], dtype="u8")
 
         result = read_cells(CellSource(ArtifactFile(path), "unadjusted"), read_borders=False)
         assert isinstance(result.table.X, csr_array)
-        assert_array_equal(result.table.X.data, np.array([12, 2**64 - 2048, 22], dtype=np.float64))
+        assert_array_equal(result.table.X.data, np.array([12, 2**53, 22], dtype=np.float64))
         assert_array_equal(result.table.layers["exon"].data, [4, 7, 6])
         assert isinstance(result.table.X, csr_array)
         assert result.table.X.has_canonical_format

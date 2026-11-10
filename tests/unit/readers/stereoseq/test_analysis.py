@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import warnings
-from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -58,7 +57,7 @@ def _counts(*, square: bool = False) -> CellCounts | SquareCounts:
     )
 
 
-def _source(path: Path, *, resolution: Decimal | None = Decimal("0.50")) -> AnalysisSource:
+def _source(path: Path, *, resolution: str | None = "0_50") -> AnalysisSource:
     return AnalysisSource(ArtifactFile(path), "cells", resolution, "sample")
 
 
@@ -96,7 +95,7 @@ class TestReadAnalysis:
         table.uns.update(bin_type="bins", bin_size=50)
         table.write_h5ad(path)
         raw = _counts(square=True)
-        source = AnalysisSource(ArtifactFile(path), 50, Decimal("0.50"), "sample")
+        source = AnalysisSource(ArtifactFile(path), 50, "0_50", "sample")
         result = read_analysis(source, counts={"bin50": raw})
         np.testing.assert_array_equal(result.coordinates, [[30, 40], [10, 20]])
 
@@ -114,7 +113,7 @@ class TestReadAnalysis:
         original = _analysis(path, cell_ids=cell_ids)
         raw = _counts()
         result = read_analysis(_source(path), counts={"cells": raw})
-        assert result.name == "cells_analysis_r0_5"
+        assert result.name == "cells_analysis_r0_50"
         assert result.resolution == 500
         assert result.table.obs_names.tolist() == original.obs_names.tolist()
         assert result.table.var_names.tolist() == ["g_a", "g_z"]
@@ -128,25 +127,6 @@ class TestReadAnalysis:
         np.testing.assert_array_equal(raw.coordinates, [[10, 20], [30, 40], [50, 60]])
         assert isinstance(raw.table.X, csr_array)
         np.testing.assert_array_equal(raw.table.X.data, [11, 22, 1, 1])
-
-    @pytest.mark.parametrize(
-        ("resolution", "suffix"),
-        [
-            ("10.0", "10"),
-            ("0.000001", "0_000001"),
-            ("1e70", "1e70"),
-            ("1e-80", "1e-80"),
-            ("0.123456789012345678901234567890123", "0_123456789012345678901234567890123"),
-            ("0.123456789012345678901234567890124", "0_123456789012345678901234567890124"),
-        ],
-    )
-    def test_names_clustering_resolution_exactly_without_decimal_context_rounding(
-        self, tmp_path: Path, resolution: str, suffix: str
-    ) -> None:
-        path = tmp_path / "sample.cell.cluster.h5ad"
-        _analysis(path)
-        result = read_analysis(_source(path, resolution=Decimal(resolution)), counts={})
-        assert result.name == f"cells_analysis_r{suffix}"
 
     def test_analysis_only_historical_unknown_clustering_resolution(self, tmp_path: Path) -> None:
         path = tmp_path / "sample.cell.cluster.h5ad"
@@ -171,8 +151,7 @@ class TestReadAnalysis:
         del table.uns["bin_size"]
         table.write_h5ad(path)
         assert (
-            read_analysis(AnalysisSource(ArtifactFile(path), 50, Decimal(1), "sample"), counts={}).name
-            == "bin50_analysis_r1"
+            read_analysis(AnalysisSource(ArtifactFile(path), 50, "1", "sample"), counts={}).name == "bin50_analysis_r1"
         )
 
     def test_matching_gef_supplies_missing_physical_pitch(self, tmp_path: Path) -> None:

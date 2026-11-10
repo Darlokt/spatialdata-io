@@ -117,10 +117,9 @@ class SourceMetadata:
 
 def _positive(values: dict[str, object], name: str, *, path: ArtifactFile, context: ReaderErrorContext) -> float:
     value = values.get(name)
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"{name}={value!r}", expected="a finite positive number"
-        )
+    # Strict JSON numbers are finite; booleans are ints in Python but never a size.
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ReaderFormatError(context=context, path=path, found=f"{name}={value!r}", expected="a positive number")
     return float(value)
 
 
@@ -240,11 +239,10 @@ def _matrix(value: object, *, path: ArtifactFile, name: str, context: ReaderErro
             context=context, path=path, found=f"malformed {name}", expected="a numeric 3 by 3 matrix or null"
         )
 
+    # Strict JSON numbers are finite, so only singularity needs checking.
     matrix = numeric.astype(np.float64).reshape(3, 3)
-    if not np.isfinite(matrix).all() or np.linalg.det(matrix) == 0:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"nonfinite or singular {name}", expected="a finite invertible matrix"
-        )
+    if np.linalg.det(matrix) == 0:
+        raise ReaderFormatError(context=context, path=path, found=f"singular {name}", expected="an invertible matrix")
 
     matrix.flags.writeable = False
     return matrix

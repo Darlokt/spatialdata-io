@@ -88,7 +88,7 @@ class TestNormalizeOwnedAnndata:
         table = ad.AnnData(source)
         reports: list[SparseDuplicateSummary] | None = [] if collect else None
 
-        with pytest.raises(ValueError, match="lossless"):
+        with pytest.raises(ValueError, match="exceed int64 arithmetic"):
             normalize_owned_anndata(table, duplicate_sums=reports)
 
         assert table.X is source

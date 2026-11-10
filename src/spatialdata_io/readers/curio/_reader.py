@@ -140,8 +140,8 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
     **Coordinates.** Takara's coordinate-unit FAQ gives approximately
     0.647 µm per Seeker pixel for primary-pipeline output. The calibration
     registers no image. ``X_spatial`` must be a finite real ``(n_obs, 2)`` XY
-    array that converts to float64 without loss; an optional
-    ``obsm["spatial"]`` in the source must equal it exactly. The uppercase
+    array; an optional ``obsm["spatial"]`` in the source must equal it
+    exactly. The uppercase
     ``X_SPATIAL`` profile, Trekker and merged or reprocessed objects are not
     supported.
 

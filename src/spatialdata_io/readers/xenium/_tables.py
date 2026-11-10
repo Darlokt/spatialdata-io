@@ -45,7 +45,6 @@ from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
-    finalize_count_arrays,
     normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
@@ -275,7 +274,6 @@ def read_counts(
     var.columns = sanitize_column_names(
         list(var.columns), source="xenium: the cell-feature matrix features", reserved=_VAR_COLUMNS
     )
-    matrix = finalize_count_arrays((matrix,), context=context, path=path)[0]
 
     protein: dict[str, object] | None = None
     is_protein = types[selected] == _PROTEIN_EXPRESSION

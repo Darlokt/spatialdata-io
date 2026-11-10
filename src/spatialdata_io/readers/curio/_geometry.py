@@ -2,9 +2,9 @@
 
 The primary pipeline stores bead XY in ``obsm["X_spatial"]`` as an
 ``(n_obs, 2)`` array of Seeker pixels in ``(x, y)`` order, and some exports
-repeat it in ``obsm["spatial"]``. Both must be finite real arrays that convert
-to float64 without loss, because Shapely stores float64; a repeat must equal
-``X_spatial`` exactly. Other coordinate profiles (uppercase ``X_SPATIAL``,
+repeat it in ``obsm["spatial"]``. Both must be finite real arrays; a repeat
+must equal ``X_spatial`` exactly. Shapely stores the circle centres as
+float64. Other coordinate profiles (uppercase ``X_SPATIAL``,
 Trekker, merged or reprocessed objects) are not supported.
 
 Takara's coordinate-unit FAQ gives approximately 0.647 µm per Seeker pixel
@@ -60,8 +60,6 @@ def read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
 
     xy = _validate_xy(table.obsm.get("X_spatial"), table.n_obs, context, path)
     repeat = table.obsm.get("spatial")
-    # Both arrays are exactly float64-representable, so mixed-dtype comparison
-    # cannot hide distinct integer coordinates.
     if repeat is not None and not np.array_equal(xy, _validate_xy(repeat, table.n_obs, context, path)):
         raise ReaderFormatError(
             context=context,
@@ -70,9 +68,18 @@ def read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
             expected="X_spatial and optional spatial with exactly equal coordinates",
         )
 
-    # Finite float64-exact inputs times a factor below one stay finite.
+    with np.errstate(over="ignore"):
+        physical = np.multiply(xy, MICROMETRES_PER_PIXEL, dtype=np.float64)
+    if not np.isfinite(physical).all():
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="coordinates overflow float64",
+            expected="finite float64 physical XY coordinates",
+        )
+
     table.obsm["spatial_pixels"] = table.obsm.pop("X_spatial")
-    table.obsm["spatial"] = np.multiply(xy, MICROMETRES_PER_PIXEL, dtype=np.float64)
+    table.obsm["spatial"] = physical
     table.uns[POSITIONS_KEY] = _positions_metadata()
 
     shapes = gpd.GeoDataFrame(
@@ -87,7 +94,7 @@ def read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
 def _validate_xy(
     xy: object, n_obs: int, context: ReaderErrorContext, path: ArtifactFile
 ) -> NDArray[np.integer | np.floating]:
-    """Require finite real ``(n_obs, 2)`` coordinates that convert to float64 without loss."""
+    """Require finite real ``(n_obs, 2)`` coordinates."""
     if (
         not isinstance(xy, np.ndarray)
         or xy.shape != (n_obs, 2)
@@ -99,23 +106,6 @@ def _validate_xy(
             path=path,
             found="missing or invalid spatial array",
             expected="finite real numeric coordinates of shape (n_obs, 2), ordered (x, y)",
-        )
-
-    if xy.dtype.kind in "iu":
-        candidates = xy[(xy > 2**53) | (xy < -(2**53))]
-        loss = any(int(value) != int(float(value)) for value in candidates)
-    elif xy.dtype.itemsize > np.dtype(np.float64).itemsize:
-        with np.errstate(over="ignore"):
-            loss = not np.array_equal(xy, xy.astype(np.float64))
-    else:
-        loss = False
-
-    if loss:
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="spatial coordinates lose precision in float64 geometry",
-            expected="coordinates losslessly representable as float64",
         )
     return xy
 

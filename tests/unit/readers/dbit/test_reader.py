@@ -331,7 +331,7 @@ class TestDbit:
             source[f"{group}/indices"][0] = 2
         copy = mocker.spy(ad.AnnData, "copy")
 
-        with pytest.raises(ValueError, match="active indices") as caught:
+        with pytest.raises(ValueError, match="indices must be < 2") as caught:
             dbit(tmp_path)
 
         copy.assert_not_called()

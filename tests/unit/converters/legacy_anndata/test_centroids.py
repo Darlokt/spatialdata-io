@@ -248,16 +248,6 @@ class TestCentroidCoordinates:
         with pytest.raises(ValueError, match="unique non-null"):
             centroid_coordinates(linked_targets(sdata, table), frame="analysis", n_obs=2)
 
-    @pytest.mark.parametrize("transform", [Identity(), Scale([2.0, 1.0], axes=("x", "y"))])
-    def test_rejects_lossy_large_integer_points_before_transform(self, transform: Identity | Scale) -> None:
-        sdata, table = _scene("points")
-        sdata.points["cells"] = PointsModel.parse(
-            pd.DataFrame({"x": [2**53 + 1, 2], "y": [1, 4]}, index=pd.Index([5, 11])),
-            transformations={"analysis": transform},
-        )
-        with pytest.raises(ValueError, match="losslessly"):
-            centroid_coordinates(linked_targets(sdata, table), frame="analysis", n_obs=2)
-
     def test_accepts_exactly_representable_large_integer_points(self) -> None:
         sdata, table = _scene("points")
         sdata.points["cells"] = PointsModel.parse(

@@ -81,8 +81,8 @@ GeoJSON supports `FeatureCollection` and `GeometryCollection` documents with
 2D Polygons or MultiPolygons. The file must be strict UTF-8 JSON: duplicate
 object names and `NaN`/`Infinity` constants fail instead of being resolved
 silently. Output rows retain source order and positional integer IDs; source
-Feature IDs, properties and CRS declarations are discarded. Coordinates, holes
-and multipart order are preserved. Units remain those of the source,
+Feature IDs, properties and CRS declarations are discarded. Coordinates become
+float64; holes and multipart order follow the source. Units remain those of the source,
 potentially unknown; geographic coordinates are never reprojected or described
 as micrometres. Shapes are necessarily eager; the document is decoded once and
 its geometries are built in one vectorized step.
@@ -90,9 +90,9 @@ its geometries are built in one vectorized step.
 `invalid_geometries="keep"` preserves invalid topology. `"drop"` removes entire
 invalid feature rows without renumbering survivors; `"raise"` reports invalid
 positional IDs. Missing, empty, nonpolygon, nonfinite, nonplanar or malformed
-geometries fail under every mode, as do integer coordinates that float64
-cannot represent exactly. Open rings are rejected, never closed or repaired;
-coordinates are never rounded. Dropping every feature also fails.
+geometries fail under every mode. Open rings are rejected, never closed or
+repaired. Dropping every feature also fails. Coordinates are stored as float64,
+so integers beyond `2**53` may round.
 
 ## Coordinate systems and stores
 

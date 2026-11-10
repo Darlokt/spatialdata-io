@@ -103,10 +103,9 @@ class TestNormalizeRasterAxes:
         [
             (("y",), ("y", "x"), (), "rank"),
             (("y", "y"), ("y", "x"), (), "duplicate"),
-            (("c", "y"), ("c", "y"), (), "contain 'x' and 'y'"),
+            (("c", "y"), ("c", "y"), (), "source axes must contain 'x' and 'y'"),
             (("t", "y", "x"), ("y", "x"), (), r"Axis 't' has length 2 and is absent from target_axes"),
             (("y", "x"), ("c", "y", "x"), (), "add_missing"),
-            (("y", "x"), ("y", "x"), ("z",), "add_missing contains axes absent from target_axes"),
             (("yy", "x"), ("y", "x"), (), "single alphabetic"),
         ],
     )

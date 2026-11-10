@@ -98,8 +98,9 @@ def normalize_owned_anndata(
     duplicate_sums
         Optional reader-owned destination for duplicate summaries. Collecting
         summaries does not change numerical behavior or accepted storage.
-        CSR/CSC integer duplicate sums exceeding their source dtype always
-        use lossless floating promotion.
+        CSR/CSC integer duplicate sums exceeding their source dtype use
+        lossless floating promotion after checked int64 or uint64 arithmetic.
+        A partial-sum bound exceeding that 64-bit dtype raises.
         Promoted arrays use float32 when exact, otherwise float64; an inexact
         floating result raises. Sufficient source dtypes and existing
         floating/boolean semantics are retained. The reader emits one warning

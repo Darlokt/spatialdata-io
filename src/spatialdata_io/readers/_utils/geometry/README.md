@@ -1,7 +1,7 @@
 # Geometry construction and invalid-geometry policy
 
 This private package owns one cross-reader output policy: what happens to
-source polygons that are not valid geometries. It also owns exact construction
+source polygons that are not valid geometries. It also owns the construction
 of decoded GeoJSON Polygon and MultiPolygon geometry objects.
 
 ```python
@@ -35,8 +35,9 @@ seqFISH boundaries share this contract:
 - each entry is a Polygon or MultiPolygon with nonempty coordinates;
 - each ring is a closed list of at least four 2D vertices; open rings are
   rejected rather than closed by Shapely;
-- coordinates are finite JSON numbers (not booleans or strings) and integers
-  must be exactly representable in float64;
+- coordinates are JSON numbers (not booleans or strings); the strict JSON
+  reader already rejects nonfinite and out-of-range numbers, and integers
+  beyond `2**53` may round to float64;
 - vertices, holes and part order are preserved, and topology is neither
   classified nor repaired.
 

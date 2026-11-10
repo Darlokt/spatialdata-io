@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
 from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table import _count_values, count_accumulation_dtype, finalize_count_arrays
+from spatialdata_io.readers._utils.table import count_accumulation_dtype, finalize_count_arrays
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,16 +40,6 @@ class TestCountAccumulationDtype:
     def test_inconclusive_bound_leaves_fallback_to_reader(self, bound: int) -> None:
         assert count_accumulation_dtype(bound) is None
 
-    @pytest.mark.parametrize("bound", [-1, -(10**400)])
-    def test_rejects_negative_bounds(self, bound: int) -> None:
-        with pytest.raises(ValueError, match="nonnegative"):
-            count_accumulation_dtype(bound)
-
-    @pytest.mark.parametrize("bound", [True, False, 1.0, 0.5, np.nan, np.inf, "1", None, np.int64(1)])
-    def test_rejects_non_python_integers(self, bound: object) -> None:
-        with pytest.raises(TypeError, match="Python integer"):
-            count_accumulation_dtype(cast("int", bound))
-
 
 class TestFinalizeCountArrays:
     @pytest.mark.parametrize("value", [-1, 2**53 + 1])
@@ -68,16 +58,21 @@ class TestFinalizeCountArrays:
             ("int8", 127, "float32"),
             ("uint16", 65535, "float32"),
             ("int32", 2**24, "float32"),
+            ("uint64", 2**24, "float32"),
+            ("longdouble", 2**24, "float32"),
+            ("float64", 2**24, "float32"),
             ("int64", 2**24 + 1, "float64"),
-            ("int64", 2**24 + 2, "float32"),
-            ("int64", 2**53 + 2, "float64"),
-            ("uint64", 2**63, "float32"),
-            ("uint64", 2**64 - 2048, "float64"),
+            ("int64", 2**24 + 2, "float64"),
+            ("int64", 2**53, "float64"),
+            ("uint64", 2**53, "float64"),
+            ("longdouble", 2**53, "float64"),
             ("float32", 42, "float32"),
+            ("float32", 2**30, "float32"),
             ("float64", 2**24 + 1, "float64"),
+            ("float64", 2**60, "float64"),
         ],
     )
-    def test_selects_by_actual_values(self, dtype: str, value: int, expected: str) -> None:
+    def test_selects_by_maximum_and_keeps_floating_storage(self, dtype: str, value: int, expected: str) -> None:
         source = sparse.csr_array(np.array([[value]], dtype=dtype))
         (result,) = finalize_count_arrays((source,), context=_CONTEXT)
         assert result.dtype == np.dtype(expected)
@@ -86,10 +81,13 @@ class TestFinalizeCountArrays:
         assert isinstance(result, sparse.sparray)
         assert not isinstance(result, sparse.spmatrix)
 
-    @pytest.mark.parametrize(("dtype", "value"), [("int64", 2**53 + 1), ("int64", 2**63 - 1), ("uint64", 2**64 - 1)])
-    def test_rejects_inexact_integer_float64(self, dtype: str, value: int) -> None:
+    @pytest.mark.parametrize(
+        ("dtype", "value"),
+        [("int64", 2**53 + 1), ("int64", 2**53 + 2), ("int64", 2**63 - 1), ("uint64", 2**64 - 1)],
+    )
+    def test_rejects_integer_counts_above_exact_float64_range(self, dtype: str, value: int) -> None:
         source = sparse.csr_array(np.array([[value]], dtype=dtype))
-        with pytest.raises(ReaderFormatError, match="not exactly representable"):
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53"):
             finalize_count_arrays((source,), context=_CONTEXT)
         assert int(source.data[0]) == value
 
@@ -106,6 +104,21 @@ class TestFinalizeCountArrays:
             finalize_count_arrays((source,), context=_CONTEXT)
         np.testing.assert_array_equal(source.data, [-1, 1])
         assert source.dtype == np.dtype(dtype)
+
+    def test_floating_family_is_never_widened_but_mixed_storage_is(self) -> None:
+        large = sparse.csr_array([[2**25 + 4]], dtype=np.float32)
+        small = sparse.csr_array([[3]], dtype=np.float32)
+        assert all(
+            result.dtype == np.dtype(np.float32) for result in finalize_count_arrays((large, small), context=_CONTEXT)
+        )
+        mixed = finalize_count_arrays((large, sparse.csr_array([[3]], dtype=np.int32)), context=_CONTEXT)
+        assert all(result.dtype == np.dtype(np.float64) for result in mixed)
+        assert int(mixed[0].data[0]) == 2**25 + 4
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53"):
+            finalize_count_arrays(
+                (sparse.csr_array([[2**60]], dtype=np.float64), sparse.csr_array([[1]], dtype=np.float32)),
+                context=_CONTEXT,
+            )
 
     def test_family_dtype_includes_empty_arrays_and_ignores_order(self) -> None:
         ordinary = sparse.csr_array([[1]], dtype=np.float32)
@@ -149,40 +162,6 @@ class TestFinalizeCountArrays:
         with pytest.raises(ReaderFormatError, match="negative"):
             finalize_count_arrays((source,), context=_CONTEXT)
 
-    def test_empty_family(self) -> None:
-        with pytest.raises(ValueError, match="at least one"):
-            finalize_count_arrays((), context=_CONTEXT)
-
-    @pytest.mark.parametrize("dtype", ["int64", "uint64", "float64", "longdouble"])
-    def test_skips_elementwise_casts_for_values_within_exact_integer_range(
-        self, dtype: str, mocker: MockerFixture
-    ) -> None:
-        cast_check = mocker.spy(_count_values, "_exact_float_cast")
-        source = sparse.csr_array(np.array([[0, 1, 2**24]], dtype=dtype))
-
-        (result,) = finalize_count_arrays((source,), context=_CONTEXT)
-
-        cast_check.assert_not_called()
-        assert result.dtype == np.dtype(np.float32)
-        np.testing.assert_array_equal(result.data, [1, 2**24])
-
-    def test_checks_only_float32_between_exact_integer_ranges(self, mocker: MockerFixture) -> None:
-        cast_check = mocker.spy(_count_values, "_exact_float_cast")
-        exact = sparse.csr_array(np.array([[2**25]], dtype=np.int64))
-        inexact = sparse.csr_array(np.array([[2**24 + 1]], dtype=np.int64))
-
-        assert finalize_count_arrays((exact,), context=_CONTEXT)[0].dtype == np.dtype(np.float32)
-        assert finalize_count_arrays((inexact,), context=_CONTEXT)[0].dtype == np.dtype(np.float64)
-
-        assert [call.args[1] for call in cast_check.call_args_list] == [np.dtype(np.float32)] * 2
-
-    def test_noncanonical_and_unsupported_values(self) -> None:
-        source = sparse.csr_array((np.array([1, 2]), np.array([0, 0]), np.array([0, 2])), shape=(1, 1))
-        with pytest.raises(ValueError, match="Complete duplicate aggregation"):
-            finalize_count_arrays((source,), context=_CONTEXT)
-        with pytest.raises(TypeError, match="real floating"):
-            finalize_count_arrays((sparse.csr_array([[1j]]),), context=_CONTEXT)
-
     @pytest.mark.parametrize("shape", [(0, 4), (3, 0), (2, 3)])
     def test_zero_empty_counts(self, shape: tuple[int, int]) -> None:
         (result,) = finalize_count_arrays((sparse.csr_array(shape, dtype=np.int64),), context=_CONTEXT)
@@ -190,7 +169,7 @@ class TestFinalizeCountArrays:
         assert result.nnz == 0
         assert result.dtype == np.dtype(np.float32)
 
-    def test_real_float_overflow_and_noninteger_longdouble(self) -> None:
+    def test_rejects_longdouble_beyond_float64_exact_integers(self) -> None:
         source = sparse.csr_array([[np.finfo(np.longdouble).max]], dtype=np.longdouble)
-        with pytest.raises(ReaderFormatError, match="not exactly representable"):
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53"):
             finalize_count_arrays((source,), context=_CONTEXT)

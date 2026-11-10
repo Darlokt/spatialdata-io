@@ -17,8 +17,8 @@ The document is strict UTF-8 JSON: duplicate object names, ``NaN`` and
 ``Infinity`` are rejected rather than resolved by the parser. Rows keep source
 order with positional integer IDs; Feature IDs, properties and any ``crs``
 member are discarded. Coordinates keep the units of the source (pixels,
-micrometres or geographic degrees alike) and are never reprojected, rounded,
-closed or repaired.
+micrometres or geographic degrees alike) and become float64. They are never
+reprojected, closed or repaired.
 """
 
 from __future__ import annotations
@@ -108,8 +108,8 @@ def geojson(
         Eager shapes with a single ``geometry`` column, one row per feature or
         geometry in source order, and positional integer IDs.
 
-        - Vertices, holes and multipart order are those of the source; nothing
-          is closed, rounded or repaired.
+        - Vertices become float64; holes and multipart order follow the source.
+          Nothing is closed or repaired.
         - Feature IDs, properties and ``crs`` declarations are discarded.
         - Coordinates: an ``Identity`` to ``coordinate_system``; the units are
           those of the source and geographic coordinates are not reprojected.
@@ -123,8 +123,8 @@ def geojson(
     ReaderFormatError
         Under every policy, if the file is not strict UTF-8 JSON, the document
         is not a nonempty supported collection, or a geometry is missing,
-        empty, nonpolygonal, nonplanar or nonfinite, has an open or short
-        ring, or has integer coordinates float64 cannot represent exactly.
+        empty, nonpolygonal, nonplanar or nonfinite, or has an open or short
+        ring.
         Also for invalid geometries under ``"raise"`` and when ``"drop"``
         removes every row.
     FileNotFoundError, IsADirectoryError

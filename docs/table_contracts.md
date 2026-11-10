@@ -92,8 +92,11 @@ is tracked in [AnnData issue #948](https://github.com/scverse/anndata/issues/948
 ## Completed raw counts
 
 seqFISH, MERSCOPE, CosMx, raw Stereo-seq and the 10x-backed readers return
-completed counts as float32 when every value is exactly representable, otherwise
-float64. Related arrays such as MERSCOPE genes/blanks or Stereo-seq X/exon share
+completed integer counts as float32 when the maximum is at most 2²⁴, otherwise
+float64 through 2⁵³. Larger integer counts raise, even when a particular value
+is representable. An already uniform floating family retains its dtype when
+the maximum would require widening; smaller values can use float32. Related
+arrays such as MERSCOPE genes/blanks or Stereo-seq X/exon share
 one selected dtype. Geometry drops re-evaluate that choice from the surviving
 count family. Neither float can preserve every uint64 value; unsupported
 exact values raise rather than round. Source parsing remains exact where owned
@@ -111,8 +114,9 @@ Curio, ISS, Steinbock, DBiT and Stereo-seq analysis normalize their documented
 imported expression slots without imposing raw-count semantics. Duplicate
 matrix coordinates are additive contributions and are summed, never dropped.
 Sufficient source integer dtypes are retained; otherwise they promote directly
-to float32 when every completed value is exact, or float64 if needed. No wider
-integer array is staged before floating output. If neither float preserves the
+to float32 when every completed value is exact, or float64 if needed. When the
+source dtype cannot safely accumulate contributions, reduction uses int64 or
+uint64; an unproved 64-bit partial-sum bound raises. If neither float preserves the
 completed values, including unaffected entries, promotion raises.
 An unsupported exact result raises before lossy conversion. Floating and boolean
 expression retain their existing numerical semantics. One UserWarning per
@@ -238,11 +242,10 @@ including hexadecimal and surrounding spaces or tabs; decimal/exponent
 spellings such as `2.0` and `2e0` are rejected. Pixel coordinates are correctly
 rounded directly to float64, including underflow to zero, and must be finite
 and nonnegative. Required numeric fields cannot be empty.
-Image scale factors must have finite inverses, and the display diameter must
-produce a positive representable circle radius.
+Image scale factors and the display diameter must be positive JSON numbers.
 
-`X` contains decoded counts as float32 when every value is exact, otherwise
-float64; values unrepresentable in either dtype raise. Standard int32 HDF5
+`X` contains decoded counts under the completed-count dtype policy above.
+Duplicate HDF5 entries for one barcode and feature fail. Standard int32 HDF5
 and MTX inputs already return float32 through the accepted Scanpy decoder. `obs` adds uint8 `in_tissue`,
 uint64 `array_row` and `array_col`, textual `spot_id` and categorical `region` in that
 order. `spot_id` repeats the barcode and links to the generated spot circles
@@ -287,7 +290,7 @@ a spelling; those columns are now float64, and boolean columns are rejected.
 Enrichment never changes `raw.var`.
 The supported Seeker primary profile requires `X_spatial` and accepts
 an additional exactly agreeing real numeric `spatial` embedding. Both embeddings
-must be losslessly representable in float64. Exact native XY is retained in
+must be finite. Exact native XY is retained in
 `obsm["spatial_pixels"]`; canonical float64 `spatial` uses the manufacturer
 approximate 0.647 µm/pixel calibration without reversing stored orientation.
 The circles use the same scale; their radius is half the nominal 10 µm bead
@@ -327,8 +330,7 @@ or textual region normalization. Native XY
 remains in `obs["x"]`/`obs["y"]`. Canonical float64
 `obsm["spatial"]` exists only with an explicit or supported associated physical
 calibration; its declaration identifies the source metric and frame. Physical
-conversion rejects nonfinite products and, defensively, nonzero coordinates
-rounded to zero by an exceptionally small scale. Circles are linked by
+conversion rejects nonfinite products. Circles are linked by
 `(region, cell_id)` to their generated index; no independent segmentation
 population is inferred. No layers, `raw` or additional embeddings are created.
 CSV expression is parsed in 1 MiB source blocks and converted to CSR per native
@@ -671,10 +673,10 @@ tables: `square_XXXum_table`, `cell_table`, and requested `nucleus_table`.
 No unselected table is fabricated. Bin/cell barcodes and features retain matrix
 order. Feature metadata follow 10x (`gene_ids`, `feature_types`, available
 `genome` and additional annotations); symbols become unique unless disabled.
-Bin/cell output is float32 when exact, otherwise float64. Nucleus expression
+Bin/cell output follows the completed-count policy above. Nucleus expression
 independently sums decoded raw 2 µm bins in float32 when maximum count times
-maximum contributing bins is at most 2**24, otherwise float64 up to 2**53; final output uses float32
-only when exact, otherwise float64. A failed conservative bound raises.
+maximum contributing bins is at most 2**24, otherwise float64 up to 2**53;
+final output uses float32 through 2**24, otherwise float64. A failed conservative bound raises.
 It is not copied from the selected cell matrix.
 
 Bin `obs` contains uint8 `in_tissue`, uint32 `array_row`/`array_col`, float64
@@ -708,8 +710,9 @@ contract.
 
 Float32 cannot exactly represent every integer above 2²⁴. Scanpy's conversion
 may round large counts before the reader sees them; a later cast cannot recover
-them. Reader-owned completed raw counts use float32 when every actual value
-is exact, otherwise float64; unsupported exact values raise. This does not
+them. Reader-owned completed integer counts use float32 through 2²⁴ and
+float64 through 2⁵³; larger counts raise. Uniform floating storage is never
+widened solely because of the maximum. This does not
 recover source information already rounded by Scanpy. HD nuclei accumulate in
 checked float32/f64 and adapt their output dtype after summation. Imported integer
 expression in Curio, DBiT, ISS, Steinbock and Stereo-seq analysis combines
@@ -719,8 +722,8 @@ summarizes unexpected imported duplicate normalization. Other inherited layers
 and raw retain their source numerical semantics; processed expression is not
 automatically reinterpreted as nonnegative molecule counts.
 
-Shared HDF5 validation checks nonnegative/integral entries retained by Scanpy
-before local duplicate reduction; filtering may remove unselected records.
+Shared HDF5 validation rejects repeated barcode/feature entries and checks
+nonnegative/integral decoded counts before reader-owned feature filtering.
 No extra source scan is performed. MTX has a separate upstream limitation:
 the installed parser can truncate malformed integer-header tokens and reduce
 duplicates before returning. Header checks and finite/integer result checks

@@ -181,7 +181,7 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         If an option has an invalid value, an image option is given without an
         image, ``data_axes`` cannot be mapped to CYX for the image (with a note
         naming it), ``pixel_size_um`` conflicts with the experiment, or the
-        calibration over- or underflows a cell position.
+        calibration overflows a cell position.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         If a path is missing or has the wrong kind.
     ValueError
@@ -189,9 +189,9 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         table or image is ambiguous or malformed, for example a
         multi-series TIFF without ``tiff_series``, declared image axes that
         cannot be mapped to CYX, missing or duplicate fields,
-        lossy numbers, nonfinite intensities or coordinates, several regions,
-        negative, non-integral or duplicate cell IDs, or an unsupported
-        experiment version.
+        nonfinite intensities or coordinates, several regions, negative,
+        non-integral or duplicate cell IDs, or an unsupported experiment
+        version.
     """
     validate_calibration(pixel_size_um, image_to_table)
     validate_image_options(data_axes, tiff_series)

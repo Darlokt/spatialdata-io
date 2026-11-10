@@ -117,6 +117,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
               arrays with the source values and dtype. Duplicate sparse entries
               are summed; an integer sum that overflows the source dtype
               promotes to float32 or float64 when exact, and raises otherwise.
+              Integer accumulation must have a proven int64 or uint64 bound.
             - ``obs["region"]``: the labels element name, categorical.
             - ``obs[instance_key]`` (kept, widened to 16 bits when narrower) or
               ``obs["instance_id"]`` (uint64)

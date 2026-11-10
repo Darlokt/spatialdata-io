@@ -58,15 +58,27 @@ class TestReadCounts:
         assert isinstance(zero.X, csr_array)
         assert zero.X.nnz == 0
 
-    @pytest.mark.parametrize("entries", [[1, 1, 0, 2], [2, 1, 0, 2]])
-    def test_normalized_source_coordinates(self, tmp_path: Path, entries: list[int]) -> None:
+    def test_normalized_source_coordinates(self, tmp_path: Path) -> None:
         path = _source(tmp_path)
-        _replace(path, "indices", np.array(entries, dtype=np.int32))
+        _replace(path, "indices", np.array([2, 1, 0, 2], dtype=np.int32))
         result = tables.read_counts(path, version=VERSION)
         assert isinstance(result.X, csr_array)
         assert result.X.has_canonical_format
-        expected = [[0, 3, 0], [3, 0, 4]] if entries[0] == 1 else [[0, 2, 1], [3, 0, 4]]
-        assert_array_equal(result.X.toarray(), expected)
+        assert_array_equal(result.X.toarray(), [[0, 2, 1], [3, 0, 4]])
+
+    def test_repeated_source_coordinates_rejected(self, tmp_path: Path) -> None:
+        path = _source(tmp_path)
+        _replace(path, "indices", np.array([1, 1, 0, 2], dtype=np.int32))
+        with pytest.raises(ReaderFormatError, match=r"repeated \(barcode, feature\)") as caught:
+            tables.read_counts(path, version=VERSION)
+        assert caught.value.path == path
+
+    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
+        path = _source(tmp_path)
+        _replace(path, "data", np.array([2**53 + 1, 2, 3, 4], dtype=np.int64))
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53") as caught:
+            tables.read_counts(path, version=VERSION)
+        assert caught.value.path == path
 
     @pytest.mark.parametrize("value", [-1.0, 0.5, np.nan, np.inf])
     def test_invalid_count_values(self, tmp_path: Path, value: float) -> None:
@@ -88,21 +100,6 @@ class TestReadCounts:
 
 class TestLinkTable:
     """Link only against the independent materialized target IDs."""
-
-    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
-        path = _source(tmp_path)
-        _replace(path, "data", np.array([2**53 + 1, 2, 3, 4], dtype=np.int64))
-        table = tables.read_counts(path, version=VERSION)
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            tables.link_table(
-                table,
-                "boundaries",
-                pd.Index([2, 5]),
-                position="vendor cell centroid",
-                counts_path=path,
-                version=VERSION,
-            )
-        assert caught.value.path == path
 
     def test_linkage_and_serializable_categories(self, tmp_path: Path) -> None:
         result = tables.read_counts(_source(tmp_path), version=VERSION)

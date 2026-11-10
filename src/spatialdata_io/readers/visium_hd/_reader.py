@@ -436,8 +436,9 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
             Lazy CYX CytAssist image, bilinearly resampled at its own physical
             resolution in the source dtype.
 
-        Tables: ``X`` is a canonical CSR sparse array, float32 when every count
-        is exact in float32, else float64; ``var`` keeps ``gene_ids``,
+        Tables: ``X`` is a canonical CSR sparse array, float32 through 2**24,
+        else float64 through 2**53; already decoded floating values are not
+        widened. Duplicate HDF5 entries fail. ``var`` keeps ``gene_ids``,
         ``feature_types`` and ``genome`` in matrix order; ``region`` and
         ``instance_id`` link each row to its element;
         ``uns["spatialdata_io_positions"]`` declares ``obsm["spatial"]``

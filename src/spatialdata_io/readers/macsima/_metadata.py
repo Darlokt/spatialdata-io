@@ -35,7 +35,7 @@ Exposure     ``Exposure time``, ``Exposure time unit``               ``ExposureT
   name the same version, with or without a leading ``v``.
 - Marker, cycle and acquisition type are required. Cycles and ROI IDs are
   non-negative decimal integers within uint64; exposures are finite,
-  non-negative milliseconds whose nonzero source text stays nonzero in float64.
+  non-negative milliseconds parsed as float64.
 - The pixel size must be square, declared in µm or nm, and finite and
   positive in µm. Plane positions are optional; when present they must be
   integral and in pixel units (major 1 writes pixels).
@@ -46,7 +46,6 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass, replace
-from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 from ome_types.model import UnitsLength
@@ -222,18 +221,12 @@ def _exposure_ms(text: str | None, unit: str | None, origin: _Origin) -> float |
     if unit is not None and unit != EXPOSURE_UNIT:
         raise origin.error(found=f"exposure unit {unit!r}", expected=f"exposure in {EXPOSURE_UNIT!r}")
 
-    expected = "a finite non-negative number representable as nonzero float64 when nonzero"
-    try:
-        source = Decimal(text)
-    except InvalidOperation as error:
-        raise origin.error(found=f"exposure {text!r}", expected=expected) from error
-    if not source.is_finite() or (source.is_signed() and not source.is_zero()):
-        raise origin.error(found=f"exposure {text!r}", expected=expected)
+    expected = "a finite non-negative number"
     try:
         exposure = float(text)
     except ValueError as error:
         raise origin.error(found=f"exposure {text!r}", expected=expected) from error
-    if not math.isfinite(exposure) or (exposure == 0 and not source.is_zero()):
+    if not math.isfinite(exposure) or exposure < 0:
         raise origin.error(found=f"exposure {text!r}", expected=expected)
     return exposure
 

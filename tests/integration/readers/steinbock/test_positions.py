@@ -299,22 +299,6 @@ class TestSteinbockPositions:
         with pytest.raises(ReaderFormatError, match="nonfinite physical positions"):
             steinbock(tmp_path)
 
-    @pytest.mark.parametrize("multiple", [False, True])
-    def test_shifted_nonzero_underflow_fails_without_pixel_tasks(self, tmp_path: Path, *, multiple: bool) -> None:
-        spacings = {"sample-a": (5e-324, 3.0)}
-        if multiple:
-            spacings["sample-b"] = (2.0, 3.0)
-        _write_dataset(tmp_path, spacings)
-        path = tmp_path / "cells.h5ad"
-        source = ad.read_h5ad(path)
-        assert isinstance(source.obs, pd.DataFrame)
-        source.obs.loc[source.obs["image"] == "sample-a.tiff", "centroid-1"] = 0.0
-        source.write_h5ad(path)
-        executed: list[object] = []
-        with Callback(posttask=lambda *args: executed.append(args)), pytest.raises(ReaderFormatError, match="nonzero"):
-            steinbock(tmp_path)
-        assert not executed
-
     @pytest.mark.parametrize("storage", ["h5ad", "anndata_zarr", "spatialdata_zarr"])
     def test_position_snapshots_persist_with_exact_source_and_categorical_frames(
         self, tmp_path: Path, storage: str

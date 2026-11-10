@@ -1,4 +1,4 @@
-"""Curio bead coordinate validation and exact geometry."""
+"""Curio bead coordinate validation and float64 geometry."""
 
 from __future__ import annotations
 
@@ -19,6 +19,35 @@ if TYPE_CHECKING:
 
 class TestReadShapes:
     """Reject invalid coordinates before constructing a spatial element."""
+
+    def test_finite_extended_precision_coordinates_cannot_overflow_output(self, tmp_path: Path) -> None:
+        if np.finfo(np.longdouble).max <= np.finfo(np.float64).max:
+            pytest.skip("Extended precision has the same range as float64.")
+        write_curio(tmp_path, duplicate_coordinates=False)
+        layout = discover_layout(tmp_path)
+        table = ad.read_h5ad(layout.counts)
+        native = np.full((3, 2), np.longdouble(np.finfo(np.float64).max) * 2)
+        table.obsm["X_spatial"] = native
+
+        with pytest.raises(ReaderFormatError, match="overflow"):
+            read_shapes(table, layout.counts)
+
+        assert table.obsm["X_spatial"] is native
+        assert "spatial_pixels" not in table.obsm
+        assert "spatial" not in table.obsm
+
+    def test_large_integer_coordinates_round_in_float64_output(self, tmp_path: Path) -> None:
+        write_curio(tmp_path, duplicate_coordinates=False)
+        layout = discover_layout(tmp_path)
+        table = ad.read_h5ad(layout.counts)
+        native = np.full((3, 2), 2**53 + 1, dtype=np.int64)
+        table.obsm["X_spatial"] = native
+
+        shapes = read_shapes(table, layout.counts)
+
+        np.testing.assert_array_equal(shapes.geometry.x, np.full(3, float(2**53)))
+        np.testing.assert_array_equal(table.obsm["spatial"], native.astype(np.float64) * 0.647)
+        assert table.obsm["spatial_pixels"] is native
 
     @pytest.mark.parametrize("kind", ["missing_duplicate", "shape", "dtype", "nonfinite", "disagree"])
     def test_invalid_spatial_arrays(self, tmp_path: Path, kind: str) -> None:
@@ -147,46 +176,6 @@ class TestReadShapes:
         np.testing.assert_array_equal(native, np.ones((3, 2)))
         np.testing.assert_array_equal(duplicate, np.ones((3, 2), dtype=dtype))
 
-    @pytest.mark.parametrize("value", [2**53 + 1, -(2**53 + 1)])
-    @pytest.mark.parametrize("reverse", [False, True])
-    def test_mixed_coordinates_cannot_hide_integer_precision_loss(
-        self, tmp_path: Path, value: int, *, reverse: bool
-    ) -> None:
-        write_curio(tmp_path)
-        layout = discover_layout(tmp_path)
-        table = ad.read_h5ad(layout.counts)
-        integer = np.zeros((3, 2), dtype=np.int64)
-        integer[0, 0] = value
-        floating = integer.astype(np.float64)
-        native, duplicate = (integer, floating) if reverse else (floating, integer)
-        table.obsm["X_spatial"] = native
-        table.obsm["spatial"] = duplicate
-        expression = table.X
-
-        with pytest.raises(ReaderFormatError, match="lose precision"):
-            read_shapes(table, layout.counts)
-
-        assert table.obsm["X_spatial"] is native
-        assert table.obsm["spatial"] is duplicate
-        assert table.X is expression
-        assert "spatial_pixels" not in table.obsm
-        assert "spatialdata_io_positions" not in table.uns
-        assert int(integer[0, 0]) == value
-        assert floating[0, 0] == float(value)
-
-    @pytest.mark.parametrize("value", [2**53 + 1, -(2**53 + 1), 2**64 - 1])
-    def test_integer_coordinate_precision_loss(self, tmp_path: Path, value: int) -> None:
-        write_curio(tmp_path)
-        layout = discover_layout(tmp_path)
-        table = ad.read_h5ad(layout.counts)
-        coordinates = np.zeros((3, 2), dtype=np.uint64 if value >= 2**63 else np.int64)
-        coordinates[0, 0] = value
-        table.obsm["spatial"] = coordinates
-        table.obsm["X_spatial"] = coordinates.copy()
-
-        with pytest.raises(ReaderFormatError, match="lose precision"):
-            read_shapes(table, layout.counts)
-
     @pytest.mark.parametrize("value", [-(2**60), -(2**53), 2**53, 2**60])
     @pytest.mark.parametrize("reverse", [False, True])
     def test_exact_large_integer_geometry(self, tmp_path: Path, value: int, *, reverse: bool) -> None:
@@ -204,28 +193,3 @@ class TestReadShapes:
 
         assert int(shapes.geometry.x.iloc[0]) == value
         assert table.obsm["spatial_pixels"] is native
-
-    @pytest.mark.parametrize("exact", [True, False])
-    @pytest.mark.parametrize("duplicate_only", [False, True])
-    def test_extended_float_geometry(self, tmp_path: Path, *, exact: bool, duplicate_only: bool) -> None:
-        if np.finfo(np.longdouble).eps == np.finfo(np.float64).eps:
-            pytest.skip("This platform has no floating type wider than float64.")
-        write_curio(tmp_path)
-        layout = discover_layout(tmp_path)
-        table = ad.read_h5ad(layout.counts)
-        coordinates = np.ones((3, 2), dtype=np.longdouble)
-        if not exact:
-            coordinates[0, 0] += np.finfo(np.longdouble).eps
-        native = coordinates.astype(np.float64) if duplicate_only else coordinates.copy()
-        table.obsm["spatial"] = coordinates
-        table.obsm["X_spatial"] = native
-
-        if exact:
-            assert read_shapes(table, layout.counts).geometry.x.tolist() == [1.0] * 3
-        else:
-            with pytest.raises(ReaderFormatError, match="lose precision"):
-                read_shapes(table, layout.counts)
-            assert table.obsm["X_spatial"] is native
-            assert table.obsm["spatial"] is coordinates
-            assert "spatial_pixels" not in table.obsm
-            assert "spatialdata_io_positions" not in table.uns

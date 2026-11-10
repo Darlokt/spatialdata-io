@@ -308,13 +308,6 @@ class TestSetPositions:
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[native_x, 0.5]])
         assert table.obsm["spatial"].dtype == np.dtype(np.float64)
 
-    def test_rejects_nonzero_shifted_coordinate_collapsing_to_zero(self, tmp_path: Path) -> None:
-        table = self._table([[0, 0.5]], ["sample.tiff"])
-        with pytest.raises(ReaderFormatError, match=r"nonzero.*zero"):
-            set_positions(
-                table, {"sample": self._grid("sample", "global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad")
-            )
-
     def test_single_calibrated_sample_declares_fixed_frames(self, tmp_path: Path) -> None:
         table = self._table([[1, 2]], ["sample.tiff"])
         set_positions(table, {"sample": self._grid("sample", "global", (2, 4))}, ArtifactFile(tmp_path / "cells.h5ad"))

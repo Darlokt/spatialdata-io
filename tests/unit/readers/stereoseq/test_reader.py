@@ -314,13 +314,23 @@ class TestStereoseq:
                 transform.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")) @ [10, 20, 1], [5, 10, 1]
             )
 
-    def test_duplicate_normalized_analysis_names_fail(self, tmp_path: Path) -> None:
+    def test_coinciding_analysis_names_fail(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, family="outs", products=("analysis",))
-        duplicate = fixture.analysis.with_name("sample.cellbin_0.50.h5ad")
-        duplicate.write_bytes(fixture.analysis.read_bytes())
+        first, second = (fixture.analysis.with_name(f"sample.cellbin_{value}.h5ad") for value in ("1e3", "1E+3"))
+        first.write_bytes(fixture.analysis.read_bytes())
+        second.write_bytes(fixture.analysis.read_bytes())
 
         with pytest.raises(ReaderFormatError, match="duplicate"):
-            stereoseq(tmp_path, analysis_files=(fixture.analysis, duplicate))
+            stereoseq(tmp_path, analysis_files=(first, second))
+
+    def test_resolution_spellings_name_separate_products(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path, family="outs", products=("analysis",))
+        other = fixture.analysis.with_name("sample.cellbin_0.50.h5ad")
+        other.write_bytes(fixture.analysis.read_bytes())
+
+        result = stereoseq(tmp_path, analysis_files=(fixture.analysis, other))
+
+        assert set(result.tables) == {"cells_analysis_r0_5_table", "cells_analysis_r0_50_table"}
 
     def test_analysis_only_requires_consistent_grid_pitch(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, family="outs", products=("analysis",))

@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -134,11 +133,16 @@ class CellSource:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisSource:
-    """Hold filename evidence; historical names may omit bin or clustering resolution."""
+    """Hold filename evidence; historical names may omit bin or clustering resolution.
+
+    ``resolution`` is the filename's clustering resolution as an element-name
+    fragment: ``.`` becomes ``_``, ``+`` is dropped and ``E`` is lowercased
+    (``0.50`` gives ``0_50``, ``1E+3`` gives ``1e3``).
+    """
 
     file: ArtifactFile
     population: Literal["cells", "adjusted_cells"] | int | None
-    resolution: Decimal | None
+    resolution: str | None
     sample_id: str
 
 
@@ -205,14 +209,12 @@ def _analysis_source(file: ArtifactFile) -> AnalysisSource:
 
     match = _BIN_ANALYSIS.fullmatch(name)
     if match:
-        return AnalysisSource(
-            file, int(match["bin"]), _clustering_resolution(match["resolution"], file), match["sample"]
-        )
+        return AnalysisSource(file, int(match["bin"]), _resolution_name(match["resolution"]), match["sample"])
 
     match = _CELL_ANALYSIS.fullmatch(name)
     if match:
         population: Literal["cells", "adjusted_cells"] = "adjusted_cells" if match["adjusted"] else "cells"
-        return AnalysisSource(file, population, _clustering_resolution(match["resolution"], file), match["sample"])
+        return AnalysisSource(file, population, _resolution_name(match["resolution"]), match["sample"])
 
     historical: tuple[tuple[str, Literal["cells", "adjusted_cells"] | None], ...] = (
         (".adjusted.cell.cluster.h5ad", "adjusted_cells"),
@@ -226,15 +228,9 @@ def _analysis_source(file: ArtifactFile) -> AnalysisSource:
     raise _error(file, f"analysis filename {name!r}", "a documented square/cell clustering H5AD filename")
 
 
-def _clustering_resolution(value: str, file: ArtifactFile) -> Decimal:
-    """Read a positive exact filename value with contextual exponent-limit failures."""
-    try:
-        resolution = Decimal(value)
-    except InvalidOperation as error:
-        raise _error(file, f"clustering resolution {value!r}", "a finite positive decimal resolution") from error
-    if not resolution.is_finite() or resolution <= 0:
-        raise _error(file, f"clustering resolution {value!r}", "a finite positive decimal resolution")
-    return resolution
+def _resolution_name(value: str) -> str:
+    """Turn the regex-validated filename resolution into an element-name fragment."""
+    return value.replace(".", "_").replace("+", "").lower()
 
 
 def _count_sample(path: Path, *, sample_id: str | None = None) -> str | None:
@@ -474,7 +470,7 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public product selec
     sample = _select_sample(root, family, (*files, *selected_overrides), analyses, sample_id)
     _validate_override_samples(root, overrides, sample, sample_id)
 
-    identities: set[tuple[str, str | int, Decimal | None]] = set()
+    identities: set[tuple[str, str | int, str | None]] = set()
     for source in analyses:
         if source.population is not None:
             key = (source.sample_id, source.population, source.resolution)

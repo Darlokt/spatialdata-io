@@ -107,8 +107,8 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
         The linked table, optional rasters and optional transcript points:
 
         - ``tables["table"]``: one row per metadata cell, in metadata order.
-          ``X`` is an eager canonical CSR count array, float32 when exact and
-          otherwise float64. Features are every count column except ``fov`` and
+          ``X`` is an eager canonical CSR count array, float32 through 2**24 and
+          otherwise float64 through 2**53. Features are every count column except ``fov`` and
           ``cell_ID``, in source order, including negative and system controls.
           The per-FOV background rows (``cell_ID`` 0) are removed, and the
           remaining count and metadata populations must be identical.
@@ -144,7 +144,7 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
         If an option has the wrong type.
     ValueError
         If an option has an invalid value, or ``pixel_size_um`` makes a cell
-        coordinate nonfinite or underflow to zero.
+        coordinate nonfinite.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         If a required artifact is missing or has the wrong filesystem kind.
     spatialdata_io.readers._utils.errors.ReaderFormatError

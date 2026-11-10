@@ -85,7 +85,7 @@ class TestMacsima:
     def test_invalid_derived_metadata_fails_without_pixel_tasks(
         self, tmp_path: Path, version: SchemaVersion, failure: str
     ) -> None:
-        channel = ChannelSpec("CD3", 1, "APC", exposure_ms="-1e-400" if failure == "exposure" else "1")
+        channel = ChannelSpec("CD3", 1, "APC", exposure_ms="-1" if failure == "exposure" else "1")
         write_stack(
             tmp_path / "run",
             (channel,),

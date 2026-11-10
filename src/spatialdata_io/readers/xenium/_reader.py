@@ -459,8 +459,9 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         storage; nucleus mask-label indexes retain their NumPy integer type.
 
         The table has an eager canonical CSR ``X`` in source feature order,
-        float32 when every value is exact in it, otherwise float64; values
-        neither type preserves raise. ``obs_names`` are the matrix barcodes.
+        float32 through 2**24, otherwise float64 through 2**53; already decoded
+        floating values are not widened. Duplicate HDF5 entries fail.
+        ``obs_names`` are the matrix barcodes.
 
         - ``obs``: the cells-table columns in source order, plus ``label_id``
           (uint32) and the nucleus centroids when ``cells.zarr.zip`` is

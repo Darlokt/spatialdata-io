@@ -677,16 +677,6 @@ class TestCodexCalibration:
         with np.errstate(over="ignore"), pytest.raises(ValueError, match="nonfinite physical"):
             codex(tmp_path, pixel_size_um=1e308)
 
-    @pytest.mark.parametrize("coordinate", [1e-100, -1e-100])
-    def test_physical_underflow(self, tmp_path: Path, coordinate: float) -> None:
-        """A calibrated reader must reject a nonzero native position becoming zero."""
-        frame = cell_frame()
-        frame["x"] = coordinate
-        write_csv(tmp_path / "cells.csv", frame)
-
-        with np.errstate(under="ignore"), pytest.raises(ValueError, match="physical"):
-            codex(tmp_path, pixel_size_um=1e-300)
-
 
 class TestCodexPathPolicy:
     """Discovered artifacts follow the dataset root's symlink policy."""

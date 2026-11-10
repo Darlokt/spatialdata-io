@@ -16,34 +16,27 @@ containment policy, existence, and artifact-kind validation. The count
 boundary borrows them and performs no second `stat()`, resolution, or kind
 check.
 
-Both functions return the identical, freshly read `AnnData` after
-`normalize_owned_anndata()` has converted `X` to a finite canonical SciPy CSR
-sparse array. A canonical Scanpy CSR matrix can be wrapped without copying its
-`data`, `indices`, or `indptr` buffers. Conversion from another sparse format
-allocates only the required CSR storage and never densifies expression data.
-Negative, fractional and nonfinite entries retained by Scanpy fail before local
-duplicate summation. Integer duplicate counts combine losslessly using the
-shared table normalizer; sufficient source dtype is retained, otherwise exact
-float32/f64 promotion is used. Decoded floating and boolean duplicates use a
-Python-integer partial-sum bound to choose exact floating arithmetic before
-reduction. An unproved bound above 2**53 raises a contextual precision error;
-no arbitrary-precision floating fallback or unconditional widening is added.
-Sorting without duplicates does not require an addition bound. Canonical
-decoded values retain their dtype and suitable buffers are reused.
+Both functions return the identical, freshly read `AnnData` after one shared
+normalization and count-finalization pass. `X` is a finite, nonnegative,
+integral, canonical float32 or float64 CSR sparse array. Canonical float32
+Scanpy CSR storage can be wrapped without copying its buffers. Other
+conversions allocate the required storage and never densify expression.
+Sparse capacity beyond the terminal pointer is not an active contribution.
 
-For example, decoded float32 contributions 16,777,216 and 1 require float64
-addition to preserve 16,777,217. The generic expression normalizer's ordinary
-floating reduction alone does not establish this count-specific guarantee.
-Boolean count contributions add numerically; generic boolean expression keeps
-its distinct boolean reduction semantics. Sparse capacity beyond the terminal
-pointer is not an active count contribution.
+A repeated (barcode, feature) entry retained by Scanpy is malformed and raises
+`ReaderFormatError`; HDF5 duplicates are never accepted as additive counts.
+Normalization may reject invalid arithmetic before reporting the repeated
+coordinate. The Matrix Market parser already sums repeated records before
+returning, so those source repeats remain additive through Scanpy.
 
-Scanpy converts int32 HDF5 values to float32 while other source dtypes can
-remain integer. Source integers may already have rounded before local checks.
-Local guarantees are
-relative to the retained decoded contributions, not original source text.
-No expression records are reread and no source decoder is replaced. Final
-count-family storage remains reader-owned, as does Xenium protein scaling.
+Integer count storage uses float32 when its maximum is at most 2**24,
+otherwise float64 through 2**53; larger integer counts raise. Existing float32
+or float64 storage is never widened and can be narrowed when the maximum is at
+most 2**24. These guarantees concern the decoded values: Scanpy converts int32
+HDF5 values to float32 before local validation, so rounded source integers
+cannot be recovered. No expression records are reread and no source decoder
+is replaced. Readers own feature selection, aggregation and Xenium protein
+scaling after source loading.
 
 The return value is eager, owned, and in memory. The public Scanpy readers own
 expression and annotation parsing and return fully materialized tables. The
@@ -71,8 +64,10 @@ contain a path separator.
 
 Scanpy and AnnData continue to own storage-version interpretation, matrix
 orientation, barcode/feature alignment, feature metadata, and name
-uniqueness. Their failures and normalization failures retain their original
-identity, type, cause, and traceback and receive a reader/artifact/path note.
+uniqueness. Scanpy failures retain their original identity, type, cause, and traceback and
+receive a reader/artifact/path note. Malformed count storage and values raise
+`ReaderFormatError` with that context; unsupported normalization input types
+retain `TypeError`.
 
 ## Deliberate exclusions
 

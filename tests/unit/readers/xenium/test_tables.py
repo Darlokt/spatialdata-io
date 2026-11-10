@@ -76,7 +76,7 @@ class TestReadCounts:
             values[0] = 2**53 + 1
             del handle["matrix/data"]
             handle["matrix/data"] = values
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53") as caught:
             read_counts(source, "all", None, context=COUNTS)
         assert caught.value.path == source.file
 

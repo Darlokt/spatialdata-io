@@ -169,7 +169,7 @@ def write_numeric_gef(
     profile: Profile = "name_only",
     wide: bool = False,
 ) -> Path:
-    """Write both byte orders, unsorted cell features and exact wide-count cases."""
+    """Write both byte orders, unsorted cell features and integer counts up to 2**53."""
     if kind == "square":
         write_square_gef(path, bins=(1,), profile=profile)
     else:
@@ -183,19 +183,19 @@ def write_numeric_gef(
         count_dtype = byteorder + ("u8" if wide else "u2")
         if kind == "square":
             group[expression_name] = np.array(
-                [(5, 6, 2**53 if wide else 2), (5, 6, 2 if wide else 4), (1, 2, 3)],
+                [(5, 6, 2**53 - 2 if wide else 2), (5, 6, 2 if wide else 4), (1, 2, 3)],
                 dtype=[("x", byteorder + "i4"), ("y", byteorder + "u4"), ("count", count_dtype)],
             )
-            exons = [2**53 if wide else 1, 4 if wide else 2, 1]
+            exons = [2**53 - 5 if wide else 1, 4 if wide else 2, 1]
         else:
             cells = group["cell"][:]
             cells["offset"], cells["geneCount"] = [0, 2], [2, 1]
             group["cell"][:] = cells
             group[expression_name] = np.array(
-                [(1, 2**64 - 2048 if wide else 11), (0, 12), (1, 22)],
+                [(1, 2**53 if wide else 11), (0, 12), (1, 22)],
                 dtype=[("geneID", byteorder + ("u2" if profile == "name_only" else "u4")), ("count", count_dtype)],
             )
-            exons = [2**64 - 4096 if wide else 7, 4, 6]
+            exons = [2**53 - 1 if wide else 7, 4, 6]
         group[expression_name].attrs.update(attributes)
         group[exon_name] = np.array(exons, dtype=count_dtype)
         for name in ("gene",) if kind == "square" else ("cell", "gene", "cellExon", "geneExon"):

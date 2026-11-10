@@ -11,10 +11,8 @@ import pytest
 from dask import delayed
 from scipy import sparse
 
-from spatialdata_io.readers._utils.table import (
-    as_csr_array,
-    validate_compressed_sparse,
-)
+from spatialdata_io.readers._utils.table import as_csr_array
+from spatialdata_io.readers._utils.table._arrays import validate_compressed_sparse
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -292,7 +290,7 @@ class TestAsCsrArray:
         mocker.patch.object(source, "tocsr", side_effect=AssertionError("conversion before validation"))
         mocker.patch.object(source, "sum_duplicates", side_effect=AssertionError("summation before validation"))
 
-        with pytest.raises(ValueError, match="active indices"):
+        with pytest.raises(ValueError, match="indices must be < 2"):
             as_csr_array(source)
 
         assert source.indices[0] == 2
@@ -326,26 +324,9 @@ class TestAsCsrArray:
         assert source.indices is before[1][0]
         assert source.indptr is before[2][0]
 
-    @pytest.mark.parametrize("factory", [sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix])
-    def test_rejects_unsupported_unsigned64_indices_before_sparse_kernels(
-        self,
-        factory: Callable[[np.ndarray], sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix],
-        mocker: MockerFixture,
-    ) -> None:
-        source = factory(np.eye(2, dtype=np.int16))
-        source.__dict__["indices"] = source.indices.astype(np.uint64)
-        mocker.patch.object(
-            type(source),
-            "has_canonical_format",
-            new_callable=mocker.PropertyMock,
-            side_effect=AssertionError("canonicality before dtype validation"),
-        )
-        with pytest.raises(TypeError, match="safely representable by int64"):
-            as_csr_array(source)
-
 
 class TestValidateCompressedSparse:
-    """Inspect raw buffers before any compiled sparse traversal."""
+    """Check borrowed compressed structure through SciPy without changing the source."""
 
     @pytest.mark.parametrize("factory", [sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix])
     @pytest.mark.parametrize("dtype", [np.int16, np.float32])
@@ -406,44 +387,27 @@ class TestValidateCompressedSparse:
         assert source.data.size == 3
 
     @pytest.mark.parametrize(
-        ("name", "buffer", "error", "match"),
+        ("name", "buffer", "match"),
         [
-            ("data", [1], TypeError, "data must be a NumPy ndarray"),
-            ("indices", [0], TypeError, "indices must be a NumPy ndarray"),
-            ("indptr", [0, 1], TypeError, "indptr must be a NumPy ndarray"),
-            ("data", np.ones((1, 1)), ValueError, "data must be one-dimensional"),
-            ("indices", np.zeros((1, 1), dtype=np.int32), ValueError, "indices must be one-dimensional"),
-            ("indptr", np.zeros((1, 2), dtype=np.int32), ValueError, "indptr must be one-dimensional"),
-            ("indices", np.asarray([0.0]), TypeError, "indices must have an integer dtype"),
-            ("indptr", np.asarray([0.0, 1.0]), TypeError, "indptr must have an integer dtype"),
-            ("indices", np.asarray([False]), TypeError, "indices must have an integer dtype"),
-            ("indices", np.asarray([0], dtype=np.uint64), TypeError, "safely representable by int64"),
-            ("indptr", np.asarray([0, 1], dtype=np.uint64), TypeError, "safely representable by int64"),
-            ("indices", np.asarray([object()]), TypeError, "indices must have an integer dtype"),
-            ("data", np.asarray([1, 2]), ValueError, "equal lengths"),
-            ("indices", np.asarray([], dtype=np.int32), ValueError, "equal lengths"),
-            ("indptr", np.asarray([], dtype=np.int32), ValueError, "indptr must have length 2"),
-            ("indptr", np.asarray([0, 1, 1], dtype=np.int32), ValueError, "indptr must have length 2"),
-            ("indptr", np.asarray([1, 1], dtype=np.int32), ValueError, "start at zero"),
-            ("indptr", np.asarray([0, -1], dtype=np.int32), ValueError, "terminal extent"),
-            ("indptr", np.asarray([0, 2], dtype=np.int32), ValueError, "terminal extent"),
-            ("indices", np.asarray([-1], dtype=np.int32), ValueError, "active indices"),
-            ("indices", np.asarray([2], dtype=np.int32), ValueError, "active indices"),
+            ("data", np.ones((1, 1)), "should be 1-D"),
+            ("indices", np.asarray([0, 1], dtype=np.int32), "same size"),
+            ("indptr", np.asarray([0, 1, 1], dtype=np.int32), "index pointer size 3 should be 2"),
+            ("indptr", np.asarray([1, 1], dtype=np.int32), "should start with 0"),
+            ("indptr", np.asarray([0, 2], dtype=np.int32), "Last value of index pointer"),
+            ("indptr", np.asarray([0, -1], dtype=np.int32), "nondecreasing from zero"),
+            ("indices", np.asarray([-1], dtype=np.int32), "indices must be >= 0"),
+            ("indices", np.asarray([2], dtype=np.int32), "indices must be < 2"),
         ],
     )
-    def test_rejects_malformed_buffers_without_sparse_operations(
-        self,
-        name: str,
-        buffer: object,
-        error: type[Exception],
-        match: str,
+    def test_rejects_each_malformation_family_without_changing_source(
+        self, name: str, buffer: np.ndarray, match: str
     ) -> None:
         source = sparse.csr_array([[1, 0]], dtype=np.int16)
         source.has_canonical_format = True
         source.has_sorted_indices = True
         setattr(source, name, buffer)
 
-        with pytest.raises(error, match=match):
+        with pytest.raises(ValueError, match=match):
             validate_compressed_sparse(source)
 
         assert getattr(source, name) is buffer
@@ -451,42 +415,18 @@ class TestValidateCompressedSparse:
         assert source.__dict__["_has_sorted_indices"] is True
 
     @pytest.mark.parametrize("indptr", [[0, 1, 0], [0, -1, 1], [0, 2**63 - 1, 1]])
-    def test_rejects_decreasing_pointers_without_subtraction(self, indptr: list[int]) -> None:
+    def test_rejects_decreasing_pointers(self, indptr: list[int]) -> None:
         source = sparse.csr_array([[1], [0]], dtype=np.int16)
         source.__dict__["indptr"] = np.asarray(indptr, dtype=np.int64)
 
-        with pytest.raises(ValueError, match="nondecreasing"):
+        with pytest.raises(ValueError, match=r"non-?decreasing"):
             validate_compressed_sparse(source)
 
         np.testing.assert_array_equal(source.indptr, indptr)
 
-    @pytest.mark.parametrize("source", [np.zeros((1, 1)), sparse.coo_array([[1]])])
-    def test_rejects_other_containers(self, source: object) -> None:
-        with pytest.raises(TypeError, match="CSR or CSC"):
-            validate_compressed_sparse(source)  # pyrefly: ignore[bad-argument-type] - runtime public-input check.
-
     def test_rejects_one_dimensional_sparse_input(self) -> None:
         with pytest.raises(ValueError, match="two-dimensional"):
             validate_compressed_sparse(sparse.csr_array([1, 0]))
-
-    def test_rejects_corrupted_shape(self) -> None:
-        source = sparse.csr_array([[1]])
-        source.__dict__["_shape"] = (-1, 1)
-        with pytest.raises(ValueError, match="indptr must have length 0"):
-            validate_compressed_sparse(source)
-
-    def test_scans_pointers_and_indices_in_bounded_chunks(self, mocker: MockerFixture) -> None:
-        source = sparse.csr_array(np.eye(4, dtype=np.int16))
-        source.indptr = np.asarray([0, 1, 2, 3, 4], dtype=np.int32)
-        mocker.patch("spatialdata_io.readers._utils.table._arrays._FINITE_VALIDATION_CHUNK_SIZE", 2)
-        validate_compressed_sparse(source)
-        source.indices[-1] = 4
-        with pytest.raises(ValueError, match="active indices"):
-            validate_compressed_sparse(source)
-        source.indices[-1] = 3
-        source.indptr[-2] = 5
-        with pytest.raises(ValueError, match="nondecreasing"):
-            validate_compressed_sparse(source)
 
     @pytest.mark.parametrize("factory", [sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix])
     def test_checks_minor_dimension_for_rectangular_storage(
@@ -497,7 +437,7 @@ class TestValidateCompressedSparse:
         validate_compressed_sparse(source)
         bound = 3 if isinstance(source, (sparse.csr_array, sparse.csr_matrix)) else 2
         source.indices[0] = bound
-        with pytest.raises(ValueError, match=f"active indices must be in \\[0, {bound}\\)"):
+        with pytest.raises(ValueError, match=f"indices must be < {bound}"):
             validate_compressed_sparse(source)
 
     def test_accepts_all_unused_capacity_with_zero_terminal_pointer(self) -> None:

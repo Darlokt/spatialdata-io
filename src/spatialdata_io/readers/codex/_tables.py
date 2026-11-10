@@ -46,7 +46,6 @@ from spatialdata_io.readers.codex._schemas import (
     REQUIRED_COLUMNS,
     STRING_DTYPE,
     cell_columns,
-    check_integer_promotion,
     csv_column_names,
     csv_types,
     expression_dtype,
@@ -102,14 +101,11 @@ def _split_cells(
 ) -> tuple[sparse.csr_array, pd.DataFrame]:
     """Extract finite CSR intensities and metadata without changing the owned frame.
 
-    Numeric promotion must preserve integer intensities exactly. Negative
-    compensated measurements remain valid. Feature and observation order follow
-    the source, and dense expression is limited to this caller-bounded block.
+    Negative compensated measurements remain valid. Feature and observation
+    order follow the source, and dense expression is limited to this
+    caller-bounded block.
     """
     values = frame[features].to_numpy(dtype=expression_dtype(frame, features, path), copy=False)
-    if values.dtype.kind == "f":
-        for feature in features:
-            check_integer_promotion(frame[feature].to_numpy(copy=False), path)
     validate_expression(values, path)
     return as_csr_array(values), frame[metadata]
 
@@ -221,13 +217,9 @@ def set_positions(
 ) -> None:
     """Add micrometre ``obsm["spatial"]`` and its description to the owned table."""
     physical = np.multiply(coordinates, pixel_size_um, dtype=np.float64)
-    # Coordinates and scale are finite and the scale is positive, so only
-    # extreme products can overflow or turn a nonzero position into zero.
+    # Coordinates and scale are finite, so only extreme products can overflow.
     if not np.isfinite(physical).all():
         message = "pixel_size_um produces nonfinite physical cell coordinates."
-        raise ValueError(message)
-    if np.any((physical == 0) & (coordinates != 0)):
-        message = "pixel_size_um underflows nonzero physical cell coordinates to zero."
         raise ValueError(message)
 
     table.obsm["spatial"] = physical

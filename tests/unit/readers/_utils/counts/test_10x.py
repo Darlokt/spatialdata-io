@@ -11,8 +11,8 @@ import pytest
 from anndata import AnnData
 from scipy import sparse
 
-from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
-from spatialdata_io.readers._utils.counts._10x import _normalize_counts, _validate_mtx_header
+from spatialdata_io.readers._utils.counts import _10x, read_10x_h5, read_10x_mtx
+from spatialdata_io.readers._utils.counts._10x import _finalize_counts, _validate_mtx_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
@@ -40,7 +40,8 @@ def _artifact_directory(path: Path) -> ArtifactDirectory:
 
 
 def _table() -> AnnData:
-    return AnnData(sparse.csr_matrix(np.asarray([[1, 0], [0, 2]], dtype=np.int32)))
+    # Scanpy decodes 10x int32 count storage to float32.
+    return AnnData(sparse.csr_matrix(np.asarray([[1, 0], [0, 2]], dtype=np.float32)))
 
 
 def _raise_preserved_error(error: Exception) -> None:
@@ -48,24 +49,22 @@ def _raise_preserved_error(error: Exception) -> None:
 
 
 class TestRead10xH5:
-    def test_forwards_only_explicit_options_and_normalizes_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_forwards_only_explicit_options_and_validates_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _artifact_file(tmp_path / "counts.h5")
         source_table = _table()
-        normalized = _table()
         source = mocker.patch(
             "spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_h5",
             return_value=source_table,
         )
-        normalizer = mocker.patch(
-            "spatialdata_io.readers._utils.counts._10x.normalize_owned_anndata",
-            return_value=normalized,
-        )
+        normalizer = mocker.spy(_10x, "normalize_owned_anndata")
+        finalizer = mocker.spy(_10x, "finalize_count_arrays")
 
         result = read_10x_h5(path, context=_CONTEXT)
 
-        assert result is normalized
+        assert result is source_table
         source.assert_called_once_with(path, gex_only=False, backup_url=None)
-        normalizer.assert_called_once_with(source_table)
+        normalizer.assert_called_once_with(source_table, duplicate_sums=[])
+        finalizer.assert_called_once()
 
     def test_wraps_canonical_scanpy_csr_storage_without_copying_buffers(
         self, tmp_path: Path, mocker: MockerFixture
@@ -149,7 +148,7 @@ class TestRead10xH5:
             return_value=malformed,
         )
 
-        with pytest.raises(ReaderFormatError, match="finite count values") as caught:
+        with pytest.raises(ReaderFormatError, match="finite values") as caught:
             read_10x_h5(path, context=_CONTEXT)
 
         assert caught.value.context == _CONTEXT
@@ -159,22 +158,18 @@ class TestRead10xH5:
 
 
 class TestRead10xMtx:
-    def test_forwards_only_explicit_options_and_normalizes_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    def test_forwards_only_explicit_options_and_validates_once(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _artifact_directory(tmp_path)
         source_table = _table()
-        normalized = _table()
         source = mocker.patch(
             "spatialdata_io.readers._utils.counts._10x._scanpy_read_10x_mtx",
             return_value=source_table,
         )
-        normalizer = mocker.patch(
-            "spatialdata_io.readers._utils.counts._10x.normalize_owned_anndata",
-            return_value=normalized,
-        )
+        normalizer = mocker.spy(_10x, "normalize_owned_anndata")
 
         result = read_10x_mtx(path, context=_CONTEXT, make_unique=False, prefix="sample_", compressed=False)
 
-        assert result is normalized
+        assert result is source_table
         source.assert_called_once_with(
             path,
             var_names="gene_symbols",
@@ -184,7 +179,7 @@ class TestRead10xMtx:
             prefix="sample_",
             compressed=False,
         )
-        normalizer.assert_called_once_with(source_table)
+        normalizer.assert_called_once_with(source_table, duplicate_sums=[])
 
     def test_source_failure_preserves_identity_and_skips_normalization(
         self, tmp_path: Path, mocker: MockerFixture
@@ -206,161 +201,105 @@ class TestRead10xMtx:
         normalizer.assert_not_called()
 
 
-class TestNormalizeCounts:
-    @pytest.mark.parametrize("storage", ["csr", "csc"])
-    @pytest.mark.parametrize(
-        "case",
-        [
-            ("bool", [1, 1], 2, "float32"),
-            ("uint8", [150, 150], 300, "float32"),
-            ("uint32", [2**32 - 1, 2], 2**32 + 1, "float64"),
-            ("float32", [2**24, 1], 2**24 + 1, "float64"),
-            ("float32", [1, 2], 3, "float32"),
-            ("float64", [1, 2], 3, "float64"),
-            ("float64", [2**52, 1], 2**52 + 1, "float64"),
-        ],
-    )
-    def test_duplicate_counts_use_exact_arithmetic(
-        self, tmp_path: Path, storage: str, case: tuple[str, list[int], int, str]
-    ) -> None:
-        dtype, values, expected, result_dtype = case
-        buffers = (np.array(values, dtype=dtype), np.zeros(2, dtype=np.int32), np.array([0, 2], dtype=np.int32))
-        source = (
-            sparse.csr_array(buffers, shape=(1, 1)) if storage == "csr" else sparse.csc_array(buffers, shape=(1, 1))
-        )
-        table = AnnData(source)
+def _compressed(
+    values: list[float], indices: list[int], dtype: str, storage: str
+) -> sparse.csr_array | sparse.csc_array:
+    buffers = (np.array(values, dtype=dtype), np.array(indices, dtype=np.int32), np.array([0, len(values)]))
+    shape = (1, max(indices) + 1)
+    return sparse.csr_array(buffers, shape=shape) if storage == "csr" else sparse.csc_array(buffers, shape=shape[::-1])
 
-        result = _normalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
+
+class TestFinalizeCounts:
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize("dtype", ["int32", "float32", "float64"])
+    def test_rejects_repeated_entries_with_source_context(self, tmp_path: Path, storage: str, dtype: str) -> None:
+        path = tmp_path / "counts.h5"
+        source = _compressed([2, 3, 4], [1, 0, 1], dtype, storage)
+
+        with pytest.raises(ReaderFormatError, match=r"1 repeated \(barcode, feature\) entries") as caught:
+            _finalize_counts(AnnData(source), path, _CONTEXT)
+
+        assert caught.value.context == _CONTEXT
+        assert caught.value.path == path
+        np.testing.assert_array_equal(source.data, [2, 3, 4])
+
+    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
+    def test_repeated_entries_cannot_become_valid_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:
+        source = _compressed(list(values), [0, 0], "float64", "csr")
+        with pytest.raises(ReaderFormatError, match="repeated"):
+            _finalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    def test_sorts_unique_entries_without_summing(self, tmp_path: Path, storage: str) -> None:
+        table = AnnData(_compressed([2**30, 1], [1, 0], "float32", storage))
+
+        result = _finalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
 
         assert result is table
         assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(result_dtype)
         assert result.X.has_canonical_format
-        assert int(result.X.data[0]) == expected
-        np.testing.assert_array_equal(source.data, values)
-        np.testing.assert_array_equal(source.indices, [0, 0])
-        np.testing.assert_array_equal(source.indptr, [0, 2])
+        assert result.X.dtype == np.dtype(np.float32)
+        np.testing.assert_array_equal(result.X.data, [1, 2**30])
 
-    def test_floating_duplicate_precision_error_is_contextual(self, tmp_path: Path) -> None:
-        path = tmp_path / "counts.h5"
-        source = sparse.csr_array((np.array([2**53, 1], dtype=np.float64), [0, 0], [0, 2]), shape=(1, 1))
-        with pytest.raises(ReaderFormatError, match=r"exact.*bound") as error:
-            _normalize_counts(AnnData(source), path, _CONTEXT)
-
-        assert error.value.context == _CONTEXT
-        assert error.value.path == path
-        np.testing.assert_array_equal(source.data, [2**53, 1])
-
-    @pytest.mark.parametrize("storage", ["csr", "csc"])
-    def test_unsorted_unique_large_counts_need_no_addition_bound(self, tmp_path: Path, storage: str) -> None:
-        buffers = (np.array([2**60, 1], dtype=np.float64), np.array([1, 0]), np.array([0, 2]))
-        source = (
-            sparse.csr_array(buffers, shape=(1, 2)) if storage == "csr" else sparse.csc_array(buffers, shape=(2, 1))
+    @pytest.mark.parametrize(
+        ("dtype", "value", "expected"),
+        [
+            ("bool", 1, "float32"),
+            ("int32", 2**24, "float32"),
+            ("int64", 2**24 + 1, "float64"),
+            ("float32", 2**30, "float32"),
+            ("float64", 7, "float32"),
+            ("float64", 2**24 + 1, "float64"),
+        ],
+    )
+    def test_stores_counts_as_float32_or_float64(self, tmp_path: Path, dtype: str, value: int, expected: str) -> None:
+        result = _finalize_counts(
+            AnnData(sparse.csr_array(np.array([[value]], dtype=dtype))), tmp_path / "c.h5", _CONTEXT
         )
-
-        result = _normalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
-
         assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == source.dtype
-        assert result.X.has_canonical_format
-        np.testing.assert_array_equal(result.X.data, [1, 2**60])
-        np.testing.assert_array_equal(source.indices, [1, 0])
+        assert result.X.dtype == np.dtype(expected)
+        assert int(result.X.data[0]) == value
 
-    def test_cached_canonicality_cannot_hide_floating_duplicates(self, tmp_path: Path) -> None:
-        source = sparse.csr_array((np.array([2**24, 1], dtype=np.float32), [0, 0], [0, 2]), shape=(1, 1))
-        source.has_canonical_format = True
-        source.has_sorted_indices = True
+    def test_canonical_float32_counts_are_reused(self, tmp_path: Path) -> None:
+        data = sparse.csr_array(np.asarray([[0, 1, 100_000]], dtype=np.float32))
+        table = AnnData(data)
+        assert _finalize_counts(table, tmp_path / "counts.h5", _CONTEXT).X is data
 
-        result = _normalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
+    @pytest.mark.parametrize("value", [-1, 0.5])
+    def test_rejects_malformed_counts(self, tmp_path: Path, value: float) -> None:
+        table = AnnData(sparse.csr_array(np.asarray([[value]], dtype=np.float32)))
+        with pytest.raises(ReaderFormatError, match="negative or fractional"):
+            _finalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
 
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(np.float64)
-        assert int(result.X.data[0]) == 2**24 + 1
-        np.testing.assert_array_equal(source.data, [2**24, 1])
+    def test_rejects_malformed_structure(self, tmp_path: Path) -> None:
+        source = sparse.csr_array([[1, 2]], dtype=np.float32)
+        source.indices = np.asarray([0, 2], dtype=np.int32)
+        with pytest.raises(ReaderFormatError, match="indices must be < 2"):
+            _finalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
 
-    def test_late_compressed_spans_are_included_in_the_bound(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        source = sparse.csr_array(
-            (np.array([1, 1, 2**24, 1], dtype=np.float32), np.zeros(4, dtype=np.int32), [0, 1, 2, 4]), shape=(3, 1)
-        )
-        mocker.patch("spatialdata_io.readers._utils.table._duplicates._BOUND_BATCH_SIZE", 1)
-
-        result = _normalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
-
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(np.float64)
-        np.testing.assert_array_equal(result.X.data, [1, 1, 2**24 + 1])
-
-    def test_float16_source_is_rejected_before_arithmetic(self, tmp_path: Path) -> None:
-        source = sparse.csr_array((np.array([1, 1], dtype=np.float16), [0, 0], [0, 2]), shape=(1, 1))
-        with pytest.raises(TypeError, match="Float16"):
-            _normalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
+    def test_rejects_unsupported_values(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError, match="real floating dtype"):
+            _finalize_counts(AnnData(sparse.csr_array([[1j]])), tmp_path / "counts.h5", _CONTEXT)
 
     def test_unused_sparse_capacity_is_not_a_source_count(self, tmp_path: Path) -> None:
         source = sparse.csr_array([[1, 2]], dtype=np.int32)
         source.data = np.append(source.data, np.int32(-1))
         source.indices = np.append(source.indices, np.int32(99))
 
-        result = _normalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
+        result = _finalize_counts(AnnData(source), tmp_path / "counts.h5", _CONTEXT)
 
         assert isinstance(result.X, sparse.csr_array)
         np.testing.assert_array_equal(result.X.data, [1, 2])
         assert len(source.data) == 3
 
-    @pytest.mark.parametrize("matrix", [np.ones((1, 1)), np.ones((1, 1), dtype=np.complex128)])
-    def test_rejects_unsupported_source_storage(self, tmp_path: Path, matrix: np.ndarray) -> None:
-        with pytest.raises(TypeError, match="numerical CSR or CSC"):
-            _normalize_counts(AnnData(matrix), tmp_path / "counts.h5", _CONTEXT)
-
-    def test_rejects_complex_sparse_source(self, tmp_path: Path) -> None:
-        with pytest.raises(TypeError, match="numerical CSR or CSC"):
-            _normalize_counts(AnnData(sparse.csr_array([[1j]])), tmp_path / "counts.h5", _CONTEXT)
-
-    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
-    def test_duplicate_entries_cannot_hide_invalid_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:
-        matrix = sparse.csr_array((np.array(values), [0, 0], [0, 2]), shape=(1, 1))
-        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
-            _normalize_counts(AnnData(matrix), tmp_path / "counts.h5", _CONTEXT)
-
-    @pytest.mark.parametrize("dtype", [np.int32, np.float32, np.float64])
-    def test_valid_duplicates_and_unsorted_entries_sum(
-        self, tmp_path: Path, dtype: type[np.int32 | np.float32 | np.float64]
-    ) -> None:
-        matrix = sparse.csr_array((np.array([2, 0, 3, 4], dtype=dtype), [1, 0, 1, 0], [0, 4]), shape=(1, 2))
-        result = _normalize_counts(AnnData(matrix), tmp_path / "counts.h5", _CONTEXT)
-        assert isinstance(result.X, sparse.csr_array)
-        assert result.X.has_canonical_format
-        np.testing.assert_array_equal(result.X.toarray(), [[4, 5]])
-
-    @pytest.mark.parametrize("dtype", [np.int32, np.int64, np.float32, np.float64])
-    def test_realistic_counts_keep_storage_and_dtype(
-        self, tmp_path: Path, dtype: type[np.int32 | np.int64 | np.float32 | np.float64]
-    ) -> None:
-        data = sparse.csr_array(np.asarray([[0, 1, 100_000]], dtype=dtype))
-        table = AnnData(data)
-        result = _normalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
-        assert result is table
-        assert result.X is data
-        assert result.X.dtype == dtype
-
-    @pytest.mark.parametrize("value", [-1, 0.5])
-    def test_rejects_malformed_counts(self, tmp_path: Path, value: float) -> None:
-        table = AnnData(sparse.csr_array(np.asarray([[value]], dtype=np.float32)))
-        with pytest.raises(ReaderFormatError):
-            _normalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
-
     def test_empty_counts(self, tmp_path: Path) -> None:
-        empty = AnnData(sparse.csr_array((2, 2), dtype=np.float32))
-        _normalize_counts(empty, tmp_path / "counts.h5", _CONTEXT)
-
-    def test_fraction_checks_are_bounded(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        table = AnnData(sparse.csr_array(np.asarray([[1.0, 2.0, 0.5]], dtype=np.float32)))
-        mocker.patch("spatialdata_io.readers._utils.counts._10x._VALIDATION_BATCH_SIZE", 1)
-        with pytest.raises(ReaderFormatError, match="fractional"):
-            _normalize_counts(table, tmp_path / "counts.h5", _CONTEXT)
+        result = _finalize_counts(AnnData(sparse.csr_array((2, 2), dtype=np.float32)), tmp_path / "c.h5", _CONTEXT)
+        assert isinstance(result.X, sparse.csr_array)
+        assert result.X.shape == (2, 2)
 
     def test_missing_expression(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match="missing count data"):
-            _normalize_counts(AnnData(), tmp_path / "counts.h5", _CONTEXT)
+            _finalize_counts(AnnData(), tmp_path / "counts.h5", _CONTEXT)
 
 
 class TestValidateMtxHeader:

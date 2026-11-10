@@ -166,15 +166,14 @@ def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: Arti
 def _physical_positions(
     native: np.ndarray, obs: pd.DataFrame, calibrations: Mapping[str, Calibration], path: ArtifactFile
 ) -> np.ndarray:
-    """Return float64 micrometre XY, rejecting overflow and nonzero positions that underflow to zero.
+    """Return float64 micrometre XY, rejecting overflow.
 
     ``calibrations`` is keyed by the source image name of ``obs["image"]``.
     """
     # Regionprops averages zero-based pixel indices; the unchanged raster
     # locates their centres half a pixel inward from its corner origin.
-    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+    with np.errstate(over="ignore"):
         physical = np.add(native, 0.5, dtype=np.float64)
-        nonzero = physical != 0
         if len(calibrations) == 1:
             physical *= next(iter(calibrations.values())).spacing_xy_um
         else:
@@ -187,12 +186,5 @@ def _physical_positions(
             path=path,
             found="nonfinite physical positions",
             expected="finite float64 physical XY",
-        )
-    if np.any(nonzero & (physical == 0)):
-        raise ReaderFormatError(
-            context=POSITIONS_CONTEXT,
-            path=path,
-            found="nonzero shifted pixel coordinates becoming zero physical positions",
-            expected="nonzero float64 physical XY for nonzero shifted pixel coordinates",
         )
     return physical

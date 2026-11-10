@@ -17,7 +17,6 @@ import pytest
 import tifffile
 from anndata import read_h5ad
 from anndata.tests.helpers import assert_equal
-from scanpy import read_10x_h5
 from scipy import sparse
 from scipy.io import mmwrite
 from spatialdata import SpatialData
@@ -159,41 +158,28 @@ class TestVisiumSyntheticWorkflow:
     """Prove every supported count and position layout through the public API."""
 
     @pytest.mark.parametrize(
-        ("source_dtype", "first", "second", "expected"),
-        [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
+        ("source_dtype", "values"),
+        [("int32", (2**24, 1)), ("float64", (0.5, 0.5)), ("float64", (-1.0, 2.0))],
     )
-    def test_duplicate_h5_counts_preserve_exact_sum_and_public_linkage(
-        self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
+    def test_rejects_repeated_h5_count_entries(
+        self, tmp_path: Path, source_dtype: str, values: tuple[float, float]
     ) -> None:
+        """A 10x HDF5 matrix stores each (barcode, feature) count once; repeats are never summed."""
         path = tmp_path / "filtered_feature_bc_matrix.h5"
         _write_h5(path)
         _write_spatial(tmp_path, version="v2")
         with h5py.File(path, "r+") as handle:
             data = handle["matrix/data"][:].astype(source_dtype)
-            data[:2] = [first, second]
+            data[:2] = values
             del handle["matrix/data"]
             handle.create_dataset("matrix/data", data=data)
             handle["matrix/indices"][1] = 0
-        # Establish retained decoded contributions; upstream rounding/summation
-        # would be outside the local count boundary's recovery guarantee.
-        decoded = read_10x_h5(path, gex_only=False)
-        assert isinstance(decoded.X, sparse.csr_matrix | sparse.csr_array)
-        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
-        assert not decoded.X.has_canonical_format
-        np.testing.assert_array_equal(decoded.X.data[:2], [first, second])
 
-        result = visium(tmp_path)
+        with pytest.raises(ReaderFormatError, match=r"repeated \(barcode, feature\) entries") as caught:
+            visium(tmp_path)
 
-        table = result.tables["table"]
-        assert isinstance(table.X, sparse.csr_array)
-        assert table.X.dtype == np.dtype(np.float64)
-        assert table.X.has_canonical_format
-        np.testing.assert_array_equal(table.X.toarray(), [[expected, 0, 0], [0, 2, 0], [3, 4, 6]])
-        assert table.obs_names.tolist() == ["barcode-a", "barcode-b", "barcode-c"]
-        assert table.var_names.tolist() == ["gene-a", "gene-b", "protein-a"]
-        assert get_table_keys(table) == ("sample", "region", "spot_id")
-        assert table.obs["spot_id"].tolist() == result.shapes["sample"].index.tolist()
-        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[20, 10], [40, 30], [60, 50]])
+        assert caught.value.path == path
+        assert caught.value.context.artifact == "count matrix"
 
     def test_rejects_mex_legacy_selector_before_silent_feature_relabeling(self, tmp_path: Path) -> None:
         mex = tmp_path / "filtered_feature_bc_matrix"
@@ -252,35 +238,6 @@ class TestVisiumSyntheticWorkflow:
         assert isinstance(table.X, sparse.csr_array)
         np.testing.assert_array_equal(table.X.data, np.asarray([1, 5, 2, 3, 4, 6], dtype=np.float32))
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[20, 10], [40, 30], [60, 50]])
-
-    @pytest.mark.parametrize("key", ["tissue_hires_scalef", "tissue_lowres_scalef"])
-    def test_rejects_scales_that_would_return_nonfinite_image_transform(self, tmp_path: Path, key: str) -> None:
-        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
-        _write_spatial(tmp_path, version="v2")
-        path = tmp_path / "spatial" / "scalefactors_json.json"
-        values = json.loads(path.read_text(encoding="utf-8"))
-        values[key] = float(np.nextafter(0.0, 1.0))
-        path.write_text(json.dumps(values), encoding="utf-8")
-
-        with pytest.raises(ReaderFormatError, match=key) as caught:
-            visium(tmp_path)
-
-        assert caught.value.path == path
-        assert caught.value.context.artifact == "scale factors"
-
-    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
-    def test_rejects_malformed_duplicate_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:
-        source = tmp_path / "filtered_feature_bc_matrix.h5"
-        _write_h5(source)
-        _write_spatial(tmp_path, version="v2")
-        with h5py.File(source, "r+") as handle:
-            data = handle["matrix/data"][:].astype(np.float64)
-            data[:2] = values
-            del handle["matrix/data"]
-            handle.create_dataset("matrix/data", data=data)
-            handle["matrix/indices"][1] = 0
-        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
-            visium(tmp_path)
 
     def test_named_positions_accept_reordered_fields_and_project_extensions(self, tmp_path: Path) -> None:
         """Named positions accept reordered fields and project extensions."""

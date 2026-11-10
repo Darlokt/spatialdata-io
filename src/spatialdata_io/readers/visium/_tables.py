@@ -22,8 +22,10 @@ strict quoting, so a malformed quote after the first record (which discovery
 parses strictly) may be read as a different value.
 
 Counts are decoded by the shared 10x readers (Scanpy) with every feature type
-and the source feature order. Duplicate sparse entries are summed; the result
-is float32 when every count is exact in float32, otherwise float64.
+and the source feature order. An HDF5 matrix that stores a (barcode, feature)
+pair twice is rejected; Scanpy sums repeated MatrixMarket records. Counts are
+float32 when Scanpy decodes them as float32 or every count is at most 2**24,
+otherwise float64.
 """
 
 from __future__ import annotations
@@ -42,7 +44,6 @@ from spatialdata_io.readers._utils.csv import csv_errors
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
-    finalize_count_arrays,
     parse_linked_table,
     prepare_anndata_dataframe,
 )
@@ -59,7 +60,6 @@ from spatialdata_io.readers.visium._schemas import (
 
 if TYPE_CHECKING:
     from anndata import AnnData
-    from scipy.sparse import csr_array
 
     from spatialdata_io.readers.visium._layout import VisiumLayout
     from spatialdata_io.readers.visium._metadata import ScaleFactors
@@ -208,9 +208,6 @@ def prepare_table(  # noqa: PLR0913 - explicit reader-owned table construction i
 def link_table(adata: AnnData, *, dataset_id: str, shape_index: pd.Index, layout: VisiumLayout) -> AnnData:
     """Finalize the counts and link the table to the spot circles exactly once."""
     context = ReaderErrorContext("visium", "count matrix", layout.format_version)
-    # The shared 10x readers return CSR arrays, possibly with duplicate entries
-    # or integer dtypes; alignment above changed annotations only.
-    adata.X = finalize_count_arrays((cast("csr_array", adata.X),), context=context, path=layout.counts.path)[0]
     # The shared count readers return in-memory frames; AnnData's annotations
     # additionally cover Dataset2D, used only for backed tables.
     prepare_anndata_dataframe(cast("pd.DataFrame", adata.obs), context=context)

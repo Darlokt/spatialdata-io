@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
@@ -65,11 +64,9 @@ class ProteinPanel:
 
 
 def _positive(value: object, name: str, path: ArtifactFile, context: ReaderErrorContext) -> float:
-    # JSON booleans are ints in Python but never a size.
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
-        raise ReaderFormatError(
-            context=context, path=path, found=f"{name} = {value!r}", expected=f"a finite positive {name}"
-        )
+    # JSON booleans are ints in Python but never a size; strict JSON numbers are finite.
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ReaderFormatError(context=context, path=path, found=f"{name} = {value!r}", expected=f"a positive {name}")
     return float(value)
 
 

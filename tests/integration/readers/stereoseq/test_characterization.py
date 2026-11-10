@@ -67,8 +67,8 @@ class TestStereoseq:
         assert set(result.tables) == {"bin1_table", "cells_table"}
         assert set(result.points) == {"bin1_genes", "cells_centroids"}
         for name, values, exons, identifiers in (
-            ("bin1", [2**53 + 2 if wide else 6, 3], [2**53 + 4 if wide else 3, 1], [0, 1]),
-            ("cells", [12, 2**64 - 2048 if wide else 11, 22], [4, 2**64 - 4096 if wide else 7, 6], [200, 100]),
+            ("bin1", [2**53 if wide else 6, 3], [2**53 - 1 if wide else 3, 1], [0, 1]),
+            ("cells", [12, 2**53 if wide else 11, 22], [4, 2**53 - 1 if wide else 7, 6], [200, 100]),
         ):
             table = result.tables[f"{name}_table"]
             assert [int(value) for value in _counts(table).data] == values
@@ -103,6 +103,46 @@ class TestStereoseq:
         with pytest.raises(ReaderFormatError, match="image calibration companion"):
             stereoseq(fixture.root, image_roles=("registered",))
 
+    @pytest.mark.parametrize("kind", ["square", "cells"])
+    @pytest.mark.parametrize("slot", ["counts", "exon"])
+    def test_integer_counts_above_limit_fail_even_when_float64_can_represent_them(
+        self, tmp_path: Path, kind: Literal["square", "cells"], slot: Literal["counts", "exon"]
+    ) -> None:
+        fixture = write_dataset(tmp_path, products=(kind,))
+        path = fixture.square if kind == "square" else fixture.cells
+        with h5py.File(path, "r+") as handle:
+            group = handle["geneExp/bin1" if kind == "square" else "cellBin"]
+            name = (
+                ("expression" if kind == "square" else "cellExp")
+                if slot == "counts"
+                else ("exon" if kind == "square" else "cellExpExon")
+            )
+            if slot == "counts":
+                original = group[name][:]
+                fields = [
+                    (field, "u8" if field == "count" else original.dtype[field]) for field in original.dtype.names or ()
+                ]
+                values = original.astype(fields)
+                values["count"][0] = 2**54
+                attrs = dict(group[name].attrs)
+                del group[name]
+                group[name] = values
+                group[name].attrs.update(attrs)
+            else:
+                values = group[name][:].astype(np.uint64)
+                values[0] = 2**54
+                del group[name]
+                group[name] = values
+
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53") as caught:
+            stereoseq(
+                fixture.root,
+                bin_sizes=(1,) if kind == "square" else (),
+                cell_bins="unadjusted" if kind == "cells" else "none",
+            )
+
+        assert caught.value.path == path
+
     def test_non_native_exact_counts_and_categories_roundtrip(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path / "source", family="outs", products=("square", "cells"))
         write_numeric_gef(fixture.square, kind="square", byteorder=">", wide=True)
@@ -130,7 +170,7 @@ class TestStereoseq:
 
     def test_polygon_drop_retains_exact_float64_count_and_exon_extremes(self, tmp_path: Path) -> None:
         fixture = write_dataset(tmp_path, products=("cells",), invalid_cell_ids=(200,))
-        maximum = 2**64 - 2048
+        maximum = 2**53
         with h5py.File(fixture.cells, "r+") as handle:
             group = handle["cellBin"]
             del group["cellExp"]

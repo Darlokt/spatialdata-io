@@ -74,28 +74,6 @@ def coordinate_array(table: AnnData, key: str) -> npt.NDArray[np.number]:
     return cast("npt.NDArray[np.number]", values)
 
 
-def physical_coordinates(coordinates: npt.NDArray[np.number], *, key: str) -> npt.NDArray[np.float64]:
-    """Convert validated finite coordinates to float64 without losing values."""
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        converted = coordinates.astype(np.float64, copy=False)
-    if coordinates.dtype.kind in "iu":
-        # NumPy float/integer comparisons can round both sides. Python integers
-        # retain exactness for the uncommon values outside float64's safe range.
-        outside = (
-            (coordinates > 2**53) | (coordinates < -(2**53)) if coordinates.dtype.kind == "i" else coordinates > 2**53
-        )
-        exact = all(
-            int(source) == int(target) for source, target in zip(coordinates[outside], converted[outside], strict=True)
-        )
-    else:
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            exact = bool(np.equal(converted.astype(coordinates.dtype, copy=False), coordinates).all())
-    if not exact:
-        msg = f"obsm[{key!r}] cannot be represented losslessly as float64 micrometre coordinates."
-        raise ValueError(msg)
-    return converted
-
-
 def parse_positions(table: AnnData) -> PositionsMetadata:
     """Validate external coordinate metadata and return an owned typed description."""
     if POSITIONS_KEY not in table.uns:
@@ -217,9 +195,14 @@ def normalize_positions(table: AnnData, metadata: PositionsMetadata) -> Position
             descriptions[destination] = descriptions.pop("spatial")
     for key, description in descriptions.items():
         if description["units"] == "micrometer":
-            # parse_positions already validated the array shape, dtype and finiteness.
+            # Native finite values can overflow when narrowing extended precision.
             coordinates = cast("npt.NDArray[np.number]", table.obsm[key])
-            table.obsm[key] = physical_coordinates(coordinates, key=key)
+            with np.errstate(over="ignore"):
+                physical = coordinates.astype(np.float64, copy=False)
+            if not np.isfinite(physical).all():
+                msg = f"obsm[{key!r}] overflows finite float64 micrometre coordinates."
+                raise ValueError(msg)
+            table.obsm[key] = physical
     if descriptions:
         table.uns[POSITIONS_KEY] = metadata
     else:

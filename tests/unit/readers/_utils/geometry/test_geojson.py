@@ -1,4 +1,4 @@
-"""Exact GeoJSON polygon construction and structural rejection."""
+"""GeoJSON polygon construction from strict JSON and structural rejection."""
 
 from __future__ import annotations
 
@@ -78,9 +78,7 @@ class TestGeojsonPolygons:
             ([[0, 0], [True, 0], [1, 1], [0, 0]], "nonnumeric"),
             ([[False, 0], [2, 0], [0, 2], [False, 0]], "nonnumeric"),
             ([[0, 0], ["1", 0], [1, 1], [0, 0]], "nonnumeric"),
-            ([[0, 0], [float("inf"), 0], [1, 1], [0, 0]], "nonfinite"),
-            ([[0, 0], [float("nan"), 0], [1, 1], [0, 0]], "nonfinite"),
-            ([[0, 0], [10**400, 0], [1, 1], [0, 0]], "precision"),
+            ([[0, 0], [None, 0], [1, 1], [0, 0]], "nonnumeric"),
         ],
     )
     def test_malformed_rings_are_never_closed_or_coerced(self, ring: object, found: str) -> None:
@@ -89,13 +87,8 @@ class TestGeojsonPolygons:
         assert "geometry 0" in str(caught.value)
         assert "boundaries.geojson" in str(caught.value)
 
-    @pytest.mark.parametrize("x", [2**53, 2**53 + 1, 2**53 + 2, -(2**53 + 1), 2**60])
-    def test_integral_vertices_cannot_round_silently(self, x: int) -> None:
+    @pytest.mark.parametrize("x", [2**53 + 1, -(2**53 + 1), 2**60 + 1])
+    def test_large_integer_vertices_round_to_float64(self, x: int) -> None:
         ring = [[x, 0], [x + 4, 0], [x + 4, 4], [x, 4], [x, 0]]
-        geometry = {"type": "Polygon", "coordinates": [ring]}
-        if any(value != float(value) for value in (x, x + 4)):
-            with pytest.raises(ReaderFormatError, match="integer precision loss"):
-                geojson_polygons([geometry], context=CONTEXT, path=PATH)
-        else:
-            result = geojson_polygons([geometry], context=CONTEXT, path=PATH)
-            assert result[0].exterior.coords[0] == (float(x), 0.0)
+        result = geojson_polygons([{"type": "Polygon", "coordinates": [ring]}], context=CONTEXT, path=PATH)
+        assert result[0].exterior.coords[0] == (float(x), 0.0)

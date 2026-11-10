@@ -138,8 +138,8 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
         - ``tables["table"]``: rows in count-file order, features in
           count-header order. ``X`` is a CSR sparse array of gene counts,
           ``obsm["blank"]`` a CSR array of ``Blank-<n>`` controls named by
-          ``uns["blank_names"]``; both float32 when every count is exact in
-          float32, otherwise float64. ``obsm["spatial"]`` holds float64
+          ``uns["blank_names"]``; both float32 through 2**24, otherwise
+          float64 through 2**53. ``obsm["spatial"]`` holds float64
           micrometre centroids; ``obs`` holds the cell metadata (``fov`` and
           ``transcript_count`` as nullable uint64), text
           ``EntityID`` and categorical ``region``, ``slide`` and
@@ -164,7 +164,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     ReaderFormatError
         If an artifact is ambiguous or malformed, the count, metadata and
         boundary cell populations disagree, or a value is invalid (for
-        example a count that is not exact in float64). Malformed transcript
+        example a count above 2**53). Malformed transcript
         rows and unknown genes or assigned cells raise when their partition is
         computed.
 

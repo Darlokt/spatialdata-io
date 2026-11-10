@@ -67,7 +67,6 @@ class TestReadCellTable:
         ("field", "value", "match"),
         [
             ("cyc002_ch001", "bad", "nonnumeric"),
-            ("x", 2**53 + 1, "precision loss"),
             ("x", float("nan"), "invalid x/y"),
             ("cyc002_ch001", float("nan"), "nonfinite cycle intensities"),
         ],
@@ -78,20 +77,10 @@ class TestReadCellTable:
         path = tmp_path / "cells.fcs"
         path.touch()
         frame = cell_frame()
-        frame[field] = pd.Series([value] * len(frame), dtype="int64" if isinstance(value, int) else None)
+        frame[field] = [value] * len(frame)
         source = mocker.Mock(data=frame, channels=pd.DataFrame({"PnN": frame.columns}))
         mocker.patch("spatialdata_io.readers.codex._tables.readfcs.ReadFCS", return_value=source)
         with pytest.raises(ReaderFormatError, match=match):
-            read_cell_table(ArtifactFile(path))
-
-    def test_native_fcs_mixed_expression_cannot_round_integers(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = tmp_path / "cells.fcs"
-        path.touch()
-        frame = cell_frame()
-        frame["cyc002_ch001"] = pd.Series([2**53 + 1] * len(frame), dtype="int64")
-        source = mocker.Mock(data=frame, channels=pd.DataFrame({"PnN": frame.columns}))
-        mocker.patch("spatialdata_io.readers.codex._tables.readfcs.ReadFCS", return_value=source)
-        with pytest.raises(ReaderFormatError, match="precision loss"):
             read_cell_table(ArtifactFile(path))
 
     def test_inconsistent_fcs_parameter_count_fails(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -405,16 +394,10 @@ class TestSetPositions:
 
     @pytest.mark.parametrize(
         ("coordinate", "scale"),
-        [
-            (1e-100, 1e-300),
-            (-1e-100, 1e-300),
-            (0.25, float.fromhex("0x0.0000000000001p-1022")),
-            (-0.25, float.fromhex("0x0.0000000000001p-1022")),
-            (2.0, 1e308),
-        ],
+        [(2.0, 1e308), (-2.0, 1e308)],
     )
     def test_invalid_conversion_precedes_mutation(self, tmp_path: Path, coordinate: float, scale: float) -> None:
-        """Reject zero loss and overflow before replacing positions or their metadata."""
+        """Reject overflow before replacing positions or their metadata."""
         path = tmp_path / "cells.csv"
         write_csv(path)
         table = read_cell_table(ArtifactFile(path)).table
@@ -426,7 +409,7 @@ class TestSetPositions:
         table.obsm["spatial"] = previous_positions
         table.uns[POSITIONS_KEY] = previous_metadata
 
-        with np.errstate(over="ignore", under="ignore"), pytest.raises(ValueError, match="physical"):
+        with np.errstate(over="ignore"), pytest.raises(ValueError, match="nonfinite physical"):
             set_positions(table, coordinates, pixel_size_um=scale, calibration="Caller metric.")
 
         assert table.obsm["spatial"] is previous_positions

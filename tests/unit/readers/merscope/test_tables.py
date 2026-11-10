@@ -81,12 +81,14 @@ class TestReadTable:
         np.testing.assert_array_equal(table.obsm["spatial"], [[7, 5], [2, 3]])
         assert "spatialdata_attrs" not in table.uns
 
-    def test_exact_unsigned_counts_across_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_BYTES", 128)
-        large = 2**63
+    @pytest.mark.parametrize(("large", "dtype"), [(2**24, "float32"), (2**24 + 2, "float64"), (2**53, "float64")])
+    def test_count_storage_boundaries_across_batches(
+        self, tmp_path: Path, mocker: MockerFixture, large: int, dtype: str
+    ) -> None:
+        mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_BYTES", 16)
         table, _ = read_table(_sources(tmp_path, f"cell,A\na,1\nb,{large}\n"))
         assert isinstance(table.X, sparse.csr_array)
-        assert table.X.dtype == np.dtype(np.float32)
+        assert table.X.dtype == np.dtype(dtype)
         assert table.X.data.tolist() == [1, large]
 
     def test_row_batches_are_bounded_only_by_bytes(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -116,19 +118,22 @@ class TestReadTable:
             np.testing.assert_array_equal(expected.indptr, actual.indptr)
 
     def test_exact_integer_boundaries(self, tmp_path: Path) -> None:
-        table, _ = read_table(_sources(tmp_path, f"cell,A,Blank-1,B\na,{2**24 + 1},2,3\nb,{2**63},{2**64 - 2048},0\n"))
+        table, _ = read_table(_sources(tmp_path, f"cell,A,Blank-1,B\na,{2**24 + 1},2,3\nb,{2**53},{2**53 - 1},0\n"))
         assert isinstance(table.X, sparse.csr_array)
         assert table.X.dtype == np.dtype(np.float64)
-        np.testing.assert_array_equal(table.X.data, np.array([2**24 + 1, 3, 2**63], dtype=np.float64))
+        np.testing.assert_array_equal(table.X.data, np.array([2**24 + 1, 3, 2**53], dtype=np.float64))
         blanks = table.obsm["blank"]
         assert isinstance(blanks, sparse.csr_array)
         assert blanks.dtype == np.dtype(np.float64)
-        np.testing.assert_array_equal(blanks.data, np.array([2, 2**64 - 2048], dtype=np.float64))
+        np.testing.assert_array_equal(blanks.data, np.array([2, 2**53 - 1], dtype=np.float64))
 
     @pytest.mark.parametrize("feature", ["A", "Blank-1"])
-    def test_rejects_inexact_count_or_control(self, tmp_path: Path, feature: str) -> None:
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
-            read_table(_sources(tmp_path, f"cell,{feature}\na,1\nb,{2**64 - 1}\n"))
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**53 + 2, 2**63, 2**64 - 1])
+    def test_rejects_count_or_control_above_float64_integer_range(
+        self, tmp_path: Path, feature: str, value: int
+    ) -> None:
+        with pytest.raises(ReaderFormatError, match=r"counts above 2\*\*53") as caught:
+            read_table(_sources(tmp_path, f"cell,{feature}\na,1\nb,{value}\n"))
         assert caught.value.path == tmp_path / "counts.csv"
         assert caught.value.context == ReaderErrorContext("merscope", "count matrix")
 
@@ -174,10 +179,10 @@ class TestReadTable:
 
     @pytest.mark.parametrize("failure", [False, True])
     def test_streaming_reader_closes(self, tmp_path: Path, mocker: MockerFixture, *, failure: bool) -> None:
-        files = _sources(tmp_path, f"cell,A\na,{2**64 - 1 if failure else 1}\nb,0\n")
+        files = _sources(tmp_path, f"cell,A\na,{2**63 if failure else 1}\nb,0\n")
         reader = mocker.spy(type(files.counts), "open")
         if failure:
-            with pytest.raises(ReaderFormatError, match="not exactly representable"):
+            with pytest.raises(ReaderFormatError, match=r"counts above 2\*\*53"):
                 read_table(files)
         else:
             read_table(files)

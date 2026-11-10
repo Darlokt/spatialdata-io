@@ -14,7 +14,6 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.codex._schemas import (
     STRING_DTYPE,
     cell_columns,
-    check_integer_promotion,
     csv_column_names,
     csv_types,
     expression_dtype,
@@ -50,12 +49,6 @@ class TestCellColumns:
 
         assert features == ["cyc002_ch003"]
         assert metadata == ["cell_id", "region", "x", "y", "recycle_score"]
-
-
-class TestCheckIntegerPromotion:
-    @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
-    def test_large_exact_power_preserves_native_values(self, tmp_path: Path, dtype: type[np.integer]) -> None:
-        check_integer_promotion(np.array([2**54], dtype=dtype), ArtifactFile(tmp_path / "cells.fcs"))
 
 
 class TestFcsCellIds:

@@ -18,7 +18,6 @@ from spatialdata_io.converters.legacy_anndata._schemas import (
     normalize_positions,
     observed_frames,
     parse_positions,
-    physical_coordinates,
     validate_in_memory,
 )
 
@@ -172,42 +171,6 @@ class TestCoordinateArray:
         table.obsm["spatial"][1, 0] = value
         with pytest.raises(ValueError, match="nonfinite"):
             coordinate_array(table, "spatial")
-
-
-class TestPhysicalCoordinates:
-    @pytest.mark.parametrize(
-        "dtype", [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint64, np.float16, np.float32]
-    )
-    def test_lossless_conversion(self, dtype: npt.DTypeLike) -> None:
-        values = np.array([[1, 2], [3, 4]], dtype=dtype)
-        actual = physical_coordinates(values, key="spatial")
-        assert actual.dtype == np.float64
-        np.testing.assert_array_equal(actual, values)
-
-    def test_borrows_existing_float64(self) -> None:
-        values = np.array([[0.25, 2.5], [3.0, 4.0]])
-        assert physical_coordinates(values, key="spatial") is values
-
-    @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
-    def test_preserves_representable_large_integers(self, dtype: npt.DTypeLike) -> None:
-        values = np.array([[2**53, 2**53 + 2], [2**60, 2**63]], dtype=np.uint64)
-        if dtype == np.int64:
-            values = np.array([[2**53, 2**53 + 2], [-(2**60), -(2**63)]], dtype=dtype)
-        actual = physical_coordinates(values, key="spatial")
-        assert all(int(expected) == int(result) for expected, result in zip(values.flat, actual.flat, strict=True))
-
-    @pytest.mark.parametrize("value", [2**53 + 1, 2**63 - 1, 2**64 - 1])
-    def test_rejects_lossy_integer_conversion(self, value: int) -> None:
-        values = np.array([[value, 0]], dtype=np.uint64)
-        with pytest.raises(ValueError, match="losslessly"):
-            physical_coordinates(values, key="spatial")
-
-    def test_rejects_lossy_wide_float_conversion(self) -> None:
-        if np.finfo(np.longdouble).nmant <= np.finfo(np.float64).nmant:
-            pytest.skip("This platform does not provide a floating dtype wider than float64.")
-        values = np.array([[np.longdouble(1) + np.finfo(np.longdouble).eps, 0]], dtype=np.longdouble)
-        with pytest.raises(ValueError, match="losslessly"):
-            physical_coordinates(values, key="spatial")
 
 
 class TestParsePositions:
@@ -406,6 +369,27 @@ class TestParsePositions:
 
 
 class TestNormalizePositions:
+    def test_finite_extended_precision_coordinates_cannot_overflow_output(self) -> None:
+        if np.finfo(np.longdouble).max <= np.finfo(np.float64).max:
+            pytest.skip("Extended precision has the same range as float64.")
+        table = _declared()
+        physical = np.full((2, 2), np.longdouble(np.finfo(np.float64).max) * 2)
+        table.obsm["spatial"] = physical
+        metadata = parse_positions(table)
+
+        with pytest.raises(ValueError, match="overflows finite float64"):
+            normalize_positions(table, metadata)
+
+        assert table.obsm["spatial"] is physical
+
+    def test_large_physical_integer_coordinates_round_to_float64(self) -> None:
+        table = _declared()
+        table.obsm["spatial"] = np.full((2, 2), 2**53 + 1, dtype=np.int64)
+
+        normalize_positions(table, parse_positions(table))
+
+        np.testing.assert_array_equal(table.obsm["spatial"], np.full((2, 2), float(2**53)))
+
     def test_preserves_undeclared_arbitrary_source_without_claims(self) -> None:
         table = _table()
         source = np.array([[2**53 + 1, 2, 7], [3, 4, 9]], dtype=np.uint64)
@@ -483,8 +467,9 @@ class TestNormalizePositions:
         normalize_positions(table, parse_positions(table))
         assert POSITIONS_KEY not in table.uns
 
-    def test_rejects_lossy_physical_input(self) -> None:
+    def test_borrows_float64_physical_array(self) -> None:
         table = _declared()
-        table.obsm["spatial"] = np.array([[2**53 + 1, 0], [3, 4]], dtype=np.int64)
-        with pytest.raises(ValueError, match="losslessly"):
-            normalize_positions(table, parse_positions(table))
+        physical = np.array([[0.25, 2.0], [3.5, 4.0]], dtype=np.float64)
+        table.obsm["spatial"] = physical
+        normalize_positions(table, parse_positions(table))
+        assert table.obsm["spatial"] is physical

@@ -93,12 +93,12 @@ class TestReadExperiment:
         assert calibration.version == version
         assert "Akoya experiment xyResolution" in calibration.source
 
-    @pytest.mark.parametrize("value", [None, True, "377", 0, -1, 5e-324])
+    @pytest.mark.parametrize("value", [None, True, "377", 0, -1])
     def test_invalid_resolution(self, tmp_path: Path, value: object) -> None:
         path = tmp_path / "experiment.json"
         path.write_text(json.dumps({"version": "1.7.0.6", "xyResolution": value}))
 
-        with pytest.raises(ReaderFormatError, match=r"positive|representable") as caught:
+        with pytest.raises(ReaderFormatError, match="positive") as caught:
             read_experiment(ArtifactFile(path))
 
         assert caught.value.context.detected_version == "1.7.0.6"

@@ -152,11 +152,9 @@ def _open_hdf5_sources() -> set[Path]:
 
 
 class TestRead10xH5:
-    @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0)])
-    def test_rejects_invalid_entries_before_duplicate_reduction(
-        self, tmp_path: Path, values: tuple[float, float]
-    ) -> None:
-        """Deliberately malformed HDF5 records must not become valid counts by summation."""
+    @pytest.mark.parametrize("values", [(2.0, 3.0), (0.5, 0.5), (-1.0, 2.0)])
+    def test_rejects_repeated_barcode_feature_entries(self, tmp_path: Path, values: tuple[float, float]) -> None:
+        """The HDF5 format stores each (barcode, feature) entry at most once; repeats are never summed."""
         source = tmp_path / "duplicates.h5"
         _write_h5_v3(source)
         with h5py.File(source, "r+") as handle:
@@ -166,7 +164,7 @@ class TestRead10xH5:
             handle.create_dataset("matrix/data", data=data)
             handle["matrix/indices"][1] = 0
 
-        with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
+        with pytest.raises(ReaderFormatError, match=r"repeated \(barcode, feature\) entries"):
             read_10x_h5(require_file(source, context=_CONTEXT), context=_CONTEXT)
         assert source.resolve() not in _open_hdf5_sources()
 
@@ -191,6 +189,7 @@ class TestRead10xH5:
 
         expression = _assert_canonical_sparse(table)
         _assert_sparse_equal(expression, _COUNTS)
+        assert expression.dtype == np.dtype(np.float32)
         assert tuple(table.obs_names) == _BARCODES
         assert tuple(table.var_names) == _FEATURE_NAMES
         assert tuple(table.var["gene_ids"]) == _FEATURE_IDS
@@ -222,6 +221,7 @@ class TestRead10xH5:
         expression = _assert_canonical_sparse(table)
         expected = sparse.csr_array(np.asarray([[1, 2], [3, 0]], dtype=np.int64))
         _assert_sparse_equal(expression, expected)
+        assert expression.dtype == np.dtype(np.float32)
         assert tuple(table.obs_names) == ("legacy-b", "legacy-a")
         assert tuple(table.var_names) == ("legacy-z", "legacy-a")
         assert source.resolve() not in _open_hdf5_sources()

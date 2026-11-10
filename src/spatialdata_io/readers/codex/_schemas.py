@@ -19,7 +19,7 @@ concatenate. CSV coordinates and expression are float64, and regions and
 unknown annotations remain literal text. CSV numeric fields follow Arrow's
 typed CSV grammar; expression and coordinates must be finite. FCS IDs are cast
 exactly from their stored values; other FCS parameters retain their native
-numeric widths and exact integer-promotion checks. Processor output contract:
+numeric widths. Processor output contract:
 https://help.codex.bio/codex/processor/technical-notes/expected-output
 """
 
@@ -104,20 +104,6 @@ def csv_column_names(columns: list[str], path: ArtifactFile) -> tuple[list[str],
         names.append(name)
         labels.append(label)
     return names, labels
-
-
-def check_integer_promotion(values: npt.NDArray[np.number], path: ArtifactFile) -> None:
-    """Reject integers that float64 expression or geometry storage would change."""
-    if values.dtype.kind in "iu":
-        large = values > 2**53
-        if values.dtype.kind == "i":
-            large |= values < -(2**53)
-
-        for value in values[large]:
-            if int(value) != int(float(value)):
-                raise schema_error(
-                    path, found="integer-to-float precision loss", expected="exactly representable integer values"
-                )
 
 
 def fcs_cell_ids(values: pd.Series, path: ArtifactFile) -> pd.Series:
@@ -207,14 +193,10 @@ def validate_expression(values: npt.NDArray[np.number], path: ArtifactFile) -> N
 
 
 def validate_observations(observations: pd.DataFrame, path: ArtifactFile) -> npt.NDArray[np.number]:
-    """Validate normalized uint64 cell identity and exact finite region-pixel coordinates."""
+    """Validate normalized uint64 cell identity and finite region-pixel coordinates."""
     if not observations["cell_id"].is_unique:
         raise schema_error(path, found="duplicate cell_id values", expected=_CELL_ID_EXPECTED)
 
-    # Geometry stores float64 centers even when the input coordinates are ints.
-    for axis in ("x", "y"):
-        if observations[axis].dtype.kind in "iu":
-            check_integer_promotion(observations[axis].to_numpy(copy=False), path)
     coordinates = observations[["x", "y"]].to_numpy(dtype=expression_dtype(observations, ["x", "y"], path))
     if not np.isfinite(coordinates).all():
         raise schema_error(path, found="invalid x/y coordinates", expected="finite real region pixel coordinates")

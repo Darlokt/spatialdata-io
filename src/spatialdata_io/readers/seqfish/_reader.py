@@ -109,7 +109,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
 
         - ``tables["table_<ROI>"]``: eager AnnData in count-row and
           feature-header order. ``X`` is a canonical CSR sparse array of the
-          exact counts, float32 when every value fits exactly, else float64.
+          exact counts, float32 through 2**24, else float64 through 2**53.
           ``obs`` holds ``area`` (µm²) and the integer cell ID
           ``instance_id`` (uint64); ``obsm["spatial"]`` the float64 centroids (µm).
           Observation names are positional strings from ``"0"``; dropped
@@ -143,8 +143,8 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
         A contextual ``ReaderFormatError`` naming the artifact and path if the
         layout, a schema or a value is malformed or files disagree: unknown
         ROIs, colliding ROI names, duplicate or mismatching cell IDs,
-        malformed CSV records or values (see Notes), counts that neither
-        float32 nor float64 holds exactly, nonfinite coordinates, missing
+        malformed CSV records or values (see Notes), counts above 2**53,
+        nonfinite coordinates, missing
         DAPI calibration, a segmentation off the DAPI grid or too narrow for
         the cell IDs. Transcript records are validated when their partition
         is computed.

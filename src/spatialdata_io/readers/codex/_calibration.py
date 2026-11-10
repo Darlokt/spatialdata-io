@@ -105,17 +105,13 @@ def read_experiment(path: ArtifactFile) -> Calibration:
             )
     context = ReaderErrorContext("codex", "experiment calibration", detected_version=version)
 
+    # Strict JSON numbers are finite; booleans are ints in Python but never a size.
     value = metadata.get("xyResolution")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise ReaderFormatError(
-            context=context, path=path, found=repr(value), expected="positive finite xyResolution in nm/pixel"
+            context=context, path=path, found=repr(value), expected="positive xyResolution in nm/pixel"
         )
-    scale = value / 1000
-    if scale == 0:
-        raise ReaderFormatError(
-            context=context, path=path, found=repr(value), expected="representable positive micrometre scale"
-        )
-    return Calibration(scale, _EXPERIMENT_SOURCE, version)
+    return Calibration(value / 1000, _EXPERIMENT_SOURCE, version)
 
 
 def resolve_calibration(pixel_size_um: float | None, experiment: ArtifactFile | None) -> Calibration | None:

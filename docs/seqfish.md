@@ -38,7 +38,7 @@ Arrow parses every CSV field directly into its declared type:
 
 Arrow's CSV grammar is the contract. Spaces and tabs around a number are trimmed, and integers may be written in hexadecimal (`0x10` reads as 16). An integer field rejects `2.0`, `2e0`, `+2`, `1_0` and values outside its type, so positive cell IDs range from 1 through 2⁶⁴ − 1. Floats are correctly rounded: `1e-400` reads as 0 and `9007199254740993` as `9007199254740992.0`. Numeric fields read by the reader cannot be empty. Floating fields accept `nan` and `inf` during parsing and then fail the finiteness check; integer fields reject these spellings. Ignored annotation fields may be empty. Duplicate header names fail before parsing.
 
-GeoJSON is an eagerly parsed UTF-8 FeatureCollection. It contains polygon features with explicit top-level Feature `id` values corresponding to cell identifiers; Arrow casts each ID, a JSON string or integer, to the uint64 cell-ID type (`"01"` and `"0x10"` are accepted, `" 1"` and `"1.0"` are not). Property fields cannot substitute for these source identifiers. Properties, including `properties.id`, are independent annotations and do not need to match the top-level ID ([GeoJSON feature semantics](https://www.rfc-editor.org/rfc/rfc7946#section-3.2)). Property columns retain JSON values as objects, avoiding numerical inference of annotation IDs. The reserved property name `geometry` is rejected so annotations cannot replace the source geometry. Other source property annotations are retained. Features may be reordered. Integer polygon vertices must be exactly representable in float64. Missing, duplicate or mismatched IDs and malformed geometry fail in every policy; geometry is neither repaired nor assigned an ID by row position. Invalid topology follows `invalid_geometries`.
+GeoJSON is an eagerly parsed UTF-8 FeatureCollection. It contains polygon features with explicit top-level Feature `id` values corresponding to cell identifiers; Arrow casts each ID, a JSON string or integer, to the uint64 cell-ID type (`"01"` and `"0x10"` are accepted, `" 1"` and `"1.0"` are not). Property fields cannot substitute for these source identifiers. Properties, including `properties.id`, are independent annotations and do not need to match the top-level ID ([GeoJSON feature semantics](https://www.rfc-editor.org/rfc/rfc7946#section-3.2)). Property columns retain JSON values as objects, avoiding numerical inference of annotation IDs. The reserved property name `geometry` is rejected so annotations cannot replace the source geometry. Other source property annotations are retained. Features may be reordered. Polygon vertices are stored as float64, so integers beyond 2⁵³ may round. Missing, duplicate or mismatched IDs and malformed geometry fail in every policy; geometry is neither repaired nor assigned an ID by row position. Invalid topology follows `invalid_geometries`.
 
 ## Output and coordinates
 
@@ -107,8 +107,8 @@ python -m spatialdata_io seqfish --input dataset --output counts.zarr \
 
 `rois` accepts any exact file prefix, including prefixes such as `Roi 1` that the reader repairs into element names; previously such prefixes produced element names that SpatialData rejected after all files had been read. The former `load_*`, `load_points`, `cells_as_circles`, `imread_kwargs` and `raster_models_scale_factors` options have been removed. Use the explicit inclusion flags, geometry choice, `chunks` and `scale_factors`. Automatic pyramids based on image size have been removed; request a pyramid explicitly when needed. The default chunks are `(1, 1024, 1024)` for images and `(1024, 1024)` for labels instead of storage-aligned chunks, and `scale_factors=()` replaces `None` for a single scale.
 
-Completed counts use float32 when every value is exactly representable, otherwise
-float64. Values that neither floating dtype can preserve raise a contextual
+Completed counts use float32 through 2²⁴, otherwise float64 through 2⁵³.
+Larger integer values raise a contextual
 precision error. Completed bounded blocks are converted before sparse assembly;
 expression is never densified.
 
@@ -116,7 +116,8 @@ CSV fields now follow Arrow's typed CSV grammar instead of exact decimal decodin
 integer fields reject `2.0` and `2e0`, accept hexadecimal and surrounding spaces,
 and cell IDs (table, CellCoordinates and Boundaries) use fixed positive uint64
 through 2⁶⁴ − 1. Coordinates no longer fail for underflow to
-zero or for integral values above 2⁵³ that float64 rounds. Transcript `cell`
+zero or for integral values above 2⁵³ that float64 rounds; neither do integer
+GeoJSON polygon vertices above 2⁵³. Transcript `cell`
 assignments keep the full uint64 range. Shape indexes are Arrow-backed
 `uint64[pyarrow]`. Table `instance_id` becomes native uint64
 at the AnnData storage boundary, preserving full-range IDs through linkage and

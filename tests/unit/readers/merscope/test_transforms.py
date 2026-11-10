@@ -75,14 +75,23 @@ class TestReadTransform:
         with pytest.raises(ReaderFormatError):
             read_transform(path)
 
-    @pytest.mark.parametrize("coefficient", ["1e-400", "9007199254740993", "nan", "inf"])
-    def test_coefficient_conversion_cannot_change_magnitude_or_integer_value(
-        self, tmp_path: Path, coefficient: str
-    ) -> None:
+    @pytest.mark.parametrize(
+        "rows", ["1 nan 0\n0 1 0", "1 inf 0\n0 1 0", "inf 0 0\n0 1 0", "1 0 0\n0 -inf 0", "1e999 0 0\n0 1 0"]
+    )
+    def test_nonfinite_coefficient_fails(self, tmp_path: Path, rows: str) -> None:
+        """Reject nonfinite coefficients, including diagonal ones whose inverse would be finite."""
+        path = ArtifactFile(tmp_path / "transform.csv")
+        path.write_text(f"{rows}\n0 0 1\n", encoding="utf-8")
+        with pytest.raises(ReaderFormatError, match="finite 3x3 matrix") as caught:
+            read_transform(path)
+        assert caught.value.path == path
+
+    @pytest.mark.parametrize(("coefficient", "value"), [("1e-400", 0.0), ("9007199254740993", 2.0**53)])
+    def test_coefficients_round_to_float64(self, tmp_path: Path, coefficient: str, value: float) -> None:
         path = ArtifactFile(tmp_path / "transform.csv")
         path.write_text(f"1 {coefficient} 0\n0 1 0\n0 0 1\n", encoding="utf-8")
-        with pytest.raises(ReaderFormatError, match="malformed transform"):
-            read_transform(path)
+        expected = np.asarray([[1, value, 0], [0, 1, 0], [0, 0, 1]])
+        np.testing.assert_array_equal(read_transform(path).matrix, np.linalg.inv(expected))
 
     def test_unrepresentable_inverse_fails(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "transform.csv")

@@ -19,8 +19,6 @@ if TYPE_CHECKING:
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
-from spatialdata_io.converters.legacy_anndata._schemas import physical_coordinates
-
 
 @dataclass(frozen=True, slots=True)
 class LinkedTarget:
@@ -108,8 +106,7 @@ def linked_targets(sdata: SpatialData, table: AnnData) -> tuple[LinkedTarget, ..
 
 
 def _point_coordinates(target: LinkedTarget, matrix: NDArray[np.float64]) -> NDArray[np.float64]:
-    # The upstream Point centroid path transforms before checking integer
-    # precision. Validate the projected source first, in its only source scan.
+    # Validate the projected source in its only scan before the transform.
     points = cast("DaskDataFrame", target.element)[["x", "y"]].compute()
     if points.index.hasnans or not points.index.is_unique:
         message = f"Export target {target.name!r} requires unique non-null instance identifiers."
@@ -125,7 +122,7 @@ def _point_coordinates(target: LinkedTarget, matrix: NDArray[np.float64]) -> NDA
         if values.dtype.kind not in "iuf" or not np.isfinite(values).all():
             message = f"Export target {target.name!r} requires finite real numerical {key!r} coordinates."
             raise ValueError(message)
-        coordinates[:, axis] = physical_coordinates(values, key=f"{target.name}.{key}")
+        coordinates[:, axis] = values
     transformed = coordinates @ matrix[:2, :2].T
     transformed += matrix[:2, 2]
     return transformed

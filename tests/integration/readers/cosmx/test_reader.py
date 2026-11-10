@@ -289,7 +289,7 @@ class TestCosmx:
         assert "spatialdata_attrs" not in result.tables["table"].uns
 
     def test_nonfinite_placement_fails_before_element_construction(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        root = write_extreme_cosmx_dataset(tmp_path, placement=True)
+        root = write_extreme_cosmx_dataset(tmp_path)
         image = mocker.spy(_reader, "read_image")
         labels = mocker.spy(_reader, "read_labels")
         table = mocker.spy(_reader, "build_table")
@@ -606,20 +606,6 @@ class TestCosmxCalibration:
         fixture = write_cosmx_dataset(tmp_path, rasters=False)
         with np.errstate(over="ignore"), pytest.raises(ValueError, match="nonfinite physical"):
             cosmx(fixture.root, pixel_size_um=1e308)
-
-    @pytest.mark.parametrize("include_transcripts", [False, True])
-    def test_nonzero_physical_underflow_fails_before_returning(
-        self, tmp_path: Path, *, include_transcripts: bool
-    ) -> None:
-        root = write_extreme_cosmx_dataset(tmp_path, placement=False)
-        tasks: list[object] = []
-        with (
-            np.errstate(all="raise"),
-            Callback(posttask=lambda *args: tasks.append(args)),
-            pytest.raises(ValueError, match=r"nonzero physical.*underflow to zero"),
-        ):
-            cosmx(root, pixel_size_um=5e-324, include_transcripts=include_transcripts)
-        assert not tasks
 
     @pytest.mark.parametrize("raster_mode", ["images", "labels"])
     def test_raster_affine_overflow_fails_even_with_finite_physical_cells(

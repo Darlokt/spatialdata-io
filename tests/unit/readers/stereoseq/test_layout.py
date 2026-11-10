@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -59,22 +58,22 @@ def _discover(  # noqa: PLR0913, RUF100 - mirrors the discovery keywords.
 
 
 class TestAnalysisSource:
-    """Filename clues preserve dotted sample IDs and exact decimal identity."""
+    """Filename clues preserve dotted sample IDs and the clustering-resolution spelling."""
 
     @pytest.mark.parametrize(
         ("filename", "population", "resolution"),
         [
-            ("chip.v2.bin50_0.50.h5ad", 50, Decimal("0.5")),
-            ("chip.v2.bin1_1e-2.spatial.cluster.h5ad", 1, Decimal("0.01")),
-            ("chip.v2.cellbin_1.50.h5ad", "cells", Decimal("1.5")),
-            ("chip.v2.cellbin_1.50.adjusted.h5ad", "adjusted_cells", Decimal("1.5")),
+            ("chip.v2.bin50_0.50.h5ad", 50, "0_50"),
+            ("chip.v2.bin1_1e-2.spatial.cluster.h5ad", 1, "1e-2"),
+            ("chip.v2.cellbin_1.50.h5ad", "cells", "1_50"),
+            ("chip.v2.cellbin_1.50.adjusted.h5ad", "adjusted_cells", "1_50"),
             ("chip.v2.cell.cluster.h5ad", "cells", None),
             ("chip.v2.adjusted.cell.cluster.h5ad", "adjusted_cells", None),
             ("chip.v2.spatial.cluster.h5ad", None, None),
         ],
     )
     def test_parses_only_documented_forms(
-        self, filename: str, population: Literal["cells", "adjusted_cells"] | int | None, resolution: Decimal | None
+        self, filename: str, population: Literal["cells", "adjusted_cells"] | int | None, resolution: str | None
     ) -> None:
         source = _analysis_source(ArtifactFile(Path(filename)))
         assert source.sample_id == "chip.v2"
@@ -88,10 +87,20 @@ class TestAnalysisSource:
         with pytest.raises(ReaderFormatError, match="analysis filename"):
             _analysis_source(ArtifactFile(Path(filename)))
 
-    @pytest.mark.parametrize("value", ["0", "0.00", "1e999999999999999999999999"])
-    def test_rejects_zero_and_unrepresentable_decimal_resolution(self, value: str) -> None:
-        with pytest.raises(ReaderFormatError, match="clustering resolution"):
-            _analysis_source(ArtifactFile(Path(f"sample.cellbin_{value}.h5ad")))
+    @pytest.mark.parametrize(
+        ("value", "name"),
+        [
+            ("10.0", "10_0"),
+            ("10", "10"),
+            ("1E+3", "1e3"),
+            ("1e-80", "1e-80"),
+            ("0.00", "0_00"),
+            ("1e999999999999999999999999", "1e999999999999999999999999"),
+        ],
+    )
+    def test_resolution_name_keeps_the_filename_spelling(self, value: str, name: str) -> None:
+        """Name the resolution from its text, without numeric normalization or range checks."""
+        assert _analysis_source(ArtifactFile(Path(f"sample.cellbin_{value}.h5ad"))).resolution == name
 
 
 class TestCountSample:
@@ -487,7 +496,7 @@ class TestDiscoverLayout:
         result = _discover(tmp_path, analysis_files=(path.relative_to(tmp_path),))
 
         assert result.sample_id == "chip.v2"
-        assert result.analyses == (AnalysisSource(ArtifactFile(path), "adjusted_cells", Decimal("0.5"), "chip.v2"),)
+        assert result.analyses == (AnalysisSource(ArtifactFile(path), "adjusted_cells", "0_5", "chip.v2"),)
         assert result.square is None
         assert result.cells == result.images == ()
 
@@ -496,11 +505,11 @@ class TestDiscoverLayout:
         with pytest.raises(ReaderFormatError, match="analysis/sample disagreement"):
             _discover(tmp_path, sample_id="sample", analysis_files=(path,))
 
-    @pytest.mark.parametrize("duplicate", ["normalized_resolution", "repeated_source", "historical_cells"])
+    @pytest.mark.parametrize("duplicate", ["exponent_spelling", "repeated_source", "historical_cells"])
     def test_rejects_duplicate_analysis_identity_before_loading(self, tmp_path: Path, duplicate: str) -> None:
-        first = _file(tmp_path / "sample.cellbin_0.5.h5ad")
-        if duplicate == "normalized_resolution":
-            second = _file(tmp_path / "sample.cellbin_0.50.h5ad")
+        first = _file(tmp_path / "sample.cellbin_1e3.h5ad")
+        if duplicate == "exponent_spelling":
+            second = _file(tmp_path / "sample.cellbin_1E+3.h5ad")
         elif duplicate == "repeated_source":
             first = second = _file(tmp_path / "sample.spatial.cluster.h5ad")
         else:
@@ -508,6 +517,12 @@ class TestDiscoverLayout:
             second = _file(tmp_path / "b" / "sample.cell.cluster.h5ad")
         with pytest.raises(ReaderFormatError, match="duplicate analysis"):
             _discover(tmp_path, analysis_files=(first, second))
+
+    def test_resolution_spellings_name_distinct_products(self, tmp_path: Path) -> None:
+        first = _file(tmp_path / "sample.cellbin_0.5.h5ad")
+        second = _file(tmp_path / "sample.cellbin_0.50.h5ad")
+        result = _discover(tmp_path, analysis_files=(first, second))
+        assert [source.resolution for source in result.analyses] == ["0_5", "0_50"]
 
     def test_does_not_require_unselected_missing_products(self, tmp_path: Path) -> None:
         (tmp_path / "051.cellcut").mkdir()

@@ -173,17 +173,13 @@ def write_cosmx_dataset(  # noqa: PLR0913, RUF100 - Independent format variants 
     return CosmxFixture(path, file_prefix, profile, features)
 
 
-def write_extreme_cosmx_dataset(path: Path, *, placement: bool) -> Path:
-    """Write two exact-count cells exposing derived placement or physical underflow."""
+def write_extreme_cosmx_dataset(path: Path) -> Path:
+    """Write two exact-count cells whose derived placement overflows."""
     path.mkdir(parents=True, exist_ok=True)
     (path / "Run_1_exprMat_file.csv").write_text("fov,cell_ID,A\n1,1,1\n1,2,2\n", encoding="utf-8")
     header = "fov,cell_ID,CenterX_local_px,CenterY_local_px,CenterX_global_px,CenterY_global_px\n"
     # Fixed decimal notation gives small printed bounds even for extreme values.
-    rows = (
-        f"1,1,{-1e308:.1f},1.0,{1e308:.1f},11.0\n1,2,{-9e307:.1f},3.0,{1.1e308:.1f},13.0\n"
-        if placement
-        else "1,1,0.1,1.0,0.1,1.0\n1,2,1.1,3.0,1.1,3.0\n"
-    )
+    rows = f"1,1,{-1e308:.1f},1.0,{1e308:.1f},11.0\n1,2,{-9e307:.1f},3.0,{1.1e308:.1f},13.0\n"
     (path / "Run_1_metadata_file.csv").write_text(header + rows, encoding="utf-8")
     (path / "Run_1_tx_file.csv").write_text(
         "fov,cell_ID,x_local_px,y_local_px,x_global_px,y_global_px,target\n1,1,1,1,1,1,A\n", encoding="utf-8"

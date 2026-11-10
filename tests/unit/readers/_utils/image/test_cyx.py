@@ -207,7 +207,7 @@ class TestNormalizeCyxImage:
         [
             ((2, 4, 5), "ZYX", "Axis 'z' has length 2 and is absent from target_axes."),
             ((2, 3, 4, 5), "CSYX", "source_axes contains duplicate axes: ('c', 'c', 'y', 'x')."),
-            ((3, 4, 5), "CZX", "Raster source and target axes must both contain 'x' and 'y'"),
+            ((3, 4, 5), "CZX", "Raster source axes must contain 'x' and 'y'"),
         ],
     )
     def test_declared_axes_that_cannot_become_cyx_are_malformed_content(

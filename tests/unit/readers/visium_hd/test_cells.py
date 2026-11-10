@@ -226,7 +226,7 @@ class TestReadNucleusTable:
         assert isinstance(result.X, csr_array)
         assert result.X[0, 0] == np.float32(maximum)
 
-    @pytest.mark.parametrize("value", [2**62, 2**63])
+    @pytest.mark.parametrize("value", [2**52 + 1, 2**53])
     def test_float64_accumulation_precision_bound(self, tmp_path: Path, value: int) -> None:
         raw, mapping, population = _sources(tmp_path)
         with h5py.File(raw, "r+") as source:

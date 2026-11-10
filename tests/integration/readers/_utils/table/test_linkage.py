@@ -52,7 +52,7 @@ class TestParseLinkedTable:
         expression.has_canonical_format = True
         expression.indices[0] = 2
 
-        with pytest.raises(ValueError, match="active indices") as error:
+        with pytest.raises(ValueError, match="indices must be <") as error:
             parse_linked_table(
                 adata,
                 TableLinkage(("cells",), "region", "instance"),

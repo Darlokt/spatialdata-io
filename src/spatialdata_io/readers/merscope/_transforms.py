@@ -13,14 +13,12 @@ maps the micrometre position ``(2, 2)`` to the pixel ``(14.5, -1)``.
 
 Mosaics are pixel grids, so their ``global`` (micrometre) transformation is the
 inverse of this matrix. Scale, anisotropy, shear, reflection and translation
-are kept as given; pixels are never resampled. Coefficients are decoded from
-their text exactly: an integral coefficient that does not survive float64, or
-a nonzero one that underflows, is rejected.
+are kept as given; pixels are never resampled. Coefficients are parsed with
+Python's ``float`` and must be finite.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 from itertools import islice
 from typing import TYPE_CHECKING
 
@@ -46,14 +44,15 @@ def read_transform(path: ArtifactFile) -> Affine:
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise
-    except (UnicodeError, ValueError, InvalidOperation, OverflowError) as error:
+    except (UnicodeError, ValueError) as error:
         raise ReaderFormatError(
             context=context,
             path=path,
             found="malformed transform values",
             expected="a 3x3 space-delimited numeric matrix",
         ) from error
-    if not np.array_equal(matrix[-1], [0, 0, 1]):
+    # A nonfinite coefficient can still give a finite inverse, e.g. diag(inf, 1, 1).
+    if not np.isfinite(matrix).all() or not np.array_equal(matrix[-1], [0, 0, 1]):
         raise ReaderFormatError(
             context=context,
             path=path,
@@ -83,19 +82,5 @@ def _parse_matrix(source: Iterable[str]) -> np.ndarray[tuple[int, int], np.dtype
     if len(rows) != _AFFINE_SHAPE[0] or any(len(row) != _AFFINE_SHAPE[1] for row in rows):
         message = "Expected exactly three rows of three coefficients."
         raise ValueError(message)
-    values = [_coefficient(token) for row in rows for token in row]
+    values = [float(token) for row in rows for token in row]
     return np.asarray(values, dtype=np.float64).reshape(_AFFINE_SHAPE)
-
-
-def _coefficient(token: str) -> float:
-    """Decode one small coefficient without underflow or integral precision loss."""
-    number = float(token)
-    exact = Decimal(token)
-    if (
-        not np.isfinite(number)
-        or (number == 0 and exact != 0)
-        or (exact == exact.to_integral_value() and exact != Decimal(number))
-    ):
-        message = "Transform coefficient is nonfinite or loses its integral value or nonzero magnitude."
-        raise ValueError(message)
-    return number

@@ -11,13 +11,12 @@ pixels, for example::
         "fiducial_diameter_fullres": 144.48502629,
     }
 
-The three named keys are required, finite and positive; every key, including
-any not listed, is kept unchanged in ``uns["spatial"]``. Space Ranger
-estimates the diameters from the fiducial registration and the nominal spot
-size, not from the image's pixel size, so they draw spots but do not
-calibrate the image in micrometres. Both scale factors must have finite
-inverses, which register the PNGs to the full-resolution frame, and half the
-spot diameter must stay a positive float64 radius. See
+The three named keys are required positive numbers; every key, including any
+not listed, is kept unchanged in ``uns["spatial"]``. Space Ranger estimates
+the diameters from the fiducial registration and the nominal spot size, not
+from the image's pixel size, so they draw spots but do not calibrate the
+image in micrometres. The inverse scale factors register the PNGs to the
+full-resolution frame. See
 https://www.10xgenomics.com/support/software/space-ranger/latest/analysis/outputs/spatial-outputs
 
 A 10x HDF5 count matrix carries the run's identity as root attributes::
@@ -37,7 +36,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from math import isfinite
 from typing import TYPE_CHECKING
 
 import h5py
@@ -84,15 +82,14 @@ class CountMetadata:
 
 
 def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile, context: ReaderErrorContext) -> float:
-    """Return one required finite positive JSON number as float."""
+    """Return one required positive JSON number as float."""
     value = values.get(key)
-    # The strict JSON reader rejects integers beyond the float range.
-    result = float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
-    if result is None or not isfinite(result) or result <= 0:
+    # Strict JSON numbers are finite and within the float range.
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
         raise ReaderFormatError(
-            context=context, found=f"{key!r}={value!r}", expected=f"a finite positive numeric {key!r}", path=path
+            context=context, found=f"{key!r}={value!r}", expected=f"a positive numeric {key!r}", path=path
         )
-    return result
+    return float(value)
 
 
 def read_scale_factors(path: ArtifactFile, *, version: str | None) -> ScaleFactors:
@@ -102,24 +99,6 @@ def read_scale_factors(path: ArtifactFile, *, version: str | None) -> ScaleFacto
     hires = _positive_number(values, HIRES_SCALE, path=path, context=context)
     lowres = _positive_number(values, LOWRES_SCALE, path=path, context=context)
     spot_diameter = _positive_number(values, SPOT_DIAMETER, path=path, context=context)
-
-    # Source positivity alone does not guarantee representable inverse transforms.
-    for key, scale in ((HIRES_SCALE, hires), (LOWRES_SCALE, lowres)):
-        if not isfinite(1.0 / scale):
-            raise ReaderFormatError(
-                context=context,
-                found=f"nonfinite inverse of {key!r}",
-                expected="a finite positive inverse scale",
-                path=path,
-            )
-    if spot_diameter / 2.0 == 0:
-        raise ReaderFormatError(
-            context=context,
-            found=f"{SPOT_DIAMETER!r} underflows when divided by two",
-            expected="a positive representable circle radius",
-            path=path,
-        )
-
     return ScaleFactors(hires=hires, lowres=lowres, spot_diameter=spot_diameter, values=values)
 
 

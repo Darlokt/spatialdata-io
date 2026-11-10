@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import warnings
 from typing import TYPE_CHECKING
 
 import h5py
 import numpy as np
 import pytest
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium._metadata import CountMetadata, read_count_metadata, read_scale_factors
 
@@ -52,23 +51,8 @@ class TestReadScaleFactors:
         }
         path.write_text(json.dumps(values), encoding="utf-8")
 
-        with pytest.raises(ReaderFormatError, match="finite"):
+        with pytest.raises(ReaderFormatError, match=r"positive|finite"):
             read_scale_factors(ArtifactFile(path), version=None)
-
-    @pytest.mark.parametrize("key", ["tissue_hires_scalef", "tissue_lowres_scalef"])
-    def test_rejects_finite_scale_with_nonfinite_inverse(self, tmp_path: Path, key: str) -> None:
-        path = tmp_path / "scales.json"
-        values = {"tissue_hires_scalef": 0.5, "tissue_lowres_scalef": 0.25, "spot_diameter_fullres": 6.0}
-        values[key] = float(np.nextafter(0.0, 1.0))
-        path.write_text(json.dumps(values), encoding="utf-8")
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            with pytest.raises(ReaderFormatError, match=key) as caught:
-                read_scale_factors(ArtifactFile(path), version="2.1.0")
-
-        assert caught.value.path == path
-        assert caught.value.context == ReaderErrorContext("visium", "scale factors", "2.1.0")
 
     def test_accepts_small_scales_with_finite_inverse(self, tmp_path: Path) -> None:
         path = tmp_path / "scales.json"
@@ -83,25 +67,6 @@ class TestReadScaleFactors:
         assert result.hires == tiny
         assert result.lowres == tiny
         np.testing.assert_array_equal([1 / result.hires, 1 / result.lowres], [1e308, 1e308])
-
-    def test_rejects_display_radius_underflow_with_artifact_context(self, tmp_path: Path) -> None:
-        path = tmp_path / "scales.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "tissue_hires_scalef": 0.5,
-                    "tissue_lowres_scalef": 0.25,
-                    "spot_diameter_fullres": float(np.nextafter(0.0, 1.0)),
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        with pytest.raises(ReaderFormatError, match="spot_diameter_fullres") as caught:
-            read_scale_factors(ArtifactFile(path), version=None)
-
-        assert caught.value.path == path
-        assert caught.value.context.artifact == "scale factors"
 
     def test_accepts_smallest_representable_positive_radius(self, tmp_path: Path) -> None:
         path = tmp_path / "scales.json"

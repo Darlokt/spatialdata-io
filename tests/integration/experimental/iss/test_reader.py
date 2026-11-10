@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING
 
 import anndata as ad
@@ -65,7 +66,7 @@ class TestIss:
         assert isinstance(counts, sparse.csr_array)
         assert int(counts[0, 0]) == 300
 
-    def test_later_precision_failure_emits_no_normalization_warning(
+    def test_later_arithmetic_bound_failure_emits_no_normalization_warning(
         self, iss_dataset: IssDataset, recwarn: pytest.WarningsRecorder
     ) -> None:
         path = iss_dataset.root / "cells.h5ad"
@@ -79,9 +80,10 @@ class TestIss:
         )
         source.write_h5ad(path)
         original = path.read_bytes()
-        with pytest.raises(ValueError, match="no supported lossless") as raised:
+        with pytest.raises(ValueError, match="can exceed uint64 arithmetic") as raised:
             iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
         assert any(str(path) in note for note in raised.value.__notes__)
+        assert "while normalizing adata.layers['counts']" in raised.value.__notes__
         assert not any("combined" in str(item.message) for item in recwarn)
         assert path.read_bytes() == original
 
@@ -106,10 +108,12 @@ class TestIss:
         [
             ("int8", [100, 100], None),
             ("uint8", [200, 200], None),
-            ("uint64", [2**63, 2**63], None),
+            ("int32", [2**31 - 1, 2], None),
+            ("uint32", [2**32 - 1, 2], None),
             ("int8", [120, 120, -120], 120),
-            ("int64", [2**63 - 2, 1], 2**63 - 1),
-            ("uint64", [2**64 - 2, 1], 2**64 - 1),
+            ("int64", [2**61, -(2**61), 7], 7),
+            ("int64", [2**62 - 2, 1], 2**62 - 1),
+            ("uint64", [2**63 - 2, 1], 2**63 - 1),
         ],
     )
     def test_h5ad_integer_duplicate_sums_preserve_source_and_lazy_pixels(
@@ -139,7 +143,7 @@ class TestIss:
         output_dtype = dtype
         if expected is None:
             expected = sum(values)
-            output_dtype = {"int8": "float32", "uint8": "float32", "uint64": "float32"}[dtype]
+            output_dtype = {"int8": "float32", "uint8": "float32", "int32": "float64", "uint32": "float64"}[dtype]
         with (
             Callback(posttask=lambda *args: tasks.append(args)),
             pytest.warns(UserWarning, match="combined") as reported,
@@ -165,6 +169,62 @@ class TestIss:
 
         assert not tasks
         assert path.read_bytes() == original
+
+    @pytest.mark.parametrize("slot", ["X", "counts"])
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize(
+        "case",
+        [
+            ("uint64", [2**63, 2**63]),
+            ("int64", [2**63 - 2, 1]),
+            ("uint64", [2**64 - 2, 1]),
+            ("int64", [2**63 - 1, -(2**63 - 1)]),
+        ],
+    )
+    def test_h5ad_duplicate_partial_sum_bounds_reject_without_mutating_source(
+        self,
+        iss_dataset: IssDataset,
+        mocker: MockerFixture,
+        slot: str,
+        storage: str,
+        case: tuple[str, list[int]],
+    ) -> None:
+        dtype, values = case
+        path = iss_dataset.root / "cells.h5ad"
+        source = ad.read_h5ad(path)
+        constructor = sparse.csr_array if storage == "csr" else sparse.csc_array
+        pointers = [0, len(values), len(values)] + ([len(values)] if storage == "csc" else [])
+        expression = constructor(
+            (np.asarray(values, dtype=dtype), np.zeros(len(values), dtype=np.int32), pointers), shape=source.shape
+        )
+        if slot == "X":
+            source.X = expression
+        else:
+            source.layers[slot] = expression
+        source.write_h5ad(path)
+        original = path.read_bytes()
+        ingested = ad.read_h5ad(path)
+        stored = ingested.X if slot == "X" else ingested.layers[slot]
+        assert isinstance(stored, sparse.csr_matrix | sparse.csc_matrix | sparse.csr_array | sparse.csc_array)
+        buffers = tuple(buffer.copy() for buffer in (stored.data, stored.indices, stored.indptr))
+        mocker.patch("spatialdata_io.experimental.iss._tables.ad.read_h5ad", return_value=ingested)
+        tasks: list[object] = []
+
+        with (
+            Callback(posttask=lambda *args: tasks.append(args)),
+            warnings.catch_warnings(record=True) as reported,
+            pytest.raises(ValueError, match=f"can exceed {dtype} arithmetic") as raised,
+        ):
+            iss(iss_dataset.root, raw_image_file="raw.tiff", labels_file="labels.tiff", table_file="cells.h5ad")
+
+        expected_slot = "adata.X" if slot == "X" else "adata.layers['counts']"
+        assert f"while normalizing {expected_slot}" in raised.value.__notes__
+        assert any("iss" in note and str(path) in note for note in raised.value.__notes__)
+        assert not any("combined" in str(item.message) for item in reported)
+        assert not tasks
+        assert path.read_bytes() == original
+        for actual, expected in zip((stored.data, stored.indices, stored.indptr), buffers, strict=True):
+            np.testing.assert_array_equal(actual, expected)
 
     @pytest.mark.parametrize(
         ("dtype", "expected"),

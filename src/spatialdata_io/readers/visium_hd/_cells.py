@@ -20,7 +20,9 @@ the raw and cell matrices must list the same features.
 Sums run in float32 when a Python-integer bound (largest decoded count times
 the most squares contributing to one nucleus) is at most 2**24, otherwise in
 float64 when at most 2**53, so every partial sum of nonnegative integers is
-exact; a larger bound raises. Counts stay sparse throughout.
+exact; a larger bound raises. The completed counts are stored as float32 when
+every nucleus count is at most 2**24, otherwise as float64. Counts stay sparse
+throughout.
 """
 
 from __future__ import annotations

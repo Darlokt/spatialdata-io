@@ -17,7 +17,6 @@ import pytest
 import tifffile
 from anndata.tests.helpers import assert_equal
 from numpy.testing import assert_allclose, assert_array_equal
-from scanpy import read_10x_h5
 from scipy.sparse import csr_array, csr_matrix, spmatrix
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
@@ -69,11 +68,11 @@ class TestVisiumHD:
     """Supported layouts and linked products agree with independent source truth."""
 
     @pytest.mark.parametrize(
-        ("source_dtype", "first", "second", "expected"),
-        [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
+        ("source_dtype", "first", "second", "output_dtype"),
+        [("int32", 2**24, 1, "float32"), ("uint32", 2**32 - 1, 2, "float64")],
     )
-    def test_duplicate_h5_bin_counts_preserve_order_positions_and_linkage(
-        self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
+    def test_large_h5_bin_counts_preserve_order_positions_and_linkage(
+        self, tmp_path: Path, source_dtype: str, first: int, second: int, output_dtype: str
     ) -> None:
         bundle = write_bundle(tmp_path, sizes=(2,), segmented=False)
         baseline = visium_hd(bundle.root, bin_sizes=(2,), include_images=False).tables["square_002um_table"]
@@ -85,21 +84,15 @@ class TestVisiumHD:
             data[:2] = [first, second]
             del handle["matrix/data"]
             handle.create_dataset("matrix/data", data=data)
-            handle["matrix/indices"][1] = 0
-        decoded = read_10x_h5(path, gex_only=False)
-        assert isinstance(decoded.X, csr_matrix | csr_array)
-        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
-        assert not decoded.X.has_canonical_format
-        assert_array_equal(decoded.X.data[:2], [first, second])
 
         result = visium_hd(bundle.root, bin_sizes=(2,), include_images=False)
 
         table = result.tables["square_002um_table"]
         assert isinstance(table.X, csr_array)
-        assert table.X.dtype == np.dtype(np.float64)
+        assert table.X.dtype == np.dtype(output_dtype)
         assert table.X.has_canonical_format
-        truth = bundle.raw[2][bundle.filtered_rows[2]].astype(np.float64)
-        truth[0] = [expected, 0, 0]
+        truth = bundle.raw[2][bundle.filtered_rows[2]].astype(output_dtype)
+        truth[0] = [first, 0, second]
         assert_array_equal(table.X.toarray(), truth)
         assert table.obs_names.tolist() == [
             "s_002um_00001_00003-1",
@@ -116,7 +109,7 @@ class TestVisiumHD:
         ("source_dtype", "first", "second", "expected"),
         [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
     )
-    def test_duplicate_h5_raw_counts_feed_exact_nucleus_reconstruction(
+    def test_distinct_h5_bins_feed_exact_nucleus_reconstruction(
         self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
     ) -> None:
         bundle = write_bundle(tmp_path, sizes=(2,))
@@ -128,22 +121,21 @@ class TestVisiumHD:
         path = bundle.root / "binned_outputs/square_002um/raw_feature_bc_matrix.h5"
         with h5py.File(path, "r+") as handle:
             data = handle["matrix/data"][:].astype(source_dtype)
-            indices = handle["matrix/indices"][:]
             indptr = handle["matrix/indptr"][:]
-            # Raw bin 1 belongs to cell 1's nucleus; it has one Gene-1 entry.
-            start = int(indptr[1])
-            data[start] = first
-            data = np.insert(data, start + 1, second)
-            indices = np.insert(indices, start + 1, indices[start])
-            indptr[2:] += 1
-            for name, values in (("data", data), ("indices", indices), ("indptr", indptr)):
-                del handle[f"matrix/{name}"]
-                handle.create_dataset(f"matrix/{name}", data=values)
-        decoded = read_10x_h5(path, gex_only=False)
-        assert isinstance(decoded.X, csr_matrix | csr_array)
-        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
-        assert not decoded.X.has_canonical_format
-        assert_array_equal(decoded.X.data[start : start + 2], [first, second])
+            # Distinct raw bins 0 and 1 contribute to one nucleus. Each
+            # stores Gene-1 once, so aggregation is across source barcodes.
+            data[int(indptr[0]) + 1] = second
+            data[int(indptr[1])] = first
+            del handle["matrix/data"]
+            handle.create_dataset("matrix/data", data=data)
+        mapping_path = bundle.root / "segmented_outputs/barcode_mappings.parquet"
+        mapping = pq.read_table(mapping_path)
+        members = mapping["in_nucleus"].to_pylist()
+        members[0] = True
+        pq.write_table(
+            mapping.set_column(mapping.schema.get_field_index("in_nucleus"), "in_nucleus", pa.array(members)),
+            mapping_path,
+        )
 
         result = visium_hd(bundle.root, bin_sizes=(), include_images=False, include_nucleus_table=True)
 
@@ -151,7 +143,7 @@ class TestVisiumHD:
         assert isinstance(table.X, csr_array)
         assert table.X.dtype == np.dtype(np.float64)
         assert table.X.has_canonical_format
-        assert_array_equal(table.X.toarray(), [[0, 0, 4], [0, expected, 0]])
+        assert_array_equal(table.X.toarray(), [[0, 0, 4], [1, expected, 0]])
         assert table.obs_names.tolist() == [CELL_IDS[1], CELL_IDS[0]]
         assert table.var_names.tolist() == ["Gene", "Gene-1", "Other"]
         assert get_table_keys(table) == ("nucleus_boundaries", "region", "instance_id")
@@ -160,6 +152,24 @@ class TestVisiumHD:
         cell_expression = result.tables["cell_table"].X
         assert isinstance(cell_expression, csr_array)
         assert_array_equal(cell_expression.toarray(), bundle.cells[[1, 0]])
+
+    @pytest.mark.parametrize("kind", ["filtered", "raw"])
+    def test_repeated_h5_coordinates_rejected(self, tmp_path: Path, kind: str) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2,))
+        path = bundle.root / f"binned_outputs/square_002um/{kind}_feature_bc_matrix.h5"
+        with h5py.File(path, "r+") as handle:
+            handle["matrix/indices"][1] = handle["matrix/indices"][0]
+
+        with pytest.raises(ReaderFormatError, match=r"repeated \(barcode, feature\)") as caught:
+            visium_hd(
+                bundle.root,
+                bin_sizes=(2,) if kind == "filtered" else (),
+                include_images=False,
+                include_nucleus_table=kind == "raw",
+            )
+
+        assert caught.value.path == path
+        assert caught.value.context.reader == "visium_hd"
 
     @pytest.mark.parametrize(
         ("version", "segmented", "sizes", "prefix", "feature_slice_name", "null_pair"),

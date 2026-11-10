@@ -193,22 +193,6 @@ def centroid_columns(obs: pd.DataFrame, path: ArtifactFile) -> tuple[np.ndarray,
             else np.dtype(str(column.dtype).lower())
         )
         columns.append(column.to_numpy(dtype=dtype, copy=False))
-
-    # Combining integer columns with other numeric dtypes can choose floating
-    # storage. Check only integers beyond its exact range before conversion.
-    common = np.result_type(columns[0].dtype, columns[1].dtype)
-    if common.kind == "f":
-        precision = np.finfo(common).nmant + 1
-        for values in columns:
-            if values.dtype.kind in "iu" and np.iinfo(values.dtype).bits > precision:
-                limit = 2**precision
-                candidates = values > limit
-                if values.dtype.kind == "i":
-                    candidates |= values < -limit
-                if any(int(common.type(value)) != int(value) for value in values[candidates]):
-                    raise _format_error(
-                        path, found="centroid integer precision loss", expected="lossless common numeric XY storage"
-                    )
     return columns[0], columns[1]
 
 

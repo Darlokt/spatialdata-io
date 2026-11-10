@@ -20,5 +20,4 @@ class TestTablePackage:
             "normalize_sparse_duplicates",
             "parse_linked_table",
             "prepare_anndata_dataframe",
-            "validate_compressed_sparse",
         ]

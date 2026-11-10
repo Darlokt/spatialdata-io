@@ -266,13 +266,6 @@ class TestCentroidColumns:
         with pytest.raises(ReaderFormatError, match="invalid centroids"):
             centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
 
-    @pytest.mark.parametrize("value", [2**53 + 1, 2**63 + 1, 2**64 - 1])
-    def test_lossy_integer_float_mixture(self, tmp_path: Path, value: int) -> None:
-        """Reject integer coordinates that a common float64 dtype would round."""
-        obs = pd.DataFrame({"centroid-0": pd.Series([value], dtype="UInt64"), "centroid-1": [1.0]})
-        with pytest.raises(ReaderFormatError, match="centroid integer precision loss"):
-            centroid_columns(obs, ArtifactFile(tmp_path / "cells.h5ad"))
-
     @pytest.mark.parametrize("value", [2**53 + 2, -(2**53 + 2), -(2**63)])
     def test_exact_wide_integer_float_mixture(self, tmp_path: Path, value: int) -> None:
         """Accept exactly representable wide integers without an arbitrary magnitude ban."""

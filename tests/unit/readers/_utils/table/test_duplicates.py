@@ -10,7 +10,7 @@ import pytest
 from scipy import sparse
 
 from spatialdata_io.readers._utils.table import SparseDuplicateSummary, normalize_owned_anndata
-from spatialdata_io.readers._utils.table._duplicates import normalize_sparse_duplicates
+from spatialdata_io.readers._utils.table._duplicates import _exact_integer_cast, normalize_sparse_duplicates
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -33,15 +33,14 @@ class TestNormalizeSparseDuplicates:
             ("uint8", [150, 150], "float32"),
             ("int16", [30000, 30000], "float32"),
             ("uint16", [65535, 1], "float32"),
+            ("int16", [2**15 - 1, 2**15 - 1], "float32"),
             ("int32", [2**31 - 1, 1], "float32"),
             ("int32", [2**31 - 1, 2], "float64"),
+            ("int32", [-(2**31), -(2**31)], "float32"),
             ("uint32", [2**32 - 1, 1], "float32"),
             ("uint32", [2**32 - 1, 2], "float64"),
-            ("int64", [2**63 - 1, 1], "float32"),
-            ("int64", [2**63 - 1, 2049], "float64"),
-            ("int64", [-(2**63), -(2**63)], "float32"),
-            ("uint64", [2**63 + 1, 2**63 - 1], "float32"),
             ("int8", [100, 100, -100], "int8"),
+            ("int32", [2**30, 2**30, -(2**30)], "int32"),
             ("int16", [100, 100], "int16"),
             ("int8", [100, -100], "int8"),
         ],
@@ -60,38 +59,55 @@ class TestNormalizeSparseDuplicates:
         for actual, original in zip((source.data, source.indices, source.indptr), before, strict=True):
             np.testing.assert_array_equal(actual, original)
 
-    def test_inexact_fallback_rejected(self) -> None:
-        source = _source([2**64 - 1, 2**64 - 1], "uint64", "csr")
-        with pytest.raises(ValueError, match="no supported lossless"):
+    @pytest.mark.parametrize(
+        ("dtype", "values"),
+        [("int64", [2**62, 2**62]), ("int64", [-(2**63), -1]), ("uint64", [2**64 - 1, 1])],
+    )
+    def test_partial_sums_beyond_64_bits_raise(self, dtype: str, values: list[int]) -> None:
+        source = _source(values, dtype, "csr")
+        with pytest.raises(ValueError, match=f"exceed {dtype} arithmetic"):
             normalize_sparse_duplicates(source)
+        np.testing.assert_array_equal(source.data, np.array(values, dtype=dtype))
 
-    def test_fallback_must_preserve_unaffected_entries(self) -> None:
+    def test_promoted_completed_sum_must_be_exact_in_float64(self) -> None:
+        # The odd uint64 total exceeds 2**53 but fits the 64-bit reduction.
+        # About 16 MiB of source buffers suffices to cross this boundary with
+        # uint32 contributions; no malformed storage or private state is used.
+        entries = 2**21 + 1
         source = sparse.csr_array(
-            (np.array([2**63, 2**63, 2**53 + 1], dtype=np.uint64), np.array([0, 0, 1]), np.array([0, 3])),
-            shape=(1, 2),
+            (np.full(entries, 2**32 - 1, dtype=np.uint32), np.zeros(entries, dtype=np.int32), np.array([0, entries])),
+            shape=(1, 1),
         )
         with pytest.raises(ValueError, match="no supported lossless"):
             normalize_sparse_duplicates(source)
+        assert source.nnz == entries
+        assert source.data[0] == 2**32 - 1
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    def test_unsorted_duplicates_are_widened_before_addition(self, storage: str) -> None:
+        buffers = (np.array([2**31 - 1, 1, 3], dtype=np.int32), np.array([1, 1, 0]), np.array([0, 3]))
+        source = (
+            sparse.csr_array(buffers, shape=(1, 2)) if storage == "csr" else sparse.csc_array(buffers, shape=(2, 1))
+        )
+
+        result = normalize_sparse_duplicates(source)
+
+        assert result.dtype == np.dtype(np.float32)
+        assert result.has_canonical_format
+        np.testing.assert_array_equal(result.data, [3, 2**31])
+        np.testing.assert_array_equal(source.data, [2**31 - 1, 1, 3])
+        np.testing.assert_array_equal(source.indices, [1, 1, 0])
 
     @pytest.mark.parametrize("storage", ["csr", "csc"])
     @pytest.mark.parametrize(("unaffected", "dtype"), [(7, "float32"), (2**24 + 1, "float64")])
     def test_promoted_dtype_includes_unaffected_values(self, storage: str, unaffected: int, dtype: str) -> None:
-        buffers = (
-            np.array([2**31 - 1, 1, unaffected], dtype=np.int32),
-            np.array([0, 0, 1]),
-            np.array([0, 3]),
-        )
+        buffers = (np.array([2**31 - 1, 1, unaffected], dtype=np.int32), np.array([0, 0, 1]), np.array([0, 3]))
         source = (
             sparse.csr_array(buffers, shape=(1, 2)) if storage == "csr" else sparse.csc_array(buffers, shape=(2, 1))
         )
         result = normalize_sparse_duplicates(source)
         assert result.dtype == np.dtype(dtype)
         np.testing.assert_array_equal(result.data, [2**31, unaffected])
-
-    def test_float_promotion_rejects_loss_even_if_a_wider_integer_would_fit(self) -> None:
-        source = _source([2**63 - 1, 2], "int64", "csr")
-        with pytest.raises(ValueError, match="lossless float32 or float64"):
-            normalize_sparse_duplicates(source)
 
     @pytest.mark.parametrize("dtype", ["int8", "int64", "uint64", "float32", "float64", "bool"])
     def test_canonical_buffers_are_borrowed(self, dtype: str) -> None:
@@ -113,7 +129,7 @@ class TestNormalizeSparseDuplicates:
     def test_sparse_structure_validated_before_conversion(self) -> None:
         source = _source([100, 100], "int8", "csr")
         source.indices[0] = 2
-        with pytest.raises(ValueError, match="active indices"):
+        with pytest.raises(ValueError, match="indices must be < 2"):
             normalize_sparse_duplicates(source)
 
     def test_unsorted_unique_entries_are_not_summed(self) -> None:
@@ -124,6 +140,22 @@ class TestNormalizeSparseDuplicates:
         assert result.dtype == source.dtype
         np.testing.assert_array_equal(result.data, [126, 127])
         assert result.nnz == source.nnz
+
+    @pytest.mark.parametrize("storage", ["csr", "csc"])
+    @pytest.mark.parametrize("dtype", ["int64", "uint64"])
+    def test_unsorted_unique_integer_extrema_need_no_sum_bound(self, storage: str, dtype: str) -> None:
+        maximum = np.iinfo(dtype).max
+        buffers = (np.array([maximum, 1], dtype=dtype), np.array([1, 0]), np.array([0, 2]))
+        source = (
+            sparse.csr_array(buffers, shape=(1, 2)) if storage == "csr" else sparse.csc_array(buffers, shape=(2, 1))
+        )
+
+        result = normalize_sparse_duplicates(source)
+
+        assert result.dtype == source.dtype
+        assert result.has_canonical_format
+        np.testing.assert_array_equal(result.data, np.array([1, maximum], dtype=dtype))
+        np.testing.assert_array_equal(source.data, np.array([maximum, 1], dtype=dtype))
 
     def test_many_small_compressed_spans_retain_native_dtype(self) -> None:
         source = sparse.csr_array(
@@ -167,6 +199,28 @@ class TestNormalizeSparseDuplicates:
             sparse.csc_matrix(_source([100, 100], "int8", "csc")),
         ):
             assert int(normalize_sparse_duplicates(source).data[0]) == 200
+
+
+class TestExactIntegerCast:
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    @pytest.mark.parametrize("source_dtype", ["int64", "uint64"])
+    def test_exact_powers_above_consecutive_integer_precision(self, dtype: str, source_dtype: str) -> None:
+        values = np.array([0, 2**54], dtype=source_dtype)
+        assert _exact_integer_cast(values, np.dtype(dtype))
+
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    @pytest.mark.parametrize("source_dtype", ["int64", "uint64"])
+    def test_rounded_upper_limit_is_not_cast_back(self, dtype: str, source_dtype: str) -> None:
+        values = np.array([np.iinfo(source_dtype).max], dtype=source_dtype)
+        assert not _exact_integer_cast(values, np.dtype(dtype))
+
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    def test_signed_minimum_is_exact(self, dtype: str) -> None:
+        assert _exact_integer_cast(np.array([-(2**63)], dtype=np.int64), np.dtype(dtype))
+
+    def test_inexact_values_in_later_batches(self, mocker: MockerFixture) -> None:
+        mocker.patch("spatialdata_io.readers._utils.table._duplicates._BOUND_BATCH_SIZE", 2)
+        assert not _exact_integer_cast(np.array([1, 2, 2**53 + 1], dtype=np.int64), np.dtype(np.float64))
 
 
 class TestSparseDuplicateSummary:

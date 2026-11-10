@@ -19,7 +19,6 @@ import zarr
 from anndata.tests.helpers import assert_equal
 from click.testing import CliRunner
 from dask.callbacks import Callback
-from scanpy import read_10x_h5
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
@@ -219,11 +218,11 @@ class TestXenium:
         np.testing.assert_array_equal(_array(labels_only.labels["cell_labels"]).data.compute(), bundle.cell_mask)
 
     @pytest.mark.parametrize(
-        ("source_dtype", "first", "second", "expected"),
-        [("int32", 2**24, 1, 2**24 + 1), ("uint32", 2**32 - 1, 2, 2**32 + 1)],
+        ("source_dtype", "first", "second", "output_dtype"),
+        [("int32", 2**24, 1, "float32"), ("uint32", 2**32 - 1, 2, "float64")],
     )
-    def test_duplicate_h5_counts_finish_before_protein_scaling(
-        self, tmp_path: Path, source_dtype: str, first: int, second: int, expected: int
+    def test_large_h5_counts_preserve_protein_scaling_order_and_linkage(
+        self, tmp_path: Path, source_dtype: str, first: int, second: int, output_dtype: str
     ) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
         path = bundle.root / "cell_feature_matrix.h5"
@@ -232,23 +231,17 @@ class TestXenium:
             data[:2] = [first, second]
             del handle["matrix/data"]
             handle.create_dataset("matrix/data", data=data)
-            handle["matrix/indices"][1] = 0
-        decoded = read_10x_h5(path, gex_only=False)
-        assert isinstance(decoded.X, sparse.csr_matrix | sparse.csr_array)
-        assert decoded.X.dtype == np.dtype("float32" if source_dtype == "int32" else "uint32")
-        assert not decoded.X.has_canonical_format
-        np.testing.assert_array_equal(decoded.X.data[:2], [first, second])
 
         result = xenium(bundle.root)
 
         table = result.tables["table"]
         expression = _x(table)
-        assert expression.dtype == np.dtype(np.float64)
+        assert expression.dtype == np.dtype(output_dtype)
         assert expression.has_canonical_format
         selected = [index for index, kind in enumerate(bundle.feature_types) if kind in DEFAULT_TYPES]
-        truth = bundle.counts[:, selected].astype(np.float64)
-        truth[0, 0] = expected
-        truth[0, 2] = 0
+        truth = bundle.counts[:, selected].astype(output_dtype)
+        truth[0, 0] = first
+        truth[0, 2] = second
         truth[:, 3:] /= fx.PROTEIN_FACTOR
         np.testing.assert_array_equal(expression.toarray(), truth)
         assert table.obs_names.tolist() == list(bundle.barcodes)
@@ -259,6 +252,18 @@ class TestXenium:
             table.obsm["spatial"], [[1.275, 1.0625], [3.4, 1.0625], [1.7, 3.4], [4.8875, 3.4]]
         )
 
+    def test_repeated_h5_coordinates_rejected_before_protein_scaling(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        path = bundle.root / "cell_feature_matrix.h5"
+        with h5py.File(path, "r+") as handle:
+            handle["matrix/indices"][1] = handle["matrix/indices"][0]
+
+        with pytest.raises(ReaderFormatError, match=r"repeated \(barcode, feature\)") as caught:
+            xenium(bundle.root)
+
+        assert caught.value.path == path
+        assert caught.value.context.reader == "xenium"
+
     @pytest.mark.parametrize("values", [(0.5, 0.5), (-1.0, 2.0), (1.25, 0.0)])
     def test_rejects_malformed_source_counts(self, tmp_path: Path, values: tuple[float, float]) -> None:
         """Modified synthetic source records exercise the shared count boundary."""
@@ -268,7 +273,6 @@ class TestXenium:
             data[:2] = values
             del handle["matrix/data"]
             handle.create_dataset("matrix/data", data=data)
-            handle["matrix/indices"][1] = handle["matrix/indices"][0]
         with pytest.raises(ReaderFormatError, match=r"negative|fractional"):
             xenium(bundle.root)
 

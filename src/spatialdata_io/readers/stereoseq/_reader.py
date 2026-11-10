@@ -369,14 +369,15 @@ def stereoseq(  # noqa: PLR0913 - every product selection is an explicit public 
           table ``cells_table``, in source cell order with the source integer
           cell IDs; ``adjusted_cells_*`` for adjusted cells.
         - ``X`` and the optional ``layers["exon"]`` are canonical CSR sparse
-          arrays, float32 when every count is exact, otherwise float64;
-          counts that neither represents exactly raise. Source summaries and
+          arrays, float32 through 2**24, otherwise float64 through 2**53;
+          larger integer counts raise. Source summaries and
           ``uns["stereoseq"]`` (origin, pitch, cell-type names) are kept.
 
         Analysis products: points ``<population>_analysis[_r<resolution>]_points``
         and table ``..._table``, where ``<population>`` is ``bin<N>``, ``cells``
         or ``adjusted_cells`` and ``<resolution>`` the clustering resolution
-        from the filename with ``.`` replaced by ``_``. The H5AD keeps its
+        as spelled in the filename, with ``.`` replaced by ``_``, ``+`` dropped
+        and ``E`` lowercased (``10.0`` gives ``r10_0``). The H5AD keeps its
         values, row and feature order, annotations, embeddings and ``raw``;
         ``X`` and the ``counts``, ``log1p`` and ``exon`` layers become CSR
         sparse arrays and duplicate sparse entries are summed. ``obs`` and

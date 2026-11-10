@@ -201,10 +201,10 @@ class TestGeojson:
         ("geometry", "found"),
         [
             ({"type": "Polygon", "coordinates": [[[0, 0], [2, 0], [0, 2]]]}, "unclosed"),
-            ({"type": "Polygon", "coordinates": [[[2**53 + 1, 0], [2, 0], [0, 2], [2**53 + 1, 0]]]}, "precision"),
+            ({"type": "Polygon", "coordinates": [[[0, 0], [True, 0], [0, 2], [0, 0]]]}, "nonnumeric"),
         ],
     )
-    def test_malformed_rings_are_never_repaired_or_rounded(
+    def test_malformed_rings_are_never_repaired_or_coerced(
         self, tmp_path: Path, geometry: dict[str, object], found: str
     ) -> None:
         path = tmp_path / "shapes.geojson"

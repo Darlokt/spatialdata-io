@@ -45,12 +45,12 @@ class TestReadTable:
         self, tmp_path: Path, mocker: MockerFixture, batch_bytes: int
     ) -> None:
         mocker.patch.object(seqfish_tables, "_BATCH_BYTES", batch_bytes)
-        counts = f",B,A,C\n2,0,2,3\n1,{2**63},0,16777217\n"
+        counts = f",B,A,C\n2,0,2,3\n1,{2**53},0,16777217\n"
         result = read_table(*_sources(tmp_path, counts))
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.has_canonical_format
         assert result.X.dtype == np.dtype(np.float64)
-        np.testing.assert_array_equal(result.X.data, np.array([2, 3, 2**63, 2**24 + 1], dtype=np.float64))
+        np.testing.assert_array_equal(result.X.data, np.array([2, 3, 2**53, 2**24 + 1], dtype=np.float64))
         np.testing.assert_array_equal(result.X.indices, [1, 2, 0, 2])
         np.testing.assert_array_equal(result.X.indptr, [0, 2, 4])
         assert result.var_names.tolist() == ["B", "A", "C"]
@@ -132,20 +132,22 @@ class TestReadTable:
             read_table(*_sources(tmp_path, ",A\n1," + "0" * 2048 + "\n"))
         assert caught.value.context.artifact == "CellxGene"
 
-    def test_unsigned_counts_across_batches(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        mocker.patch.object(seqfish_tables, "_BATCH_BYTES", 24)
-        large = 2**63
+    @pytest.mark.parametrize(("large", "dtype"), [(2**24, "float32"), (2**24 + 2, "float64"), (2**53, "float64")])
+    def test_count_storage_boundaries_across_batches(
+        self, tmp_path: Path, mocker: MockerFixture, large: int, dtype: str
+    ) -> None:
+        mocker.patch.object(seqfish_tables, "_BATCH_BYTES", 16)
         counts = f",A\n65537,1\n3,{large}\n"
         cells = "label,area,center_x,center_y\n3,1,2,3\n65537,4,5,6\n"
         result = read_table(*_sources(tmp_path, counts, cells))
         assert isinstance(result.X, sparse.csr_array)
-        assert result.X.dtype == np.dtype(np.float32)
+        assert result.X.dtype == np.dtype(dtype)
         assert result.X.data.tolist() == [1, large]
         assert result.obs["instance_id"].tolist() == [65537, 3]
 
-    @pytest.mark.parametrize("value", [2**53 + 1, 2**63 + 1, 2**64 - 1])
-    def test_completed_counts_reject_inexact_float64(self, tmp_path: Path, value: int) -> None:
-        with pytest.raises(ReaderFormatError, match="not exactly representable") as caught:
+    @pytest.mark.parametrize("value", [2**53 + 1, 2**53 + 2, 2**63, 2**63 + 1, 2**64 - 1])
+    def test_completed_counts_reject_above_float64_integer_range(self, tmp_path: Path, value: int) -> None:
+        with pytest.raises(ReaderFormatError, match=r"counts above 2\*\*53") as caught:
             read_table(*_sources(tmp_path, f",A\n1,{value}\n2,0\n"))
         assert caught.value.path == tmp_path / "counts.csv"
         assert caught.value.context.artifact == "CellxGene"
