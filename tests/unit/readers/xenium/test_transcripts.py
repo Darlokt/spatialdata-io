@@ -347,7 +347,7 @@ class TestReadTranscripts:
         pq.write_table(pq.read_table(path).drop_columns(["qv"]), path)
 
         with pytest.raises(ReaderFormatError, match="qv"):
-            _read(bundle)
+            _ = _read(bundle)
 
     def test_graph_holds_paths_not_handles(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcript_row_group=7))

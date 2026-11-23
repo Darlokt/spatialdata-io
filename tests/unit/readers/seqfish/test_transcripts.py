@@ -159,7 +159,7 @@ class TestReadTranscripts:
         path.write_bytes(content)
         parser = mocker.spy(csv_blocks, "read_bytes")
         with pytest.raises(ReaderFormatError, match=message):
-            read_transcripts(path, features=_FEATURES, frame="Roi1")
+            _ = read_transcripts(path, features=_FEATURES, frame="Roi1")
         parser.assert_not_called()
 
     def test_warning_filters_restore_when_public_model_parser_fails(
@@ -169,7 +169,7 @@ class TestReadTranscripts:
         parser = mocker.patch.object(transcript_module.PointsModel, "parse", side_effect=RuntimeError("injected"))
         initial = list(warnings.filters)
         with pytest.raises(RuntimeError, match="injected"):
-            read_transcripts(path, features=_FEATURES, frame="Roi1")
+            _ = read_transcripts(path, features=_FEATURES, frame="Roi1")
         assert warnings.filters == initial
         parser.assert_called_once()
         assert parser.call_args.kwargs["sort"] is False

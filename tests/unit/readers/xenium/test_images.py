@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
     from pytest_mock import MockerFixture
 
+    from spatialdata_io.readers._utils.image import RasterOptions
+
 DEFAULT_OPTIONS = make_raster_options()
 CONTEXT = ReaderErrorContext("xenium", "morphology focus image", "6.0.0")
 
@@ -37,9 +39,10 @@ def _focus_set(directory: Path, channels: tuple[str, ...]) -> tuple[MorphologyIm
     return MorphologyImage(ArtifactFile(directory / names[0]), names[0], frozenset(names)), pixels
 
 
-def _read(image: MorphologyImage, **options: object) -> DataArray | DataTree:
-    arguments = {"pixel_size": fx.PIXEL_SIZE, "raster": DEFAULT_OPTIONS, "context": CONTEXT} | options
-    return read_morphology(image, **arguments)  # pyrefly: ignore[bad-argument-type] - Test-chosen typed options.
+def _read(
+    image: MorphologyImage, *, pixel_size: float = fx.PIXEL_SIZE, raster: RasterOptions = DEFAULT_OPTIONS
+) -> DataArray | DataTree:
+    return read_morphology(image, pixel_size=pixel_size, raster=raster, context=CONTEXT)
 
 
 class TestReadMorphology:

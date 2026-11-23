@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import imagecodecs
@@ -19,6 +20,7 @@ from spatialdata_io.readers.cosmx._rasters import read_image, read_labels
 from spatialdata_io.readers.cosmx._transforms import Placement
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from spatialdata_io.readers._utils.image import RasterOptions
@@ -26,7 +28,6 @@ if TYPE_CHECKING:
 _DEFAULT = make_raster_options()
 _PLACEMENT = Placement(1, 1, 1000.0, 5000.5)
 _AXES = ("x", "y")
-_MINISBLACK: dict[str, object] = {"photometric": "minisblack"}
 _THREE = [0, 1, 2]
 _FOUR = [0, 1, 2, 3]
 
@@ -84,25 +85,50 @@ class TestReadImage:
         np.testing.assert_array_equal(_matrix(frames["global"]), [[0.5, 0, 499.75], [0, -0.5, 2502.5], [0, 0, 1]])
 
     @pytest.mark.parametrize(
-        ("name", "pixels", "options", "expected"),
+        ("name", "pixels", "writer", "expected"),
         [
-            ("rgb.tif", np.zeros((4, 5, 3), np.uint16), {"photometric": "rgb"}, ["r", "g", "b"]),
-            ("rgba.tif", np.zeros((4, 5, 4), np.uint8), {"photometric": "rgb", "extrasamples": [2]}, list("rgba")),
-            ("unspecified.tif", np.zeros((4, 5, 4), np.uint8), {"photometric": "rgb", "extrasamples": [0]}, _FOUR),
-            ("samples.tif", np.zeros((4, 5, 3), np.uint8), _MINISBLACK | {"planarconfig": "contig"}, _THREE),
-            ("channels.tif", np.zeros((3, 4, 5), np.uint8), _MINISBLACK | {"metadata": {"axes": "CYX"}}, _THREE),
+            ("rgb.tif", np.zeros((4, 5, 3), np.uint16), partial(tifffile.imwrite, photometric="rgb"), ["r", "g", "b"]),
+            (
+                "rgba.tif",
+                np.zeros((4, 5, 4), np.uint8),
+                partial(tifffile.imwrite, photometric="rgb", extrasamples=[2]),
+                list("rgba"),
+            ),
+            (
+                "unspecified.tif",
+                np.zeros((4, 5, 4), np.uint8),
+                partial(tifffile.imwrite, photometric="rgb", extrasamples=[0]),
+                _FOUR,
+            ),
+            (
+                "samples.tif",
+                np.zeros((4, 5, 3), np.uint8),
+                partial(tifffile.imwrite, photometric="minisblack", planarconfig="contig"),
+                _THREE,
+            ),
+            (
+                "channels.tif",
+                np.zeros((3, 4, 5), np.uint8),
+                partial(tifffile.imwrite, photometric="minisblack", metadata={"axes": "CYX"}),
+                _THREE,
+            ),
             ("gray_alpha.png", np.zeros((4, 5, 2), np.uint8), None, [0, 1]),
             ("rgba.png", np.zeros((4, 5, 4), np.uint8), None, list("rgba")),
         ],
-    )  # fmt: skip
+    )
     def test_rgb_names_only_for_declared_colour_samples(
-        self, tmp_path: Path, name: str, pixels: np.ndarray, options: dict[str, object] | None, expected: list[object]
+        self,
+        tmp_path: Path,
+        name: str,
+        pixels: np.ndarray,
+        writer: Callable[[Path, np.ndarray], tuple[int, int] | None] | None,
+        expected: list[object],
     ) -> None:
         path = tmp_path / name
-        if options is None:
+        if writer is None:
             path.write_bytes(imagecodecs.png_encode(pixels))
         else:
-            tifffile.imwrite(path, pixels, **options)  # pyrefly: ignore[bad-argument-type] - Test-owned writer options.
+            writer(path, pixels)
         element, _ = read_image(ArtifactFile(path), fov=1, placement=_PLACEMENT, options=_DEFAULT)
         assert element.dims == ("c", "y", "x")
         assert element.coords["c"].to_numpy().tolist() == expected

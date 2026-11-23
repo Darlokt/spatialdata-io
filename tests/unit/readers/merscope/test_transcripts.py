@@ -158,7 +158,7 @@ class TestReadTranscripts:
         source.path.write_bytes(b'"gene,global_x,global_y\n')
         parser = mocker.spy(csv_blocks, "read_bytes")
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_transcripts(source, features=_FEATURES, cell_population=None)
+            _ = read_transcripts(source, features=_FEATURES, cell_population=None)
         parser.assert_not_called()
 
     def test_projection_cannot_hide_bad_record_width(self, tmp_path: Path, mocker: MockerFixture) -> None:
@@ -176,7 +176,7 @@ class TestReadTranscripts:
         parser = mocker.patch.object(transcript_module.PointsModel, "parse", side_effect=RuntimeError("injected"))
         initial = list(warnings.filters)
         with pytest.raises(RuntimeError, match="injected"):
-            read_transcripts(source, features=_FEATURES, cell_population=None)
+            _ = read_transcripts(source, features=_FEATURES, cell_population=None)
         assert warnings.filters == initial
         parser.assert_called_once()
         assert parser.call_args.kwargs["sort"] is False

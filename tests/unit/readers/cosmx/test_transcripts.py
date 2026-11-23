@@ -193,7 +193,7 @@ class TestReadTranscripts:
         path = tmp_path / "tx.csv"
         path.write_text("fov,target\n1,A\n", encoding="utf-8")
         with pytest.raises(ReaderFormatError, match="missing"):
-            read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
+            _ = read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
 
 
 class TestGzipLayout:
@@ -260,7 +260,7 @@ class TestGzipLayout:
         path = tmp_path / "tx.csv.gz"
         path.write_bytes(b"fov,target\n")
         with pytest.raises(ReaderFormatError, match="invalid gzip data"):
-            read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
+            _ = read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
 
     def test_member_ending_inside_a_record_fails(self, tmp_path: Path) -> None:
         path = tmp_path / "tx.csv.gz"
