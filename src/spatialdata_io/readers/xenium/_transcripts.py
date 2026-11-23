@@ -23,7 +23,6 @@ coordinates ``x``, ``y``, ``z`` and the categorical ``feature_name`` that
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -37,6 +36,8 @@ from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.csv import read_csv_blocks
+from spatialdata_io.readers._utils.errors import ReaderFormatError
+from spatialdata_io.readers._utils.points import categorize_features, suppress_points_index_warning
 from spatialdata_io.readers.xenium._schemas import (
     CELL_ID,
     STRING,
@@ -48,7 +49,7 @@ from spatialdata_io.readers.xenium._schemas import (
     require_finite,
     require_no_nulls,
     transcript_columns,
-    vocabulary_codes,
+    validate_membership,
 )
 from spatialdata_io.readers.xenium._tables import read_header
 
@@ -93,11 +94,19 @@ def _normalize(table: pa.Table, spec: _Partitioning) -> pd.DataFrame:
         if name == _FEATURE:
             # XOA 1.0 stores binary feature names; they are decoded strictly as UTF-8.
             names = arrow_series(normalize_text(column, name, path=path, context=spec.context))
-            codes = vocabulary_codes(names, spec.features, name, path=path, context=spec.context)
-            columns[name] = pd.Categorical.from_codes(codes, categories=spec.features)
+            categories = categorize_features(names, spec.features)
+            if categories is None:
+                unknown = pd.Index(names.unique()).difference(spec.features, sort=False)[:5].tolist()
+                raise ReaderFormatError(
+                    context=spec.context,
+                    path=path,
+                    found=f"unknown {name} values {unknown!r}",
+                    expected=f"{name} values from the count matrix",
+                )
+            columns[name] = categories
         elif name == CELL_ID:
             ids = arrow_series(normalize_ids(column, kind, path=path, context=spec.context))
-            vocabulary_codes(ids[ids != spec.unassigned], spec.cells, name, path=path, context=spec.context)
+            validate_membership(ids[ids != spec.unassigned], spec.cells, name, path=path, context=spec.context)
             columns[name] = ids
         elif pa.types.is_string(kind):
             columns[name] = arrow_series(normalize_text(column, name, path=path, context=spec.context))
@@ -134,11 +143,7 @@ def _normalize_block(block: pd.DataFrame, spec: _Partitioning) -> pd.DataFrame:
 
 def _parse(frame: dd.DataFrame, *, known_divisions: bool) -> dd.DataFrame:
     """Parse points without index or category scans."""
-    with warnings.catch_warnings():
-        # CSV blocks have unknown divisions by construction; the model warns about them.
-        warnings.filterwarnings(
-            "ignore", message="The index of the dataframe is not monotonic increasing.*", category=UserWarning
-        )
+    with suppress_points_index_warning():
         return PointsModel.parse(
             frame,
             coordinates={"x": "x", "y": "y", "z": "z"},

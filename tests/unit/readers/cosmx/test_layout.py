@@ -43,15 +43,18 @@ class TestDiscoverLayout:
         )
         layout = discover_layout(root, file_prefix=None, include_transcripts=True)
         assert layout.file_prefix == "Run_1"
-        assert layout.counts.name == "Run_1_exprMat_file.csv"
+        assert layout.counts.path.name == "Run_1_exprMat_file.csv"
+        assert not layout.counts.compressed
         assert layout.fov_positions is not None
-        assert layout.fov_positions.name == "Run_1_fov_positions_file.csv.gz"
+        assert layout.fov_positions.path.name == "Run_1_fov_positions_file.csv.gz"
+        assert layout.fov_positions.compressed
         assert layout.transcripts is not None
-        assert layout.transcripts.name == "Run_1_tx_file.csv"
+        assert layout.transcripts.path.name == "Run_1_tx_file.csv"
         assert [(item.fov, item.path.name) for item in layout.images] == [
             (2, "CellComposite_F002.PNG"),
             (10, "CellComposite_F010.jpg"),
         ]
+        assert [item.encoding for item in layout.images] == ["png", "jpeg"]
         assert layout.labels is not None
         assert layout.labels.directory == root / "CellLabels"
         assert [item.fov for item in layout.labels.files] == [2, 10]
@@ -67,7 +70,7 @@ class TestDiscoverLayout:
         root = _touch(tmp_path, *_CORE, "Run_2_exprMat_file.csv.gz", "Run_2_metadata_file.csv.gz")
         layout = discover_layout(root, file_prefix="Run_2", include_transcripts=False)
         assert layout.file_prefix == "Run_2"
-        assert layout.counts.name == "Run_2_exprMat_file.csv.gz"
+        assert layout.counts.path.name == "Run_2_exprMat_file.csv.gz"
 
     @pytest.mark.parametrize("prefix", ["Lung 5", "  ", "a:b", "_"])
     def test_any_file_name_prefix_is_discovered_and_selected(self, tmp_path: Path, prefix: str) -> None:
@@ -75,7 +78,7 @@ class TestDiscoverLayout:
         for file_prefix in (None, prefix):
             layout = discover_layout(root, file_prefix=file_prefix, include_transcripts=False)
             assert layout.file_prefix == prefix
-            assert layout.metadata.name == f"{prefix}_metadata_file.csv"
+            assert layout.metadata.path.name == f"{prefix}_metadata_file.csv"
 
     @pytest.mark.parametrize("dotfile", [False, True])
     def test_present_empty_labels_fail(self, tmp_path: Path, *, dotfile: bool) -> None:

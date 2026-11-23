@@ -18,6 +18,7 @@ from spatialdata_io.readers.xenium._layout import (
     MorphologyImage,
     MtxArchive,
     Selection,
+    TranscriptInputs,
     discover_layout,
 )
 from tests.integration.readers.xenium import _fixtures as fx
@@ -85,9 +86,9 @@ class TestDiscoverLayout:
         assert layout.cells_store == tmp_path / "cells.zarr.zip"
         assert layout.cells is not None
         assert layout.cells.kind == "parquet"
-        assert layout.transcripts is not None
-        assert layout.transcripts.file.name == "transcripts.parquet"
-        assert isinstance(layout.counts, H5Counts)
+        assert isinstance(layout.counts, TranscriptInputs)
+        assert layout.counts.source.file.name == "transcripts.parquet"
+        assert isinstance(layout.counts.vocabulary, H5Counts)
         assert layout.focus is not None
         assert layout.focus.entry == tmp_path / bundle.focus_entry
         assert layout.metrics == tmp_path / "metrics_summary.csv"
@@ -107,13 +108,7 @@ class TestDiscoverLayout:
 
         layout = discover_layout(tmp_path, NOTHING)
 
-        assert (layout.cells_store, layout.cells, layout.counts, layout.transcripts, layout.focus) == (
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        assert (layout.cells_store, layout.cells, layout.counts, layout.focus) == (None, None, None, None)
 
     def test_store_required_for_labels_and_optional_otherwise(self, tmp_path: Path) -> None:
         fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(cells_store=False))
@@ -157,8 +152,9 @@ class TestDiscoverLayout:
         selection = replace(NOTHING, transcripts=True)
 
         layout = discover_layout(tmp_path, selection)
-        assert layout.transcripts is not None
-        assert layout.transcripts.kind == "csv"
+        assert isinstance(layout.counts, TranscriptInputs)
+        assert layout.counts.source.kind == "csv"
+        assert isinstance(layout.counts.vocabulary, H5Counts)
 
         (tmp_path / "transcripts.csv").rename(tmp_path / "transcripts.csv.gz")
         with pytest.raises(ReaderFormatError, match="only a gzip-compressed transcript CSV"):
@@ -167,6 +163,13 @@ class TestDiscoverLayout:
         (tmp_path / "transcripts.csv.gz").unlink()
         with pytest.raises(FileNotFoundError, match=r"transcripts\.parquet"):
             discover_layout(tmp_path, selection)
+
+    def test_transcripts_require_the_count_vocabulary_without_a_table(self, tmp_path: Path) -> None:
+        fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        (tmp_path / "cell_feature_matrix.h5").unlink()
+
+        with pytest.raises(FileNotFoundError, match=r"cell_feature_matrix\.h5"):
+            discover_layout(tmp_path, replace(NOTHING, transcripts=True))
 
     def test_count_sources(self, tmp_path: Path) -> None:
         fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(counts=("h5", "mtx", "mtx_archive")))

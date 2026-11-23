@@ -33,7 +33,7 @@ from spatialdata_io.readers.xenium._schemas import (
     transcript_types,
     validate_analysis_header,
     validate_header,
-    vocabulary_codes,
+    validate_membership,
 )
 
 if TYPE_CHECKING:
@@ -364,40 +364,22 @@ class TestIntegerIds:
             integer_ids(pd.Index(values, dtype="str"), path=PATH, context=CONTEXT)
 
 
-class TestVocabularyCodes:
-    """Values map to vocabulary positions and unknown values raise."""
+class TestValidateMembership:
+    """Validate distinct native values without narrowing their storage."""
 
-    def test_positions_in_vocabulary_order(self) -> None:
-        vocabulary = pd.Index(["GeneB", "GeneA", "GeneC"], dtype="str")
+    @pytest.mark.parametrize("ids", [[], [2**63 - 2, 2**63 - 1, 2**63 - 2]])
+    def test_signed_assignments_match_unsigned_ids(self, ids: list[int]) -> None:
+        values = arrow_series(pa.array(ids, pa.int64()))
+        vocabulary = id_index(pa.array([2**63 - 1, 2**63 - 2, 2**64 - 1], pa.uint64()))
 
-        codes = vocabulary_codes(
-            arrow_series(pa.array(["GeneA", "GeneC", "GeneA", "GeneB"])),
-            vocabulary,
-            "feature_name",
-            path=PATH,
-            context=CONTEXT,
-        )
-
-        np.testing.assert_array_equal(codes, [1, 2, 1, 0])
-
-    def test_integer_values(self) -> None:
-        codes = vocabulary_codes(pd.Series([-1, 3]), pd.Index([3, -1]), "cell_id", path=PATH, context=CONTEXT)
-
-        np.testing.assert_array_equal(codes, [1, 0])
-
-    def test_empty_values(self) -> None:
-        codes = vocabulary_codes(
-            arrow_series(pa.array([], pa.string())), pd.Index(["a"]), "x", path=PATH, context=CONTEXT
-        )
-
-        assert codes.shape == (0,)
+        validate_membership(values, vocabulary, "cell_id", path=PATH, context=CONTEXT)
 
     def test_unknown_values_raise_with_examples(self) -> None:
-        with pytest.raises(ReaderFormatError, match=r"unknown feature_name values \['GeneZ'\]"):
-            vocabulary_codes(
-                arrow_series(pa.array(["GeneA", "GeneZ"])),
-                pd.Index(["GeneA"]),
-                "feature_name",
+        with pytest.raises(ReaderFormatError, match=r"unknown cell_id values \['unknown'\]"):
+            validate_membership(
+                arrow_series(pa.array(["known", "unknown", "unknown"])),
+                pd.Index(["known"]),
+                "cell_id",
                 path=PATH,
                 context=CONTEXT,
             )

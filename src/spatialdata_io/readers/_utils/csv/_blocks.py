@@ -79,7 +79,7 @@ def _empty(spec: _BlockSpec) -> pd.DataFrame:
     return spec.schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
 
 
-def _paired_quotes(block: bytes) -> bool:
+def _paired_quotes(block: bytes | bytearray) -> bool:
     """Return whether every line of a block has an even number of double quotes."""
     if b'"' not in block:
         return True
@@ -98,6 +98,35 @@ def _paired_quotes(block: bytes) -> bool:
     return quotes % 2 == 0
 
 
+def validate_csv_lines(block: bytes | bytearray, /, *, context: ReaderErrorContext, path: ArtifactFile) -> None:
+    """Require physical CSV lines with paired quotes and LF or CRLF endings.
+
+    A partition owner calls this on a complete record block before Arrow
+    parsing so the validity of a record cannot depend on block boundaries.
+    """
+    if b"\r" in block and re.search(rb"\r(?!\n)", block):
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="a bare carriage return in CSV records",
+            expected="LF or CRLF line endings",
+        )
+    if not _paired_quotes(block):
+        start = 0
+        while start < len(block):
+            end = block.find(b"\n", start)
+            end = len(block) if end < 0 else end
+            if block.count(b'"', start, end) % 2:
+                preview = block[start : min(end, start + 80)].decode(errors="replace")
+                raise ReaderFormatError(
+                    context=context,
+                    path=path,
+                    found=f"a line with an odd number of double quotes ({preview!r})",
+                    expected="one record per line with paired quotes; quoted fields cannot span lines",
+                )
+            start = end + 1
+
+
 def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
     """Parse one owned byte block into the projected Arrow-backed columns."""
     if first:
@@ -106,25 +135,11 @@ def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
         block = block[newline + 1 :] if newline >= 0 else b""
     if not block:
         return _empty(spec)
-    if b"\r" in block and re.search(rb"\r(?!\n)", block):
-        raise ReaderFormatError(
-            context=spec.context,
-            path=spec.path,
-            found="a bare carriage return in CSV records",
-            expected="LF or CRLF line endings",
-        )
+    validate_csv_lines(block, context=spec.context, path=spec.path)
     # Arrow treats the first bytes of every input as a possible BOM. An
     # ignored empty line keeps a literal U+FEFF in the first field intact.
     if block.startswith(codecs.BOM_UTF8):
         block = b"\n" + block
-    if not _paired_quotes(block):
-        line = next(line for line in block.split(b"\n") if line.count(b'"') % 2)
-        raise ReaderFormatError(
-            context=spec.context,
-            path=spec.path,
-            found=f"a line with an odd number of double quotes ({line[:80].decode(errors='replace')!r})",
-            expected="one record per line with paired quotes; quoted fields cannot span lines",
-        )
     # Every record is one line now, so Arrow's default newline chunking applies.
     with pa.BufferReader(block) as source, csv_errors(context=spec.context, path=spec.path):
         table = pacsv.read_csv(

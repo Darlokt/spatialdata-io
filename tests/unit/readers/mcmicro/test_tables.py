@@ -5,21 +5,19 @@ from __future__ import annotations
 import io
 from typing import TYPE_CHECKING
 
-import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
-from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.mcmicro import _tables as mcmicro_tables
 from spatialdata_io.readers.mcmicro._layout import Quantification, Segmentation
 from spatialdata_io.readers.mcmicro._rasters import ImageGrid
 from spatialdata_io.readers.mcmicro._schemas import STRING_DTYPE, MarkerPanel, quantification_columns
-from spatialdata_io.readers.mcmicro._tables import _read_measurements, _set_positions, read_table
+from spatialdata_io.readers.mcmicro._tables import _read_measurements, read_table
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,10 +56,6 @@ def _grids(
 
 def _grid(sizes: tuple[float | None, float | None], name: str = "image", frame: str = "global") -> ImageGrid:
     return ImageGrid(name, (10, 10), sizes, frame)
-
-
-def _source(tmp_path: Path, name: str = "source") -> ArtifactFile:
-    return ArtifactFile(tmp_path / f"{name}.csv")
 
 
 class TestReadTable:
@@ -155,6 +149,8 @@ class TestReadTable:
         ("text", "match"),
         [
             (_HEADER + "1,inf,0,0,0,1,a\n", "nonfinite"),
+            (_HEADER + "1,nan,0,0,0,1,a\n", "nonfinite"),
+            (_HEADER + "1,-inf,0,0,0,1,a\n", "nonfinite"),
             (_HEADER + "1,1,0,0,0,1\n", r"malformed CSV \("),
             (_HEADER + "1,1,0,,0,1,a\n", "missing 'X_centroid'"),
             (_HEADER + "300,1,0,0,0,1,a\n", "'CellID' value 300 above 255"),
@@ -228,111 +224,39 @@ class TestReadMeasurements:
         elif failure == "parser":
             text += "2,1,0,0,0,1\n"
         source = io.BytesIO(text.encode())
-        path = ArtifactFile(tmp_path / "s.csv")
+        source_table = _quantification(tmp_path, "s", _HEADER)
+        path = source_table.path
         columns = quantification_columns(_HEADER.strip().split(","), ("A", "B"), path)
         mocker.patch("pathlib.Path.open", return_value=source)
         mocker.patch.object(mcmicro_tables, "_BATCH_BYTES", 128)
         if failure is None:
-            assert _read_measurements(path, columns, np.dtype(np.uint32)).annotations.num_rows == 20
+            assert (
+                _read_measurements(source_table, _grid((None, None)), columns, np.dtype(np.uint32)).annotations.num_rows
+                == 20
+            )
         else:
             with pytest.raises(ReaderFormatError, match=r"nonfinite|malformed CSV") as caught:
-                _read_measurements(path, columns, np.dtype(np.uint32))
+                _read_measurements(source_table, _grid((None, None)), columns, np.dtype(np.uint32))
             assert caught.value.context.reader == "mcmicro"
             assert caught.value.path == path
         assert source.closed
 
     def test_open_error_preserves_type_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = ArtifactFile(tmp_path / "s.csv")
+        source_table = _quantification(tmp_path, "s", _HEADER)
+        path = source_table.path
         columns = quantification_columns(_HEADER.strip().split(","), ("A", "B"), path)
         mocker.patch("pathlib.Path.open", side_effect=PermissionError("denied"))
         with pytest.raises(PermissionError) as caught:
-            _read_measurements(path, columns, np.dtype(np.uint32))
+            _read_measurements(source_table, _grid((None, None)), columns, np.dtype(np.uint32))
         assert any("mcmicro" in note and str(path) in note for note in caught.value.__notes__)
 
 
-class TestSetPositions:
-    """Native centroids keep their pixel-index frame; physical ones need every grid calibrated."""
-
-    @pytest.mark.parametrize("sizes", [(None, None), (2.0, None), (2.0, 3.0)])
-    def test_complete_source_grid_required_and_native_buffer_preserved(
-        self, tmp_path: Path, sizes: tuple[float | None, float | None]
-    ) -> None:
-        native = np.asarray([[2.0, 1.0], [5.0, 3.5]], dtype=np.float64)
-        table = ad.AnnData(sparse.csr_array([[1], [2]]))
-        expression = table.X
-        _set_positions(table, native, [_grid(sizes)], [2], [_source(tmp_path)])
-        assert table.obsm["spatial_pixels"] is native
-        np.testing.assert_array_equal(native, [[2, 1], [5, 3.5]])
-        assert table.X is expression
-        coordinates = table.uns[POSITIONS_KEY]["coordinates"]
-        assert coordinates["spatial_pixels"] == {
-            "axes": ["x", "y"],
-            "units": "pixel",
-            "frame": "image_regionprops_indices",
-            "position": "source_regionprops_centroid_zero_based_pixel_index_centres",
-        }
-        if sizes == (2.0, 3.0):
-            np.testing.assert_array_equal(table.obsm["spatial"], [[5, 4.5], [11, 12]])
-            assert not np.shares_memory(table.obsm["spatial"], native)
-            assert coordinates["spatial"] == {
-                "axes": ["x", "y"],
-                "units": "micrometer",
-                "frame": "global",
-                "position": "source_regionprops_centroid_in_raster_corner_frame",
-                "calibration": {"global": _grid(sizes).calibration},
-            }
-        else:
-            assert "spatial" not in table.obsm
-            assert set(coordinates) == {"spatial_pixels"}
-
-    def test_several_grids_use_row_frames(self, tmp_path: Path) -> None:
-        native = np.asarray([[0.5, 0.5], [1.5, 1.5], [2.5, 2.5]], dtype=np.float64)
-        table = ad.AnnData(sparse.csr_array([[1], [2], [3]]))
-        grids = [_grid((2.0, 3.0), "core_1", "core_1"), _grid((5.0, 7.0), "core_2", "core_2")]
-        _set_positions(table, native, grids, [1, 2], [_source(tmp_path, "a"), _source(tmp_path, "b")])
-        np.testing.assert_array_equal(table.obsm["spatial"], [[2, 3], [10, 14], [15, 21]])
-        assert table.obs["spatial_frame"].tolist() == ["core_1", "core_2", "core_2"]
-        assert table.obs["spatial_frame"].cat.categories.tolist() == ["core_1", "core_2"]
-        assert table.obs["spatial_pixel_frame"].tolist() == [
-            "core_1_regionprops_indices",
-            "core_2_regionprops_indices",
-            "core_2_regionprops_indices",
-        ]
-        coordinates = table.uns[POSITIONS_KEY]["coordinates"]
-        assert coordinates["spatial"]["frame_key"] == "spatial_frame"
-        assert set(coordinates["spatial"]["calibration"]) == {"core_1", "core_2"}
-        assert coordinates["spatial_pixels"]["frame_key"] == "spatial_pixel_frame"
-
-    def test_mixed_calibration_has_no_physical_positions(self, tmp_path: Path) -> None:
-        table = ad.AnnData(sparse.csr_array([[1], [2]]))
-        grids = [_grid((2.0, 3.0), "core_1", "core_1"), _grid((None, None), "core_2", "core_2")]
-        _set_positions(table, np.zeros((2, 2)), grids, [1, 1], [_source(tmp_path, "a"), _source(tmp_path, "b")])
-        assert "spatial" not in table.obsm
-        assert "spatial_frame" not in table.obs
-        assert set(table.uns[POSITIONS_KEY]["coordinates"]) == {"spatial_pixels"}
-
-    @pytest.mark.parametrize(("native_x", "physical_x"), [(-0.5, 0.0), (0.5, 5e-324), (-1.5, -5e-324)])
-    def test_shifted_zero_and_representable_subnormal_are_valid(
-        self, tmp_path: Path, native_x: float, physical_x: float
-    ) -> None:
-        native = np.asarray([[native_x, 0.5]], dtype=np.float64)
-        table = ad.AnnData(sparse.csr_array([[1]]))
-        _set_positions(table, native, [_grid((5e-324, 3.0))], [1], [_source(tmp_path)])
-        np.testing.assert_array_equal(table.obsm["spatial"], [[physical_x, 3]])
-        np.testing.assert_array_equal(native, [[native_x, 0.5]])
-        assert table.obsm["spatial_pixels"] is native
-        assert table.obsm["spatial"].dtype == np.dtype(np.float64)
-
-    def test_nonzero_shifted_coordinate_cannot_collapse_to_zero(self, tmp_path: Path) -> None:
-        table = ad.AnnData(sparse.csr_array([[1]]))
-        with pytest.raises(ReaderFormatError, match="nonzero"):
-            _set_positions(table, np.asarray([[0.0, 1.0]]), [_grid((5e-324, 3.0))], [1], [_source(tmp_path)])
-
-    def test_failure_names_the_offending_table(self, tmp_path: Path) -> None:
-        table = ad.AnnData(sparse.csr_array([[1], [2]]))
-        grids = [_grid((2.0, 3.0), "core_1", "core_1"), _grid((1e308, 3.0), "core_2", "core_2")]
-        paths = [_source(tmp_path, "a"), _source(tmp_path, "b")]
+class TestCalibratedMeasurements:
+    def test_failure_identifies_the_unrepresentable_core(self, tmp_path: Path) -> None:
+        first = _quantification(tmp_path, "a", _HEADER + "1,1,2,2,1,4,x\n")
+        second = _quantification(tmp_path, "b", _HEADER + "1,1,2,2,1,4,x\n")
+        grids = {"a": _grid((2, 3), "core_1", "core_1"), "b": _grid((1e308, 3), "core_2", "core_2")}
         with pytest.raises(ReaderFormatError, match="nonfinite physical positions in 'core_2'") as caught:
-            _set_positions(table, np.asarray([[2.0, 1.0], [2.0, 1.0]]), grids, [1, 1], paths)
-        assert caught.value.path == paths[1]
+            read_table((first, second), _panel(), _dtypes(first, second), grids)
+        assert caught.value.path == second.path
         assert caught.value.context == ReaderErrorContext("mcmicro", "quantification")

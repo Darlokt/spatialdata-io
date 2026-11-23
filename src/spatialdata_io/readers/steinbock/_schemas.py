@@ -196,24 +196,17 @@ def centroid_columns(obs: pd.DataFrame, path: ArtifactFile) -> tuple[np.ndarray,
     return columns[0], columns[1]
 
 
-def validate_centroids(
-    coordinates: np.ndarray, obs: pd.DataFrame, grids: Mapping[str, SampleGrid], path: ArtifactFile
-) -> None:
-    """Require finite XY pixel centres within each object's own mask extent."""
+def validate_centroids(coordinates: np.ndarray, grid: SampleGrid, path: ArtifactFile) -> None:
+    """Require finite XY pixel centres within this sample's mask extent."""
     if not np.isfinite(coordinates).all():
         raise _format_error(path, found="invalid centroids", expected="finite real centroid coordinates")
-
-    shapes = {grid.image_name: grid.shape for grid in grids.values()}
-    # Group once rather than rescanning the entire cell population for each image.
-    for filename, rows in obs.groupby("image", sort=False, observed=True).indices.items():
-        positions = coordinates[rows]
-        height, width = shapes[str(filename)]
-        if (positions < 0).any() or (positions[:, 0] > width - 1).any() or (positions[:, 1] > height - 1).any():
-            raise _format_error(
-                path,
-                found=f"centroids outside {filename!r}",
-                expected=f"pixel centers within YX extent {(height, width)}",
-            )
+    height, width = grid.shape
+    if (coordinates < 0).any() or (coordinates[:, 0] > width - 1).any() or (coordinates[:, 1] > height - 1).any():
+        raise _format_error(
+            path,
+            found=f"centroids outside {grid.image_name!r}",
+            expected=f"pixel centers within YX extent {(height, width)}",
+        )
 
 
 def metadata_columns(obs: pd.DataFrame, var: pd.DataFrame, path: ArtifactFile) -> list[str]:

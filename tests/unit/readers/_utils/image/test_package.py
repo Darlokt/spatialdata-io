@@ -15,6 +15,7 @@ class TestImagePackage:
             "TiffMetadata",
             "channel_source",
             "inspect_tiff",
+            "inspect_tiff_if_recognized",
             "make_raster_options",
             "normalize_cyx_image",
             "normalize_raster_axes",

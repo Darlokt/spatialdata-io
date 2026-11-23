@@ -18,10 +18,9 @@ from spatialdata_io.readers.codex._schemas import (
     csv_types,
     expression_dtype,
     fcs_cell_ids,
-    normalize_fcs_metadata,
     region_name,
     validate_csv_annotations,
-    validate_expression,
+    validate_fcs_metadata,
     validate_observations,
 )
 
@@ -84,17 +83,6 @@ class TestFcsCellIds:
             fcs_cell_ids(values, ArtifactFile(tmp_path / "cells.fcs"))
 
 
-class TestValidateExpression:
-    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
-    def test_nonfinite_intensities(self, tmp_path: Path, value: float) -> None:
-        with pytest.raises(ReaderFormatError, match="nonfinite cycle intensities"):
-            validate_expression(np.array([[1.0, value]]), ArtifactFile(tmp_path / "cells.csv"))
-
-    def test_finite_integer_and_float_intensities(self, tmp_path: Path) -> None:
-        validate_expression(np.array([[-1.5, 0.0]]), ArtifactFile(tmp_path / "cells.csv"))
-        validate_expression(np.array([[2**62, -1]], dtype=np.int64), ArtifactFile(tmp_path / "cells.fcs"))
-
-
 class TestValidateObservations:
     def test_coordinates(self, tmp_path: Path) -> None:
         frame = pd.DataFrame({"cell_id": [0, 5], "x": [1.5, -2.0], "y": [3.0, 4.0]}).astype(
@@ -140,7 +128,7 @@ class TestValidateCsvAnnotations:
         pd.testing.assert_frame_equal(frame, original, check_exact=True)
 
 
-class TestNormalizeFcsMetadata:
+class TestValidateFcsMetadata:
     """Preserve FCS annotation widths and reject nonnumeric metadata parameters."""
 
     def test_float32_parameters(self, tmp_path: Path) -> None:
@@ -148,15 +136,15 @@ class TestNormalizeFcsMetadata:
         values = np.asarray([0.125, -1.5], dtype=np.float32)
         frame = pd.DataFrame({"x": values})
 
-        normalize_fcs_metadata(frame, ArtifactFile(tmp_path / "cells.fcs"))
+        validate_fcs_metadata(frame, ArtifactFile(tmp_path / "cells.fcs"))
 
-        assert frame["x"].dtype == pd.ArrowDtype(pa.float32())
+        assert frame["x"].dtype == np.dtype(np.float32)
         np.testing.assert_array_equal(frame["x"].to_numpy(), values)
 
     def test_nonnumeric_parameter(self, tmp_path: Path) -> None:
         """Reject nonnumeric FCS event parameters before numerical assembly."""
         with pytest.raises(ReaderFormatError, match="FCS parameter"):
-            normalize_fcs_metadata(pd.DataFrame({"cell_id": ["invalid"]}), ArtifactFile(tmp_path / "cells.fcs"))
+            validate_fcs_metadata(pd.DataFrame({"cell_id": ["invalid"]}), ArtifactFile(tmp_path / "cells.fcs"))
 
 
 class TestExpressionDtype:

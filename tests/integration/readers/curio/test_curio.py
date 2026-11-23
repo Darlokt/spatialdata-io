@@ -240,6 +240,20 @@ class TestCurio:
 
         assert table.uns["QC"] == {"Reads": "100", "Beads": "3"}
 
+    def test_mixed_integer_embeddings_preserve_exact_native_xy_in_h5ad(self, tmp_path: Path) -> None:
+        write_curio(tmp_path)
+        path = tmp_path / "sample_anndata.h5ad"
+        source = ad.read_h5ad(path)
+        native = np.arange(source.n_obs * 2, dtype=np.int64).reshape(source.n_obs, 2) + 2**53 + 1
+        source.obsm["X_spatial"], source.obsm["spatial"] = native, native.astype(np.uint64)
+        source.write_h5ad(path)
+
+        destination = tmp_path / "table.h5ad"
+        curio(tmp_path).tables["table"].write_h5ad(destination)
+        restored = ad.read_h5ad(destination)
+        np.testing.assert_array_equal(restored.obsm["spatial_pixels"], native, strict=True)
+        assert restored.obsm["spatial"].dtype == np.float64
+
     def test_primary_single_embedding_and_manufacturer_landmarks(self, tmp_path: Path) -> None:
         write_curio(tmp_path, duplicate_coordinates=False)
         path = tmp_path / "sample_anndata.h5ad"

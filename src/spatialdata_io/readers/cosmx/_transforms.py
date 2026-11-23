@@ -116,9 +116,17 @@ def raster_to_local(height: int) -> Affine:
     return Affine(np.asarray(matrix, dtype=np.float64), input_axes=_AXES, output_axes=_AXES)
 
 
-def _intervals(
-    samples: AxisSamples, rows: npt.NDArray[np.bool_], path: ArtifactFile
-) -> dict[Sign, tuple[float, float]]:
+def group_fov_rows(fovs: pd.Index) -> dict[int, npt.NDArray[np.intp]]:
+    """Group rows by exact uint64 FOV in numeric FOV order and source row order."""
+    if not len(fovs):
+        return {}
+    codes, ordered_fovs = fovs.factorize(sort=True)
+    rows = np.argsort(codes, kind="stable")
+    boundaries = np.flatnonzero(np.diff(codes[rows])) + 1
+    return {int(fov): group for fov, group in zip(ordered_fovs, np.split(rows, boundaries), strict=True)}
+
+
+def _intervals(samples: AxisSamples, rows: npt.NDArray[np.intp], path: ArtifactFile) -> dict[Sign, tuple[float, float]]:
     """Return the offset interval consistent with every selected cell, for each sign."""
     local, global_ = samples.local[rows], samples.global_[rows]
     # A subnormal round-off allowance may underflow; printed bounds still apply.
@@ -190,7 +198,7 @@ def _position_offset(
 
 
 def solve_placements(
-    fovs: pd.Index,
+    fov_rows: Mapping[int, npt.NDArray[np.intp]],
     samples: tuple[AxisSamples, AxisSamples],
     *,
     required: frozenset[int],
@@ -199,10 +207,7 @@ def solve_placements(
 ) -> dict[int, Placement]:
     """Derive every required FOV's placement from all of its cells, cross-checked by positions."""
     candidates: tuple[dict[int, dict[Sign, tuple[float, float]]], dict[int, dict[Sign, tuple[float, float]]]] = ({}, {})
-    for fov in fovs.unique().sort_values():
-        # Pandas otherwise boxes a Python scalar as signed int64, overflowing
-        # for valid large FOV IDs. Coordinates require one native boolean mask.
-        rows = np.asarray(fovs == np.uint64(fov), dtype=np.bool_)
+    for fov, rows in fov_rows.items():
         for axis, axis_samples in enumerate(samples):
             feasible = _intervals(axis_samples, rows, path)
             if not feasible:
@@ -215,7 +220,9 @@ def solve_placements(
 
     signs = (_dataset_sign(candidates[0], "x", path), _dataset_sign(candidates[1], "y", path))
     placements: dict[int, Placement] = {}
-    for fov in sorted(required | set(candidates[0])):
+    # A pixel position supplies both offsets only when both axes are positive.
+    position_fovs = positions.keys() if signs == (1, 1) else ()
+    for fov in sorted(set(required).union(fov_rows, position_fovs)):
         position = positions.get(fov)
         offsets: list[float] = []
         for axis, sign in enumerate(signs):

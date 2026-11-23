@@ -112,6 +112,8 @@ class TestXenium:
     @pytest.mark.parametrize("role", ["cell", "nucleus", "both"])
     def test_native_labels_only_contract(self, tmp_path: Path, profile: fx.Profile, role: str) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, profile)
+        (bundle.root / "cell_feature_matrix.h5").unlink()
+        (bundle.root / "transcripts.parquet").unlink()
         tasks: list[object] = []
         with Callback(posttask=lambda *args: tasks.append(args)):
             result = xenium(
@@ -462,6 +464,33 @@ class TestXenium:
         assert "spatialdata_attrs" not in unlinked.uns
         assert "region" not in unlinked.obs
         assert dict(without.tables) == {}
+
+    @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_3_0])
+    def test_transcript_vocabulary_without_an_expression_matrix(self, tmp_path: Path, profile: fx.Profile) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, profile)
+        expected = xenium(bundle.root).points["transcripts"].compute()
+        with h5py.File(bundle.root / "cell_feature_matrix.h5", "r+") as handle:
+            del handle["matrix/data"]
+        for artifact in ("cells.parquet", "cells.zarr.zip", "cell_boundaries.parquet", "nucleus_boundaries.parquet"):
+            (bundle.root / artifact).unlink()
+
+        result = xenium(
+            bundle.root,
+            include_table=False,
+            include_cell_labels=False,
+            include_nucleus_labels=False,
+            include_cell_boundaries=False,
+            include_nucleus_boundaries=False,
+            include_morphology_focus=False,
+            include_aligned_images=False,
+        )
+
+        assert set(result.points) == {"transcripts"}
+        assert not result.tables
+        assert not result.labels
+        assert not result.shapes
+        assert not result.images
+        pd.testing.assert_frame_equal(result.points["transcripts"].compute(), expected, check_exact=True)
 
     def test_drop_removes_whole_entities(self, tmp_path: Path) -> None:
         # Cell 2 has a self-intersecting polygon and owns nuclei 3 and 4.

@@ -8,6 +8,7 @@ per split nuclei stack) and record provenance.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata import SpatialData
@@ -15,6 +16,7 @@ from spatialdata import SpatialData
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, warn_user
 from spatialdata_io.readers._utils.image import make_raster_options
+from spatialdata_io.readers._utils.names import colliding_element_names
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.macsima._channels import make_channel_options, plan_stack
 from spatialdata_io.readers.macsima._images import make_image
@@ -23,12 +25,12 @@ from spatialdata_io.readers.macsima._metadata import ChannelSource, read_channel
 from spatialdata_io.readers.macsima._tables import make_channel_table
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping, Sequence
-    from pathlib import Path
+    from collections.abc import Sequence
 
     from anndata import AnnData
     from xarray import DataArray, DataTree
 
+    from spatialdata_io.readers.macsima._channels import PlannedChannel
     from spatialdata_io.readers.macsima._layout import ParsingStyle, StackFiles
 
 
@@ -57,25 +59,6 @@ def _read_sources(stack: StackFiles) -> list[ChannelSource]:
             expected="at least one MACSima OME-TIFF channel",
         )
     return sources
-
-
-def _insert_unique(
-    elements: MutableMapping[str, DataArray | DataTree], name: str, element: DataArray | DataTree, *, stack: StackFiles
-) -> None:
-    """Insert one image and reject a name that another stack already generated.
-
-    A split nuclei stack adds ``<stack>_nuclei_image``, which can equal the
-    image of a folder named ``<stack>_nuclei``. SpatialData compares element
-    names with ``str.lower()``.
-    """
-    if any(existing.lower() == name.lower() for existing in elements):
-        raise ReaderFormatError(
-            context=_LAYOUT_CONTEXT,
-            path=stack.directory,
-            found=f"element name {name!r} generated twice, ignoring case",
-            expected="folder names whose image and table names do not collide",
-        )
-    elements[name] = element
 
 
 def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the documented CLI.
@@ -210,8 +193,10 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
     Notes
     -----
     Coordinates: every stack is calibrated in micrometres by its square OME
-    pixel size, declared in µm or nm; a missing, non-square or
-    nonpositive size fails. One stack uses ``global``. Several stacks are
+    pixel size, declared in µm or nm. Sizes must be positive and agree
+    across axes and channels within a relative tolerance of ``1e-12``.
+    The first selected channel's X size supplies the scale. One stack uses
+    ``global``. Several stacks are
     not registered to each other, so each keeps its own micrometre frame
     named ``<stack>``; a nuclei stack shares its parent's frame. Channels are
     placed on one pixel canvas by their integral OME plane positions in
@@ -241,25 +226,32 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
         path, parsing_style=parsing_style, exclude_folder_names=excluded_folders, path_policy=path_policy
     )
 
+    selections: list[tuple[str, str, tuple[PlannedChannel, ...], float]] = []
+    for stack in layout.stacks:
+        plan = plan_stack(stack, _read_sources(stack), channel_options)
+        # Stacks are calibrated in micrometres; unregistered stacks keep separate frames.
+        frame = "global" if len(layout.stacks) == 1 else plan.name
+        selections.append((plan.name, frame, plan.channels, plan.pixel_size_um))
+        if plan.nuclei is not None:
+            selections.append((f"{plan.name}_nuclei", frame, plan.nuclei, plan.pixel_size_um))
+
+    # A split stack's name can coincide with an ordinary folder name.
+    duplicates = colliding_element_names(f"{name}_image" for name, _, _, _ in selections)
+    if duplicates:
+        raise ReaderFormatError(
+            context=_LAYOUT_CONTEXT,
+            path=Path(path).expanduser(),
+            found=f"generated element names {duplicates!r} that collide ignoring case",
+            expected="folder names whose image and table names do not collide",
+        )
+
     images: dict[str, DataArray | DataTree] = {}
     tables: dict[str, AnnData] = {}
     versions: set[str] = set()
-    for stack in layout.stacks:
-        plan = plan_stack(stack, _read_sources(stack), channel_options)
-        # Every selected channel is in the main stack, the nuclei stack or both.
-        versions.update(channel.source.software_version for channel in (*plan.channels, *(plan.nuclei or ())))
-        # Stacks are calibrated in micrometres; unregistered stacks keep separate frames.
-        frame = "global" if len(layout.stacks) == 1 else plan.name
-
-        # The optional nuclei stack shares the main stack's canvas and frame.
-        selections = {"": plan.channels}
-        if plan.nuclei is not None:
-            selections["_nuclei"] = plan.nuclei
-
-        for suffix, channels in selections.items():
-            image = make_image(channels, frame=frame, pixel_size_um=plan.pixel_size_um, raster=raster)
-            _insert_unique(images, f"{plan.name}{suffix}_image", image, stack=stack)
-            tables[f"{plan.name}{suffix}_table"] = make_channel_table(channels)
+    for name, frame, channels, pixel_size_um in selections:
+        images[f"{name}_image"] = make_image(channels, frame=frame, pixel_size_um=pixel_size_um, raster=raster)
+        tables[f"{name}_table"] = make_channel_table(channels)
+        versions.update(channel.source.software_version for channel in channels)
 
     result = SpatialData(images=images, tables=tables)
     # Channels from different MACS iQ View releases have no single format version.

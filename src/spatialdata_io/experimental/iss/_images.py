@@ -8,8 +8,8 @@ caller's ``data_axes``::
     labels      source axes -> y, x      integer dtype, only singleton extra axes
 
 Channel ``C`` holds scientific channels and is never reinterpreted as RGB from
-its count or dtype. A non-singleton samples axis ``S`` (interleaved RGB, for
-example) is rejected unless ``data_axes`` maps it to ``C``. Declared axes that
+its count or dtype. An interleaved samples axis ``S`` becomes channels.
+Declared axes that
 cannot be normalized are malformed content (``ReaderFormatError``);
 ``data_axes`` that do not fit the file raise ``ValueError`` with a note naming
 the raw image. Channel names, in order of precedence:
@@ -39,14 +39,12 @@ from typing import TYPE_CHECKING
 from spatialdata.models import Image2DModel, Labels2DModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
-    channel_source,
     inspect_tiff,
+    normalize_cyx_image,
     normalize_raster_axes,
-    ome_channel_names,
     ome_pixel_sizes_um,
-    raster_channel_names,
     read_tiff,
     require_matching_pixel_sizes,
     select_tiff_series,
@@ -54,11 +52,10 @@ from spatialdata_io.readers._utils.image import (
 
 if TYPE_CHECKING:
     import numpy as np
-    from dask.array import Array
     from xarray import DataArray, DataTree
 
     from spatialdata_io.experimental.iss._layout import IssLayout
-    from spatialdata_io.readers._utils.image import RasterOptions
+    from spatialdata_io.readers._utils.image import LazyRaster, RasterOptions
     from spatialdata_io.readers._utils.image.tiff import TiffMetadata
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -79,33 +76,25 @@ class IssRasters:
     label_dtype: np.dtype[np.integer]
 
 
-def validate_data_axes(data_axes: str | None) -> str | None:
-    """Validate the caller's raw-image axes before any I/O and return them lowercase.
-
-    The rank is checked against the file when it is read.
-    """
-    if data_axes is None:
-        return None
-    if not isinstance(data_axes, str):
-        message = "data_axes must be a string such as 'CYX', or None."
-        raise TypeError(message)
-
-    axes = data_axes.lower()
-    if not axes.isascii() or not axes.isalpha() or len(set(axes)) != len(axes) or not {"x", "y"} <= set(axes):
-        message = f"data_axes must contain distinct letters including X and Y, such as 'CYX'; found {data_axes!r}."
-        raise ValueError(message)
-    return axes
-
-
 def read_rasters(layout: IssLayout, *, data_axes: str | None, raster: RasterOptions) -> IssRasters:
     """Build the image and labels models without executing pixel tasks.
 
     One pyramid applies to both, because they share a pixel grid.
     """
-    image, image_metadata = _read_raster(
-        layout.raw_image, context=_IMAGE_CONTEXT, target_axes=_IMAGE_AXES, data_axes=data_axes
+    raw, image_metadata = _read_raster(layout.raw_image, context=_IMAGE_CONTEXT)
+    image, channels = normalize_cyx_image(
+        raw, data_axes, tiff=(image_metadata, 0), context=_IMAGE_CONTEXT, path=layout.raw_image
     )
-    labels, label_metadata = _read_raster(layout.labels, context=_LABELS_CONTEXT, target_axes=_LABEL_AXES)
+    mask, label_metadata = _read_raster(layout.labels, context=_LABELS_CONTEXT)
+    try:
+        labels = normalize_raster_axes(mask.data, mask.axes, target_axes=_LABEL_AXES)
+    except ValueError as error:
+        raise ReaderFormatError(
+            context=_LABELS_CONTEXT,
+            path=layout.labels,
+            found=str(error),
+            expected="unambiguous 2D axes YX with only singleton nonspatial axes",
+        ) from error
 
     if image.shape[-2:] != labels.shape:
         raise ReaderFormatError(
@@ -123,28 +112,14 @@ def read_rasters(layout: IssLayout, *, data_axes: str | None, raster: RasterOpti
         )
     raster.validate_label_pyramid(labels, element=f"ISS labels {layout.labels}")
 
-    # A declared S becomes channels only when data_axes maps it to C, because
-    # normalization rejects a non-singleton S otherwise.
-    level = image_metadata.series[0].levels[0]
-    source_axes = tuple(axis.lower() for axis in level.axes)
-    samples, ome_samples = channel_source(source_axes, source_axes if data_axes is None else data_axes)
-    ome = None
-    if ome_samples is not None:
-        ome = ome_channel_names(
-            image_metadata,
-            series=0,
-            count=int(image.shape[0]),
-            samples=ome_samples,
-            context=ReaderErrorContext("iss", "raw image channels"),
-        )
-
+    source_axes = tuple(axis.lower() for axis in raw.axes)
     scale = _micrometre_scale(image_metadata, label_metadata, source_axes, data_axes)
     frame, transform = (_PIXEL_FRAME, Identity()) if scale is None else (_CALIBRATED_FRAME, scale)
     return IssRasters(
         Image2DModel.parse(
             image,
             dims=_IMAGE_AXES,
-            c_coords=raster_channel_names(level.color, samples=samples, ome=ome),
+            c_coords=channels,
             rgb=False,
             chunks=raster.image_chunks(),
             scale_factors=raster.model_scale_factors,
@@ -161,28 +136,11 @@ def read_rasters(layout: IssLayout, *, data_axes: str | None, raster: RasterOpti
     )
 
 
-def _read_raster(
-    path: ArtifactFile, *, context: ReaderErrorContext, target_axes: tuple[str, ...], data_axes: str | None = None
-) -> tuple[Array, TiffMetadata]:
-    """Inspect the only series and normalize its full-resolution level lazily to ``target_axes``."""
+def _read_raster(path: ArtifactFile, *, context: ReaderErrorContext) -> tuple[LazyRaster, TiffMetadata]:
+    """Inspect the only series and return its lazy full-resolution raster."""
     metadata = inspect_tiff(path, context=context)
     raster = read_tiff(metadata, series=select_tiff_series(metadata, None, context=context), level=0, context=context)
-    axes = tuple(data_axes) if data_axes is not None else tuple(axis.lower() for axis in raster.axes)
-    try:
-        array = normalize_raster_axes(
-            raster.data, axes, target_axes=target_axes, add_missing=("c",) if "c" in target_axes else ()
-        )
-    except ValueError as error:
-        if data_axes is not None:
-            add_reader_context(error, context=context, path=path)
-            raise
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=str(error),
-            expected=f"unambiguous 2D axes {target_axes}. Singleton nonspatial axes only",
-        ) from error
-    return array, metadata
+    return raster, metadata
 
 
 def _micrometre_scale(

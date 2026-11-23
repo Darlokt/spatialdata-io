@@ -13,7 +13,7 @@ import tifffile
 from dask.callbacks import Callback
 from numpy.testing import assert_array_equal
 from scipy.sparse import csr_array, csr_matrix, sparray, spmatrix
-from spatialdata import SpatialData, join_spatialelement_table
+from spatialdata import SpatialData, concatenate, join_spatialelement_table
 from spatialdata.transformations import Identity, Scale, get_transformation
 from xarray import DataTree
 
@@ -46,6 +46,29 @@ def _counts(table: ad.AnnData, *, layer: str | None = None) -> csr_array:
 
 class TestStereoseq:
     """Check supported compositions against explicit source values and identities."""
+
+    def test_square_bins_concatenate_with_signed_ids(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path, products=("square",))
+        first = stereoseq(fixture.root, bin_sizes=(50,))
+        second = stereoseq(fixture.root, bin_sizes=(50,))
+        second_obs = second.tables["bin50_table"].obs
+        assert isinstance(second_obs, pd.DataFrame)
+        second_obs["instance_id"] = second_obs["instance_id"].astype(np.int64)
+
+        result = concatenate({"first": first, "second": second}, concatenate_tables=True)
+        ids = result.tables["bin50_table"].obs["instance_id"]
+        assert ids.dtype == np.int64
+        assert ids.tolist() == [0, 1, 0, 1]
+
+    def test_gef_does_not_follow_external_group_links(self, tmp_path: Path) -> None:
+        root = tmp_path / "dataset"
+        fixture = write_dataset(root, products=("square",))
+        other = fixture.square.rename(tmp_path / "other.gef")
+        with h5py.File(fixture.square, "w") as handle:
+            handle["geneExp"] = h5py.ExternalLink(other, "/geneExp")
+
+        with pytest.raises(ReaderFormatError, match="local HDF5"):
+            stereoseq(fixture.root, bin_sizes=(50,))
 
     @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs", "flat"])
     @pytest.mark.parametrize("profile", ["name_only", "id_and_name"])
@@ -86,9 +109,9 @@ class TestStereoseq:
             points = result.points[target]
             frame = points.compute()
             assert frame.index.tolist() == identifiers
-            assert table.obs["instance_id"].dtype == np.uint64
-            # Square points keep a RangeIndex; cell points are indexed by the uint64 source cell IDs.
-            assert frame.index.dtype == (np.int64 if name == "bin1" else np.uint64)
+            dtype = np.int64 if name == "bin1" else np.uint64
+            assert table.obs["instance_id"].dtype == dtype
+            assert frame.index.dtype == dtype
             assert frame["x"].dtype == frame["y"].dtype == np.int64
             transformation = get_transformation(points, to_coordinate_system="global")
             assert isinstance(transformation, Scale)
@@ -451,8 +474,10 @@ class TestStereoseq:
         assert_array_equal(analysis.obsm["spatial_grid"], [[11, 20], [31, 40]])
         assert_array_equal(_counts(analysis).toarray(), [[1.25, 2.5], [3.75, 5]])
 
-    @pytest.mark.parametrize("historical", [False, True])
-    def test_square_analysis_uses_explicit_native_bin_identity(self, tmp_path: Path, *, historical: bool) -> None:
+    @pytest.mark.parametrize(("historical", "repeated"), [(False, False), (True, False), (False, True)])
+    def test_square_analysis_uses_explicit_native_bin_identity(
+        self, tmp_path: Path, *, historical: bool, repeated: bool
+    ) -> None:
         family: Family = "numbered" if historical else "outs"
         fixture = write_dataset(tmp_path, family=family, profile="id_and_name", products=("square",))
         relative = (
@@ -461,17 +486,24 @@ class TestStereoseq:
         path = tmp_path / relative
         write_analysis(path, profile="id_and_name")
         analysis = ad.read_h5ad(path)
-        positions = np.array([[5, 6], [1, 2]], dtype=np.uint32)
+        positions = np.array([[5, 6], [5, 6] if repeated else [1, 2]], dtype=np.uint32)
         observations = analysis.obs
         assert isinstance(observations, pd.DataFrame)
         analysis.obs = observations.drop(columns=["id"])
         analysis.obs["x"] = positions[:, 0]
         analysis.obs["y"] = positions[:, 1]
-        analysis.obs_names = [str((int(x) << 32) | int(y)) for x, y in positions]
+        analysis.obs_names = ["a:5_6", "b:5_6"] if repeated else [str((int(x) << 32) | int(y)) for x, y in positions]
         analysis.obsm["spatial"] = positions
         analysis.uns["bin_type"] = "bins"
         analysis.uns["bin_size"] = 50
         analysis.write_h5ad(path)
+
+        if repeated:
+            with pytest.raises(ReaderFormatError, match="repeated square coordinates"):
+                stereoseq(fixture.root, bin_sizes=(50,), analysis_files=(path,))
+            with pytest.raises(ReaderFormatError, match="repeated square coordinates"):
+                stereoseq(fixture.root, analysis_files=(path,))
+            return
 
         result = stereoseq(fixture.root, bin_sizes=(50,), analysis_files=(path,))
         name = "bin50_analysis_table" if historical else "bin50_analysis_r0_5_table"
@@ -548,10 +580,11 @@ class TestStereoseq:
             assert restored.tables[name].obs_names.tolist() == result.tables[name].obs_names.tolist()
             assert restored.tables[name].var_names.tolist() == result.tables[name].var_names.tolist()
             assert_array_equal(restored.tables[name].obs["instance_id"], result.tables[name].obs["instance_id"])
-            assert restored.tables[name].obs["instance_id"].dtype == np.uint64
+            dtype = np.int64 if name.startswith("bin") else np.uint64
+            assert restored.tables[name].obs["instance_id"].dtype == dtype
             target = str(result.tables[name].obs["region"].iloc[0])
             restored_index = restored.points[target].compute().index
-            assert restored_index.dtype == (np.int64 if name.startswith("bin") else np.uint64)
+            assert restored_index.dtype == dtype
             assert_array_equal(restored_index, restored.tables[name].obs["instance_id"])
             _, joined = join_spatialelement_table(
                 sdata=restored, spatial_element_names=[target], table_name=name, how="left", match_rows="left"
@@ -560,7 +593,7 @@ class TestStereoseq:
             table_path = tmp_path / f"{name}.h5ad"
             result.tables[name].write_h5ad(table_path)
             h5ad = ad.read_h5ad(table_path)
-            assert h5ad.obs["instance_id"].dtype == np.uint64
+            assert h5ad.obs["instance_id"].dtype == dtype
             assert_array_equal(h5ad.obs["instance_id"], result.tables[name].obs["instance_id"])
 
     @pytest.mark.parametrize("family", ["compact_numbered", "numbered", "outs"])

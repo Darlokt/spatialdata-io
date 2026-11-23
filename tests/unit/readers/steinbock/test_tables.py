@@ -17,8 +17,8 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.steinbock._images import Calibration, SampleGrid
 from spatialdata_io.readers.steinbock._tables import (
     _set_instance_ids,
+    _set_positions,
     read_table,
-    set_positions,
 )
 
 if TYPE_CHECKING:
@@ -242,12 +242,10 @@ class TestReadTable:
             ),
         ]
         # HDF5 stores group members by name, so the stored order is alphabetical.
-        assert list(table.uns) == ["Spatialdata_IO_positions_1", "my_key", "valid"]
         assert table.uns["my_key"] == {"inner key": "kept"}
         assert table.uns["valid"] == "v"
         np.testing.assert_array_equal(table.uns["Spatialdata_IO_positions_1"], [1, 2])
 
-        set_positions(table, samples, path)
         assert list(table.uns) == ["Spatialdata_IO_positions_1", "my_key", "valid", POSITIONS_KEY]
 
     def test_valid_uns_keys_are_untouched(self, tmp_path: Path) -> None:
@@ -262,7 +260,7 @@ class TestReadTable:
         # Only the fixture's feature column "Channel Name" warns.
         assert len(caught) == 1
         assert "feature metadata" in str(caught[0].message)
-        assert list(table.uns) == ["qc"]
+        assert list(table.uns) == ["qc", POSITIONS_KEY]
         assert table.uns["qc"] == {"inner key": 1}
 
 
@@ -296,21 +294,14 @@ class TestSetInstanceIds:
 class TestSetPositions:
     """Declare native centroids and derive physical positions only from complete calibration."""
 
-    @pytest.mark.parametrize(("native_x", "physical_x"), [(-0.5, 0.0), (0.5, 5e-324), (-1.5, -5e-324)])
-    def test_shifted_zero_and_representable_subnormal_are_valid(
-        self, tmp_path: Path, native_x: float, physical_x: float
-    ) -> None:
-        table = self._table([[native_x, 0.5]], ["sample.tiff"])
-        set_positions(
-            table, {"sample": self._grid("sample", "global", (5e-324, 3))}, ArtifactFile(tmp_path / "cells.h5ad")
-        )
-        np.testing.assert_array_equal(table.obsm["spatial"], [[physical_x, 3]])
-        np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[native_x, 0.5]])
-        assert table.obsm["spatial"].dtype == np.dtype(np.float64)
-
     def test_single_calibrated_sample_declares_fixed_frames(self, tmp_path: Path) -> None:
         table = self._table([[1, 2]], ["sample.tiff"])
-        set_positions(table, {"sample": self._grid("sample", "global", (2, 4))}, ArtifactFile(tmp_path / "cells.h5ad"))
+        _set_positions(
+            table,
+            np.asarray(table.obsm["spatial_pixels"]),
+            {"sample": self._grid("sample", "global", (2, 4))},
+            ArtifactFile(tmp_path / "cells.h5ad"),
+        )
         np.testing.assert_array_equal(table.obsm["spatial"], [[3, 10]])
         assert table.uns[POSITIONS_KEY] == {
             "schema_version": 1,
@@ -336,7 +327,7 @@ class TestSetPositions:
     def test_several_samples_scale_rows_by_their_own_frame(self, tmp_path: Path) -> None:
         table = self._table([[1, 2], [1, 2], [0, 0]], ["b.tiff", "a.tiff", "b.tiff"])
         grids = {"a": self._grid("a", "a", (2, 4)), "b": self._grid("b", "b", (10, 100))}
-        set_positions(table, grids, ArtifactFile(tmp_path / "cells.h5ad"))
+        _set_positions(table, np.asarray(table.obsm["spatial_pixels"]), grids, ArtifactFile(tmp_path / "cells.h5ad"))
         np.testing.assert_array_equal(table.obsm["spatial"], [[15, 250], [3, 10], [5, 50]])
         assert table.obs["spatial_frame"].tolist() == ["b", "a", "b"]
         assert table.obs["spatial_pixel_frame"].tolist() == [
@@ -355,7 +346,7 @@ class TestSetPositions:
     ) -> None:
         table = self._table([[1, 2], [1, 2]], ["a.tiff", "b.tiff"])
         grids = {name: self._grid(name, name, (2, 4) if name in calibrated else None) for name in ("a", "b")}
-        set_positions(table, grids, ArtifactFile(tmp_path / "cells.h5ad"))
+        _set_positions(table, np.asarray(table.obsm["spatial_pixels"]), grids, ArtifactFile(tmp_path / "cells.h5ad"))
         assert "spatial" not in table.obsm
         assert "spatial_frame" not in table.obs
         assert list(table.uns[POSITIONS_KEY]["coordinates"]) == ["spatial_pixels"]

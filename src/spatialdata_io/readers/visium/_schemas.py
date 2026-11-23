@@ -69,7 +69,10 @@ def classify_position_row(columns: Sequence[str], *, path: Path, context: Reader
     Named fields may be reordered and extended; additional fields are projected
     away. Headerless input retains exactly six positional fields.
     """
-    if any(column in POSITION_COLUMNS for column in columns):
+    positional_width = len(columns) == len(POSITION_COLUMNS)
+    # A literal barcode in the first positional field may also be a column name.
+    header_candidates = columns[1:] if positional_width else columns
+    if any(column in POSITION_COLUMNS for column in header_candidates):
         if any(not column for column in columns) or len(set(columns)) != len(columns):
             raise ReaderFormatError(
                 context=context,
@@ -86,7 +89,7 @@ def classify_position_row(columns: Sequence[str], *, path: Path, context: Reader
             )
         return "headered"
 
-    if len(columns) != len(POSITION_COLUMNS):
+    if not positional_width:
         raise ReaderFormatError(
             context=context, path=path, found=f"{len(columns)} fields", expected="exactly six positional fields"
         )

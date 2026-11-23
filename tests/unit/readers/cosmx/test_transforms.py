@@ -18,6 +18,7 @@ from spatialdata_io.readers.cosmx._transforms import (
     _midpoint,
     fov_frame,
     global_frame,
+    group_fov_rows,
     raster_to_local,
     solve_placements,
 )
@@ -52,12 +53,22 @@ def _solve(
     positions: dict[int, FovPosition] | None = None,
 ) -> dict[int, Placement]:
     return solve_placements(
-        pd.Index(fovs, dtype="uint64[pyarrow]"),
+        group_fov_rows(pd.Index(fovs, dtype="uint64[pyarrow]")),
         samples,
         required=required,
         positions=positions or {},
         path=ArtifactFile(tmp_path / "metadata.csv"),
     )
+
+
+class TestGroupFovRows:
+    def test_preserves_exact_uint64_fovs_and_source_row_order(self) -> None:
+        last = 2**64 - 1
+        groups = group_fov_rows(pd.Index([last, 2, last, 3, 2], dtype="uint64[pyarrow]"))
+        assert [(fov, rows.tolist()) for fov, rows in groups.items()] == [(2, [1, 4]), (3, [3]), (last, [0, 2])]
+
+    def test_empty_population_has_no_groups(self) -> None:
+        assert group_fov_rows(pd.Index([], dtype="uint64[pyarrow]")) == {}
 
 
 class TestRasterToLocal:

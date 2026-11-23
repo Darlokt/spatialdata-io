@@ -12,4 +12,5 @@ class TestCsvPackage:
             "csv_header",
             "open_csv_stream",
             "read_csv_blocks",
+            "validate_csv_lines",
         ]

@@ -167,6 +167,14 @@ class TestMakeSelection:
 class TestDiscoverLayout:
     """Resolve only selected products while enforcing paired artifacts and containment."""
 
+    def test_final_keys_cannot_collide_across_element_types(self, tmp_path: Path) -> None:
+        _write_pairs(tmp_path, ("table_a", "a_DAPI"))
+        for roi in ("table_a", "a_DAPI"):
+            (tmp_path / f"{roi}_DAPI.tiff").touch()
+        assert len(discover_layout(tmp_path, _selection())) == 2
+        with pytest.raises(ReaderFormatError, match="table_a_DAPI"):
+            discover_layout(tmp_path, replace(_selection(), images=True))
+
     def test_sorted_inference_explicit_order_and_normalized_root(self, tmp_path: Path) -> None:
         _write_pairs(tmp_path)
         inferred = discover_layout(tmp_path / ".", _selection())
@@ -260,6 +268,15 @@ class TestDiscoverLayout:
         roi = layout[0]
         assert (roi.pixels is None) == (product in {"circles", "transcripts"})
         assert (roi.transcripts is not None) == (product == "transcripts")
+        product_keys = {
+            "images": {"Roi1_DAPI"},
+            "labels": {"Roi1_Segmentation"},
+            "transcripts": {"Roi1_TranscriptList"},
+            "polygons": {"Roi1_Boundaries"},
+            "both": {"Roi1_Boundaries", "Roi1_CellCoordinates"},
+            "circles": {"Roi1_CellCoordinates"},
+        }
+        assert set(roi.element_keys()) == {"table_Roi1", *product_keys[product]}
 
     def test_explicit_subset_ignores_an_unselected_incomplete_roi(self, tmp_path: Path) -> None:
         _write_pairs(tmp_path, ("Roi1",))

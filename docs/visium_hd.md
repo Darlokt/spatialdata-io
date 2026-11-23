@@ -206,8 +206,10 @@ carry exact scale and rigid orientation transforms, without a half-bin shift.
 
 Segmentation vertices and vendor centroids are reprojected through the inverse
 homography fitted from 2 µm positions. The fit is checked against every position
-at an unchanged maximum error of 1e-9 pixels. For pre-4.1 boundaries without
-vendor centroids no centroid is invented.
+at a maximum error of 1e-9 pixels. The first calibration pass verifies the
+complete grid and aligns any selected 2 µm count barcodes. The second reads
+only the coordinate columns to check the homography and measure the affine
+residual. For pre-4.1 boundaries without vendor centroids no centroid is invented.
 
 Microscope pixels retain their source values and carry a least-squares affine
 into the physical frame. Projective registration makes this approximate:
@@ -271,7 +273,10 @@ positions. The Space Ranger PNGs and the CytAssist TIFF are RGB files and keep
 `include_cytassist_image=True` uses a lazy projective warp into a regular physical
 grid, with bounded source windows and bilinear SciPy interpolation. It preserves
 the source dtype (integer interpolation therefore rounds to that dtype) and the
-source channel coordinates. No image pixel tasks execute when the reader returns.
+source channel coordinates. Each output tile reads only the source window that
+can contribute to its projected footprint. Tiles outside the footprint are zero.
+The registered grid must have finite positive pixel dimensions and pitch. No
+image pixel tasks execute when the reader returns.
 
 All-bin squares can require several GiB: the default includes every available
 size, and a full 6.5 mm grid has 11.2 million 2 µm bins. Labels require about 45 MB

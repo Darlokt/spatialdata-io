@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, warn_user
+from spatialdata_io.readers._utils.image import require_matching_pixel_sizes
 
 if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
@@ -132,7 +133,16 @@ def _require_single(values: AbstractSet[object], field: str, stack: StackFiles) 
 def _require_consistent(sources: Sequence[ChannelSource], stack: StackFiles) -> None:
     """Stack only channels acquired on one grid of one ROI."""
     _require_single({source.dtype for source in sources}, "dtype", stack)
-    _require_single({source.pixel_size_um for source in sources}, "pixel size (µm)", stack)
+    reference = (sources[0].pixel_size_um,)
+    for source in sources[1:]:
+        require_matching_pixel_sizes(
+            (source.pixel_size_um,),
+            reference,
+            axes="x",
+            context=_CONTEXT,
+            path=stack.directory,
+            expected="one pixel size (µm) per stack",
+        )
     _require_single({source.major for source in sources}, "MACSiQView major version", stack)
     _require_single({source.metadata.well for source in sources} - {None}, "well", stack)
     _require_single({source.metadata.roi for source in sources} - {None}, "ROI", stack)

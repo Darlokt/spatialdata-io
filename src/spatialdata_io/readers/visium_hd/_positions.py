@@ -62,6 +62,7 @@ if TYPE_CHECKING:
 
 MAX_PROJECTIVE_ERROR_PX = 1e-9
 POSITION_BATCH_SIZE = 131_072
+_COORDINATE_COLUMNS = ["array_row", "array_col", "pxl_row_in_fullres", "pxl_col_in_fullres"]
 
 
 def _context(version: str | None) -> ReaderErrorContext:
@@ -142,33 +143,39 @@ def iter_position_batches(
     One boolean per grid site records coverage; decoded source columns have at
     most ``POSITION_BATCH_SIZE`` rows. No complete positions frame is built.
     """
-    context = _context(version)
     with _open(positions, version=version) as source:
-        if source.metadata.num_rows != shape[0] * shape[1]:
+        yield from _verified_batches(source, positions, shape, version=version)
+
+
+def _verified_batches(
+    source: pq.ParquetFile, positions: ArtifactFile, shape: tuple[int, int], *, version: str | None
+) -> Iterator[pa.RecordBatch]:
+    context = _context(version)
+    if source.metadata.num_rows != shape[0] * shape[1]:
+        raise ReaderFormatError(
+            context=context,
+            path=positions,
+            found=f"{source.metadata.num_rows} rows",
+            expected=f"complete grid {shape}",
+        )
+
+    seen = np.zeros(shape[0] * shape[1], dtype=np.bool_)
+    for batch in source.iter_batches(batch_size=POSITION_BATCH_SIZE, columns=POSITIONS_SCHEMA.names):
+        validate_position_batch(batch, positions, context=context)
+        rows = batch.column("array_row").to_numpy()
+        cols = batch.column("array_col").to_numpy()
+        if np.any(rows >= shape[0]) or np.any(cols >= shape[1]):
             raise ReaderFormatError(
-                context=context,
-                path=positions,
-                found=f"{source.metadata.num_rows} rows",
-                expected=f"complete grid {shape}",
+                context=context, path=positions, found="out-of-grid indices", expected=f"indices within {shape}"
             )
 
-        seen = np.zeros(shape[0] * shape[1], dtype=np.bool_)
-        for batch in source.iter_batches(batch_size=POSITION_BATCH_SIZE, columns=POSITIONS_SCHEMA.names):
-            validate_position_batch(batch, positions, context=context)
-            rows = batch.column("array_row").to_numpy()
-            cols = batch.column("array_col").to_numpy()
-            if np.any(rows >= shape[0]) or np.any(cols >= shape[1]):
-                raise ReaderFormatError(
-                    context=context, path=positions, found="out-of-grid indices", expected=f"indices within {shape}"
-                )
-
-            indices = rows.astype(np.int64) * shape[1] + cols
-            if np.any(seen[indices]) or np.unique(indices).size != indices.size:
-                raise ReaderFormatError(
-                    context=context, path=positions, found="duplicate grid indices", expected="one row per grid site"
-                )
-            seen[indices] = True
-            yield batch
+        indices = rows.astype(np.int64) * shape[1] + cols
+        if np.any(seen[indices]) or np.unique(indices).size != indices.size:
+            raise ReaderFormatError(
+                context=context, path=positions, found="duplicate grid indices", expected="one row per grid site"
+            )
+        seen[indices] = True
+        yield batch
 
 
 def _pixels(batch: pa.RecordBatch) -> NDArray[np.float64]:
@@ -185,6 +192,84 @@ def _grid(batch: pa.RecordBatch) -> NDArray[np.float64]:
     )
 
 
+class PositionSelection:
+    """Collect an owned matrix's selected grid rows while scanning source positions."""
+
+    __slots__ = (
+        "_cols",
+        "_context",
+        "_names",
+        "_order",
+        "_path",
+        "_rows",
+        "_sorted_indices",
+        "_tissue",
+        "_width",
+        "_x",
+        "_y",
+    )
+
+    def __init__(
+        self,
+        positions: ArtifactFile,
+        shape: tuple[int, int],
+        names: pd.Index[str],
+        size_um: int,
+        *,
+        version: str | None,
+    ) -> None:
+        self._path = positions
+        self._context = _context(version)
+        self._names = names
+        self._width = shape[1]
+        self._rows, self._cols = parse_bin_barcodes(names, size_um, shape, positions, version=version)
+        indices = self._rows.astype(np.int64) * self._width + self._cols
+        # Search spatially sorted IDs, then scatter values back into matrix order.
+        self._order = np.argsort(indices)
+        self._sorted_indices = indices[self._order]
+        self._tissue = np.empty(len(names), dtype=np.uint8)
+        self._x = np.empty(len(names), dtype=np.float64)
+        self._y = np.empty(len(names), dtype=np.float64)
+
+    def add(self, batch: pa.RecordBatch) -> None:
+        """Scatter one verified source batch into the corresponding selected rows."""
+        rows = batch.column("array_row").to_numpy().astype(np.int64)
+        grid = rows * self._width + batch.column("array_col").to_numpy()
+        matches = np.searchsorted(self._sorted_indices, grid)
+        source_rows = np.flatnonzero(matches < len(self._names))
+        source_rows = source_rows[self._sorted_indices[matches[source_rows]] == grid[source_rows]]
+        if not source_rows.size:
+            return
+        destination = self._order[matches[source_rows]]
+
+        source_names = batch.column("barcode").take(pa.array(source_rows)).to_pylist()
+        if source_names != self._names[destination].tolist():
+            raise ReaderFormatError(
+                context=self._context,
+                path=self._path,
+                found="barcode differs at selected grid index",
+                expected="exact matrix/positions barcode agreement",
+            )
+
+        self._tissue[destination] = batch.column("in_tissue").to_numpy()[source_rows]
+        self._x[destination] = batch.column("pxl_col_in_fullres").to_numpy()[source_rows]
+        self._y[destination] = batch.column("pxl_row_in_fullres").to_numpy()[source_rows]
+
+    def to_frame(self) -> pd.DataFrame:
+        """Return the selected rows after the complete source grid has been verified."""
+        result = pa.table(
+            {
+                "in_tissue": self._tissue,
+                "array_row": self._rows,
+                "array_col": self._cols,
+                "pxl_row_in_fullres": self._y,
+                "pxl_col_in_fullres": self._x,
+            }
+        ).to_pandas(types_mapper=pd.ArrowDtype)
+        result.index = self._names
+        return result
+
+
 def read_positions(  # noqa: PLR0913, RUF100 - Explicit file, grid, population, size, frame and version.
     positions: ArtifactFile,
     shape: tuple[int, int],
@@ -199,16 +284,7 @@ def read_positions(  # noqa: PLR0913, RUF100 - Explicit file, grid, population, 
     Returns the selected rows' ``in_tissue``, grid indices and source pixel
     positions in the order of ``names`` (the count matrix barcodes).
     """
-    rows, cols = parse_bin_barcodes(names, size_um, shape, positions, version=version)
-    indices = rows.astype(np.int64) * shape[1] + cols
-    # Search spatially sorted IDs, then scatter values back into matrix observation order.
-    order = np.argsort(indices)
-    sorted_indices = indices[order]
-
-    tissue = np.empty(len(names), dtype=np.uint8)
-    x = np.empty(len(names), dtype=np.float64)
-    y = np.empty(len(names), dtype=np.float64)
-
+    selected = PositionSelection(positions, shape, names, size_um, version=version)
     registration = ReaderErrorContext("visium_hd", f"{size_um} micrometre positions", version)
     factor = size_um // 2
     corners = apply_projective(
@@ -226,43 +302,24 @@ def read_positions(  # noqa: PLR0913, RUF100 - Explicit file, grid, population, 
                 expected=f"the 2 micrometre registration with residual <= {MAX_PROJECTIVE_ERROR_PX:g} pixels",
             )
 
-        grid = batch.column("array_row").to_numpy().astype(np.int64) * shape[1] + batch.column("array_col").to_numpy()
-        matches = np.searchsorted(sorted_indices, grid)
-        valid = matches < len(indices)
-        if not valid.any():
-            continue
-
-        source_rows = np.flatnonzero(valid)
-        source_rows = source_rows[sorted_indices[matches[source_rows]] == grid[source_rows]]
-        destination = order[matches[source_rows]]
-
-        source_names = batch.column("barcode").take(pa.array(source_rows)).to_pylist()
-        if source_names != names[destination].tolist():
-            raise ReaderFormatError(
-                context=_context(version),
-                path=positions,
-                found="barcode differs at selected grid index",
-                expected="exact matrix/positions barcode agreement",
-            )
-
-        tissue[destination] = batch.column("in_tissue").to_numpy()[source_rows]
-        x[destination] = batch.column("pxl_col_in_fullres").to_numpy()[source_rows]
-        y[destination] = batch.column("pxl_row_in_fullres").to_numpy()[source_rows]
-
-    result = pa.table(
-        {"in_tissue": tissue, "array_row": rows, "array_col": cols, "pxl_row_in_fullres": y, "pxl_col_in_fullres": x}
-    ).to_pandas(types_mapper=pd.ArrowDtype)
-    result.index = names
-    return result
+        selected.add(batch)
+    return selected.to_frame()
 
 
-def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int], *, version: str | None) -> SlideFrame:
+def fit_slide_frame(
+    positions: ArtifactFile,
+    shape: tuple[int, int],
+    *,
+    version: str | None,
+    selected: PositionSelection | None = None,
+) -> SlideFrame:
     """Fit the physical image frame in two bounded scans of all 2 µm positions.
 
     A centered covariance reduction fits the affine using every source bin.
-    Nine well-spread correspondences fit the exact homography; the second scan
-    validates it on every bin and measures the affine's registration residual.
-    No complete position array or string index is retained.
+    Nine well-spread correspondences fit the exact homography. The first scan
+    verifies the complete grid and fills any selected matrix rows. The second
+    scan attests the homography and measures the affine residual with only
+    the four coordinate columns, using the same open Parquet source.
     """
     registration = ReaderErrorContext("visium_hd", "2 micrometre positions", version)
     sample_rows = np.unique([0, shape[0] // 2, shape[0] - 1])
@@ -274,48 +331,51 @@ def fit_slide_frame(positions: ArtifactFile, shape: tuple[int, int], *, version:
     covariance = np.zeros((4, 4), dtype=np.float64)
     count = 0
 
-    for batch in iter_position_batches(positions, shape, version=version):
-        grid, pixels = _grid(batch), _pixels(batch)
-        selected = np.isin(grid[:, 1], sample_rows) & np.isin(grid[:, 0], sample_cols)
-        sample_source.append(grid[selected])
-        sample_target.append(pixels[selected])
+    with _open(positions, version=version) as source:
+        for batch in _verified_batches(source, positions, shape, version=version):
+            if selected is not None:
+                selected.add(batch)
+            grid, pixels = _grid(batch), _pixels(batch)
+            sample = np.isin(grid[:, 1], sample_rows) & np.isin(grid[:, 0], sample_cols)
+            sample_source.append(grid[sample])
+            sample_target.append(pixels[sample])
 
-        values = np.column_stack((pixels, SPOT_PITCH_UM * (grid + 0.5)))
-        batch_count = len(values)
-        batch_mean = values.mean(axis=0)
-        centered = values - batch_mean
-        delta = batch_mean - mean
-        total = count + batch_count
-        # Merge centered moments to avoid subtracting large, nearly equal raw sums.
-        covariance += centered.T @ centered + np.outer(delta, delta) * (count * batch_count / total)
-        mean += delta * (batch_count / total)
-        count = total
+            values = np.column_stack((pixels, SPOT_PITCH_UM * (grid + 0.5)))
+            batch_count = len(values)
+            batch_mean = values.mean(axis=0)
+            centered = values - batch_mean
+            delta = batch_mean - mean
+            total = count + batch_count
+            # Merge centered moments to avoid subtracting large, nearly equal raw sums.
+            covariance += centered.T @ centered + np.outer(delta, delta) * (count * batch_count / total)
+            mean += delta * (batch_count / total)
+            count = total
 
-    homography = fit_homography(np.concatenate(sample_source), np.concatenate(sample_target), context=registration)
-    linear = np.linalg.solve(covariance[:2, :2], covariance[:2, 2:]).T
-    origin = mean[2:] - linear @ mean[:2]
-    rigid, affine = _orient_frame(linear, origin)
+        homography = fit_homography(np.concatenate(sample_source), np.concatenate(sample_target), context=registration)
+        linear = np.linalg.solve(covariance[:2, :2], covariance[:2, 2:]).T
+        origin = mean[2:] - linear @ mean[:2]
+        rigid, affine = _orient_frame(linear, origin)
 
-    maximum = 0.0
-    squared_sum = 0.0
+        maximum = 0.0
+        squared_sum = 0.0
 
-    for batch in iter_position_batches(positions, shape, version=version):
-        grid, pixels = _grid(batch), _pixels(batch)
-        error_px = np.max(
-            np.linalg.norm(apply_projective(homography, grid, context=registration) - pixels, axis=1), initial=0.0
-        )
-        if error_px > MAX_PROJECTIVE_ERROR_PX:
-            raise ReaderFormatError(
-                context=registration,
-                path=positions,
-                found=f"projective registration residual {error_px:.6g} pixels",
-                expected=f"one exact homography with residual <= {MAX_PROJECTIVE_ERROR_PX:g} pixels on every bin",
+        for batch in source.iter_batches(batch_size=POSITION_BATCH_SIZE, columns=_COORDINATE_COLUMNS):
+            grid, pixels = _grid(batch), _pixels(batch)
+            error_px = np.max(
+                np.linalg.norm(apply_projective(homography, grid, context=registration) - pixels, axis=1), initial=0.0
             )
+            if error_px > MAX_PROJECTIVE_ERROR_PX:
+                raise ReaderFormatError(
+                    context=registration,
+                    path=positions,
+                    found=f"projective registration residual {error_px:.6g} pixels",
+                    expected=f"one exact homography with residual <= {MAX_PROJECTIVE_ERROR_PX:g} pixels on every bin",
+                )
 
-        residual = pixels @ linear.T + origin - SPOT_PITCH_UM * (grid + 0.5)
-        squared = np.einsum("ij,ij->i", residual, residual)
-        maximum = max(maximum, float(np.sqrt(np.max(squared, initial=0.0))))
-        squared_sum += float(squared.sum())
+            residual = pixels @ linear.T + origin - SPOT_PITCH_UM * (grid + 0.5)
+            squared = np.einsum("ij,ij->i", residual, residual)
+            maximum = max(maximum, float(np.sqrt(np.max(squared, initial=0.0))))
+            squared_sum += float(squared.sum())
 
     for matrix in (homography, rigid, affine):
         matrix.flags.writeable = False

@@ -62,7 +62,7 @@ class TestReadImage:
         tasks: list[object] = []
         with Callback(posttask=lambda *args: tasks.append(args)):
             element, grid = read_image(
-                ArtifactFile(tmp_path / "C_F002.png"), fov=2, placement=_PLACEMENT, options=_DEFAULT
+                ArtifactFile(tmp_path / "C_F002.png"), fov=2, encoding="png", placement=_PLACEMENT, options=_DEFAULT
             )
         assert not tasks
         assert grid == (4, 5)
@@ -129,13 +129,21 @@ class TestReadImage:
             path.write_bytes(imagecodecs.png_encode(pixels))
         else:
             writer(path, pixels)
-        element, _ = read_image(ArtifactFile(path), fov=1, placement=_PLACEMENT, options=_DEFAULT)
+        element, _ = read_image(
+            ArtifactFile(path),
+            fov=1,
+            encoding="png" if writer is None else "tiff",
+            placement=_PLACEMENT,
+            options=_DEFAULT,
+        )
         assert element.dims == ("c", "y", "x")
         assert element.coords["c"].to_numpy().tolist() == expected
 
     def test_jpeg_and_grayscale_tiff(self, tmp_path: Path) -> None:
         (tmp_path / "C_F001.jpg").write_bytes(imagecodecs.jpeg8_encode(np.zeros((4, 5, 3), np.uint8)))
-        jpeg, _ = read_image(ArtifactFile(tmp_path / "C_F001.jpg"), fov=1, placement=_PLACEMENT, options=_DEFAULT)
+        jpeg, _ = read_image(
+            ArtifactFile(tmp_path / "C_F001.jpg"), fov=1, encoding="jpeg", placement=_PLACEMENT, options=_DEFAULT
+        )
         assert jpeg.shape == (3, 4, 5)
         tifffile.imwrite(tmp_path / "C_F001.tif", np.ones((4, 5), np.uint16))
         tiff, _ = read_image(ArtifactFile(tmp_path / "C_F001.tif"), fov=1, placement=_PLACEMENT, options=_DEFAULT)
@@ -162,7 +170,9 @@ class TestReadImage:
         assert caught.value.context == ReaderErrorContext("cosmx", "composite images")
         (tmp_path / "C_F002.jpg").write_bytes(b"not a jpeg")
         with pytest.raises(ValueError, match=r"JPEG|SOI") as error:
-            read_image(ArtifactFile(tmp_path / "C_F002.jpg"), fov=2, placement=_PLACEMENT, options=_DEFAULT)
+            read_image(
+                ArtifactFile(tmp_path / "C_F002.jpg"), fov=2, encoding="jpeg", placement=_PLACEMENT, options=_DEFAULT
+            )
         assert any("artifact 'composite images'" in note for note in getattr(error.value, "__notes__", []))
 
     def test_unnamed_extra_axis_fails(self, tmp_path: Path) -> None:

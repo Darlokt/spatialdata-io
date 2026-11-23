@@ -60,6 +60,8 @@ class TestReadCellTable:
 
         assert isinstance(result.X, sparse.csr_array)
         assert result.X.dtype == np.dtype(dtype)
+        assert result.obs["x"].dtype == np.dtype(dtype)
+        assert result.obs["tile_num"].dtype == np.dtype(dtype)
         expected = frame[["cyc002_ch001", "cyc001_ch002"]].to_numpy().ravel()
         np.testing.assert_array_equal(result.X.data, expected[expected != 0])
 

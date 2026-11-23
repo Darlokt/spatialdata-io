@@ -709,10 +709,12 @@ class TestGenericToZarr:
         result = cast("DataArray", spatial_data["image"])
         np.testing.assert_array_equal(result.data.compute(), source.transpose(2, 0, 1))
 
+    @pytest.mark.parametrize("duplicate", ["regions", "REGIONS"])
     def test_appends_geojson_and_rejects_duplicate_before_parsing(
         self,
         tmp_path: Path,
         mocker: MockerFixture,
+        duplicate: str,
     ) -> None:
         image_path = tmp_path / "image.png"
         shapes_path = tmp_path / "shapes.geojson"
@@ -729,7 +731,7 @@ class TestGenericToZarr:
 
         parse = mocker.patch("spatialdata_io.converters.generic_to_zarr.generic")
         with pytest.raises(ValueError, match="already exists"):
-            generic_to_zarr(tmp_path / "missing.png", output, name="regions", data_axes="yx")
+            generic_to_zarr(tmp_path / "missing.png", output, name=duplicate, data_axes="yx")
 
         parse.assert_not_called()
 

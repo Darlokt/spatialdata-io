@@ -50,6 +50,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.points import categorize_features
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -82,7 +83,7 @@ _METADATA_FLOATS = frozenset(
     }
 )
 _TRANSCRIPT_OPTIONAL = ("global_z", "cell_id", "fov", "barcode_id", "transcript_id")
-# Integer metadata that VPT can print as decimals; read as float64, then cast exactly.
+# Integer metadata that VPT can print as decimals; read as float64, then check and cast.
 _METADATA_INTEGERS = frozenset({"fov", "transcript_count"})
 OUTPUT_ANNOTATIONS = ("region", "slide", "dataset_id", "cells_region")
 
@@ -184,7 +185,7 @@ def normalize_metadata(frame: pd.DataFrame, path: ArtifactFile) -> pd.DataFrame:
 
 
 def _metadata_integers(series: pd.Series, path: ArtifactFile, name: str) -> pd.Series:
-    """Cast float64 metadata exactly to nullable uint64; empty fields stay missing."""
+    """Cast decoded float64 metadata to nullable uint64; empty fields stay missing."""
     try:
         values = pc.cast(pa.array(series), pa.uint64(), safe=True)
     except pa.ArrowInvalid as error:
@@ -301,13 +302,12 @@ def normalize_transcript_partition(
     ``cell_population`` is the unique Arrow-string index of current cells;
     assigned events must belong to it. ``None`` skips the check.
     """
-    vocabulary = pd.Index(features)
-    codes = vocabulary.get_indexer(pd.Index(frame["gene"].array))
-    if (codes < 0).any():
+    categories = categorize_features(frame["gene"], pd.Index(features))
+    if categories is None:
         raise schema_error(
             path, TRANSCRIPTS, found="unknown gene names", expected="the complete source feature vocabulary"
         )
-    frame["gene"] = pd.Categorical.from_codes(codes, categories=vocabulary)
+    frame["gene"] = categories
     for column, axis in (("global_x", "x"), ("global_y", "y")):
         require_finite(frame[column], path, TRANSCRIPTS, column)
         # PointsModel requires native NumPy coordinate columns.

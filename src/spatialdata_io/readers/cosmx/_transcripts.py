@@ -27,13 +27,12 @@ Source decoding is therefore sequential. A single-stream gzip file is one
 member and forms one nonempty partition with all its rows.
 
 Coordinate systems: ``global_pixels`` (identity) without ``pixel_size_um``, or
-``global`` (scale to micrometres) with it, and every FOV's local pixel frame
+``global`` (scale to micrometres) with it, and every placed FOV's local pixel frame
 ``fov_<n>_pixels`` through the inverse of its placement.
 """
 
 from __future__ import annotations
 
-import warnings
 import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
@@ -46,8 +45,9 @@ from dask import delayed
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.csv import csv_errors, read_csv_blocks
+from spatialdata_io.readers._utils.csv import csv_errors, read_csv_blocks, validate_csv_lines
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.points import categorize_features, suppress_points_index_warning
 from spatialdata_io.readers.cosmx._schemas import (
     CELL,
     CELL_ID,
@@ -68,13 +68,14 @@ if TYPE_CHECKING:
     from spatialdata.transformations import BaseTransformation
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers.cosmx._layout import CsvFile
     from spatialdata_io.readers.cosmx._transforms import Placement
 
 _GZIP_RANGE_BYTES = 8 * 1024 * 1024
 _READ_BYTES = 1024 * 1024
 
 
-def _normalize(block: pd.DataFrame, *, features: tuple[str, ...], path: ArtifactFile) -> pd.DataFrame:
+def _normalize(block: pd.DataFrame, *, features: pd.Index, path: ArtifactFile) -> pd.DataFrame:
     """Validate one typed Arrow-backed partition and convert only required point-model columns."""
     require_positive(pa.array(block[FOV]), path, TRANSCRIPTS, FOV)
     for name in ("x_global_px", "y_global_px", "x_local_px", "y_local_px"):
@@ -82,13 +83,12 @@ def _normalize(block: pd.DataFrame, *, features: tuple[str, ...], path: Artifact
     names = ["x_global_px", "y_global_px", "target", FOV, CELL_ID, "x_local_px", "y_local_px"]
     names.extend(name for name in ("z", "CellComp", CELL) if name in block)
     frame = block[names]
-    vocabulary = pd.Index(features)
-    codes = vocabulary.get_indexer(pd.Index(frame["target"].array))
-    if (codes < 0).any():
+    categories = categorize_features(frame["target"], features)
+    if categories is None:
         raise schema_error(
             path, TRANSCRIPTS, found="missing or unknown targets", expected="targets from the count vocabulary"
         )
-    frame["target"] = pd.Categorical.from_codes(codes, categories=vocabulary)
+    frame["target"] = categories
     # PointsModel requires NumPy coordinates; local coordinates stay Arrow annotations.
     frame["x_global_px"] = frame["x_global_px"].to_numpy(dtype="float64")
     frame["y_global_px"] = frame["y_global_px"].to_numpy(dtype="float64")
@@ -103,20 +103,21 @@ class _Projection:
 
     names: tuple[str, ...]
     types: pa.Schema
-    features: tuple[str, ...]
-    path: ArtifactFile
+    features: pd.Index
+    source: CsvFile
 
 
 def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
     """Parse gzip records with the same physical types and null policy as plain blocks."""
-    path = projection.path
+    path = projection.source.path
     if not payload:
         return _normalize(_empty(projection.types), features=projection.features, path=path)
-    with pa.BufferReader(payload) as source, csv_errors(context=ReaderErrorContext("cosmx", TRANSCRIPTS), path=path):
+    context = ReaderErrorContext("cosmx", TRANSCRIPTS)
+    validate_csv_lines(payload, context=context, path=path)
+    with pa.BufferReader(payload) as source, csv_errors(context=context, path=path):
         table = pacsv.read_csv(
             source,
             read_options=pacsv.ReadOptions(column_names=projection.names, use_threads=False),
-            parse_options=pacsv.ParseOptions(newlines_in_values=True),
             convert_options=pacsv.ConvertOptions(
                 include_columns=projection.types.names,
                 column_types=projection.types,
@@ -173,9 +174,10 @@ def _gzip_range(projection: _Projection, offset: int, *, start: int, stop: int) 
     """
     payload = bytearray()
     pending = b""
-    with projection.path.open("rb") as handle:
+    path = projection.source.path
+    with path.open("rb") as handle:
         while offset < stop:
-            offset, pending = _decode_member(handle, offset, projection.path, payload, pending)
+            offset, pending = _decode_member(handle, offset, path, payload, pending)
     if start == 0:
         del payload[: payload.find(b"\n") + 1]
     return offset, _parse(payload, projection)
@@ -183,8 +185,8 @@ def _gzip_range(projection: _Projection, offset: int, *, start: int, stop: int) 
 
 def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
     """Return one partition per plain-CSV block or compressed member range."""
-    path = projection.path
-    if not path.name.endswith(".gz"):
+    path = projection.source.path
+    if not projection.source.compressed:
         context = ReaderErrorContext("cosmx", TRANSCRIPTS)
         blocks = read_csv_blocks(
             path,
@@ -205,21 +207,23 @@ def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
 
 
 def read_transcripts(
-    path: ArtifactFile,
+    source: CsvFile,
     *,
     features: tuple[str, ...],
     placements: Mapping[int, Placement],
     pixel_size_um: float | None = None,
 ) -> dd.DataFrame:
-    """Return lazy global XY points and every FOV frame after header inspection.
+    """Return lazy global XY points with local frames for placed FOVs.
 
     Records must each occupy one physical line. Values are validated when their
     partition is computed.
     """
-    names = read_header(path, TRANSCRIPTS)
+    path = source.path
+    names = read_header(source, TRANSCRIPTS)
     types = transcript_types(names, path)
-    meta = _normalize(_empty(types), features=features, path=path)
-    frame = _frame(_Projection(names, types, features, path), meta)
+    vocabulary = pd.Index(features)
+    meta = _normalize(_empty(types), features=vocabulary, path=path)
+    frame = _frame(_Projection(names, types, vocabulary, source), meta)
 
     transformations: dict[str, BaseTransformation] = {
         global_frame(pixel_size_um): (
@@ -229,10 +233,7 @@ def read_transcripts(
     transformations.update({fov_frame(fov): placement.global_to_local() for fov, placement in placements.items()})
     # Partitions are deliberately unsorted. Known target categories and
     # sort=False avoid the public model's eager category and index scans.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message="The index of the dataframe is not monotonic increasing.*", category=UserWarning
-        )
+    with suppress_points_index_warning():
         return PointsModel.parse(
             frame, coordinates={"x": "x", "y": "y"}, feature_key="target", transformations=transformations, sort=False
         )

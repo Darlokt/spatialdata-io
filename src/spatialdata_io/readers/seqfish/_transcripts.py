@@ -24,7 +24,6 @@ number of double quotes, an unknown feature or a nonfinite coordinate fails then
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -33,6 +32,7 @@ from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.csv import csv_header, read_csv_blocks
+from spatialdata_io.readers._utils.points import suppress_points_index_warning
 from spatialdata_io.readers.seqfish._schemas import (
     TRANSCRIPTS_CONTEXT,
     normalize_transcript_partition,
@@ -60,10 +60,7 @@ def read_transcripts(path: ArtifactFile, *, features: tuple[str, ...], frame: st
     # Known categories and sort=False keep the model parser from scanning the
     # features or the index. Unknown divisions are intentional for independent
     # CSV blocks, so this exact upstream warning does not indicate a failure.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message="The index of the dataframe is not monotonic increasing.*", category=UserWarning
-        )
+    with suppress_points_index_warning():
         return PointsModel.parse(
             points,
             coordinates={"x": "x", "y": "y"},

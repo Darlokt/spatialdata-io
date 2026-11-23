@@ -110,6 +110,15 @@ class TestReadExperiment:
         with pytest.raises(ReaderFormatError):
             read_experiment(ArtifactFile(path))
 
+    def test_resolution_must_stay_positive_in_micrometres(self, tmp_path: Path) -> None:
+        path = tmp_path / "experiment.json"
+        path.write_text('{"version": "1.7.0.6", "xyResolution": 5e-324}')
+
+        with pytest.raises(ReaderFormatError, match="representable positive micrometre scale") as caught:
+            read_experiment(ArtifactFile(path))
+
+        assert caught.value.context.detected_version == "1.7.0.6"
+
     @pytest.mark.parametrize(
         "metadata", [{}, {"version": 1.7}, {"version": "2.0", "xyResolution": 377}, {"per_pixel_XY_resolution": 377}]
     )

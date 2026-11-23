@@ -322,6 +322,123 @@ class TestInspectTiff:
         with pytest.raises(RasterFormatError, match="escapes the TIFF source directory"):
             inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
+    @pytest.mark.parametrize(
+        ("first_mapping", "depth", "second_ifd", "overlaps"),
+        [
+            ('IFD="0" PlaneCount="2"', 2, 1, True),
+            ('IFD="0" PlaneCount="2"', 2, 2, False),
+            ("", 2, 1, True),
+            ("", 2, 2, False),
+            ('IFD="0"', 1, 1, False),
+        ],
+    )
+    def test_effective_ifd_ranges(
+        self, tmp_path: Path, first_mapping: str, depth: int, second_ifd: int, *, overlaps: bool
+    ) -> None:
+        path = tmp_path / "planes.ome.tif"
+        images = "".join(
+            f'<Image ID="Image:{i}"><Pixels ID="Pixels:{i}" DimensionOrder="XYZCT" Type="uint8" '
+            f'SizeX="4" SizeY="3" SizeZ="{z}" SizeC="1" SizeT="1">'
+            f'<Channel ID="Channel:{i}:0" SamplesPerPixel="1"/><TiffData {mapping}/></Pixels></Image>'
+            for i, (z, mapping) in enumerate(((depth, first_mapping), (1, f'IFD="{second_ifd}"')))
+        )
+        xml = f'<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">{images}</OME>'
+        with tifffile.TiffWriter(path) as writer:
+            for plane in range(3):
+                writer.write(
+                    np.full((3, 4), plane, dtype=np.uint8), description=xml if plane == 0 else None, metadata=None
+                )
+        if overlaps:
+            with pytest.raises(RasterFormatError, match="reuses TIFF IFD"):
+                inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+        else:
+            metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+            assert len(metadata.series) == 2
+            raster = read_tiff(metadata, series=1, level=0, context=_RASTER_CONTEXT)
+            np.testing.assert_array_equal(raster.data.compute(), np.full((3, 4), second_ifd))
+
+    def test_omitted_count_stops_at_remaining_logical_rgb_planes(self, tmp_path: Path) -> None:
+        # Three packed RGB samples occupy one IFD per timepoint. From FirstT=1
+        # only IFD 0 remains in the first image; IFD 1 belongs to the second.
+        images = "".join(
+            f'<Image ID="Image:{i}"><Pixels ID="Pixels:{i}" DimensionOrder="XYCZT" Type="uint8" '
+            f'SizeX="4" SizeY="3" SizeZ="1" SizeC="3" SizeT="{times}">'
+            f'<Channel ID="Channel:{i}:0" SamplesPerPixel="3"/>{blocks}</Pixels></Image>'
+            for i, (times, blocks) in enumerate(
+                ((2, '<TiffData IFD="3"/><TiffData FirstT="1"/>'), (1, '<TiffData IFD="1"/>'))
+            )
+        )
+        path = tmp_path / "rgb.ome.tif"
+        xml = f'<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">{images}</OME>'
+        with tifffile.TiffWriter(path) as writer:
+            for plane in range(4):
+                writer.write(
+                    np.full((3, 4, 3), plane, dtype=np.uint8),
+                    photometric="rgb",
+                    description=xml if plane == 0 else None,
+                    metadata=None,
+                )
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+        first = read_tiff(metadata, series=0, level=0, context=_RASTER_CONTEXT)
+        np.testing.assert_array_equal(first.data[:, 0, 0, 0].compute(), [3, 0])
+        second = read_tiff(metadata, series=1, level=0, context=_RASTER_CONTEXT)
+        np.testing.assert_array_equal(second.data.compute(), np.ones((3, 4, 3), dtype=np.uint8))
+
+    def test_conflicting_declared_range_cannot_be_overwritten(self, tmp_path: Path) -> None:
+        # A decoder can replace the first mapping for image 0 with its second one.
+        # The earlier block still explicitly claims IFD 1, also used by image 1.
+        images = "".join(
+            f'<Image ID="Image:{i}"><Pixels ID="Pixels:{i}" DimensionOrder="XYZCT" Type="uint8" '
+            f'SizeX="4" SizeY="3" SizeZ="{z}" SizeC="1" SizeT="1"><Channel ID="Channel:{i}:0"/>'
+            f"{blocks}</Pixels></Image>"
+            for i, (z, blocks) in enumerate(
+                (
+                    (2, '<TiffData IFD="0" PlaneCount="2"/><TiffData IFD="2" PlaneCount="2"/>'),
+                    (1, '<TiffData IFD="1"/>'),
+                )
+            )
+        )
+        path = tmp_path / "overwritten.ome.tif"
+        xml = f'<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">{images}</OME>'
+        with tifffile.TiffWriter(path) as writer:
+            for plane in range(4):
+                writer.write(
+                    np.full((3, 4), plane, dtype=np.uint8), description=xml if plane == 0 else None, metadata=None
+                )
+        with pytest.raises(RasterFormatError, match="reuses TIFF IFD"):
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+
+    def test_explicit_zero_plane_count_cannot_decode_an_entire_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "empty_mapping.ome.tif"
+        xml = (
+            '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image ID="Image:0">'
+            '<Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint8" SizeX="4" SizeY="3" '
+            'SizeZ="1" SizeC="1" SizeT="1"><Channel ID="Channel:0:0"/><TiffData PlaneCount="0"/>'
+            "</Pixels></Image></OME>"
+        )
+        tifffile.imwrite(path, np.ones((3, 4), dtype=np.uint8), description=xml, metadata=None)
+        with pytest.raises(RasterFormatError, match="PlaneCount"):
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+
+    def test_equal_ifd_numbers_in_distinct_files(self, tmp_path: Path) -> None:
+        first, second = tmp_path / "first.tif", tmp_path / "second.tif"
+        first_uuid = "urn:uuid:11111111-1111-4111-8111-111111111111"
+        second_uuid = "urn:uuid:22222222-2222-4222-8222-222222222222"
+        images = "".join(
+            f'<Image ID="Image:{i}"><Pixels ID="Pixels:{i}" DimensionOrder="XYZCT" Type="uint8" '
+            f'SizeX="4" SizeY="3" SizeZ="1" SizeC="1" SizeT="1"><Channel ID="Channel:{i}:0" SamplesPerPixel="1"/>'
+            f'<TiffData><UUID FileName="{path.name}">{uuid}</UUID></TiffData></Pixels></Image>'
+            for i, (path, uuid) in enumerate(((first, first_uuid), (second, second_uuid)))
+        )
+        xml = f'<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" UUID="{first_uuid}">{images}</OME>'
+        tifffile.imwrite(first, np.zeros((3, 4), dtype=np.uint8), description=xml, metadata=None)
+        tifffile.imwrite(second, np.ones((3, 4), dtype=np.uint8), metadata=None)
+
+        metadata = inspect_tiff(ArtifactFile(first), context=_RASTER_CONTEXT)
+        for index in range(2):
+            raster = read_tiff(metadata, series=index, level=0, context=_RASTER_CONTEXT)
+            np.testing.assert_array_equal(raster.data.compute(), np.full((3, 4), index))
+
     def test_rejects_inconsistent_ome_image_mapping(self, tmp_path: Path) -> None:
         path = tmp_path / "inconsistent.ome.tif"
         xml = """<?xml version="1.0" encoding="UTF-8"?>

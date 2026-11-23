@@ -289,8 +289,10 @@ Enrichment never changes `raw.var`.
 The supported Seeker primary profile requires `X_spatial` and accepts
 an additional exactly agreeing real numeric `spatial` embedding. Both embeddings
 must be finite. Exact native XY is retained in
-`obsm["spatial_pixels"]`; canonical float64 `spatial` uses the manufacturer
-approximate 0.647 µm/pixel calibration without reversing stored orientation.
+`obsm["spatial_pixels"]`. Agreement is checked in the source dtypes before
+the canonical float64 `spatial` and circle centres are constructed. Physical
+positions use the manufacturer's approximate 0.647 µm/pixel calibration and
+retain the stored orientation.
 The circles use the same scale; their radius is half the nominal 10 µm bead
 diameter from Takara's Seeker FAQ, stored in source pixels (about 7.73), rather
 than a measured per-bead footprint. Reprocessed, merged and Trekker
@@ -355,7 +357,9 @@ does not establish the imported table embedding's units or origin.
 Categorical `region` names `<dataset_id>_labels_image`. The default
 `instance_id` is parsed exactly from observation names as uint64 (earlier
 releases used int64); an explicit `instance_key` selects an existing integer
-column, keeping its signedness and promoting widths below 16 bits. These IDs
+column, keeping its signedness and promoting widths below 16 bits. Its name
+must follow SpatialData's table-column rules and cannot match `region`
+ignoring letter case. These IDs
 are checked against the label dtype range, without reading label pixels. A
 table with int64 instance IDs (for example `spatialdata.aggregate` output or a
 store written by an earlier release) cannot be concatenated with a uint64
@@ -581,8 +585,8 @@ for supported profiles and product names.
 Square-bin tables `<binN>_table` contain exact float32/float64 raw counts, source feature
 order and first-occurrence coordinate order. Duplicate coordinate/feature
 records sum deterministically. `obs` contains categorical `region` and
-uint64 `instance_id` (int64 in earlier releases); the returned points keep the
-same IDs as a `RangeIndex`. Positional string observation names identify the bins.
+int64 `instance_id`. The returned points keep the same IDs as a `RangeIndex`.
+Positional string observation names identify the bins.
 `var` retains source `gene` or `geneID`/`geneName`, `offset` and record-span
 `count`. Exact integer native-grid XY positions are in `obsm["spatial_grid"]`;
 finite float64 `spatial` uses source pitch divided by 1000 in `global`
@@ -602,9 +606,9 @@ for summary annotations; summaries are not recomputed QC. Native-grid XY
 centres, optional CSR `exon` sharing the selected count dtype, origin/resolution metadata and available
 cell-type names are retained. Linkage uses `(region, instance_id)` with exact
 returned point/polygon IDs; invalid-cell drops filter the complete cell row.
-A table with int64 instance IDs (for example `spatialdata.aggregate` output or
-a square-bin table written by an earlier release) cannot be concatenated with
-these uint64 tables, because the pair is promoted to float64.
+Concatenating these uint64 cell tables with int64 instance IDs, such as square
+bins or `spatialdata.aggregate` output, requires an explicit common integer dtype.
+NumPy otherwise promotes the combined IDs to float64.
 
 Analysis tables are separate products with their own point targets. Imported
 expression values, sufficient source dtype, names/order, annotations, embeddings, ordinary

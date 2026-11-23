@@ -51,7 +51,7 @@ class TestIss:
                 **{option: value},  # pyrefly: ignore[bad-argument-type] - Exercise an untyped caller boundary.
             )
 
-    @pytest.mark.parametrize("instance_key", ["", "region"])
+    @pytest.mark.parametrize("instance_key", ["", "region", "Region", "Cell ID", "_index"])
     def test_invalid_instance_key(self, tmp_path: Path, instance_key: str) -> None:
         with pytest.raises(ValueError, match="instance_key"):
             iss(

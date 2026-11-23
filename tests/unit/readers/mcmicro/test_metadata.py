@@ -58,6 +58,7 @@ class TestReadWorkflow:
             ("workflow:\n  tma: true\n  tma: false\n", "2 'tma' entries"),
             ("workflow:\n  tma: true\nworkflow:\n  tma: true\n", "2 'workflow' entries"),
             ("workflow:\n  other: 1\n", "0 'tma' entries"),
+            ("workflow: {tma: !!bool bogus}", "workflow.tma"),
             ("workflow: [tma]\n", "mapping"),
             ("- workflow\n", "mapping"),
             ("", "empty document"),

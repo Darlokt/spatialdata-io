@@ -45,13 +45,12 @@ makes one stack per immediate subfolder and ignores files in the root::
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, warn_user
-from spatialdata_io.readers._utils.names import sanitize_element_name
+from spatialdata_io.readers._utils.names import colliding_element_names, sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
@@ -151,9 +150,8 @@ def _element_name(folder_name: str) -> str:
 
 def _require_unique_names(folders: Sequence[tuple[str, StackFiles]], root: DatasetRoot) -> None:
     """Reject folders whose element names agree ignoring case after repair."""
-    # SpatialData compares element names with str.lower().
-    counts = Counter(stack.name.lower() for _, stack in folders)
-    colliding = [folder for folder, stack in folders if counts[stack.name.lower()] > 1]
+    conflicts = set(colliding_element_names(stack.name for _, stack in folders))
+    colliding = [folder for folder, stack in folders if stack.name in conflicts]
     if colliding:
         raise ReaderFormatError(
             context=_CONTEXT,

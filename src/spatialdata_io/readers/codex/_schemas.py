@@ -160,13 +160,11 @@ def validate_csv_annotations(frame: pd.DataFrame, path: ArtifactFile) -> None:
             )
 
 
-def normalize_fcs_metadata(frame: pd.DataFrame, path: ArtifactFile) -> None:
-    """Keep owned FCS annotations and primitive widths in explicit Arrow columns."""
-    for column, dtype in frame.dtypes.items():
+def validate_fcs_metadata(frame: pd.DataFrame, path: ArtifactFile) -> None:
+    """Require real numeric types without converting native FCS annotations."""
+    for dtype in frame.dtypes:
         if dtype.kind not in "iuf":
             raise schema_error(path, found=f"FCS parameter dtype {dtype}", expected="real numeric event parameters")
-
-        frame[column] = frame[column].astype(pd.ArrowDtype(pa.from_numpy_dtype(dtype)))
 
 
 def expression_dtype(frame: pd.DataFrame, features: list[str], path: ArtifactFile) -> np.dtype:
@@ -184,12 +182,6 @@ def expression_dtype(frame: pd.DataFrame, features: list[str], path: ArtifactFil
         dtypes.append(dtype)
 
     return np.result_type(*dtypes)
-
-
-def validate_expression(values: npt.NDArray[np.number], path: ArtifactFile) -> None:
-    """Reject nonfinite cycle intensities before sparse construction."""
-    if not np.isfinite(values).all():
-        raise schema_error(path, found="nonfinite cycle intensities", expected="finite real cycle intensities")
 
 
 def validate_observations(observations: pd.DataFrame, path: ArtifactFile) -> npt.NDArray[np.number]:

@@ -36,7 +36,8 @@ import pandas as pd
 from spatialdata.models import TableModel
 
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
-from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.centroids import scale_regionprops_centroids
+from spatialdata_io.readers._utils.errors import add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers.steinbock._layout import NATIVE_FRAME_SUFFIX
 from spatialdata_io.readers.steinbock._schemas import (
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.steinbock._images import Calibration, SampleGrid
+    from spatialdata_io.readers.steinbock._images import SampleGrid
 
 # Columns the reader reads by name or generates; imported columns that equal
 # one ignoring letter case are renamed rather than these.
@@ -93,8 +94,8 @@ def read_table(path: ArtifactFile, grids: Mapping[str, SampleGrid]) -> ad.AnnDat
     _set_instance_ids(obs, grids, path)
 
     coordinates = np.column_stack(centroid_columns(obs, path))
-    validate_centroids(coordinates, obs, grids, path)
     table.obsm["spatial_pixels"] = coordinates
+    _set_positions(table, coordinates, grids, path)
     return table
 
 
@@ -107,12 +108,11 @@ def _set_instance_ids(obs: pd.DataFrame, grids: Mapping[str, SampleGrid], path: 
     )
 
 
-def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: ArtifactFile) -> None:
+def _set_positions(table: ad.AnnData, native: np.ndarray, grids: Mapping[str, SampleGrid], path: ArtifactFile) -> None:
     """Declare the native centroids and add physical positions when every sample is calibrated."""
     # read_table produced eager frames and this exact ndarray; AnnData's
     # container annotations additionally admit backed frames and sparse arrays.
     obs = cast("pd.DataFrame", table.obs)
-    native = cast("np.ndarray", table.obsm["spatial_pixels"])
     single = len(grids) == 1
     descriptions: dict[str, FixedFrame | RowFrames] = {}
 
@@ -134,11 +134,10 @@ def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: Arti
             "position": _NATIVE_POSITION,
         }
 
-    calibrations = {name: grid.calibration for name, grid in grids.items() if grid.calibration is not None}
-    if len(calibrations) == len(grids):
-        by_image = {grids[name].image_name: calibration for name, calibration in calibrations.items()}
-        table.obsm["spatial"] = _physical_positions(native, obs, by_image, path)
-        evidence = {grids[name].frame: calibration.source for name, calibration in calibrations.items()}
+    physical = _validate_and_scale_centroids(native, obs, grids, path)
+    if physical is not None:
+        table.obsm["spatial"] = physical
+        evidence = {grid.frame: grid.calibration.source for grid in grids.values() if grid.calibration is not None}
         if single:
             descriptions["spatial"] = {
                 "axes": ["x", "y"],
@@ -163,28 +162,33 @@ def set_positions(table: ad.AnnData, grids: Mapping[str, SampleGrid], path: Arti
     table.uns[POSITIONS_KEY] = declaration
 
 
-def _physical_positions(
-    native: np.ndarray, obs: pd.DataFrame, calibrations: Mapping[str, Calibration], path: ArtifactFile
-) -> np.ndarray:
-    """Return float64 micrometre XY, rejecting overflow.
-
-    ``calibrations`` is keyed by the source image name of ``obs["image"]``.
-    """
-    # Regionprops averages zero-based pixel indices; the unchanged raster
-    # locates their centres half a pixel inward from its corner origin.
-    with np.errstate(over="ignore"):
-        physical = np.add(native, 0.5, dtype=np.float64)
-        if len(calibrations) == 1:
-            physical *= next(iter(calibrations.values())).spacing_xy_um
-        else:
-            for image, rows in obs.groupby("image", observed=True, sort=False).indices.items():
-                physical[rows] *= calibrations[str(image)].spacing_xy_um
-
-    if not np.isfinite(physical).all():
-        raise ReaderFormatError(
-            context=POSITIONS_CONTEXT,
-            path=path,
-            found="nonfinite physical positions",
-            expected="finite float64 physical XY",
-        )
+def _validate_and_scale_centroids(
+    native: np.ndarray, obs: pd.DataFrame, grids: Mapping[str, SampleGrid], path: ArtifactFile
+) -> np.ndarray | None:
+    """Visit each sample's rows once, preserving interleaved observation order."""
+    by_image = {grid.image_name: grid for grid in grids.values()}
+    calibrated = all(grid.calibration is not None for grid in grids.values())
+    physical = np.empty(native.shape, dtype=np.float64) if calibrated else None
+    # A slice avoids an index array and a gather for the single-sample layout.
+    groups = (
+        {next(iter(by_image)): slice(None)}
+        if len(by_image) == 1
+        else obs.groupby("image", observed=True, sort=False).indices
+    )
+    for image, rows in groups.items():
+        grid = by_image[str(image)]
+        values = native[rows]
+        validate_centroids(values, grid, path)
+        if physical is not None and grid.calibration is not None:
+            if isinstance(rows, slice):
+                scaled = physical[rows]
+                scaled[:] = values
+            else:
+                # The integer-array gather above owns its values.
+                scaled = values.astype(np.float64, copy=False)
+            scale_regionprops_centroids(
+                scaled, grid.calibration.spacing_xy_um, frame=grid.frame, context=POSITIONS_CONTEXT, path=path
+            )
+            if not isinstance(rows, slice):
+                physical[rows] = scaled
     return physical

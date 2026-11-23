@@ -19,7 +19,6 @@ their assignments as ``original_cell_id``, which refers to no returned element.
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -29,6 +28,7 @@ from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.csv import csv_header, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.points import suppress_points_index_warning
 from spatialdata_io.readers.merscope._schemas import (
     STRING_DTYPE,
     TRANSCRIPTS,
@@ -76,10 +76,7 @@ def read_transcripts(
 
     # Unsorted independent partitions are intentional. Known feature categories
     # and sort=False avoid the public model's eager category/index scans.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message="The index of the dataframe is not monotonic increasing.*", category=UserWarning
-        )
+    with suppress_points_index_warning():
         return PointsModel.parse(
             normalized,
             coordinates={"x": "x", "y": "y"},

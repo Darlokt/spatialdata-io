@@ -57,14 +57,17 @@ from typing import TYPE_CHECKING
 
 import dask.array as da
 import numpy as np
+import shapely
 from dask import delayed
 from scipy.ndimage import map_coordinates
+from shapely.geometry import MultiPoint, Polygon, box
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Affine
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
     inspect_tiff,
+    inspect_tiff_if_recognized,
     make_raster_options,
     normalize_cyx_image,
     read_jpeg,
@@ -89,7 +92,6 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 
 _AXES = ("c", "y", "x")
-_TIFF_SIGNATURES = frozenset((b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,21 +129,11 @@ def make_image_options(
     return ImageOptions(raster, axes, tiff_series)
 
 
-def _is_tiff(path: ArtifactFile, *, context: ReaderErrorContext) -> bool:
-    try:
-        with path.open("rb") as handle:
-            return handle.read(4) in _TIFF_SIGNATURES
-    except OSError as error:
-        add_reader_context(error, context=context, path=path)
-        raise
-
-
 def _read_fullres(source: FullresImageSource, options: ImageOptions, *, version: str | None) -> _Image:
     """Read bounded metadata of the full-resolution image and build it without pixel tasks."""
     context = ReaderErrorContext("visium_hd", "full-resolution image", version)
     path = source.path
-    if _is_tiff(path, context=context):
-        metadata = inspect_tiff(path, context=context)
+    if (metadata := inspect_tiff_if_recognized(path, context=context)) is not None:
         series = select_tiff_series(metadata, options.tiff_series, context=context, option="tiff_series")
         raster = read_tiff(metadata, series=series, level=0, context=context)
         image = _Image(
@@ -283,10 +275,11 @@ def _cytassist_image(
 
 def _warp_grid(
     source_shape: tuple[int, int], source_to_global: NDArray[np.float64], *, context: ReaderErrorContext
-) -> tuple[tuple[int, int], NDArray[np.float64]]:
+) -> tuple[tuple[int, int], NDArray[np.float64], Polygon]:
     height, width = source_shape
     corners = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float64)
-    denominators = corners @ source_to_global[2, :2] + source_to_global[2, 2]
+    with np.errstate(over="ignore", invalid="ignore"):
+        denominators = corners @ source_to_global[2, :2] + source_to_global[2, 2]
     if np.min(denominators) <= 0 <= np.max(denominators):
         raise ReaderFormatError(
             context=context,
@@ -294,18 +287,69 @@ def _warp_grid(
             expected="a finite image footprint in slide micrometres",
         )
 
-    footprint = apply_projective(source_to_global, corners, context=context)
-    # The Jacobian determinant gives local pixel area; its square root sets isotropic pitch.
-    center = np.array([[width / 2, height / 2]], dtype=np.float64)
-    denominator = float(center[0] @ source_to_global[2, :2] + source_to_global[2, 2])
-    mapped = apply_projective(source_to_global, center, context=context)[0]
-    jacobian = (source_to_global[:2, :2] - np.outer(mapped, source_to_global[2, :2])) / denominator
-    step = float(np.sqrt(abs(np.linalg.det(jacobian))))
-
-    origin = footprint.min(axis=0)
-    dimensions = np.ceil((footprint.max(axis=0) - origin) / step).astype(np.int64)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        footprint = apply_projective(source_to_global, corners, context=context)
+        # The Jacobian determinant gives local pixel area; its square root sets isotropic pitch.
+        center = np.array([[width / 2, height / 2]], dtype=np.float64)
+        denominator = float(center[0] @ source_to_global[2, :2] + source_to_global[2, 2])
+        mapped = apply_projective(source_to_global, center, context=context)[0]
+        jacobian = (source_to_global[:2, :2] - np.outer(mapped, source_to_global[2, :2])) / denominator
+        step = float(np.sqrt(abs(np.linalg.det(jacobian))))
+        origin = footprint.min(axis=0)
+        output_footprint = (footprint - origin) / step
+        dimensions = np.ceil(output_footprint.max(axis=0))
+    if (
+        not np.isfinite(step)
+        or step <= 0
+        or not np.isfinite(dimensions).all()
+        or np.any(dimensions < 1)
+        or np.any(dimensions >= 2**63)
+    ):
+        raise ReaderFormatError(
+            context=context,
+            found=f"output dimensions {dimensions.tolist()} at pitch {step}",
+            expected="a finite positive output pitch and two positive output dimensions within int64",
+        )
     matrix = np.array([[step, 0, origin[0]], [0, step, origin[1]], [0, 0, 1]], dtype=np.float64)
-    return (int(dimensions[1]), int(dimensions[0])), matrix
+    polygon = Polygon(output_footprint)
+    if not polygon.is_valid:
+        raise ReaderFormatError(
+            context=context,
+            found="degenerate projected source rectangle",
+            expected="a representable, nondegenerate output footprint",
+        )
+    return (int(dimensions[1]), int(dimensions[0])), matrix, polygon
+
+
+def _source_window(
+    footprint: Polygon,
+    output_to_source: NDArray[np.float64],
+    output_slice: tuple[int, int, int, int],
+    source_shape: tuple[int, int],
+    *,
+    context: ReaderErrorContext,
+) -> tuple[int, int, int, int] | None:
+    """Bound bilinear sampling by clipping the output tile to the finite footprint."""
+    y0, y1, x0, x1 = output_slice
+    left, right, top, bottom = x0 + 0.5, x1 - 0.5, y0 + 0.5, y1 - 0.5
+    centre_region = (
+        MultiPoint(((left, top), (right, bottom))).convex_hull
+        if left == right or top == bottom
+        else box(left, top, right, bottom)
+    )
+    clipped = shapely.get_coordinates(footprint.intersection(centre_region))
+    if not len(clipped):
+        return None
+
+    # The inverse denominator has one sign on the footprint. Coordinate extrema
+    # therefore occur at the clipped vertices, even when a tile crosses the horizon.
+    mapped = apply_projective(output_to_source, clipped, context=context) - 0.5
+    height, width = source_shape
+    left, top = np.clip(np.floor(mapped.min(axis=0)), 0, [width, height]).astype(np.int64)
+    right, bottom = np.clip(np.ceil(mapped.max(axis=0)) + 1, 0, [width, height]).astype(np.int64)
+    if right <= left or bottom <= top:
+        return None
+    return int(top), int(bottom), int(left), int(right)
 
 
 def _warp_tile(
@@ -313,15 +357,20 @@ def _warp_tile(
     output_to_source: NDArray[np.float64],
     output_slice: tuple[int, int, int, int],
     source_origin: tuple[int, int],
-    context: ReaderErrorContext,
 ) -> NDArray[np.generic]:
     y0, y1, x0, x1 = output_slice
     yy, xx = np.indices((y1 - y0, x1 - x0), dtype=np.float64)
 
     # SpatialData transforms operate on pixel corners; scipy indexes centres at integers.
     points = np.column_stack(((xx + x0 + 0.5).ravel(), (yy + y0 + 0.5).ravel()))
-    coordinates = apply_projective(output_to_source, points, context=context)
-    coordinates -= np.array([source_origin[1] + 0.5, source_origin[0] + 0.5], dtype=np.float64)
+    denominator = points @ output_to_source[2, :2] + output_to_source[2, 2]
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        coordinates = (points @ output_to_source[:2, :2].T + output_to_source[:2, 2]) / denominator[:, None]
+    # An inverse horizon can cross the rectangular output outside the projected source.
+    # Its undefined pixels sample background, just like other out-of-source positions.
+    coordinates[~np.isfinite(coordinates)] = -1
+    coordinates -= 0.5
+    coordinates -= np.array([source_origin[1], source_origin[0]], dtype=np.float64)
     scipy_coordinates = np.stack((coordinates[:, 1], coordinates[:, 0])).reshape(2, y1 - y0, x1 - x0)
 
     return np.stack(
@@ -351,7 +400,8 @@ def warp_cytassist(
     """
     spot_to_grid_um = np.array([[2, 0, 1], [0, 2, 1], [0, 0, 1]], dtype=np.float64)
     source_to_global = frame.grid_um_to_global @ spot_to_grid_um @ np.linalg.inv(spot_to_cytassist)
-    shape, matrix = _warp_grid((int(pixels.shape[1]), int(pixels.shape[2])), source_to_global, context=context)
+    source_shape = (int(pixels.shape[1]), int(pixels.shape[2]))
+    shape, matrix, footprint = _warp_grid(source_shape, source_to_global, context=context)
     output_to_source = np.linalg.inv(source_to_global) @ matrix
 
     chunks = options.image_chunks()
@@ -362,18 +412,15 @@ def warp_cytassist(
         for x0 in range(0, shape[1], chunks["x"]):
             x1 = min(x0 + chunks["x"], shape[1])
 
-            corners = np.array([[x0, y0], [x1 - 1, y0], [x1 - 1, y1 - 1], [x0, y1 - 1]], dtype=np.float64)
-            mapped = apply_projective(output_to_source, corners + 0.5, context=context) - 0.5
-            # Include both interpolation neighbours, clipped to the available source pixels.
-            low = np.maximum(np.floor(mapped.min(axis=0)).astype(np.int64), 0)
-            high = np.minimum(np.ceil(mapped.max(axis=0)).astype(np.int64) + 1, [pixels.shape[2], pixels.shape[1]])
-
+            output_slice = (y0, y1, x0, x1)
+            window = _source_window(footprint, output_to_source, output_slice, source_shape, context=context)
             tile_shape = (pixels.shape[0], y1 - y0, x1 - x0)
-            if np.any(high <= low):
+            if window is None:
                 tile = da.zeros(tile_shape, dtype=pixels.dtype, chunks=tile_shape)
             else:
-                roi = pixels[:, low[1] : high[1], low[0] : high[0]]
-                task = delayed(_warp_tile)(roi, output_to_source, (y0, y1, x0, x1), (int(low[1]), int(low[0])), context)
+                top, bottom, left, right = window
+                roi = pixels[:, top:bottom, left:right]
+                task = delayed(_warp_tile)(roi, output_to_source, output_slice, (top, left))
                 tile = da.from_delayed(task, shape=tile_shape, dtype=pixels.dtype)
             columns.append(tile)
         rows.append(da.concatenate(columns, axis=2))

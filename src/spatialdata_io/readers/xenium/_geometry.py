@@ -180,15 +180,13 @@ def read_polygons(
     starts, lengths = _runs(vertices, path, context)
 
     degenerate = lengths < _MIN_RING_COORDINATES
-    geometries = np.full(len(starts), None, dtype=object)
-    if not degenerate.all():
+    if degenerate.any():
+        geometries = np.full(len(starts), None, dtype=object)
         built = ~degenerate
-        offsets = np.concatenate([[0], np.cumsum(lengths[built])])
-        geometries[built] = shapely.from_ragged_array(
-            shapely.GeometryType.POLYGON,
-            vertices.coordinates[np.repeat(built, lengths)],
-            (offsets, np.arange(built.sum() + 1)),
-        )
+        if built.any():
+            geometries[built] = _polygons(vertices.coordinates[np.repeat(built, lengths)], lengths[built])
+    else:
+        geometries = _polygons(vertices.coordinates, lengths)
 
     cell_ids = vertices.ids[starts]
     file_labels = None if vertices.labels is None else vertices.labels[starts]
@@ -202,6 +200,11 @@ def read_polygons(
     else:
         labels = None
     return Polygons(kind, cell_ids, labels, geometries, degenerate, path, context)
+
+
+def _polygons(coordinates: NDArray[np.float64], lengths: NDArray[np.intp]) -> NDArray[np.object_]:
+    offsets = np.concatenate([[0], np.cumsum(lengths)])
+    return shapely.from_ragged_array(shapely.GeometryType.POLYGON, coordinates, (offsets, np.arange(len(lengths) + 1)))
 
 
 def _uint32_labels(

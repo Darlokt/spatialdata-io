@@ -70,6 +70,18 @@ class TestXeniumExplorerSelection:
         with pytest.raises(ReaderFormatError, match=r"1 invalid geometries .*\['Selection 2'\]"):
             xenium_explorer_selection(path, invalid_geometries="raise")
 
+    def test_keep_skips_topology_and_preserves_invalid_ring(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        topology = mocker.patch(
+            "spatialdata_io.readers.xenium._selection.invalid_geometry_mask", side_effect=AssertionError
+        )
+        path = _write(tmp_path / "coordinates.csv", MULTI + BOWTIE)
+
+        result = xenium_explorer_selection(path)
+
+        assert result.index.tolist() == ["Selection 1", "Cell aaaaficg-1", "Selection 2"]
+        assert not result.geometry.loc["Selection 2"].is_valid
+        topology.assert_not_called()
+
     def test_no_valid_selection(self, tmp_path: Path) -> None:
         bowtie = _write(tmp_path / "bowtie.csv", MULTI.split("Selection 1,0,0", maxsplit=1)[0] + BOWTIE)
         empty = _write(tmp_path / "empty.csv", MULTI.split("Selection 1,0,0", maxsplit=1)[0])

@@ -21,6 +21,7 @@ chroma samples.
 
 from __future__ import annotations
 
+from functools import cache
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ome_types import OME
-    from ome_types.model import TiffData
+    from ome_types.model import Pixels, TiffData
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.image._types import SampleColor
@@ -52,13 +53,9 @@ _JPEG_COMPRESSIONS = frozenset({6, 7, 33007, 34892})
 _ALPHA_SAMPLES = frozenset({tifffile.EXTRASAMPLE.ASSOCALPHA, tifffile.EXTRASAMPLE.UNASSALPHA})
 
 
-def _validate_tiff_signature(path: Path) -> None:
-    """Reject non-TIFF bytes before opening a metadata or pixel decoder."""
+def _has_tiff_signature(path: Path) -> bool:
     with path.open("rb") as stream:
-        signature = stream.read(4)
-    if signature not in _TIFF_SIGNATURES:
-        message = f"File does not contain a classic TIFF or BigTIFF signature: {path}"
-        raise RasterFormatError(message)
+        return stream.read(4) in _TIFF_SIGNATURES
 
 
 def _native_chunks(
@@ -154,34 +151,77 @@ def _parse_ome_xml(path: Path, ome_xml: str | None) -> OME | None:
         raise RasterFormatError(message) from error
 
 
-def _validate_ome_mappings(root: Path, ome: OME) -> None:
-    """Validate external file references before tifffile discovers the image series.
+def _require_linked_tiff(path: Path) -> None:
+    """Check each external OME source before tifffile can follow the reference."""
+    if not path.is_file():
+        message = f"OME metadata references a non-file TIFF source: {path}"
+        raise RasterFormatError(message)
+    if not _has_tiff_signature(path):
+        message = f"Linked OME source does not have a TIFF signature: {path}"
+        raise RasterFormatError(message)
 
-    Every ``TiffData`` block must reference a TIFF file inside the directory
-    of the source's real path, and no two images may claim the same file and
-    first IFD.
-    """
+
+def _remaining_planes(pixels: Pixels, block: TiffData) -> int:
+    """Count logical planes from FirstZ/C/T in OME's fastest-to-slowest dimension order."""
+    samples = (pixels.channels[0].samples_per_pixel or 1) if pixels.channels else 1
+    dimensions = {
+        "Z": (pixels.size_z, block.first_z),
+        "C": (pixels.size_c // samples, block.first_c),
+        "T": (pixels.size_t, block.first_t),
+    }
+    stride, offset = 1, 0
+    for axis in pixels.dimension_order.value[2:]:
+        extent, first = dimensions[axis]
+        offset += first * stride
+        stride *= extent
+    return stride - offset
+
+
+def _validate_ome_mappings(root: Path, tiff: tifffile.TiffFile, ome: OME) -> None:
+    """Validate linked files before series discovery and compare IFD ranges per image."""
+    root = root.resolve()
     checked_sources = {root}
-    mapped_by_previous_images: set[tuple[Path, int]] = set()
-    for image_index, image in enumerate(ome.images):
-        image_mappings: set[tuple[Path, int]] = set()
+    intervals: dict[Path, list[tuple[int, int, int]]] = {}
+
+    @cache
+    def file_plane_count(path: Path) -> int:
+        if path == root:
+            return len(tiff.pages)
+        with tifffile.TiffFile(path) as other:
+            return len(other.pages)
+
+    for image_number, image in enumerate(ome.images):
         for block in image.pixels.tiff_data_blocks:
             linked = _tiff_data_path(root, ome, block)
             if linked not in checked_sources:
-                if not linked.is_file():
-                    message = f"OME metadata references a non-file TIFF source: {linked}"
-                    raise RasterFormatError(message)
-                _validate_tiff_signature(linked)
+                _require_linked_tiff(linked)
                 checked_sources.add(linked)
-            image_mappings.add((linked, block.ifd or 0))
-        duplicates = image_mappings.intersection(mapped_by_previous_images)
-        if duplicates:
-            message = (
-                f"OME image {image_index} reuses TIFF IFD mappings already owned by another "
-                f"image: {sorted((str(path), ifd) for path, ifd in duplicates)}."
-            )
-            raise RasterFormatError(message)
-        mapped_by_previous_images.update(image_mappings)
+            count = block.plane_count
+            if count == 0:
+                # tifffile interprets zero as an omitted count and would expose undeclared pixels.
+                message = f"OME image {image_number} declares PlaneCount=0 for {linked}."
+                raise RasterFormatError(message)
+            if len(ome.images) == 1:
+                continue
+            if count is None:
+                count = 1 if "ifd" in block.model_fields_set else file_plane_count(linked)
+            used = min(count, _remaining_planes(image.pixels, block))
+            if used > 0:
+                intervals.setdefault(linked, []).append((block.ifd, block.ifd + used, image_number))
+    _reject_overlapping_ifds(intervals)
+
+
+def _reject_overlapping_ifds(intervals: dict[Path, list[tuple[int, int, int]]]) -> None:
+    """Reject a physical IFD claimed by distinct images, even when later TiffData overwrites a mapping."""
+    for path, runs in intervals.items():
+        previous_image, end = -1, 0
+        for start, stop, image in sorted(runs):
+            if start < end and image != previous_image:
+                message = (
+                    f"OME image {image} reuses TIFF IFD {start} in {path} already owned by image {previous_image}."
+                )
+                raise RasterFormatError(message)
+            previous_image, end = image, max(stop, end)
 
 
 def _tiff_data_path(root: Path, ome: OME, block: TiffData) -> Path:
@@ -196,7 +236,7 @@ def _tiff_data_path(root: Path, ome: OME, block: TiffData) -> Path:
         return root
     # tifffile opens linked files beside the source's real path, so a symlinked
     # source is checked where tifffile reads instead of zero-filling missing data.
-    directory = root.resolve().parent
+    directory = root.parent
     linked = (directory / block.uuid.file_name).resolve()
     if not linked.is_relative_to(directory):
         message = (
@@ -241,8 +281,19 @@ def inspect_tiff(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffM
     even when their length is one, independently of TIFF metadata defaults.
     Failures keep their type and gain a note naming ``context`` and ``path``.
     """
+    metadata = inspect_tiff_if_recognized(path, context=context)
+    if metadata is None:
+        message = f"File does not contain a classic TIFF or BigTIFF signature: {path}"
+        error = RasterFormatError(message)
+        add_reader_context(error, context=context, path=path)
+        raise error
+    return metadata
+
+
+def inspect_tiff_if_recognized(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffMetadata | None:
+    """Inspect a TIFF by content. Return None for other signatures and propagate failures of recognized TIFFs."""
     try:
-        return _inspect(path)
+        return _inspect(path) if _has_tiff_signature(path) else None
     except (OSError, ValueError) as error:
         add_reader_context(error, context=context, path=path)
         raise
@@ -250,11 +301,10 @@ def inspect_tiff(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffM
 
 def _inspect(path: ArtifactFile) -> TiffMetadata:
     """Open the TIFF once and describe every series and level without reading pixels."""
-    _validate_tiff_signature(path)
     with tifffile.TiffFile(path) as tiff:
         ome = _parse_ome_xml(path, tiff.ome_metadata)
         if ome is not None:
-            _validate_ome_mappings(path, ome)
+            _validate_ome_mappings(path, tiff, ome)
             if len(ome.images) != len(tiff.series):
                 message = (
                     f"OME metadata declares {len(ome.images)} images, "

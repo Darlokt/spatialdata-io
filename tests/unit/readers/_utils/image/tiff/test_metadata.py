@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pytest
@@ -11,7 +11,7 @@ from ome_types import OME
 from ome_types.model import Image, Pixels
 
 from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext
-from spatialdata_io.readers._utils.image import inspect_tiff
+from spatialdata_io.readers._utils.image import inspect_tiff, inspect_tiff_if_recognized
 from spatialdata_io.readers._utils.image.tiff._metadata import _level_metadata, _sample_color
 from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -38,6 +38,31 @@ class TestInspectTiff:
             inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
         assert caught.value.__notes__ == [f"While handling {_RASTER_CONTEXT.describe(path=path)}."]
+
+
+class TestInspectTiffIfRecognized:
+    @pytest.mark.parametrize("byteorder", ["<", ">"])
+    @pytest.mark.parametrize("bigtiff", [True, False])
+    def test_recognizes_byteorder_and_tiff_width(
+        self, tmp_path: Path, byteorder: Literal["<", ">"], *, bigtiff: bool
+    ) -> None:
+        path = ArtifactFile(tmp_path / "unlabelled")
+        tifffile.imwrite(path, np.zeros((3, 4), dtype=np.uint16), byteorder=byteorder, bigtiff=bigtiff)
+        metadata = inspect_tiff_if_recognized(path, context=_RASTER_CONTEXT)
+        assert metadata is not None
+        assert metadata.series[0].levels[0].shape == (3, 4)
+
+    def test_other_signature(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "other")
+        path.write_bytes(b"other")
+        assert inspect_tiff_if_recognized(path, context=_RASTER_CONTEXT) is None
+
+    def test_damaged_recognized_file(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "truncated")
+        path.write_bytes(b"II+\0invalid")
+        with pytest.raises(tifffile.TiffFileError) as error:
+            inspect_tiff_if_recognized(path, context=_RASTER_CONTEXT)
+        assert str(path) in error.value.__notes__[0]
 
 
 class TestLevelMetadata:

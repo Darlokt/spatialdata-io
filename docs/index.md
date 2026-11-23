@@ -27,5 +27,6 @@ table_contracts.md
 legacy_anndata.md
 changelog.md
 contributing.md
+reader_architecture.md
 references.md
 ```

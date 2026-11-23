@@ -11,10 +11,11 @@ import pandas as pd
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
+from spatialdata_io.readers._utils.paths import ArtifactFile, normalize_dataset_root
 from spatialdata_io.readers.xenium import _analysis
 from spatialdata_io.readers.xenium._analysis import read_analysis
 from spatialdata_io.readers.xenium._layout import AnalysisArchive, AnalysisDirectory
+from spatialdata_io.readers.xenium._layout import _analysis as _discover_analysis
 from tests.integration.readers.xenium import _fixtures as fx
 
 if TYPE_CHECKING:
@@ -32,7 +33,13 @@ def _directory(root: Path, members: dict[str, str]) -> AnalysisDirectory:
     for name, text in members.items():
         (root / "analysis" / name).parent.mkdir(parents=True, exist_ok=True)
         (root / "analysis" / name).write_text(text)
-    return AnalysisDirectory(ArtifactDirectory(root / "analysis"))
+    return _directory_source(root)
+
+
+def _directory_source(root: Path) -> AnalysisDirectory:
+    source = _discover_analysis(normalize_dataset_root(root, context=CONTEXT, path_policy="strict"), CONTEXT)
+    assert isinstance(source, AnalysisDirectory)
+    return source
 
 
 class TestReadAnalysis:
@@ -55,7 +62,7 @@ class TestReadAnalysis:
     def test_vendor_layouts(self, tmp_path: Path, kind: Literal["directory", "archive"]) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(analysis=kind))
         source = (
-            AnalysisDirectory(ArtifactDirectory(tmp_path / "analysis"))
+            _directory_source(tmp_path)
             if kind == "directory"
             else AnalysisArchive(ArtifactFile(tmp_path / "analysis.tar.gz"))
         )
@@ -148,6 +155,33 @@ class TestReadAnalysis:
         with pytest.raises(ReaderFormatError, match="repeated analysis identity"):
             read_analysis(source, BARCODES, context=CONTEXT)
 
+    def test_archive_physical_read_and_output_order(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = tmp_path / "analysis.tar.gz"
+        with tarfile.open(path, "w:gz") as archive:
+            for method, cluster in (("bravo", 2), ("alpha", 1)):
+                payload = f"Barcode,Cluster\na-1,{cluster}\n".encode()
+                info = tarfile.TarInfo(f"clustering/{method}/clusters.csv")
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+
+        extract = mocker.spy(tarfile.TarFile, "extractfile")
+        seek = mocker.spy(tarfile.ExFileObject, "seek")
+        result = read_analysis(AnalysisArchive(ArtifactFile(path)), BARCODES, context=CONTEXT)
+
+        offsets = [call.args[1].offset for call in extract.call_args_list]
+        assert len(offsets) == 2
+        assert offsets == sorted(offsets)
+        seek.assert_not_called()
+        assert list(result.clusters) == ["alpha", "bravo"]
+        assert result.clusters["alpha"].categories.tolist() == ["1"]
+        assert result.clusters["bravo"].categories.tolist() == ["2"]
+
+    def test_data_bom_is_part_of_the_literal_barcode(self, tmp_path: Path) -> None:
+        source = _directory(tmp_path, {CLUSTERS: "Barcode,Cluster\n\ufeffa-1,1\n"})
+
+        with pytest.raises(ReaderFormatError, match="unknown or repeated barcodes"):
+            read_analysis(source, BARCODES, context=CONTEXT)
+
     def test_identities_ignore_letter_case(self, tmp_path: Path) -> None:
         # SpatialData compares obs and obsm names ignoring case, so these would collide.
         source = _directory(
@@ -168,7 +202,7 @@ class TestReadAnalysis:
         handle = io.BytesIO(b"Barcode,Cluster\na-1,1\n")
         read = mocker.spy(handle, "read")
         parsed = mocker.spy(_analysis, "_table")
-        mocker.patch.object(type(source.directory), "open", return_value=handle)
+        mocker.patch.object(type(source.files[0][1]), "open", return_value=handle)
         result = read_analysis(source, BARCODES, context=CONTEXT)
         assert parsed.call_args.args[0] is handle
         assert result.clusters["graphclust"].codes.tolist() == [0, -1, -1]

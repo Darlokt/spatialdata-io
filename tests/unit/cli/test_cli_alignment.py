@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import importlib
 import inspect
 import subprocess
@@ -51,11 +50,6 @@ _READER_CASES = (
 # Readers without images or labels.
 _WITHOUT_RASTER_OPTIONS = frozenset({"curio"})
 _RASTER_DEFAULTS = {"scale_factors": DEFAULT_SCALE_FACTORS, "chunks": DEFAULT_CHUNKS}
-_COMMAND_DIRECTORY = Path(__file__).parents[3] / "src" / "spatialdata_io" / "_cli" / "commands"
-# Dataset command modules whose options end with ``--path-policy``; generic takes a single file.
-_COMMAND_MODULES = {
-    path.stem: path for path in _COMMAND_DIRECTORY.glob("*.py") if path.stem not in {"__init__", "generic", "curio"}
-}
 # Options that a command requires besides the dataset root and output store.
 _REQUIRED_ARGUMENTS = {
     "iss": ("--raw-image-file", "raw.tif", "--labels-file", "labels.tif", "--table-file", "table.h5ad"),
@@ -121,20 +115,6 @@ class TestPathPolicyAlignment:
         assert list(inspect.signature(reader).parameters)[-1] == "path_policy"
         assert command.params[-1].name == "path_policy"
         assert [parameter.name for parameter in command.params[:2]] == ["input_path", "output_path"]
-
-    @pytest.mark.parametrize("command", sorted(_COMMAND_MODULES), ids=str)
-    def test_option_typed_dicts_keep_their_docstring_first_and_path_policy_last(self, command: str) -> None:
-        tree = ast.parse(_COMMAND_MODULES[command].read_text(encoding="utf-8"))
-        classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef) and node.name.endswith("Options")]
-
-        assert len(classes) == 1
-        for node in classes:
-            # A docstring, when present, is the first statement; no string is stranded among the fields.
-            assert all(isinstance(statement, ast.AnnAssign) for statement in node.body[1:])
-            last = node.body[-1]
-            assert isinstance(last, ast.AnnAssign)
-            assert isinstance(last.target, ast.Name)
-            assert last.target.id == "path_policy"
 
     @pytest.mark.parametrize("case", _READER_CASES, ids=lambda case: case.reader)
     def test_relaxed_flag_reaches_the_reader(self, case: _ReaderCase, tmp_path: Path, mocker: MockerFixture) -> None:

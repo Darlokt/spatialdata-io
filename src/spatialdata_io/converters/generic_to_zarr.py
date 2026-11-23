@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
+from spatialdata_io.readers._utils.names import validate_element_name
 from spatialdata_io.readers.generic import generic
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         Destination SpatialData Zarr store. A missing store is created and an
         existing store receives one new element.
     name
-        Element name. Defaults to the input filename stem.
+        Valid SpatialData element name. Defaults to the input filename stem.
     data_axes
         Explicit image axes. Required for images and invalid for GeoJSON.
     coordinate_system
@@ -73,10 +74,10 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     Raises
     ------
     TypeError
-        If a frame name is not a string, or image scale factors or chunk sizes
-        are not integers.
+        If an element or frame name is not a string, or image scale factors
+        or chunk sizes are not integers.
     ValueError
-        If the input options are invalid or ``name`` already exists.
+        If the input options are invalid or ``name`` already exists, ignoring letter case.
 
     Notes
     -----
@@ -93,12 +94,13 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
 
     input_path = Path(path)
     output_path = Path(output)
-    element_name = input_path.stem if name is None else name
+    element_name = validate_element_name(input_path.stem if name is None else name, parameter="name")
 
     spatial_data: SpatialData | None = None
     if output_path.exists():
         spatial_data = SpatialData.read(output_path)
-        if element_name in spatial_data:
+        folded_name = element_name.lower()
+        if any(existing.lower() == folded_name for _, existing, _ in spatial_data.gen_elements()):
             message = (
                 f"Name {element_name!r} already exists in {output_path}; provide a different "
                 "name or delete the existing element."

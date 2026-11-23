@@ -62,12 +62,20 @@ from spatialdata_io.readers.cosmx._schemas import (
     require_positive,
     schema_error,
 )
-from spatialdata_io.readers.cosmx._transforms import GLOBAL, GLOBAL_PIXELS, AxisSamples, FovPosition, fov_frame
+from spatialdata_io.readers.cosmx._transforms import (
+    GLOBAL,
+    GLOBAL_PIXELS,
+    AxisSamples,
+    FovPosition,
+    fov_frame,
+    group_fov_rows,
+)
 
 if TYPE_CHECKING:
     import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers.cosmx._layout import CsvFile
     from spatialdata_io.readers.cosmx._schemas import Artifact
 
 # A parser batch can combine a preceding unfinished record with one source
@@ -82,11 +90,11 @@ _TABLE_CONTEXT = ReaderErrorContext("cosmx", "cell table")
 _READER_OBS_COLUMNS = (FOV, CELL_ID, REGION_KEY, FRAME_KEY)
 
 
-def read_header(path: ArtifactFile, artifact: Artifact) -> tuple[str, ...]:
+def read_header(source: CsvFile, artifact: Artifact) -> tuple[str, ...]:
     """Parse one header with Arrow under its plain or gzip stream owner."""
     context = ReaderErrorContext("cosmx", artifact)
-    with open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as source:
-        return csv_header(path, context=context, source=source)
+    with open_csv_stream(source.path, context=context, compressed=source.compressed) as stream:
+        return csv_header(source.path, context=context, source=stream)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,24 +102,24 @@ class Counts:
     """Own sparse positive-cell counts, their exact keys, and the feature vocabulary."""
 
     expression: sparse.csr_array
-    fovs: pd.Index
-    cell_ids: pd.Index
+    keys: pd.MultiIndex
     features: tuple[str, ...]
 
 
-def read_counts(path: ArtifactFile) -> Counts:
+def read_counts(source: CsvFile) -> Counts:
     """Stream unsigned counts to CSR after validating and removing background rows."""
-    types = count_types(read_header(path, COUNTS), path)
+    path = source.path
+    types = count_types(read_header(source, COUNTS), path)
     features = tuple(types.names[2:])
     context = ReaderErrorContext("cosmx", COUNTS)
     blocks: list[sparse.csr_array] = []
     fovs: list[pa.Array] = []
     cell_ids: list[pa.Array] = []
     with (
-        open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as source,
+        open_csv_stream(path, context=context, compressed=source.compressed) as stream,
         csv_errors(context=context, path=path),
         pacsv.open_csv(
-            source,
+            stream,
             read_options=pacsv.ReadOptions(block_size=_BATCH_BYTES, use_threads=False),
             parse_options=_PARSE,
             convert_options=pacsv.ConvertOptions(
@@ -136,9 +144,10 @@ def read_counts(path: ArtifactFile) -> Counts:
     )
     all_fovs = pd.Index(pd.arrays.ArrowExtensionArray(pa.chunked_array(fovs, pa.uint64())))
     all_cells = pd.Index(pd.arrays.ArrowExtensionArray(pa.chunked_array(cell_ids, pa.uint64())))
-    if pd.MultiIndex.from_arrays([all_fovs, all_cells]).has_duplicates:
+    keys = pd.MultiIndex.from_arrays([all_fovs, all_cells])
+    if keys.has_duplicates:
         raise schema_error(path, COUNTS, found="duplicate (fov, cell_ID) count rows", expected="one count row per cell")
-    return Counts(expression, all_fovs, all_cells, features)
+    return Counts(expression, keys, features)
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,22 +155,23 @@ class CellMetadata:
     """Own typed cell annotations, exact keys, and coordinates with their rounding bounds."""
 
     obs: pd.DataFrame
-    fovs: pd.Index
-    cell_ids: pd.Index
+    keys: pd.MultiIndex
+    fov_rows: dict[int, npt.NDArray[np.intp]]
     local: npt.NDArray[np.float64]
     global_: npt.NDArray[np.float64]
     samples: tuple[AxisSamples, AxisSamples]
 
 
-def read_metadata(path: ArtifactFile) -> CellMetadata:
+def read_metadata(source: CsvFile) -> CellMetadata:
     """Read typed annotations and exact keys, retaining printed coordinate uncertainty."""
-    types = metadata_types(read_header(path, METADATA), path)
+    path = source.path
+    types = metadata_types(read_header(source, METADATA), path)
     context = ReaderErrorContext("cosmx", METADATA)
     with (
-        open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as stream,
+        open_csv_stream(path, context=context, compressed=source.compressed) as stream,
         csv_errors(context=context, path=path),
     ):
-        source = pacsv.read_csv(
+        records = pacsv.read_csv(
             stream,
             parse_options=_PARSE,
             convert_options=pacsv.ConvertOptions(
@@ -169,22 +179,23 @@ def read_metadata(path: ArtifactFile) -> CellMetadata:
             ),
         )
     for name in (FOV, CELL_ID):
-        require_positive(source[name], path, METADATA, name)
+        require_positive(records[name], path, METADATA, name)
     numeric = [field.name for field in types if pa.types.is_floating(field.type)]
     text = [field.name for field in types if pa.types.is_string(field.type) and field.name not in CENTERS]
     for name in numeric:
-        require_finite(source[name], path, METADATA, name, nullable=True)
-    obs = source.select([FOV, CELL_ID, *numeric, *text]).to_pandas(types_mapper=pd.ArrowDtype)
+        require_finite(records[name], path, METADATA, name, nullable=True)
+    obs = records.select([FOV, CELL_ID, *numeric, *text]).to_pandas(types_mapper=pd.ArrowDtype)
     fovs, cell_ids = pd.Index(obs[FOV].array), pd.Index(obs[CELL_ID].array)
-    if pd.MultiIndex.from_arrays([fovs, cell_ids]).has_duplicates:
+    keys = pd.MultiIndex.from_arrays([fovs, cell_ids])
+    if keys.has_duplicates:
         raise schema_error(path, METADATA, found="duplicate (fov, cell_ID) keys", expected="one row per cell")
 
-    local = np.empty((source.num_rows, 2), dtype=np.float64)
+    local = np.empty((records.num_rows, 2), dtype=np.float64)
     global_ = np.empty_like(local)
     halves: dict[str, npt.NDArray[np.float64]] = {}
     for axis, (local_name, global_name) in enumerate((CENTERS[0::2], CENTERS[1::2])):
-        local[:, axis], halves[local_name] = placement_values(source[local_name], path, METADATA, local_name)
-        global_[:, axis], halves[global_name] = placement_values(source[global_name], path, METADATA, global_name)
+        local[:, axis], halves[local_name] = placement_values(records[local_name], path, METADATA, local_name)
+        global_[:, axis], halves[global_name] = placement_values(records[global_name], path, METADATA, global_name)
     samples = (
         AxisSamples(local[:, 0], global_[:, 0], halves[CENTERS[0]], halves[CENTERS[2]]),
         AxisSamples(local[:, 1], global_[:, 1], halves[CENTERS[1]], halves[CENTERS[3]]),
@@ -201,42 +212,45 @@ def read_metadata(path: ArtifactFile) -> CellMetadata:
     obs.columns = sanitize_column_names(
         list(obs.columns), source="cosmx: the cell metadata CSV header", reserved=reserved
     )
-    return CellMetadata(obs, fovs, cell_ids, local, global_, samples)
+    return CellMetadata(obs, keys, group_fov_rows(fovs), local, global_, samples)
 
 
-def read_fov_positions(path: ArtifactFile) -> dict[int, FovPosition]:
+def read_fov_positions(source: CsvFile) -> dict[int, FovPosition]:
     """Read projected pixel positions; stage-only exports provide no pixel cross-check."""
-    types = fov_position_types(read_header(path, POSITIONS), path)
+    path = source.path
+    types = fov_position_types(read_header(source, POSITIONS), path)
     if types is None:
         return {}
     fov_name, x_name, y_name = types.names
     context = ReaderErrorContext("cosmx", POSITIONS)
     with (
-        open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as stream,
+        open_csv_stream(path, context=context, compressed=source.compressed) as stream,
         csv_errors(context=context, path=path),
     ):
-        source = pacsv.read_csv(
+        records = pacsv.read_csv(
             stream,
             parse_options=_PARSE,
             convert_options=pacsv.ConvertOptions(
                 column_types=types, include_columns=types.names, null_values=[], strings_can_be_null=False
             ),
         )
-    require_positive(source[fov_name], path, POSITIONS, fov_name)
-    fovs = pd.Index(pd.arrays.ArrowExtensionArray(source[fov_name]))
+    require_positive(records[fov_name], path, POSITIONS, fov_name)
+    fovs = pd.Index(pd.arrays.ArrowExtensionArray(records[fov_name]))
     if not fovs.is_unique:
         raise schema_error(path, POSITIONS, found="repeated FOV positions", expected="one position per FOV")
-    x, x_half = placement_values(source[x_name], path, POSITIONS, x_name)
-    y, y_half = placement_values(source[y_name], path, POSITIONS, y_name)
+    x, x_half = placement_values(records[x_name], path, POSITIONS, x_name)
+    y, y_half = placement_values(records[y_name], path, POSITIONS, y_name)
     return {
         int(fov): FovPosition(float(x[i]), float(y[i]), float(x_half[i]), float(y_half[i]))
         for i, fov in enumerate(fovs)
     }
 
 
-def _positions(metadata: CellMetadata, pixel_size_um: float | None) -> tuple[dict[str, np.ndarray], PositionsMetadata]:
+def _positions(
+    metadata: CellMetadata, pixel_size_um: float | None
+) -> tuple[dict[str, npt.NDArray[np.float64]], PositionsMetadata]:
     """Return the observation coordinates and their declaration, scaling global pixels when calibrated."""
-    arrays: dict[str, np.ndarray] = {"spatial_pixels": metadata.local, "spatial_global_pixels": metadata.global_}
+    arrays = {"spatial_pixels": metadata.local, "spatial_global_pixels": metadata.global_}
     descriptions: PositionsMetadata = {
         "schema_version": 1,
         "coordinates": {
@@ -278,13 +292,12 @@ def build_table(
     Finalize the reader-owned ``metadata.obs`` in place and reuse its native
     coordinate buffers. ``path`` identifies the metadata artifact in population errors.
     """
-    keys = pd.MultiIndex.from_arrays([counts.fovs, counts.cell_ids])
-    order = keys.get_indexer(pd.MultiIndex.from_arrays([metadata.fovs, metadata.cell_ids]))
-    if len(keys) != len(order) or (order < 0).any():
+    order = counts.keys.get_indexer(metadata.keys)
+    if len(counts.keys) != len(order) or (order < 0).any():
         raise schema_error(
             path,
             METADATA,
-            found=f"{len(keys)} positive count rows for {len(order)} metadata cells",
+            found=f"{len(counts.keys)} positive count rows for {len(order)} metadata cells",
             expected="identical positive count and metadata populations",
         )
     expression = counts.expression if np.array_equal(order, np.arange(len(order))) else counts.expression[order]
@@ -292,11 +305,12 @@ def build_table(
 
     obs = metadata.obs
     obs.index = pd.Index(obs[CELL].array if CELL in obs else pd.RangeIndex(len(obs)).astype(str), name=None)
-    fovs = metadata.fovs.unique().sort_values()
-    regions = [f"{fov}_labels" for fov in fovs.tolist()]
-    codes = fovs.get_indexer(metadata.fovs)
+    regions = [f"{fov}_labels" for fov in metadata.fov_rows]
+    codes = np.empty(len(obs), dtype=np.intp)
+    for code, rows in enumerate(metadata.fov_rows.values()):
+        codes[rows] = code
     obs.insert(0, REGION_KEY, pd.Series(pd.Categorical.from_codes(codes, pd.Index(regions)), index=obs.index))
-    obs[FRAME_KEY] = pd.Categorical.from_codes(codes, pd.Index([fov_frame(fov) for fov in fovs.tolist()]))
+    obs[FRAME_KEY] = pd.Categorical.from_codes(codes, pd.Index([fov_frame(fov) for fov in metadata.fov_rows]))
 
     table = ad.AnnData(
         X=expression,

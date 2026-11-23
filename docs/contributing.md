@@ -401,40 +401,13 @@ If the specification cannot (yet) be made public, you can reach out to scverse v
 
 The advantage of a public specification is that it makes contributions and bugfixes from the community easier.
 
-#### The reader file
+#### Reader architecture
 
-The reader files are located under [src/spatialdata_io/readers](https://github.com/scverse/spatialdata-io/tree/main/src/spatialdata_io/readers). For each supported technology, the reader file is a single function, named after the technology, that takes as input the path to the raw data and extra arguments, and returns a `SpatialData` object:
-
-```python
-from pathlib import Path
-from spatialdata import SpatialData
-
-def technology(path: str | Path, ...) -> SpatialData:
-    # `sdata` is constructed
-    return sdata
-```
-
-For example, the reader for Xenium data is called `xenium()` and is located under [`src/spatialdata_io/readers/xenium/`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/xenium).
-
-**Technical notes**
-
-> Feel free to skip this section (and all the "technical notes") if you are doing a first read and just want an overview of the contribution process.
-
-We recommend studying existing readers and reusing code from them. A few technical notes below.
-
-- Large raster or points data is loaded from disk lazily (rasters through the shared `readers._utils.image` boundary), which allows returning a `SpatialData` object quickly and defers computation when saving the object to disk in the SpatialData Zarr format, with `sdata.write()`.
-- When the raw data has multiple samples, we recommend adding a coordinate system for each sample, and if the samples are aligned in space, one common coordinate system. A single table containing the annotation for all samples is preferred. See an example in the [`cosmx()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/cosmx/_reader.py) reader.
-- Readers that return images or labels expose `scale_factors` and `chunks` with defaults imported directly from `spatialdata_io._raster_defaults` (`DEFAULT_SCALE_FACTORS`, `DEFAULT_CHUNKS`), validate them with `readers._utils.image.make_raster_options()`, and pass explicit chunks to the SpatialData models; the CLI uses the shared `scale_factors_option` and `chunks_option` decorators. See [Raster options](raster_options.md) and the [`xenium()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/readers/xenium/_reader.py) reader.
+Dataset readers use the same core files for public orchestration, artifact discovery, column schemas and tables. The package template explains when to split product modules, where to validate inputs, and how to test the scientific contract from source to output. [Reader package template](reader_architecture.md)
 
 ##### Experimental readers
 
 If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. Keep experimental readers under `spatialdata_io.experimental` and document their supported artifact contracts with executable workflows. The experimental [`iss()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/experimental/iss/_reader.py) reader, for example, supports explicitly selected TIFF images, integer segmentation labels, and a linked h5ad table.
-
-#### Reader-owned schemas and layout names
-
-Keep vendor column schemas and their validation in the reader's `_schemas.py`.
-Keep artifact names and version-specific layout interpretation with discovery
-in that reader's `_layout.py`; do not introduce shared vendor constants.
 
 ### Adding tests: small data vs real data
 

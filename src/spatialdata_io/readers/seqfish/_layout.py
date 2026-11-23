@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
-from spatialdata_io.readers._utils.names import sanitize_element_name
+from spatialdata_io.readers._utils.names import colliding_element_names, sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
     ArtifactFile,
     DatasetRoot,
@@ -50,6 +50,7 @@ from spatialdata_io.readers._utils.paths import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
@@ -72,12 +73,21 @@ class Selection:
 
 
 @dataclass(frozen=True, slots=True)
+class NamedArtifact:
+    """Pair an enabled product's element key with its source file."""
+
+    key: str
+    path: ArtifactFile
+
+
+@dataclass(frozen=True, slots=True)
 class PixelLayout:
     """The DAPI calibration source and the requested rasters and polygons on its pixel grid."""
 
     dapi: ArtifactFile
-    labels: ArtifactFile | None
-    boundaries: ArtifactFile | None
+    image_key: str | None
+    labels: NamedArtifact | None
+    boundaries: NamedArtifact | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +97,24 @@ class RoiLayout:
     name: str
     counts: ArtifactFile
     cells: ArtifactFile
+    table_key: str
+    circles_key: str | None
     pixels: PixelLayout | None
-    transcripts: ArtifactFile | None
+    transcripts: NamedArtifact | None
+
+    def element_keys(self) -> Iterator[str]:
+        """Yield every key this ROI contributes to the selected dataset."""
+        yield self.table_key
+        if self.circles_key is not None:
+            yield self.circles_key
+        if self.transcripts is not None:
+            yield self.transcripts.key
+        if self.pixels is not None:
+            if self.pixels.image_key is not None:
+                yield self.pixels.image_key
+            for product in (self.pixels.labels, self.pixels.boundaries):
+                if product is not None:
+                    yield product.key
 
 
 def make_selection(  # noqa: PLR0913, RUF100 - Keep supported product choices explicit.
@@ -180,7 +206,15 @@ def discover_layout(
         )
 
     names = _element_names(requested, root)
-    return tuple(_roi_layout(root, prefix, name, selection) for prefix, name in zip(requested, names, strict=True))
+    layouts = tuple(_roi_layout(root, prefix, name, selection) for prefix, name in zip(requested, names, strict=True))
+    if conflicts := colliding_element_names(key for roi in layouts for key in roi.element_keys()):
+        raise ReaderFormatError(
+            context=_CONTEXT,
+            path=root.path,
+            found=f"colliding element keys {conflicts!r}",
+            expected="element names that are unique ignoring letter case across all selected products",
+        )
+    return layouts
 
 
 def _element_names(prefixes: Sequence[str], root: DatasetRoot) -> list[str]:
@@ -206,6 +240,9 @@ def _roi_layout(root: DatasetRoot, prefix: str, name: str, selection: Selection)
     def artifact(kind: str, extension: str) -> ArtifactFile:
         return require_metadata_file(root, f"{prefix}_{kind}.{extension}", context=ReaderErrorContext("seqfish", kind))
 
+    def named_artifact(kind: str, extension: str) -> NamedArtifact:
+        return NamedArtifact(f"{name}_{kind}", artifact(kind, extension))
+
     counts = artifact("CellxGene", "csv")
     cells = artifact("CellCoordinates", "csv")
     polygons = selection.shapes in {"polygons", "both"}
@@ -213,8 +250,16 @@ def _roi_layout(root: DatasetRoot, prefix: str, name: str, selection: Selection)
     if selection.images or selection.labels or polygons:
         pixels = PixelLayout(
             dapi=artifact("DAPI", "tiff"),
-            labels=artifact("Segmentation", "tiff") if selection.labels else None,
-            boundaries=artifact("Boundaries", "geojson") if polygons else None,
+            image_key=f"{name}_DAPI" if selection.images else None,
+            labels=named_artifact("Segmentation", "tiff") if selection.labels else None,
+            boundaries=named_artifact("Boundaries", "geojson") if polygons else None,
         )
-    transcripts = artifact("TranscriptList", "csv") if selection.transcripts else None
-    return RoiLayout(name, counts, cells, pixels, transcripts)
+    return RoiLayout(
+        name=name,
+        counts=counts,
+        cells=cells,
+        table_key=f"table_{name}",
+        circles_key=f"{name}_CellCoordinates" if selection.shapes in {"circles", "both"} else None,
+        pixels=pixels,
+        transcripts=named_artifact("TranscriptList", "csv") if selection.transcripts else None,
+    )

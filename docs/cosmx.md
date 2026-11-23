@@ -14,7 +14,7 @@ export/
 └── CellLabels/<any>_F<fov>.tif          # optional; .tiff
 ```
 
-Every flat file may instead be gzip-compressed (`.csv.gz`); one artifact cannot exist in both spellings. FOV numbers come from the `_F<number>` raster suffix, range from 1 through `2**64 - 1`, and are ordered numerically; leading zeros are permitted. Polygon, overlay, compartment and morphology files are not read.
+Every flat file may instead be gzip-compressed (`.csv.gz`); one artifact cannot exist in both spellings. The discovered name determines CSV compression and the composite image format, including when an in-root symlink resolves to a differently named file. FOV numbers come from the `_F<number>` raster suffix, range from 1 through `2**64 - 1`, and are ordered numerically; leading zeros are permitted. Polygon, overlay, compartment and morphology files are not read.
 
 ## File prefix and element names
 
@@ -62,13 +62,13 @@ With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with 
 | --- | --- | --- |
 | `images["<fov>_image"]` | `fov_<fov>_pixels`, `global_pixels` | `fov_<fov>_pixels`, `global` |
 | `labels["<fov>_labels"]` | `fov_<fov>_pixels`, `global_pixels` | `fov_<fov>_pixels`, `global` |
-| `points["<dataset_id>_transcripts"]` | `global_pixels` (identity), every `fov_<fov>_pixels` | `global` (scale), every `fov_<fov>_pixels` |
+| `points["<dataset_id>_transcripts"]` | `global_pixels` (identity), local frames of placed FOVs | `global` (scale), local frames of placed FOVs |
 
 The `fov_<fov>_pixels` systems (for example `fov_2_pixels`) are each FOV's local pixel frame. CosMx local coordinates are pixel indices with a reversed vertical axis: the raster pixel at row `r` and column `c` of an `H`-row FOV has local coordinates `(c, H - r)`. This was measured on the public 2021 Lung5_Rep2 release and on an AtoMx mouse-brain export, from label pixels against cell metadata and polygon extremes. Raster pixels are returned exactly as stored; the reflection is part of each raster's transformation.
 
 Each FOV's local-to-global map is a translation per axis, possibly with a reversed axis: `global = ±local + offset`. Exports differ in the sign of the y axis. The sign and offset are derived from every metadata cell and accepted only when one offset lies within the printed rounding interval of all of them; no affine is fitted. A pixel FOV-position file (`fov,x_px,y_px` or `FOV,x_global_px,y_global_px,...`) must agree with the cells and places FOVs without cells; millimetre-only position files are accepted but not used. For a positive axis, the printed position's rounding interval is intersected with the cell-derived offset interval. The printed center is preserved when feasible; otherwise the midpoint of their intersection is used. This selects a feasible placement within source precision and cannot recover an unprinted exact origin. Reflected axes use cell evidence for their offsets. Stage positions alone do not establish stage-to-pixel calibration; no universal micrometre-per-pixel constant or scale fitted from a single FOV is applied. A FOV with rasters but no cells and no pixel position fails. A wholly cell-empty export is unsupported because it cannot establish the dataset's axis signs, even when pixel FOV positions are present.
 
-The raster convention has only been evidenced for exports whose global axes run in the same direction as the local axes. Rasters in an export with a reversed global axis therefore fail, while its table and transcripts are read.
+The raster convention has only been evidenced for exports whose global axes run in the same direction as the local axes. Rasters in an export with a reversed global axis therefore fail, while its table and transcripts are read. When both axes are positive, an FOV listed only in the pixel-position file also gets a local transcript frame, even if it contains no cells or rasters.
 
 Printed rounding half-widths are rounded once to the nearest float64 value and must remain finite and positive, including for coordinates written as zero. Extreme decimal exponents that overflow or collapse that width to zero fail with the source artifact identified. Cell-derived intervals include a float64 round-off allowance; they cannot resolve discrepancies below floating-point precision. Placement requires finite offset intervals and finite selected offsets; a nonfinite sign candidate cannot establish a placement. The final raster affine, including pixel-center placement and any caller calibration, must also remain finite.
 
@@ -94,7 +94,7 @@ One task owns members beginning in about 8 MiB of compressed data, including the
 
 Count parsing uses 1 MiB source blocks with internal Arrow threads disabled. A batch can include the preceding unfinished record and the current source block: required uint64 numerical values occupy at most eight times that source target, excluding parser/annotation storage, allocator alignment, the row-major tensor and sparse output. Records should fit one block; records spanning two block boundaries fail. Sparse arrays and eager metadata scale with the complete output.
 
-Every CSV record must have the header's full width, including ignored fields. Eager tables permit quoted multiline fields; transcript records must occupy one physical line for partitioning. In an uncompressed transcript file, a line with an odd number of `"` (an embedded newline in a quoted field, or a stray quote) raises a `ReaderFormatError` when its partition is computed. Arrow may accept some malformed quoting; the reader does not add a separate strict-syntax pass. Required numeric keys and transcript coordinates cannot be empty. Only optional numeric metadata accepts empty fields and `NA` as missing; string fields preserve these spellings literally.
+Every CSV record must have the header's full width, including ignored fields. Eager tables permit quoted multiline fields. In both plain and gzip transcript files, a line with an odd number of `"` (an embedded newline in a quoted field, or a stray quote) raises a `ReaderFormatError` when its partition is computed. Line endings must be LF or CRLF. Arrow may accept some malformed quoting within a single line. Required numeric keys and transcript coordinates cannot be empty. Only optional numeric metadata accepts empty fields and `NA` as missing; string fields preserve these spellings literally.
 
 All options are validated in signature order before any file is read; `path_policy` (see [dataset paths](dataset_paths.md)) is checked last. Errors name the artifact by its role (`count matrix`, `cell metadata`, `FOV positions`, `transcripts`, `composite images`, `cell labels`) and give its path.
 

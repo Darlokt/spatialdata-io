@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
 import pandas as pd
@@ -25,6 +26,21 @@ if TYPE_CHECKING:
     from geopandas import GeoDataFrame
     from spatialdata.transformations import Scale
     from xarray import DataArray, DataTree
+
+    from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
+    from spatialdata_io.readers._utils.image import RasterOptions
+    from spatialdata_io.readers.seqfish._layout import RoiLayout
+
+
+@dataclass(slots=True)
+class _Elements:
+    """Own the selected products as each independent ROI is read."""
+
+    images: dict[str, DataArray | DataTree] = field(default_factory=dict)
+    labels: dict[str, DataArray | DataTree] = field(default_factory=dict)
+    points: dict[str, DataFrame] = field(default_factory=dict)
+    shapes: dict[str, GeoDataFrame] = field(default_factory=dict)
+    tables: dict[str, AnnData] = field(default_factory=dict)
 
 
 def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explicit.
@@ -59,7 +75,7 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
       polygons, so it is inspected even when ``include_images=False``.
     - The ROI prefix starts every element name. A prefix that is not a valid
       SpatialData element name is repaired with a warning (``Roi 1`` becomes
-      ``Roi_1``); selected ROIs whose names then agree ignoring case fail.
+      ``Roi_1``); names of all selected elements must be distinct ignoring case.
 
     Parameters
     ----------
@@ -195,60 +211,66 @@ def seqfish(  # noqa: PLR0913, RUF100 - Supported public products remain explici
     options = make_raster_options(scale_factors=scale_factors, chunks=chunks)
     layouts = discover_layout(path, selection, path_policy=path_policy)
 
-    images: dict[str, DataArray | DataTree] = {}
-    labels: dict[str, DataArray | DataTree] = {}
-    points: dict[str, DataFrame] = {}
-    shapes: dict[str, GeoDataFrame] = {}
-    tables: dict[str, AnnData] = {}
+    elements = _Elements()
     for roi in layouts:
         frame = "global" if len(layouts) == 1 else roi.name
-        table = read_table(roi.counts, roi.cells)
-        # read_table returns an eager AnnData; Dataset2D is only a backed alternative.
-        instance_ids = pd.Index(cast("pd.DataFrame", table.obs)["instance_id"])
+        _read_roi(roi, options, elements, frame=frame, policy=selection.invalid_geometries)
 
-        if roi.pixels is not None:
-            scale: Scale
-            if selection.images or selection.labels:
-                dapi = read_dapi(roi.pixels.dapi)
-                scale = dapi.scale
-                if selection.images:
-                    images[f"{roi.name}_DAPI"] = read_image(dapi, frame=frame, options=options)
-                if roi.pixels.labels is not None:
-                    labels[f"{roi.name}_Segmentation"] = read_labels(
-                        roi.pixels.labels,
-                        reference=dapi,
-                        frame=frame,
-                        options=options,
-                        max_instance_id=int(instance_ids.max()),
-                    )
-            else:
-                scale = read_calibration(roi.pixels.dapi)
-
-            if roi.pixels.boundaries is not None:
-                boundaries = read_boundaries(
-                    roi.pixels.boundaries,
-                    instance_ids=instance_ids,
-                    frame=frame,
-                    scale=scale,
-                    policy=selection.invalid_geometries,
-                )
-                shapes[f"{roi.name}_Boundaries"] = boundaries
-                if len(boundaries) != table.n_obs:
-                    table = select_cells(table, boundaries.index, counts=roi.counts)
-
-        if selection.shapes in {"circles", "both"}:
-            shapes[f"{roi.name}_CellCoordinates"] = make_circles(table, frame=frame, cells=roi.cells)
-        if roi.transcripts is not None:
-            points[f"{roi.name}_TranscriptList"] = read_transcripts(
-                roi.transcripts, features=tuple(table.var_names), frame=frame
-            )
-        tables[f"table_{roi.name}"] = finalize_table(
-            table,
-            frame=frame,
-            region=f"{roi.name}_Segmentation" if selection.labels else None,
-            counts=roi.counts,
-        )
-
-    result = SpatialData(images=images, labels=labels, points=points, shapes=shapes, tables=tables)
+    result = SpatialData(
+        images=elements.images,
+        labels=elements.labels,
+        points=elements.points,
+        shapes=elements.shapes,
+        tables=elements.tables,
+    )
     set_reader_provenance(result.attrs, reader="seqfish")
     return result
+
+
+def _read_roi(
+    roi: RoiLayout, options: RasterOptions, elements: _Elements, *, frame: str, policy: InvalidGeometryPolicy
+) -> None:
+    """Add one ROI's products and link its table after optional cell filtering."""
+    table = read_table(roi.counts, roi.cells)
+    pixels = roi.pixels
+    label_name = None
+    if pixels is not None:
+        # The reader owns an eager AnnData; Dataset2D is only a backed alternative.
+        instance_ids = pd.Index(cast("pd.DataFrame", table.obs)["instance_id"])
+        scale: Scale
+        if pixels.image_key is not None or pixels.labels is not None:
+            dapi = read_dapi(pixels.dapi)
+            scale = dapi.scale
+            if pixels.image_key is not None:
+                elements.images[pixels.image_key] = read_image(dapi, frame=frame, options=options)
+            if pixels.labels is not None:
+                label_name = pixels.labels.key
+                elements.labels[label_name] = read_labels(
+                    pixels.labels.path,
+                    reference=dapi,
+                    frame=frame,
+                    options=options,
+                    max_instance_id=int(instance_ids.max()),
+                )
+        else:
+            scale = read_calibration(pixels.dapi)
+
+        if pixels.boundaries is not None:
+            boundaries = read_boundaries(
+                pixels.boundaries.path,
+                instance_ids=instance_ids,
+                frame=frame,
+                scale=scale,
+                policy=policy,
+            )
+            elements.shapes[pixels.boundaries.key] = boundaries
+            if len(boundaries) != table.n_obs:
+                table = select_cells(table, boundaries.index, counts=roi.counts)
+
+    if roi.circles_key is not None:
+        elements.shapes[roi.circles_key] = make_circles(table, frame=frame, cells=roi.cells)
+    if roi.transcripts is not None:
+        elements.points[roi.transcripts.key] = read_transcripts(
+            roi.transcripts.path, features=tuple(table.var_names), frame=frame
+        )
+    elements.tables[roi.table_key] = finalize_table(table, frame=frame, region=label_name, counts=roi.counts)

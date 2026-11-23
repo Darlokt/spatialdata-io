@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
 from spatialdata.transformations import Identity, Scale
@@ -147,9 +146,8 @@ def _square_products(
 ) -> tuple[dd.DataFrame, ad.AnnData]:
     """Build square points and their linked table; the IDs are the row positions."""
     name = f"bin{square.bin_size}"
-    # A RangeIndex stores no per-row array; the table keeps the same IDs as uint64.
+    # Keep the exact signed row IDs used by the target's RangeIndex.
     index = pd.RangeIndex(len(square.coordinates))
-    instance_ids = pd.Index(np.arange(len(square.coordinates), dtype=np.uint64))
     context = ReaderErrorContext("stereoseq", "square counts", square.format_version)
     finalize_positions(
         square.table,
@@ -160,7 +158,7 @@ def _square_products(
         path=square.file,
     )
     points = make_points(square.coordinates, index, transformations=transformations)
-    return points, link_table(square.table, f"{name}_genes", instance_ids, context=context, path=square.file)
+    return points, link_table(square.table, f"{name}_genes", index, context=context, path=square.file)
 
 
 def _cell_products(

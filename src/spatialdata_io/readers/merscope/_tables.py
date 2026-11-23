@@ -139,14 +139,15 @@ def read_table(files: TableFiles) -> tuple[ad.AnnData, tuple[str, ...]]:
     expression, identities, features = _read_counts(files.counts)
     observations = _read_metadata(files.metadata)
     if not observations.index.equals(identities):
-        if set(observations.index) != set(identities):
+        positions = observations.index.get_indexer(identities)
+        if len(observations) != len(identities) or (positions < 0).any():
             raise schema_error(
                 files.metadata,
                 METADATA,
                 found="different cell populations",
                 expected="identical count and metadata IDs",
             )
-        observations = observations.loc[identities]
+        observations = observations.iloc[positions]
 
     is_blank = np.asarray(blank_columns(features), dtype=np.bool_)
     genes = [name for name, blank in zip(features, is_blank, strict=True) if not blank]

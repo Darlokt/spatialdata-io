@@ -30,10 +30,10 @@ from spatialdata_io.readers.visium_hd._cells import read_cell_table, read_nucleu
 from spatialdata_io.readers.visium_hd._geometry import bin_squares, read_boundaries
 from spatialdata_io.readers.visium_hd._images import make_image_options, read_images
 from spatialdata_io.readers.visium_hd._labels import make_bin_labels
-from spatialdata_io.readers.visium_hd._layout import discover_layout
+from spatialdata_io.readers.visium_hd._layout import Selection, discover_layout
 from spatialdata_io.readers.visium_hd._metadata import read_bin_scale_factors, read_source_metadata
-from spatialdata_io.readers.visium_hd._positions import fit_slide_frame, read_grid_shape
-from spatialdata_io.readers.visium_hd._tables import link_table, read_bin_table
+from spatialdata_io.readers.visium_hd._positions import PositionSelection, fit_slide_frame, read_grid_shape
+from spatialdata_io.readers.visium_hd._tables import link_table, make_bin_table, read_bin_table, read_counts
 from spatialdata_io.readers.visium_hd._transforms import SPOT_PITCH_UM
 
 if TYPE_CHECKING:
@@ -50,11 +50,29 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class _Options:
-    """Owned normalized options that discovery does not consume directly."""
+    """Validated discovery and assembly options from one public call."""
 
-    bin_sizes: tuple[int, ...] | Literal["all"]
+    selection: Selection
+    bin_geometry: Literal["squares", "labels"]
+    make_var_names_unique: bool
     invalid_geometries: InvalidGeometryPolicy
     images: ImageOptions
+
+
+def _calibrate_bins(
+    layout: VisiumHDLayout, shape: tuple[int, int], *, make_var_names_unique: bool, version: str | None
+) -> tuple[SlideFrame, AnnData | None]:
+    """Align any selected 2 µm observations as part of the native calibration scan."""
+    base = next((source for source in layout.bins if source.size_um == SPOT_PITCH_UM), None)
+    if base is None:
+        return fit_slide_frame(layout.base_positions, shape, version=version), None
+
+    counts, obs, var = read_counts(base.counts, version=version)
+    selection = PositionSelection(base.positions, shape, obs.index, base.size_um, version=version)
+    frame = fit_slide_frame(layout.base_positions, shape, version=version, selected=selection)
+    return frame, make_bin_table(
+        counts, selection.to_frame(), var, base.size_um, frame, make_var_names_unique=make_var_names_unique
+    )
 
 
 def _bin_sizes(values: object) -> tuple[int, ...] | Literal["all"]:
@@ -104,18 +122,18 @@ def _flag(value: object, *, parameter: str, optional: bool = False) -> None:
 
 def _validate_options(  # noqa: PLR0913, RUF100 - Validate every public option together, in signature order.
     *,
-    bin_sizes: object,
-    bin_geometry: object,
-    bin_counts_kind: object,
-    include_cell_boundaries: object,
-    include_nucleus_boundaries: object,
-    include_nucleus_table: object,
-    cell_counts_kind: object,
-    make_var_names_unique: object,
-    invalid_geometries: object,
-    include_images: object,
-    include_cytassist_image: object,
-    fullres_image_file: object,
+    bin_sizes: Sequence[int] | Literal["all"],
+    bin_geometry: Literal["squares", "labels"],
+    bin_counts_kind: Literal["filtered", "raw"],
+    include_cell_boundaries: bool | None,
+    include_nucleus_boundaries: bool | None,
+    include_nucleus_table: bool,
+    cell_counts_kind: Literal["filtered", "raw"],
+    make_var_names_unique: bool,
+    invalid_geometries: InvalidGeometryPolicy,
+    include_images: bool,
+    include_cytassist_image: bool,
+    fullres_image_file: str | Path | None,
     data_axes: str | None,
     tiff_series: int | None,
     scale_factors: Sequence[int],
@@ -156,7 +174,18 @@ def _validate_options(  # noqa: PLR0913, RUF100 - Validate every public option t
         message = "fullres_image_file, data_axes, tiff_series and scale_factors require include_images=True."
         raise ValueError(message)
 
-    return _Options(sizes, policy, images)
+    selection = Selection(
+        bin_sizes=sizes,
+        bin_counts_kind=bin_counts_kind,
+        include_cell_boundaries=include_cell_boundaries,
+        include_nucleus_boundaries=include_nucleus_boundaries,
+        include_nucleus_table=include_nucleus_table,
+        cell_counts_kind=cell_counts_kind,
+        include_images=include_images,
+        include_cytassist_image=include_cytassist_image,
+        fullres_image_file=fullres_image_file,
+    )
+    return _Options(selection, bin_geometry, make_var_names_unique, policy, images)
 
 
 def _select_population(
@@ -520,19 +549,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         chunks=chunks,
     )
 
-    layout = discover_layout(
-        path,
-        bin_sizes=options.bin_sizes,
-        bin_counts_kind=bin_counts_kind,
-        include_cell_boundaries=include_cell_boundaries,
-        include_nucleus_boundaries=include_nucleus_boundaries,
-        include_nucleus_table=include_nucleus_table,
-        cell_counts_kind=cell_counts_kind,
-        include_images=include_images,
-        include_cytassist_image=include_cytassist_image,
-        fullres_image_file=fullres_image_file,
-        path_policy=path_policy,
-    )
+    layout = discover_layout(path, options.selection, path_policy=path_policy)
     version = layout.version
 
     metadata = None if layout.feature_slice is None else read_source_metadata(layout.feature_slice, version=version)
@@ -546,17 +563,25 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         if metadata is None
         else (metadata.nrows, metadata.ncols)
     )
-    frame = fit_slide_frame(layout.base_positions, shape, version=version)
+    frame, base_table = _calibrate_bins(
+        layout, shape, make_var_names_unique=options.make_var_names_unique, version=version
+    )
 
     shapes, tables = _segmentations(
-        layout, frame, policy=options.invalid_geometries, make_var_names_unique=make_var_names_unique
+        layout, frame, policy=options.invalid_geometries, make_var_names_unique=options.make_var_names_unique
     )
     labels: dict[str, DataArray | DataTree] = {}
     for source in layout.bins:
         size = source.size_um
         factor = size // 2
         grid = ((shape[0] + factor - 1) // factor, (shape[1] + factor - 1) // factor)
-        table = read_bin_table(source, grid, frame, make_var_names_unique=make_var_names_unique, version=version)
+        table = (
+            base_table
+            if size == SPOT_PITCH_UM and base_table is not None
+            else read_bin_table(
+                source, grid, frame, make_var_names_unique=options.make_var_names_unique, version=version
+            )
+        )
 
         # Shared counts return eager AnnData; the upstream type also includes backed frames.
         obs = cast("pd.DataFrame", table.obs)
@@ -566,7 +591,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         ids = pd.Index(np.arange(1, table.n_obs + 1, dtype=np.uint32))
         table.obs["instance_id"] = ids
         name = f"square_{size:03d}um"
-        if bin_geometry == "squares":
+        if options.bin_geometry == "squares":
             shapes[name] = bin_squares(rows, cols, size, frame, ids)
         else:
             labels[name] = make_bin_labels(frame, rows, cols, grid, size, options=options.images.raster)

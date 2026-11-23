@@ -256,6 +256,22 @@ class TestVisiumSyntheticWorkflow:
         for column in ("array_row", "array_col"):
             assert result.tables["table"].obs[column].dtype == np.dtype(np.uint64)
 
+    @pytest.mark.parametrize("barcode", ["barcode", "in_tissue", "pxl_col_in_fullres"])
+    def test_preserves_literal_first_headerless_barcode(self, tmp_path: Path, barcode: str) -> None:
+        counts = tmp_path / "filtered_feature_bc_matrix.h5"
+        _write_h5(counts)
+        _write_spatial(tmp_path, version="v1")
+        positions = tmp_path / "spatial/tissue_positions_list.csv"
+        positions.write_text(positions.read_text(encoding="utf-8").replace("barcode-a,", f"{barcode},", 1))
+        with h5py.File(counts, "r+") as source:
+            del source["matrix/barcodes"]
+            source["matrix/barcodes"] = np.asarray([barcode.encode(), b"barcode-b", b"barcode-c"])
+
+        result = visium(tmp_path)
+
+        assert result.tables["table"].obs["spot_id"].tolist() == [barcode, "barcode-b", "barcode-c"]
+        assert result.shapes["sample"].index.tolist() == [barcode, "barcode-b", "barcode-c"]
+
     @pytest.mark.parametrize("version", ["v1_headered", "v2"])
     def test_named_positions_preserve_multiline_extension_header(
         self, tmp_path: Path, version: Literal["v1_headered", "v2"]

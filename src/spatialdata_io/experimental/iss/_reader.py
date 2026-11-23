@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.experimental.iss._images import read_rasters, validate_data_axes
+from spatialdata_io.experimental.iss._images import read_rasters
 from spatialdata_io.experimental.iss._layout import discover_layout, validate_artifact_names
 from spatialdata_io.experimental.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY
 from spatialdata_io.experimental.iss._tables import read_table
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
-from spatialdata_io.readers._utils.image import make_raster_options
+from spatialdata_io.readers._utils.image import make_raster_options, validate_data_axes
 from spatialdata_io.readers._utils.names import validate_element_name
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, normalize_owned_anndata, parse_linked_table
@@ -62,8 +62,9 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         ``path``; absolute paths may point elsewhere.
     instance_key
         Observation column holding the label value of each row: non-null
-        positive integers. By default the observation names are used, and
-        must then consist of ASCII digits only.
+        positive integers. The column name follows SpatialData's table name
+        rules and cannot be ``region`` in any letter case. By default the
+        observation names are used and must consist of ASCII digits only.
     dataset_id
         Prefix of the raster element names. It must be a valid SpatialData
         element name: nonempty, only letters, digits, ``_``, ``-`` and ``.``,
@@ -71,9 +72,9 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     data_axes
         Axes of the raw image as one string of distinct letters including X
         and Y, case-insensitive, for example ``"CYX"`` for a stack without
-        axis metadata or ``"YXC"`` to read interleaved RGB samples (``YXS``)
-        as channels. Defaults to the axes the file declares. Labels always use
-        their declared axes.
+        axis metadata. Defaults to the axes the file declares. ``S`` and
+        ``C`` both identify channels, so at most one may be present. Labels
+        always use their declared axes.
     scale_factors
         Integer factors of at least two, one per generated pyramid level of the
         image and labels; empty for a single scale. Pyramids require labels of
@@ -99,7 +100,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
 
         ``images["<dataset_id>_raw_image"]``
             Lazy CYX image with the source dtype and channel order. Singleton
-            nonspatial axes are dropped; a missing C axis is added. Channel
+            nonspatial axes are dropped; S becomes C and a missing C axis is added. Channel
             names are ``r, g, b`` (``r, g, b, a`` with a declared alpha sample)
             for samples the TIFF declares RGB (``PhotometricInterpretation``
             RGB or JPEG-compressed YCbCr); otherwise OME channel names when all
@@ -224,11 +225,9 @@ def _validate_options(instance_key: str | None, dataset_id: str) -> None:
     ``table``.
     """
     if instance_key is not None:
-        if not isinstance(instance_key, str):
-            message = "instance_key must be a string or None."
-            raise TypeError(message)
-        if not instance_key or instance_key == REGION_KEY:
-            message = f"instance_key must be a nonempty observation column other than {REGION_KEY!r}."
+        validate_element_name(instance_key, parameter="instance_key", reserved=(REGION_KEY,))
+        if instance_key == "_index":
+            message = "instance_key cannot be '_index', which AnnData reserves for the index."
             raise ValueError(message)
 
     validate_element_name(dataset_id, parameter="dataset_id")

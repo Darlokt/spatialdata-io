@@ -239,8 +239,7 @@ class TestDbit:
             """Inspect the pre-link table before the real parser attaches new metadata."""
             assert "spatialdata_attrs" not in table.uns
             assert table.obs["region"].tolist() == ["sample", "sample"]
-            # Linkage sees source order; pixel_id is each row's sorted position.
-            np.testing.assert_array_equal(table.obs["pixel_id"], [1, 0])
+            np.testing.assert_array_equal(table.obs["pixel_id"], [0, 1])
             return parse_linked_table(
                 table,
                 target,

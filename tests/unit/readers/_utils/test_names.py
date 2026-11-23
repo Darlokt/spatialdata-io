@@ -12,6 +12,7 @@ import pytest
 from spatialdata._core.validation import check_valid_dataframe_column_name, check_valid_name, validate_table_attr_keys
 
 from spatialdata_io.readers._utils.names import (
+    colliding_element_names,
     sanitize_column_names,
     sanitize_element_name,
     sanitize_uns_keys,
@@ -36,6 +37,16 @@ _INVALID = [
     "a\nb",
     "a+b",
 ]
+
+
+class TestCollidingElementNames:
+    def test_reports_original_spellings_once_in_deterministic_order(self) -> None:
+        names = ["Beta", "a", "beta", "A", "beta", "solo", "same", "same"]
+        assert colliding_element_names(iter(names)) == ["A", "Beta", "a", "beta", "same"]
+
+    def test_matches_spatialdata_lowercase_rule(self) -> None:
+        assert colliding_element_names(["images", "image\u017f"]) == []
+        assert colliding_element_names(()) == []
 
 
 class TestValidateElementName:

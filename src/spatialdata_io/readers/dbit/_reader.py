@@ -2,7 +2,7 @@
 
 One call validates every option, discovers the layout, reads the barcode map
 and the H5AD table, optionally reads the image to size the grid, builds the
-squares, links the table to them and sorts its rows by A and then B.
+squares, sorts the table rows by A and then B and links them to the squares.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, cast
 
-import numpy as np
 import pandas as pd
 from spatialdata import SpatialData
 from spatialdata.transformations import Identity, Scale
@@ -39,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    import numpy as np
     import numpy.typing as npt
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray
@@ -319,19 +319,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         coordinates[order], include_border=include_border, border_scale=border_scale, transformations=transformations
     )
 
-    # Link in source order: linkage converts expression to CSR, so the row
-    # sort below copies sparse storage, never a dense matrix. pixel_id is each
-    # row's position after that sort.
-    pixel_ids = np.empty(table.n_obs, dtype=np.uint16)
-    pixel_ids[order] = np.arange(table.n_obs, dtype=np.uint16)
-    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
-    obs["region"] = pd.Categorical([dataset_id] * table.n_obs)
-    obs["sample"] = pd.Series(dataset_id, index=obs.index, dtype=SAMPLE_DTYPE)
-    obs["pixel_id"] = pd.Series(pixel_ids, index=obs.index, dtype=GRID_DTYPE)
+    # Normalize before row selection so that reordering never copies dense expression.
     table.uns.pop("spatialdata_attrs", None)
-    prepare_anndata_dataframe(obs, context=_TABLE_CONTEXT)
-    prepare_anndata_dataframe(var, context=_TABLE_CONTEXT)
-
     duplicate_sums: list[SparseDuplicateSummary] = []
     normalize_owned_anndata(
         table,
@@ -340,6 +329,13 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         expression_layers=("counts",) if "counts" in table.layers else (),
         duplicate_sums=duplicate_sums,
     )
+    table = sort_rows(table, order)
+    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
+    obs["region"] = pd.Categorical([dataset_id] * table.n_obs)
+    obs["sample"] = pd.Series(dataset_id, index=obs.index, dtype=SAMPLE_DTYPE)
+    obs["pixel_id"] = pd.Series(grid.index, index=obs.index, dtype=GRID_DTYPE)
+    prepare_anndata_dataframe(obs, context=_TABLE_CONTEXT)
+    prepare_anndata_dataframe(var, context=_TABLE_CONTEXT)
     table = parse_linked_table(
         table,
         TableLinkage((dataset_id,), "region", "pixel_id"),
@@ -347,7 +343,6 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         path=layout.table,
         expected_instance_ids={dataset_id: grid.index},
     )
-    table = sort_rows(table, order)
 
     result = SpatialData(images=images, shapes={dataset_id: grid}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="dbit")

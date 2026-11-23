@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata_io.readers._utils.errors import warn_user
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Iterable, Sequence
 
     import anndata as ad
 
@@ -64,6 +64,23 @@ _RULE = "nonempty, only alphanumeric characters, '_', '-' or '.', not '.' or '..
 _FALLBACK = "unnamed"
 _INDEX_COLUMN = "_index"
 _LEADING_UNDERSCORES = re.compile(r"^_{2,}")
+
+
+def colliding_element_names(names: Iterable[str], /) -> list[str]:
+    """Return the sorted distinct spellings that collide in SpatialData's element namespace.
+
+    Readers supply the final names of every selected product before constructing elements.
+    Repeating the exact same spelling also creates a collision.
+    """
+    first: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for name in names:
+        folded = name.lower()
+        if folded in first:
+            conflicts.update((first[folded], name))
+        else:
+            first[folded] = name
+    return sorted(conflicts)
 
 
 def _follows_rule(name: str) -> bool:

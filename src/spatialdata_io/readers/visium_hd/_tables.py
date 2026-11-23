@@ -72,11 +72,24 @@ def read_bin_table(
     """Align sparse counts and nominal centres after source calibration is validated."""
     counts, obs, var = read_counts(layout.counts, version=version)
     positions = read_positions(layout.positions, shape, obs.index, layout.size_um, frame, version=version)
+    return make_bin_table(counts, positions, var, layout.size_um, frame, make_var_names_unique=make_var_names_unique)
+
+
+def make_bin_table(  # noqa: PLR0913 - Owned counts, aligned annotations, bin size and frame.
+    counts: csr_array,
+    positions: pd.DataFrame,
+    var: pd.DataFrame,
+    size_um: int,
+    frame: SlideFrame,
+    *,
+    make_var_names_unique: bool,
+) -> AnnData:
+    """Build a bin count table after its positions have been aligned."""
     table = AnnData(counts, obs=positions, var=var)
 
     rows: NDArray[np.uint32] = positions["array_row"].to_numpy(dtype=np.uint32)
     cols: NDArray[np.uint32] = positions["array_col"].to_numpy(dtype=np.uint32)
-    table.obsm["spatial"] = bin_centers(frame, rows, cols, float(layout.size_um))
+    table.obsm["spatial"] = bin_centers(frame, rows, cols, float(size_um))
 
     if make_var_names_unique:
         table.var_names_make_unique()

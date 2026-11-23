@@ -304,27 +304,20 @@ def integer_ids(text: pd.Index, *, path: Path, context: ReaderErrorContext) -> p
     return values
 
 
-def vocabulary_codes(
+def validate_membership(
     values: pd.Series, vocabulary: pd.Index, name: str, *, path: Path, context: ReaderErrorContext
-) -> NDArray[np.intp]:
-    """Return the vocabulary position of every value; unknown values raise.
-
-    Factorizing hashes the values once (an Arrow kernel for Arrow-backed text);
-    only the distinct values are looked up in the vocabulary.
-    """
-    codes, values_uniques = values.factorize()
-    uniques = pd.Index(values_uniques)
-    positions = vocabulary.get_indexer(uniques)
-    unknown = positions < 0
+) -> None:
+    """Reject values absent from the vocabulary, looking up only distinct source values."""
+    unique = pd.Index(values.unique())
+    unknown = vocabulary.get_indexer(unique) < 0
     if unknown.any():
-        examples = uniques[unknown][:5].tolist()
+        examples = unique[unknown][:5].tolist()
         raise ReaderFormatError(
             context=context,
             path=path,
             found=f"unknown {name} values {examples!r}",
             expected=f"{name} values from the count matrix",
         )
-    return positions[codes]
 
 
 def require_finite(

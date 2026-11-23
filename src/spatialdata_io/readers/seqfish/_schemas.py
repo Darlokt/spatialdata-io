@@ -40,6 +40,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.points import categorize_features
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -90,6 +91,20 @@ def validate_cell_columns(header: Sequence[str], path: ArtifactFile) -> None:
         )
 
 
+def validate_cell_values(source: pa.Table, path: ArtifactFile) -> None:
+    """Validate physical metadata directly in its typed Arrow columns."""
+    for name in ("area", "center_x", "center_y"):
+        if pc.call_function("all", [pc.call_function("is_finite", [source[name]])]).as_py() is False:
+            raise ReaderFormatError(
+                context=CELLS_CONTEXT, path=path, found=f"nonfinite {name!r} values", expected=f"finite {name!r} values"
+            )
+    minimum_area = pc.call_function("min", [source["area"]]).as_py()
+    if minimum_area is not None and minimum_area < 0:
+        raise ReaderFormatError(
+            context=CELLS_CONTEXT, path=path, found="negative cell area", expected="nonnegative cell areas"
+        )
+
+
 def transcript_types(header: Sequence[str], path: ArtifactFile) -> dict[str, pa.DataType]:
     """Return the projected transcript fields and their types; additional vendor annotations are ignored."""
     if not set(_TRANSCRIPT_REQUIRED).issubset(header):
@@ -109,15 +124,15 @@ def normalize_transcript_partition(frame: pd.DataFrame, *, features: pd.Index, p
     ``y`` become NumPy float64, as :class:`~spatialdata.models.PointsModel`
     requires; ``cell`` keeps its Arrow type and ``z`` becomes ``z_raw``.
     """
-    codes = features.get_indexer(pd.Index(frame["name"]))
-    if (codes < 0).any():
+    categories = categorize_features(frame["name"], features)
+    if categories is None:
         raise ReaderFormatError(
             context=TRANSCRIPTS_CONTEXT,
             path=path,
             found="unknown transcript names",
             expected="names in the expression vocabulary",
         )
-    frame["name"] = pd.Categorical.from_codes(codes, categories=features)
+    frame["name"] = categories
     for axis in ("x", "y"):
         values = frame[axis].to_numpy(dtype=np.float64)
         if not np.isfinite(values).all():

@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     from anndata import AnnData
 
+    from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.stereoseq._cells import CellCounts
     from spatialdata_io.readers.stereoseq._layout import AnalysisSource
     from spatialdata_io.readers.stereoseq._square import SquareCounts
@@ -103,7 +104,7 @@ def read_analysis(source: AnalysisSource, *, counts: Mapping[str, SquareCounts |
         raise
     schema = _schemas.validate_analysis_table(table, source.file)
 
-    # validate_analysis_table proved that read_h5ad returned eager DataFrames.
+    # The default read_h5ad mode materializes annotations; AnnData also types backed frames.
     obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
     obs.columns = sanitize_column_names(
         list(obs.columns), source=f"stereoseq: the obs of {source.file.name}", reserved=_RESERVED_OBS
@@ -129,6 +130,8 @@ def read_analysis(source: AnalysisSource, *, counts: Mapping[str, SquareCounts |
                 expected=f"matching GEF pitch {matching.resolution} nm",
             )
         physical_resolution = matching.resolution
+    elif population_name.startswith("bin"):
+        _require_unique_square_coordinates(_coordinate_index(schema.coordinates), source.file)
 
     if physical_resolution is None:
         raise _schemas.schema_error(
@@ -198,7 +201,7 @@ def _match_counts(
                 expected="GEF cell-ID membership with exact coordinate agreement",
             )
     else:
-        raw_index = pd.MultiIndex.from_arrays((coordinates[:, 0], coordinates[:, 1]))
+        raw_index = _coordinate_index(coordinates)
         if isinstance(source.population, str) and not raw_index.is_unique:
             raise _schemas.schema_error(
                 source.file,
@@ -206,13 +209,23 @@ def _match_counts(
                 found="ambiguous source centroids without semantic analysis cell IDs",
                 expected="unique coordinate identities for native analysis matching",
             )
-        analysis_index = pd.MultiIndex.from_arrays((schema.coordinates[:, 0], schema.coordinates[:, 1]))
-        if np.any(raw_index.get_indexer(analysis_index) < 0):
+        analysis_index = _coordinate_index(schema.coordinates)
+        positions = raw_index.get_indexer(analysis_index)
+        if not isinstance(source.population, str):
+            _require_unique_square_coordinates(analysis_index, source.file)
+        if np.any(positions < 0):
             raise _schemas.schema_error(
                 source.file,
                 "analysis coordinates",
                 found="coordinates absent from selected GEF",
                 expected="exact source-coordinate membership",
+            )
+        if not analysis_index.is_unique:
+            raise _schemas.schema_error(
+                source.file,
+                "analysis coordinates",
+                found="repeated cell coordinates",
+                expected="unique coordinate matches or explicit source cell IDs",
             )
     if np.any(matching.table.var_names.get_indexer(table.var_names) < 0):
         raise _schemas.schema_error(
@@ -220,4 +233,15 @@ def _match_counts(
             "analysis features",
             found="features absent from selected GEF",
             expected="source feature-identity membership",
+        )
+
+
+def _coordinate_index(coordinates: npt.NDArray[np.int64]) -> pd.MultiIndex:
+    return pd.MultiIndex.from_arrays((coordinates[:, 0], coordinates[:, 1]))
+
+
+def _require_unique_square_coordinates(index: pd.MultiIndex, path: ArtifactFile) -> None:
+    if not index.is_unique:
+        raise _schemas.schema_error(
+            path, "analysis coordinates", found="repeated square coordinates", expected="one observation per square bin"
         )

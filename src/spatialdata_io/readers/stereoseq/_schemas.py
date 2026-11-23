@@ -93,18 +93,30 @@ def schema_error(path: ArtifactFile, artifact: str, *, found: str, expected: str
 
 def require_group(parent: h5py.Group, name: str, path: ArtifactFile) -> h5py.Group:
     """Require a named HDF5 group."""
-    value = parent.get(name)
+    value = _local_node(parent, name, path)
     if not isinstance(value, h5py.Group):
         raise schema_error(path, name, found=type(value).__name__, expected="an HDF5 group")
     return value
 
 
-def require_dataset(parent: h5py.Group, name: str, path: ArtifactFile) -> h5py.Dataset:
-    """Require a one-dimensional HDF5 dataset."""
-    value = parent.get(name)
-    if not isinstance(value, h5py.Dataset) or value.ndim != 1:
-        raise schema_error(path, f"{parent.name}/{name}", found=str(value), expected="a one-dimensional HDF5 dataset")
+def require_dataset(parent: h5py.Group, name: str, path: ArtifactFile, *, ndim: int = 1) -> h5py.Dataset:
+    """Require a dataset stored in the GEF with the declared rank."""
+    value = _local_node(parent, name, path)
+    artifact = f"{parent.name}/{name}"
+    if not isinstance(value, h5py.Dataset) or value.ndim != ndim:
+        expected = "a one-dimensional HDF5 dataset" if ndim == 1 else f"a {ndim}-dimensional HDF5 dataset"
+        raise schema_error(path, artifact, found=str(value), expected=expected)
+    if value.is_virtual or value.external:
+        raise schema_error(path, artifact, found="externally backed dataset", expected="local HDF5 dataset storage")
     return value
+
+
+def _local_node(parent: h5py.Group, name: str, path: ArtifactFile) -> h5py.Group | h5py.Dataset | None:
+    """Check the link before HDF5 can open another file."""
+    link = parent.get(name, getlink=True)
+    if link is not None and not isinstance(link, h5py.HardLink):
+        raise schema_error(path, f"{parent.name}/{name}", found=type(link).__name__, expected="a local HDF5 hard link")
+    return parent.get(name)
 
 
 def integer_dtype(
@@ -318,11 +330,8 @@ def _analysis_integer(value: object, path: ArtifactFile, name: str) -> int:
 
 def validate_analysis_table(table: AnnData, path: ArtifactFile) -> AnalysisSchema:
     """Validate native Stereopy annotations without changing the owned table."""
-    obs, var = table.obs, table.var
-    if not isinstance(obs, pd.DataFrame) or not isinstance(var, pd.DataFrame):
-        raise schema_error(
-            path, "annotations", found="nonmaterialized annotations", expected="pandas observation and feature frames"
-        )
+    # The reader owns an eager read_h5ad result; AnnData also types backed frames.
+    obs, var = cast("pd.DataFrame", table.obs), cast("pd.DataFrame", table.var)
 
     for name, frame in (("obs", obs), ("var", var)):
         if not frame.columns.is_unique or not frame.index.is_unique:

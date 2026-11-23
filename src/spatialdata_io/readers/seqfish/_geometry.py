@@ -44,14 +44,13 @@ def read_boundaries(
     geometries = geojson_polygons([feature["geometry"] for feature in features], context=BOUNDARIES_CONTEXT, path=path)
     # Keep arbitrary annotation IDs exact, including nullable integers, rather
     # than allowing pandas to infer a lossy floating column from JSON values.
-    shapes = gpd.GeoDataFrame(
-        [
-            {"geometry": geometry, **(feature["properties"] or {})}
-            for geometry, feature in zip(geometries, features, strict=True)
-        ],
+    properties = pd.DataFrame(
+        [feature["properties"] or {} for feature in features],
+        index=identifiers.rename("instance_id"),
         dtype=object,
     )
-    shapes.index = identifiers.rename("instance_id")
+    properties.insert(0, "geometry", geometries)
+    shapes = gpd.GeoDataFrame(properties, geometry="geometry", copy=False)
     if len(shapes) != len(instance_ids) or (shapes.index.get_indexer(instance_ids) < 0).any():
         raise ReaderFormatError(
             context=BOUNDARIES_CONTEXT,

@@ -404,9 +404,9 @@ class TestIss:
             ("minisblack", True, [f"Channel:0:0:sample:{index}" for index in range(3)]),
         ],
     )
-    @pytest.mark.parametrize("axes", ["YXC", "yXc"])
-    def test_explicit_sample_channels_compose_with_linked_tables(
-        self, tmp_path: Path, axes: str, photometric: str, *, ome: bool, expected: list[str | int]
+    @pytest.mark.parametrize("axes", [None, "YXS", "yXc"])
+    def test_sample_channels_compose_with_linked_tables(
+        self, tmp_path: Path, axes: str | None, photometric: str, *, ome: bool, expected: list[str | int]
     ) -> None:
         dataset = write_iss_dataset(tmp_path)
         source = np.arange(32 * 40 * 3, dtype=np.uint8).reshape(32, 40, 3)

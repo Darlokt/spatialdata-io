@@ -56,6 +56,16 @@ def _frames(result: SpatialData, name: str) -> dict[str, object]:
 class TestMacsima:
     """Discover, inspect, plan and assemble complete MACSima exports."""
 
+    def test_equivalent_pixel_sizes_in_different_units_share_one_scale(self, tmp_path: Path) -> None:
+        write_channel(tmp_path, V1_CHANNELS[0], version=1, index=0, physical_size=("0.10003", "µm"))
+        write_channel(tmp_path, V1_CHANNELS[1], version=1, index=1, physical_size=("100.03", "nm"))
+
+        result = macsima(tmp_path)
+
+        image = _image(result, f"{tmp_path.name}_image")
+        assert image.coords["c"].to_numpy().tolist() == ["CD3", "DAPI"]
+        assert get_transformation(image, "global") == Scale([0.10003, 0.10003], axes=("x", "y"))
+
     @pytest.mark.parametrize(
         ("channels", "version", "software"), [(V0_CHANNELS, 0, "0.15.3"), (V1_CHANNELS, 1, "1.1.1")]
     )
@@ -376,7 +386,9 @@ class TestMacsimaRejects:
         write_stack(tmp_path / nuclei_folder, nuclei, version=1)
         write_stack(tmp_path / other_folder, V1_CHANNELS[:1], version=1)
 
-        with pytest.raises(ReaderFormatError, match=f"element name '{duplicate_name}' generated twice, ignoring case"):
+        with pytest.raises(
+            ReaderFormatError, match=f"generated element names .*'{duplicate_name}'.* collide ignoring case"
+        ):
             macsima(tmp_path, parsing_style="processed_multiple_folders")
 
     def test_dangling_channel_symlink_fails_instead_of_dropping_the_channel(self, tmp_path: Path) -> None:

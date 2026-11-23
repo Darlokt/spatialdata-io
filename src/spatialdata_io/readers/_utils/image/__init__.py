@@ -30,6 +30,7 @@ from spatialdata_io.readers._utils.image._types import LazyRaster
 from spatialdata_io.readers._utils.image.tiff import (
     TiffMetadata,
     inspect_tiff,
+    inspect_tiff_if_recognized,
     read_tiff,
     select_tiff_series,
     validate_tiff_index,
@@ -41,6 +42,7 @@ __all__ = [
     "TiffMetadata",
     "channel_source",
     "inspect_tiff",
+    "inspect_tiff_if_recognized",
     "make_raster_options",
     "normalize_cyx_image",
     "normalize_raster_axes",

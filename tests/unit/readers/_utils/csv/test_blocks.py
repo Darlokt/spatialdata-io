@@ -288,6 +288,23 @@ class TestPairedQuotes:
         assert _blocks._paired_quotes(block) is expected
 
 
+class TestValidateCsvLines:
+    def test_accepts_encoded_payload_without_copying_type(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "transcripts.csv.gz")
+        _blocks.validate_csv_lines(bytearray(b'"a",0\r\n"b""c",1\n'), context=_CONTEXT, path=path)
+
+    @pytest.mark.parametrize(
+        ("payload", "found"),
+        [(b'"a"\n"b\nc"\n', "odd number of double quotes"), (b"1\r2\n", "bare carriage return")],
+    )
+    def test_malformed_encoded_payload_names_the_source(self, tmp_path: Path, payload: bytes, found: str) -> None:
+        path = ArtifactFile(tmp_path / "transcripts.csv.gz")
+        with pytest.raises(ReaderFormatError, match=found) as caught:
+            _blocks.validate_csv_lines(bytearray(payload), context=_CONTEXT, path=path)
+        assert caught.value.context == _CONTEXT
+        assert caught.value.path == path
+
+
 class TestReadBlock:
     @pytest.mark.parametrize("record", [b"1,A,0\n", b"1,A\n", b"1,\xff,0\n"])
     def test_owned_buffer_closes_on_success_and_parse_failure(

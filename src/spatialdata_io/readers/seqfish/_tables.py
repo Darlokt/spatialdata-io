@@ -45,6 +45,7 @@ from spatialdata_io.readers.seqfish._schemas import (
     count_types,
     validate_cell_columns,
     validate_cell_ids,
+    validate_cell_values,
 )
 
 if TYPE_CHECKING:
@@ -102,15 +103,7 @@ def _read_cells(path: ArtifactFile) -> pd.DataFrame:
                 column_types=CELL_TYPES, include_columns=list(CELL_TYPES), null_values=[], strings_can_be_null=False
             ),
         )
-    for name in ("area", "center_x", "center_y"):
-        if not np.isfinite(source[name].to_numpy()).all():
-            raise ReaderFormatError(
-                context=CELLS_CONTEXT, path=path, found=f"nonfinite {name!r} values", expected=f"finite {name!r} values"
-            )
-    if (source["area"].to_numpy() < 0).any():
-        raise ReaderFormatError(
-            context=CELLS_CONTEXT, path=path, found="negative cell area", expected="nonnegative cell areas"
-        )
+    validate_cell_values(source, path)
     ids = validate_cell_ids(source["label"], context=CELLS_CONTEXT, path=path)
     return source.drop_columns(["label"]).to_pandas(types_mapper=pd.ArrowDtype).set_axis(ids)
 

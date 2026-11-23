@@ -314,17 +314,19 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public artifact sele
 
     transcripts = None
     if selection.transcripts:
-        context = ReaderErrorContext("merscope", TRANSCRIPTS)
+        name = "detected_transcripts.csv"
         current = (
-            analysis is root
-            or optional_metadata_file(analysis, "detected_transcripts.csv", context=context) is not None
+            _file(root, name, TRANSCRIPTS)
+            if analysis is root
+            else optional_metadata_file(analysis, name, context=ReaderErrorContext("merscope", TRANSCRIPTS))
         )
-        source = analysis if current else root
-        transcripts = TranscriptSource(
-            _file(source, "detected_transcripts.csv", TRANSCRIPTS),
-            _file(source, "cell_by_gene.csv", COUNTS),
-            "current" if current else "original",
-        )
+        if current is None:
+            transcripts = TranscriptSource(
+                _file(root, name, TRANSCRIPTS), _file(root, "cell_by_gene.csv", COUNTS), "original"
+            )
+        else:
+            vocabulary = tables.counts if tables is not None else _file(analysis, "cell_by_gene.csv", COUNTS)
+            transcripts = TranscriptSource(current, vocabulary, "current")
 
     images = _mosaics(root, selection.z_layers) if selection.images else None
     return MerscopeLayout(names, tables, images, boundaries, transcripts)

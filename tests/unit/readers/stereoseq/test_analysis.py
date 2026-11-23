@@ -79,6 +79,22 @@ class TestReadAnalysis:
             with pytest.raises(ReaderFormatError, match="ambiguous source centroids"):
                 read_analysis(_source(path), counts={"cells": raw})
 
+    @pytest.mark.parametrize("cell_ids", [True, False])
+    def test_coincident_analysis_coordinates_require_distinct_cell_ids(self, tmp_path: Path, *, cell_ids: bool) -> None:
+        path = tmp_path / "sample.cellbin_0.50.h5ad"
+        table = _analysis(path, cell_ids=cell_ids)
+        table.obs_names = ["first:30_40", "second:30_40"]
+        table.obsm["spatial"] = np.array([[30, 40], [30, 40]], dtype=np.uint32)
+        table.write_h5ad(path)
+        raw = _counts()
+        if cell_ids:
+            raw.coordinates[0] = [30, 40]
+            result = read_analysis(_source(path), counts={"cells": raw})
+            assert result.table.obs["id"].tolist() == [100, 200]
+        else:
+            with pytest.raises(ReaderFormatError, match="repeated cell coordinates"):
+                read_analysis(_source(path), counts={"cells": raw})
+
     def test_unreadable_h5ad_names_the_artifact(self, tmp_path: Path) -> None:
         path = tmp_path / "sample.cellbin_0.50.h5ad"
         path.write_bytes(b"not an HDF5 file")

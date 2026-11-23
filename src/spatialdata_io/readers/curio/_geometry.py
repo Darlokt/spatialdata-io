@@ -60,7 +60,7 @@ def read_shapes(table: ad.AnnData, path: ArtifactFile) -> gpd.GeoDataFrame:
 
     xy = _validate_xy(table.obsm.get("X_spatial"), table.n_obs, context, path)
     repeat = table.obsm.get("spatial")
-    if repeat is not None and not np.array_equal(xy, _validate_xy(repeat, table.n_obs, context, path)):
+    if repeat is not None and not _equal_xy(xy, _validate_xy(repeat, table.n_obs, context, path)):
         raise ReaderFormatError(
             context=context,
             path=path,
@@ -108,6 +108,33 @@ def _validate_xy(
             expected="finite real numeric coordinates of shape (n_obs, 2), ordered (x, y)",
         )
     return xy
+
+
+def _equal_xy(first: NDArray[np.integer | np.floating], second: NDArray[np.integer | np.floating]) -> bool:
+    """Compare source positions exactly, including mixed integer and floating dtypes."""
+    if not np.array_equal(first, second):
+        return False
+
+    common = np.result_type(first, second)
+    if common.kind != "f" or first.dtype.kind == second.dtype.kind:
+        return True
+    limit = 2 ** (np.finfo(common).nmant + 1)
+    if not any(
+        int(values.min()) < -limit or int(values.max()) > limit
+        for values in (first, second)
+        if values.dtype.kind in "iu"
+    ):
+        return True
+
+    # NumPy's common float dtype can round an integer before comparing it.
+    return all(
+        _coordinate_ratio(left) == _coordinate_ratio(right) for left, right in zip(first.flat, second.flat, strict=True)
+    )
+
+
+def _coordinate_ratio(value: np.integer | np.floating) -> tuple[int, int]:
+    """Return a finite source coordinate as an exact rational number."""
+    return (int(value), 1) if isinstance(value, np.integer) else value.as_integer_ratio()
 
 
 def _positions_metadata() -> PositionsMetadata:

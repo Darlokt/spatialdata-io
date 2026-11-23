@@ -185,6 +185,17 @@ class TestReadChannel:
         assert source is not None
         assert source.pixel_size_um == 0.17
 
+    def test_equivalent_pixel_sizes_in_different_units_are_square(self, tmp_path: Path) -> None:
+        xml = _xml(V1_CHANNELS[0], physical_size=("0.10003", "µm"))
+        xml = xml.replace(
+            'PhysicalSizeY="0.10003" PhysicalSizeYUnit="µm"', 'PhysicalSizeY="100.03" PhysicalSizeYUnit="nm"'
+        )
+
+        source = read_channel(_write_xml(tmp_path, xml))
+
+        assert source is not None
+        assert source.pixel_size_um == 0.10003
+
     def test_tiff_without_ome_is_not_a_channel(self, tmp_path: Path) -> None:
         path = tmp_path / "preview.tif"
         tifffile.imwrite(path, np.zeros((3, 4), dtype=np.uint16), metadata=None)

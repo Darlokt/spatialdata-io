@@ -31,3 +31,17 @@ class TestGenericToZarr:
 
         read.assert_not_called()
         parse.assert_not_called()
+
+    def test_rejects_an_invalid_element_name_before_reading_store_or_source(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        output = tmp_path / "existing.zarr"
+        output.mkdir()
+        read = mocker.patch("spatialdata_io.converters.generic_to_zarr.SpatialData.read")
+        parse = mocker.patch("spatialdata_io.converters.generic_to_zarr.generic")
+
+        with pytest.raises(ValueError, match="name must be a valid SpatialData element name"):
+            generic_to_zarr(tmp_path / "missing.geojson", output, name="two words")
+
+        read.assert_not_called()
+        parse.assert_not_called()

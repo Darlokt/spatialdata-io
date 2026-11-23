@@ -27,7 +27,7 @@ from spatialdata_io.readers.xenium._geometry import (
 )
 from spatialdata_io.readers.xenium._images import read_morphology
 from spatialdata_io.readers.xenium._labels import read_labels
-from spatialdata_io.readers.xenium._layout import Selection, discover_layout
+from spatialdata_io.readers.xenium._layout import Selection, TranscriptInputs, discover_layout
 from spatialdata_io.readers.xenium._metadata import read_gene_panel, read_metrics, read_protein_panel
 from spatialdata_io.readers.xenium._schemas import integer_ids
 from spatialdata_io.readers.xenium._tables import build_table, link_table, read_cells, read_counts, read_feature_index
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.xenium._cells import CellStore, MaskRole
     from spatialdata_io.readers.xenium._labels import MaskSource
     from spatialdata_io.readers.xenium._layout import TableTarget, XeniumLayout
-    from spatialdata_io.readers.xenium._metadata import ProteinPanel
+    from spatialdata_io.readers.xenium._metadata import Experiment, ProteinPanel
     from spatialdata_io.readers.xenium._tables import Cells, Counts, FeatureSelection
 
 type CellGeometry = Literal["polygons", "circles", "both"]
@@ -267,22 +267,19 @@ def _check_grid(rasters: dict[str, DataArray | DataTree], root: Path, context: R
         )
 
 
-def _transcripts(layout: XeniumLayout, counts: Counts | None) -> dd.DataFrame:
+def _transcripts(inputs: TranscriptInputs, experiment: Experiment, counts: Counts | None) -> dd.DataFrame:
     """Use the count matrix vocabulary and barcodes; without a table, read only their names."""
-    source, family = layout.transcripts, layout.experiment.family
-    if source is None or layout.counts is None:  # pragma: no cover - discovery resolves both together
-        message = "transcripts require a count source"
-        raise ValueError(message)
     if counts is not None:
         features, barcodes = counts.features, counts.table.obs_names
     else:
-        index = read_feature_index(layout.counts, context=layout.experiment.context("cell-feature matrix"))
+        index = read_feature_index(inputs.vocabulary, context=experiment.context("cell-feature matrix"))
         features, barcodes = index.features, index.barcodes
-    if family == "integer_ids":
-        context = layout.experiment.context("cell-feature matrix barcodes")
-        barcodes = integer_ids(barcodes, path=source.file, context=context)
-    context = layout.experiment.context("transcripts")
-    return read_transcripts(source, family, features=features, cells=barcodes, context=context)
+    if experiment.family == "integer_ids":
+        context = experiment.context("cell-feature matrix barcodes")
+        barcodes = integer_ids(barcodes, path=inputs.source.file, context=context)
+    return read_transcripts(
+        inputs.source, experiment.family, features=features, cells=barcodes, context=experiment.context("transcripts")
+    )
 
 
 def _table(  # noqa: PLR0913, RUF100 - The table combines every table-side product.
@@ -549,17 +546,23 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     panel = None
     if layout.protein_panel is not None:
         panel = read_protein_panel(layout.protein_panel, context=experiment.context("protein_panel.json"))
+    count_inputs = layout.counts
     counts = None
-    if layout.counts is not None and selection.table:
+    if count_inputs is not None and selection.table:
+        matrix = count_inputs.vocabulary if isinstance(count_inputs, TranscriptInputs) else count_inputs
         context = experiment.context("cell-feature matrix")
-        counts = read_counts(layout.counts, options.feature_types, panel, context=context)
+        counts = read_counts(matrix, options.feature_types, panel, context=context)
 
     shapes = _shapes(layout, store, cells, circles=selection.cell_circles, policy=options.invalid_geometries)
     labels = _labels(layout, masks, selection, options.raster)
     images = _images(layout, options.raster)
     morphology = {name: image for name, image in images.items() if name.startswith("morphology")}
     _check_grid(labels | morphology, layout.root.path, experiment.context("pixel grid"))
-    points = {} if layout.transcripts is None else {"transcripts": _transcripts(layout, counts)}
+    points = (
+        {"transcripts": _transcripts(count_inputs, experiment, counts)}
+        if isinstance(count_inputs, TranscriptInputs)
+        else {}
+    )
     tables = {}
     if counts is not None and cells is not None:
         tables["table"] = _table(layout, counts, cells, store=store, shapes=shapes, target=selection.table_target)

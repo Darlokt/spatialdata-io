@@ -80,7 +80,6 @@ from spatialdata_io.readers._utils.paths import (
 from spatialdata_io.readers.visium_hd._metadata import reconcile_identities
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
     from pathlib import Path
 
     from spatialdata_io.readers._utils.paths import ArtifactDirectory, PathPolicy
@@ -89,6 +88,21 @@ if TYPE_CHECKING:
 _FULLRES_NAME = re.compile(r"(?:.+_)?tissue_image\.(?:btf|tif|tiff)", flags=re.IGNORECASE)
 _FULLRES_SUFFIXES = frozenset({".btf", ".tif", ".tiff", ".png", ".jpg", ".jpeg"})
 _BIN_DIRECTORY = re.compile(r"square_(\d{3,})um")
+
+
+@dataclass(frozen=True, slots=True)
+class Selection:
+    """Validated choices that determine which artifacts discovery resolves."""
+
+    bin_sizes: tuple[int, ...] | Literal["all"]
+    bin_counts_kind: Literal["filtered", "raw"]
+    include_cell_boundaries: bool | None
+    include_nucleus_boundaries: bool | None
+    include_nucleus_table: bool
+    cell_counts_kind: Literal["filtered", "raw"]
+    include_images: bool
+    include_cytassist_image: bool
+    fullres_image_file: str | Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,25 +293,12 @@ def _nucleus_counts(
     return NucleusCountSource(raw, mappings)
 
 
-def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product selections once.
-    path: str | Path,
-    *,
-    bin_sizes: Sequence[int] | Literal["all"] = "all",
-    bin_counts_kind: Literal["filtered", "raw"] = "filtered",
-    include_cell_boundaries: bool | None = None,
-    include_nucleus_boundaries: bool | None = None,
-    include_nucleus_table: bool = False,
-    cell_counts_kind: Literal["filtered", "raw"] = "filtered",
-    include_images: bool = True,
-    include_cytassist_image: bool = False,
-    fullres_image_file: str | Path | None = None,
-    path_policy: PathPolicy = "strict",
-) -> VisiumHDLayout:
+def discover_layout(path: str | Path, selection: Selection, *, path_policy: PathPolicy = "strict") -> VisiumHDLayout:
     """Resolve the selected artifacts and reconcile the identity of every consumed source."""
     root = normalize_dataset_root(path, context=_context("dataset root"), path_policy=path_policy)
     entries = list_directory(root.path, context=_context("dataset root"))
     directories = _bin_directories(root)
-    selected = tuple(sorted(directories)) if bin_sizes == "all" else tuple(bin_sizes)
+    selected = tuple(sorted(directories)) if selection.bin_sizes == "all" else selection.bin_sizes
     absent = set(selected).difference(directories)
     if absent:
         raise ReaderFormatError(
@@ -320,7 +321,9 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
         BinLayout(
             size,
             require_metadata_file(
-                root, directories[size] / f"{bin_counts_kind}_feature_bc_matrix.h5", context=_context("bin counts")
+                root,
+                directories[size] / f"{selection.bin_counts_kind}_feature_bc_matrix.h5",
+                context=_context("bin counts"),
             ),
             require_metadata_file(
                 root, directories[size] / "spatial/tissue_positions.parquet", context=_context("tissue positions")
@@ -332,52 +335,56 @@ def discover_layout(  # noqa: PLR0913, RUF100 - Resolve supported product select
         for size in selected
     )
 
-    nucleus_requested = True if include_nucleus_table else include_nucleus_boundaries
+    nucleus_requested = True if selection.include_nucleus_table else selection.include_nucleus_boundaries
     segmented_context = _context("segmented outputs")
     segmented = (
         require_metadata_directory(root, "segmented_outputs", context=segmented_context)
-        if include_cell_boundaries or nucleus_requested
+        if selection.include_cell_boundaries or nucleus_requested
         else optional_metadata_directory(root, "segmented_outputs", context=segmented_context)
     )
     cell = _boundary(
-        root, segmented, "cell_segmentations.geojson", artifact="cell boundaries", requested=include_cell_boundaries
+        root,
+        segmented,
+        "cell_segmentations.geojson",
+        artifact="cell boundaries",
+        requested=selection.include_cell_boundaries,
     )
     nucleus = _boundary(
         root, segmented, "nucleus_segmentations.geojson", artifact="nucleus boundaries", requested=nucleus_requested
     )
 
     cell_counts = None
-    if segmented is not None and (cell is not None or include_nucleus_table):
+    if segmented is not None and (cell is not None or selection.include_nucleus_table):
         cell_counts = require_metadata_file(
-            root, segmented / f"{cell_counts_kind}_feature_cell_matrix.h5", context=_context("cell counts")
+            root, segmented / f"{selection.cell_counts_kind}_feature_cell_matrix.h5", context=_context("cell counts")
         )
     segmentation = SegmentationLayout(cell_counts, cell, nucleus) if cell is not None or nucleus is not None else None
-    nucleus_counts = _nucleus_counts(root, base, segmented, entries) if include_nucleus_table else None
+    nucleus_counts = _nucleus_counts(root, base, segmented, entries) if selection.include_nucleus_table else None
 
     feature = _loose_file(
         root,
         ("feature_slice.h5", "hd_feature_slice.h5"),
         entries,
         artifact="feature slice",
-        required=include_cytassist_image or (not bins and cell_counts is None),
+        required=selection.include_cytassist_image or (not bins and cell_counts is None),
     )
 
     images = None
-    if include_images or include_cytassist_image:
+    if selection.include_images or selection.include_cytassist_image:
         spatial = optional_metadata_directory(root, "spatial", context=_context("image directory"))
         images = ImageLayout(
             _image_file(root, spatial, base / "spatial", "tissue_hires_image.png", artifact="hires image")
-            if include_images
+            if selection.include_images
             else None,
             _image_file(root, spatial, base / "spatial", "tissue_lowres_image.png", artifact="lowres image")
-            if include_images
+            if selection.include_images
             else None,
             _image_file(
                 root, spatial, base / "spatial", "cytassist_image.tiff", artifact="CytAssist image", required=True
             )
-            if include_cytassist_image
+            if selection.include_cytassist_image
             else None,
-            _fullres(root, fullres_image_file, entries) if include_images else None,
+            _fullres(root, selection.fullres_image_file, entries) if selection.include_images else None,
         )
 
     # Only consumed sources establish identity; unselected matrices are never fallbacks.

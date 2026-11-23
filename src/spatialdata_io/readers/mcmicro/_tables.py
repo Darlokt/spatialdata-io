@@ -31,7 +31,7 @@ pixel corner at the origin, so a calibrated position is
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import anndata as ad
 import numpy as np
@@ -41,6 +41,7 @@ import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata, RowFrames
+from spatialdata_io.readers._utils.centroids import scale_regionprops_centroids
 from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names
@@ -59,7 +60,6 @@ from spatialdata_io.readers.mcmicro._schemas import (
     REGION_KEY,
     QuantificationColumns,
     quantification_columns,
-    validate_expression,
     validate_measurements,
     validate_position_columns,
 )
@@ -67,7 +67,6 @@ from spatialdata_io.readers.mcmicro._schemas import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.mcmicro._layout import Quantification
     from spatialdata_io.readers.mcmicro._rasters import ImageGrid
     from spatialdata_io.readers.mcmicro._schemas import MarkerPanel
@@ -90,14 +89,17 @@ _READER_OBS_COLUMNS = (REGION_KEY, CELL_ID, "spatial_frame", "spatial_pixel_fram
 class _Measurements:
     """Own one table's sparse expression blocks and typed Arrow annotations."""
 
+    source: Quantification
+    grid: ImageGrid
     blocks: list[sparse.csr_array]
     annotations: pa.Table
 
 
 def _read_measurements(
-    path: ArtifactFile, columns: QuantificationColumns, label_dtype: np.dtype[np.integer]
+    source: Quantification, grid: ImageGrid, columns: QuantificationColumns, label_dtype: np.dtype[np.integer]
 ) -> _Measurements:
     """Parse typed native batches, retaining only CSR expression and eager annotations."""
+    path = source.path
     annotation_names = [CELL_ID, *columns.morphology, *columns.text]
     blocks: list[sparse.csr_array] = []
     annotations: list[pa.RecordBatch] = []
@@ -120,15 +122,23 @@ def _read_measurements(
             for batch in reader:
                 validate_measurements(batch, columns, label_dtype, path)
                 dense = np.asarray(batch.select(columns.features).to_tensor(row_major=True))
-                validate_expression(dense, path)
-                blocks.append(as_csr_array(dense))
+                # The projected tensor is two-dimensional float64. Only its values can violate the CSR contract.
+                try:
+                    blocks.append(as_csr_array(dense))
+                except ValueError as error:
+                    raise ReaderFormatError(
+                        context=QUANTIFICATION_CONTEXT,
+                        path=path,
+                        found="nonfinite marker intensities",
+                        expected="finite float64 marker intensities",
+                    ) from error
                 annotations.append(batch.select(annotation_names))
     except OSError as error:
         add_reader_context(error, context=QUANTIFICATION_CONTEXT, path=path)
         raise
 
     schema = pa.schema([columns.types.field(name) for name in annotation_names])
-    return _Measurements(blocks, pa.Table.from_batches(annotations, schema=schema))
+    return _Measurements(source, grid, blocks, pa.Table.from_batches(annotations, schema=schema))
 
 
 def _observations(
@@ -159,9 +169,6 @@ def read_table(
     """Concatenate a nonempty sequence of MCQuant tables once and link them to their labels."""
     columns: QuantificationColumns | None = None
     measurements: list[_Measurements] = []
-    regions: list[str] = []
-    paths: list[ArtifactFile] = []
-    source_grids: list[ImageGrid] = []
     for quantification in quantifications:
         path = quantification.path
         current = quantification_columns(csv_header(path, context=QUANTIFICATION_CONTEXT), panel.features, path)
@@ -174,14 +181,13 @@ def read_table(
                 found=f"columns {current.types.names!r}",
                 expected=f"the shared MCQuant schema {columns.types.names!r}",
             )
-        measurement = _read_measurements(path, current, label_dtypes[quantification.target.key])
+        measurement = _read_measurements(
+            quantification, grids[quantification.target.image_id], current, label_dtypes[quantification.target.key]
+        )
 
         # A label without measured cells is not a table region; empty linked tables fail below.
         if measurement.annotations.num_rows:
             measurements.append(measurement)
-            regions.append(quantification.target.key)
-            paths.append(path)
-            source_grids.append(grids[quantification.target.image_id])
 
     if columns is None or not measurements:
         raise ReaderFormatError(
@@ -191,7 +197,10 @@ def read_table(
             expected="at least one MCQuant row",
         )
 
-    validate_position_columns(columns, multiple=len({grid.name for grid in source_grids}) > 1, path=paths[0])
+    validate_position_columns(
+        columns, multiple=len({m.grid.name for m in measurements}) > 1, path=measurements[0].source.path
+    )
+    regions = [m.source.target.key for m in measurements]
 
     obs, spatial = _observations(measurements, regions, columns)
     obs.columns = sanitize_column_names(
@@ -204,68 +213,34 @@ def read_table(
         axis="columns",
     )
     expression = sparse.vstack([block for measurement in measurements for block in measurement.blocks], format="csr")
-    table = ad.AnnData(X=expression, obs=obs)
-    table.var = prepare_anndata_dataframe(var, context=MARKERS_CONTEXT)
-    _set_positions(
-        table, spatial, source_grids, [measurement.annotations.num_rows for measurement in measurements], paths
+    embeddings, declaration = _positions(obs, spatial, measurements)
+    table = ad.AnnData(
+        X=expression,
+        obs=prepare_anndata_dataframe(obs, context=_TABLE_CONTEXT, allow_float_nulls=True),
+        var=prepare_anndata_dataframe(var, context=MARKERS_CONTEXT),
+        uns={POSITIONS_KEY: declaration},
     )
-    # This reader constructed an eager DataFrame; AnnData also admits backed frames.
-    prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=_TABLE_CONTEXT, allow_float_nulls=True)
+    table.obsm.update(embeddings)
     return parse_linked_table(table, TableLinkage(tuple(regions), REGION_KEY, CELL_ID), context=_TABLE_CONTEXT)
 
 
-def _physical_positions(
+def _positions(
+    obs: pd.DataFrame,
     native: np.ndarray[tuple[int, int], np.dtype[np.float64]],
-    grids: list[ImageGrid],
-    sizes: list[int],
-    paths: list[ArtifactFile],
-    spacings: list[tuple[float, float]],
-) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
-    """Shift regionprops indices to the raster's pixel-corner frame and scale each table's rows."""
-    physical = np.add(native, 0.5, dtype=np.float64)
-    offset = 0
-    for grid, size, path, spacing in zip(grids, sizes, paths, spacings, strict=True):
-        rows = physical[offset : offset + size]
-        nonzero = rows != 0
-        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
-            rows *= spacing
-        if not np.isfinite(rows).all():
-            raise ReaderFormatError(
-                context=QUANTIFICATION_CONTEXT,
-                path=path,
-                found=f"nonfinite physical positions in {grid.frame!r}",
-                expected="finite float64 physical XY",
-            )
-        if np.any(nonzero & (rows == 0)):
-            raise ReaderFormatError(
-                context=QUANTIFICATION_CONTEXT,
-                path=path,
-                found="nonzero shifted pixel coordinates becoming zero physical positions",
-                expected="nonzero float64 physical XY for nonzero shifted pixel coordinates",
-            )
-        offset += size
-    return physical
-
-
-def _set_positions(
-    table: ad.AnnData,
-    native: np.ndarray[tuple[int, int], np.dtype[np.float64]],
-    grids: list[ImageGrid],
-    sizes: list[int],
-    paths: list[ArtifactFile],
-) -> None:
-    """Declare the native centroids, adding physical positions when every measured grid is calibrated.
-
-    ``grids``, ``sizes`` and ``paths`` describe the contiguous row slice of each
-    quantification table in order.
-    """
-    table.obsm["spatial_pixels"] = native
+    measurements: list[_Measurements],
+) -> tuple[dict[str, np.ndarray], PositionsMetadata]:
+    """Build ordered embeddings and add per-row frames to the owned observation metadata."""
+    embeddings = {"spatial_pixels": native}
+    grids = [m.grid for m in measurements]
     names = pd.Index(list(dict.fromkeys(grid.name for grid in grids)))
-    single = len(names) == 1
-    codes = np.repeat(names.get_indexer(pd.Index([grid.name for grid in grids])), sizes)
     descriptions: dict[str, FixedFrame | RowFrames] = {}
 
-    if single:
+    codes = None
+    if len(names) > 1:
+        codes = np.repeat(
+            names.get_indexer(pd.Index([grid.name for grid in grids])), [m.annotations.num_rows for m in measurements]
+        )
+    if codes is None:
         descriptions["spatial_pixels"] = {
             "axes": ["x", "y"],
             "units": "pixel",
@@ -274,7 +249,7 @@ def _set_positions(
         }
     else:
         native_frames = pd.Index([f"{name}{_NATIVE_FRAME_SUFFIX}" for name in names])
-        table.obs["spatial_pixel_frame"] = pd.Categorical.from_codes(codes, categories=native_frames)
+        obs["spatial_pixel_frame"] = pd.Categorical.from_codes(codes, categories=native_frames)
         descriptions["spatial_pixels"] = {
             "axes": ["x", "y"],
             "units": "pixel",
@@ -282,13 +257,24 @@ def _set_positions(
             "position": _NATIVE_POSITION,
         }
 
-    spacings = [grid.spacing_um for grid in grids]
-    if all(spacing is not None for spacing in spacings):
-        complete = [spacing for spacing in spacings if spacing is not None]
-        table.obsm["spatial"] = _physical_positions(native, grids, sizes, paths, complete)
+    calibrated = [(m, spacing) for m in measurements if (spacing := m.grid.spacing_um) is not None]
+    if len(calibrated) == len(measurements):
+        physical = native.copy()
+        offset = 0
+        for measurement, spacing in calibrated:
+            stop = offset + measurement.annotations.num_rows
+            scale_regionprops_centroids(
+                physical[offset:stop],
+                spacing,
+                frame=measurement.grid.frame,
+                context=QUANTIFICATION_CONTEXT,
+                path=measurement.source.path,
+            )
+            offset = stop
+        embeddings["spatial"] = physical
         # Calibrated grids use their micrometre frame, never a pixel frame.
         evidence = {grid.frame: grid.calibration for grid in grids}
-        if single:
+        if codes is None:
             descriptions["spatial"] = {
                 "axes": ["x", "y"],
                 "units": "micrometer",
@@ -298,7 +284,7 @@ def _set_positions(
             }
         else:
             frames = pd.Index(list(dict.fromkeys(grid.frame for grid in grids)))
-            table.obs["spatial_frame"] = pd.Categorical.from_codes(codes, categories=frames)
+            obs["spatial_frame"] = pd.Categorical.from_codes(codes, categories=frames)
             descriptions["spatial"] = {
                 "axes": ["x", "y"],
                 "units": "micrometer",
@@ -308,4 +294,4 @@ def _set_positions(
             }
 
     declaration: PositionsMetadata = {"schema_version": 1, "coordinates": descriptions}
-    table.uns[POSITIONS_KEY] = declaration
+    return embeddings, declaration

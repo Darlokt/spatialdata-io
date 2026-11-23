@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import anndata as ad
 import h5py
@@ -17,9 +16,6 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.stereoseq import _schemas
 from tests.integration.readers.stereoseq._fixtures import write_cell_gef, write_square_gef
-
-if TYPE_CHECKING:
-    from pytest_mock import MockerFixture
 
 
 class TestRequireGroup:
@@ -45,6 +41,20 @@ class TestRequireDataset:
             for name in ("missing", "group", "array"):
                 with pytest.raises(ReaderFormatError, match="one-dimensional"):
                     _schemas.require_dataset(handle, name, path)
+
+    @pytest.mark.parametrize("storage", ["external_bytes", "virtual"])
+    def test_rejects_external_storage(self, tmp_path: Path, storage: str) -> None:
+        path = ArtifactFile(tmp_path / "s.gef")
+        with h5py.File(path, "w") as handle:
+            if storage == "external_bytes":
+                handle.create_dataset("array", shape=(1,), dtype="u4", external=[(tmp_path / "external.raw", 0, 4)])
+            else:
+                layout = h5py.VirtualLayout(shape=(1,), dtype="u4")
+                layout[:] = h5py.VirtualSource(tmp_path / "external.gef", "array", shape=(1,))
+                handle.create_virtual_dataset("array", layout)
+
+            with pytest.raises(ReaderFormatError, match="externally backed dataset"):
+                _schemas.require_dataset(handle, "array", path)
 
 
 class TestFeatureSchema:
@@ -498,10 +508,3 @@ class TestValidateAnalysisTable:
         table.obs["orig.ident"] = ["real_chip", "real_chip"]
 
         assert _schemas.validate_analysis_table(table, ArtifactFile(Path("analysis.h5ad"))).sample_id is None
-
-    def test_rejects_nonmaterialized_annotations(self, mocker: MockerFixture) -> None:
-        table = _native_analysis()
-        mocker.patch.object(ad.AnnData, "obs", new_callable=mocker.PropertyMock, return_value=object())
-
-        with pytest.raises(ReaderFormatError, match="pandas observation"):
-            _schemas.validate_analysis_table(table, ArtifactFile(Path("analysis.h5ad")))

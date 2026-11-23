@@ -47,12 +47,11 @@ quantification table follows its label.
 from __future__ import annotations
 
 import re
-from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.names import sanitize_element_name
+from spatialdata_io.readers._utils.names import colliding_element_names, sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
     ArtifactFile,
@@ -365,8 +364,7 @@ def _require_unique_keys(layout: McmicroLayout, root: DatasetRoot) -> None:
     keys += [label.key for label in layout.segmentations]
     if layout.quantifications:
         keys.append(TABLE_KEY)
-    counts = Counter(key.lower() for key in keys)
-    duplicates = sorted(key for key in keys if counts[key.lower()] > 1)
+    duplicates = colliding_element_names(keys)
     if duplicates:
         raise _error(
             root.path,

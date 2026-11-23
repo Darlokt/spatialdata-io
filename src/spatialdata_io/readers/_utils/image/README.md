@@ -61,6 +61,14 @@ downsampling can round. Readers name the element in the message.
 
 ## Public workflow
 
+Readers dispatching on file content can use `inspect_tiff_if_recognized()`.
+It returns metadata for all four classic TIFF and BigTIFF signatures, returns
+`None` for other formats, and reports malformed recognized TIFFs. In a multi-image
+OME-TIFF, each physical IFD belongs to a single image. Inspection checks the
+resolved plane ranges per file, including ranges with an omitted plane count,
+before any pixel tasks are constructed. An explicit zero plane count raises
+because the TIFF decoder would otherwise read planes the block does not declare.
+
 TIFF inspection and reading are separate because readers may need metadata to
 choose a series or level:
 

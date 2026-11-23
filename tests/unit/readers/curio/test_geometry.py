@@ -193,3 +193,22 @@ class TestReadShapes:
 
         assert int(shapes.geometry.x.iloc[0]) == value
         assert table.obsm["spatial_pixels"] is native
+
+    @pytest.mark.parametrize("repeat_dtype", ["float64", "uint64"])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_mixed_dtypes_cannot_hide_different_source_positions(
+        self, tmp_path: Path, repeat_dtype: str, *, reverse: bool
+    ) -> None:
+        write_curio(tmp_path)
+        layout = discover_layout(tmp_path)
+        table = ad.read_h5ad(layout.counts)
+        first = np.full((3, 2), 2**53 + 1, dtype=np.int64)
+        second = np.full((3, 2), 2**53, dtype=repeat_dtype)
+        native, repeat = (second, first) if reverse else (first, second)
+        table.obsm["X_spatial"], table.obsm["spatial"] = native, repeat
+
+        with pytest.raises(ReaderFormatError, match="disagreeing spatial arrays"):
+            read_shapes(table, layout.counts)
+
+        assert table.obsm["X_spatial"] is native
+        assert table.obsm["spatial"] is repeat

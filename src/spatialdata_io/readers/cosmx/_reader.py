@@ -2,7 +2,7 @@
 
 The public reader validates every option, discovers the export once, reads the
 eager cell metadata first (so missing labels fail before counts are parsed),
-derives every FOV placement from the cells, then builds lazy rasters, the
+derives FOV placements from cells and pixel positions, then builds lazy rasters, the
 table and lazy points, and links the table to the labels once.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Literal
 
-import numpy as np
+import pandas as pd
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
@@ -21,7 +21,7 @@ from spatialdata_io.readers._utils.names import sanitize_element_name, validate_
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.cosmx._layout import discover_layout, validate_file_prefix
 from spatialdata_io.readers.cosmx._rasters import read_image, read_labels
-from spatialdata_io.readers.cosmx._schemas import LABELS, validate_label_ids
+from spatialdata_io.readers.cosmx._schemas import CELL_ID, LABELS, validate_label_ids
 from spatialdata_io.readers.cosmx._tables import build_table, read_counts, read_fov_positions, read_metadata
 from spatialdata_io.readers.cosmx._transcripts import read_transcripts
 from spatialdata_io.readers.cosmx._transforms import solve_placements
@@ -174,7 +174,8 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     Each FOV's local-to-global map is ``global = ±local + offset`` per axis,
     derived from every metadata cell and accepted only when one offset lies
     within all printed rounding bounds; no affine is fitted. Pixel FOV
-    positions must agree with the cells and place FOVs without cells. Wholly
+    positions must agree with the cells. When both axis signs are positive,
+    pixel positions also place FOVs without cells or rasters. Wholly
     cell-empty exports cannot determine the axis signs and are unsupported.
     Rasters in exports with a reversed global axis fail: their raster
     convention has not been evidenced. AtoMx 3.10.5 pancreas coordinates are
@@ -195,6 +196,7 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
 
     Building the result reads the transcript header and no pixel or transcript
     task runs. Plain transcript CSV partitions hold about 8 MiB of records.
+    Each transcript record occupies one physical line and has paired quotes.
     Gzip transcripts are read sequentially as concatenated record-aligned
     members, with every member's CRC verified; a single-stream gzip file forms
     one partition. JPEG and PNG composites decode their whole frame for any
@@ -218,17 +220,20 @@ def cosmx(  # noqa: PLR0913, RUF100 - Explicit supported format options.
     metadata = read_metadata(layout.metadata)
     if layout.labels is not None:
         _require_labels(metadata, layout.labels)
-    counts = read_counts(layout.counts)
     placements = _placements(layout, metadata)
+    counts = read_counts(layout.counts)
     images, labels = _rasters(layout, metadata, placements, options=options, pixel_size_um=pixel_size_um)
     table = build_table(
-        counts, metadata, path=layout.metadata, linked=layout.labels is not None, pixel_size_um=pixel_size_um
+        counts, metadata, path=layout.metadata.path, linked=layout.labels is not None, pixel_size_um=pixel_size_um
     )
     points: dict[str, DataFrame] = {}
     if transcripts is not None:
         name, source = transcripts
         points[name] = read_transcripts(
-            source, features=counts.features, placements=placements, pixel_size_um=pixel_size_um
+            source,
+            features=counts.features,
+            placements=placements,
+            pixel_size_um=pixel_size_um,
         )
 
     result = SpatialData(images=images, labels=labels, points=points, tables={"table": table})
@@ -278,16 +283,17 @@ def _transcripts_name(dataset_id: str | None, file_prefix: str) -> str:
 
 def _placements(layout: CosmxLayout, metadata: CellMetadata) -> dict[int, Placement]:
     """Place every FOV with cells or rasters, rejecting rasters without evidenced orientation."""
-    positions = {} if layout.fov_positions is None else read_fov_positions(layout.fov_positions)
+    source = layout.fov_positions
+    positions = {} if source is None else read_fov_positions(source)
     label_files = () if layout.labels is None else layout.labels.files
     raster_fovs = frozenset(item.fov for item in (*layout.images, *label_files))
     placements = solve_placements(
-        metadata.fovs, metadata.samples, required=raster_fovs, positions=positions, path=layout.metadata
+        metadata.fov_rows, metadata.samples, required=raster_fovs, positions=positions, path=layout.metadata.path
     )
     if raster_fovs and any((p.sign_x, p.sign_y) != (1, 1) for p in placements.values()):
         raise ReaderFormatError(
             context=ReaderErrorContext("cosmx", "FOV rasters"),
-            path=layout.metadata,
+            path=layout.metadata.path,
             found="rasters in an export whose global axes are reversed relative to local axes",
             expected="rasters only in exports with the evidenced local and global orientation",
         )
@@ -307,7 +313,12 @@ def _rasters(
     grids: dict[int, tuple[int, int]] = {}
     for item in layout.images:
         images[f"{item.fov}_image"], grids[item.fov] = read_image(
-            item.path, fov=item.fov, placement=placements[item.fov], options=options, pixel_size_um=pixel_size_um
+            item.path,
+            fov=item.fov,
+            encoding=item.encoding,
+            placement=placements[item.fov],
+            options=options,
+            pixel_size_um=pixel_size_um,
         )
     labels: dict[str, DataArray | DataTree] = {}
     for item in () if layout.labels is None else layout.labels.files:
@@ -320,13 +331,14 @@ def _rasters(
             pixel_size_um=pixel_size_um,
         )
         # The inspected dtype bounds the IDs without reading label pixels.
-        validate_label_ids(metadata.cell_ids[metadata.fovs == np.uint64(item.fov)], dtype, item.path)
+        if (rows := metadata.fov_rows.get(item.fov)) is not None:
+            validate_label_ids(pd.Index(metadata.obs[CELL_ID].array[rows]), dtype, item.path)
     return images, labels
 
 
 def _require_labels(metadata: CellMetadata, labels: CellLabels) -> None:
     """Require a label raster for every FOV with cells, before counts or rasters are read."""
-    missing = sorted(set(metadata.fovs.tolist()) - {item.fov for item in labels.files})
+    missing = sorted(set(metadata.fov_rows) - {item.fov for item in labels.files})
     if missing:
         raise ReaderFormatError(
             context=ReaderErrorContext("cosmx", LABELS),

@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata_io.readers._utils.counts import MtxFiles
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
-    ArtifactDirectory,
     ArtifactFile,
     DatasetRoot,
     list_directory,
@@ -112,6 +111,14 @@ type CountSource = H5Counts | MtxFiles | MtxArchive
 
 
 @dataclass(frozen=True, slots=True)
+class TranscriptInputs:
+    """The transcript artifact and the matrix that supplies its vocabulary."""
+
+    source: TabularSource
+    vocabulary: CountSource
+
+
+@dataclass(frozen=True, slots=True)
 class MorphologyImage:
     """A morphology entry file and the file names its OME-linked set must have.
 
@@ -149,9 +156,9 @@ class AlignedImage:
 
 @dataclass(frozen=True, slots=True)
 class AnalysisDirectory:
-    """An extracted ``analysis/`` directory."""
+    """The extracted analysis CSVs in relative-path order."""
 
-    directory: ArtifactDirectory
+    files: tuple[tuple[PurePosixPath, ArtifactFile], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,8 +181,7 @@ class XeniumLayout:
     cells: TabularSource | None
     cell_boundaries: TabularSource | None
     nucleus_boundaries: TabularSource | None
-    transcripts: TabularSource | None
-    counts: CountSource | None
+    counts: CountSource | TranscriptInputs | None
     focus: MorphologyImage | None
     mip: MorphologyImage | None
     aligned: tuple[AlignedImage, ...]
@@ -293,12 +299,27 @@ def _aligned(root: DatasetRoot, experiment: Experiment) -> tuple[AlignedImage, .
 def _analysis(root: DatasetRoot, context: ReaderErrorContext) -> AnalysisSource:
     directory = optional_metadata_directory(root, "analysis", context=context)
     if directory is not None:
-        # The analysis reader opens every CSV below the directory.
-        for file in list_directory(directory, context=context, recursive=True):
-            if file.name.endswith(".csv"):
-                require_metadata_file(root, file, context=context)
-        return AnalysisDirectory(directory)
+        return AnalysisDirectory(
+            tuple(
+                (
+                    PurePosixPath(file.relative_to(directory).as_posix()),
+                    require_metadata_file(root, file, context=context),
+                )
+                for file in sorted(list_directory(directory, context=context, recursive=True))
+                if file.name.endswith(".csv")
+            )
+        )
     return AnalysisArchive(require_metadata_file(root, "analysis.tar.gz", context=context))
+
+
+def _count_inputs(
+    root: DatasetRoot, experiment: Experiment, selection: Selection
+) -> CountSource | TranscriptInputs | None:
+    """Resolve one count source for a table, the transcript vocabulary, or both."""
+    if selection.transcripts:
+        source = _tabular(root, "transcripts", transcript_types(experiment.family), experiment.context("transcripts"))
+        return TranscriptInputs(source, _counts(root, experiment.context("cell-feature matrix")))
+    return _counts(root, experiment.context("cell-feature matrix")) if selection.table else None
 
 
 def discover_layout(path: str | Path, selection: Selection, *, path_policy: PathPolicy = "strict") -> XeniumLayout:
@@ -329,7 +350,6 @@ def discover_layout(path: str | Path, selection: Selection, *, path_policy: Path
         if uses_store
         else None
     )
-    counts_needed = selection.table or selection.transcripts
     return XeniumLayout(
         root=root,
         experiment=experiment,
@@ -343,10 +363,7 @@ def discover_layout(path: str | Path, selection: Selection, *, path_policy: Path
         nucleus_boundaries=_tabular(root, "nucleus_boundaries", boundary_types(family), context("nucleus boundaries"))
         if selection.nucleus_polygons
         else None,
-        transcripts=_tabular(root, "transcripts", transcript_types(family), context("transcripts"))
-        if selection.transcripts
-        else None,
-        counts=_counts(root, context("cell-feature matrix")) if counts_needed else None,
+        counts=_count_inputs(root, experiment, selection),
         focus=_morphology(root, experiment, "morphology_focus_filepath", "morphology focus image")
         if selection.morphology_focus
         else None,

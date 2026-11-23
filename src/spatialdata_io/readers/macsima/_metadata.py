@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING
 from ome_types.model import UnitsLength
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.image import inspect_tiff, ome_pixel_sizes_um
+from spatialdata_io.readers._utils.image import inspect_tiff, ome_pixel_sizes_um, require_matching_pixel_sizes
 from spatialdata_io.readers.macsima._schemas import (
     EXPOSURE_UNIT,
     ImageType,
@@ -327,8 +327,9 @@ def _isotropic_pixel_size_um(tiff: TiffMetadata, pixels: Pixels, origin: _Origin
     size_x, size_y = ome_pixel_sizes_um(tiff, series=0, axes=("x", "y"), context=origin.context)
     if size_x is None or size_y is None:
         raise origin.error(found=f"physical pixel size {(size_y, size_x)!r} (y, x)", expected="a finite positive size")
-    if size_x != size_y:
-        raise origin.error(found=f"pixel size {size_y} µm (y) by {size_x} µm (x)", expected="square pixels")
+    require_matching_pixel_sizes(
+        (size_y,), (size_x,), axes="y", context=origin.context, path=origin.path, expected="square pixels"
+    )
     return size_x
 
 

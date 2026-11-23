@@ -50,11 +50,10 @@ from spatialdata_io.readers.codex._schemas import (
     csv_types,
     expression_dtype,
     fcs_cell_ids,
-    normalize_fcs_metadata,
     region_name,
     schema_error,
     validate_csv_annotations,
-    validate_expression,
+    validate_fcs_metadata,
     validate_observations,
 )
 
@@ -96,25 +95,22 @@ class CellTable:
     region: str
 
 
-def _split_cells(
-    frame: pd.DataFrame, features: list[str], metadata: list[str], path: ArtifactFile
-) -> tuple[sparse.csr_array, pd.DataFrame]:
-    """Extract finite CSR intensities and metadata without changing the owned frame.
-
-    Negative compensated measurements remain valid. Feature and observation
-    order follow the source, and dense expression is limited to this
-    caller-bounded block.
-    """
-    values = frame[features].to_numpy(dtype=expression_dtype(frame, features, path), copy=False)
-    validate_expression(values, path)
-    return as_csr_array(values), frame[metadata]
+def _csr_expression(values: npt.NDArray[np.number], path: ArtifactFile) -> sparse.csr_array:
+    """Convert a typed 2D buffer and report nonfinite intensities with the source context."""
+    try:
+        # NaN and infinity are retained by the dense-to-CSR conversion and
+        # shared construction checks their finiteness on the stored values.
+        return as_csr_array(values)
+    except ValueError as error:
+        raise schema_error(
+            path, found="nonfinite cycle intensities", expected="finite real cycle intensities"
+        ) from error
 
 
 def _csv_expression(batch: pa.RecordBatch, features: list[str], path: ArtifactFile) -> sparse.csr_array:
     """Convert one bounded float64 expression batch directly to canonical CSR."""
     values = np.asarray(batch.select(features).to_tensor(row_major=True))
-    validate_expression(values, path)
-    return as_csr_array(values)
+    return _csr_expression(values, path)
 
 
 def _read_csv(path: ArtifactFile) -> ad.AnnData:
@@ -180,10 +176,10 @@ def _read_fcs(path: ArtifactFile) -> ad.AnnData:
         raise schema_error(path, found="no cells", expected="a nonempty cell population")
 
     frame.columns = columns
-    # FCS expression already has native numerical buffers. Only annotations
-    # need Arrow storage for subsequent identifier and relationship operations.
-    expression, obs = _split_cells(frame, features, metadata, path)
-    normalize_fcs_metadata(obs, path)
+    values = frame[features].to_numpy(dtype=expression_dtype(frame, features, path), copy=False)
+    expression = _csr_expression(values, path)
+    obs = frame[metadata]
+    validate_fcs_metadata(obs, path)
     table = ad.AnnData(X=expression, obs=obs, var=pd.DataFrame(index=features))
 
     if "PnS" in source.channels:

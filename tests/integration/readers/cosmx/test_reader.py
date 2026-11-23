@@ -71,6 +71,33 @@ def _labels(result: SpatialData, fov: int) -> DataArray:
 class TestCosmx:
     """Assemble supported exports through the public reader."""
 
+    def test_strict_symlinks_use_discovered_encodings(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path, compressed=True)
+        original = cosmx(fixture.root)
+        names = sorted(tmp_path.glob("*.csv.gz")) + sorted((tmp_path / "CellComposite").glob("*.png"))
+        for index, path in enumerate(names):
+            target = tmp_path / f"payload_{index}"
+            path.rename(target)
+            path.symlink_to(target)
+
+        result = cosmx(fixture.root)
+        assert_spatial_data_objects_are_identical(original, result)
+
+    def test_position_only_fov_places_unassigned_transcripts(self, tmp_path: Path) -> None:
+        fixture = write_cosmx_dataset(tmp_path, rasters=False)
+        with (tmp_path / "Run_1_fov_positions_file.csv").open("a", encoding="utf-8") as positions:
+            positions.write("99,10000,20000\n")
+        with (tmp_path / "Run_1_tx_file.csv").open("a", encoding="utf-8") as transcripts:
+            transcripts.write("99,0,10001,20002,1,2,0,GeneA,0\n")
+
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            points = cosmx(fixture.root).points["Run_1_transcripts"]
+        assert not tasks
+        frame = points.compute()
+        assert frame.loc[frame["fov"].eq(99), "cell_ID"].tolist() == [0]
+        np.testing.assert_array_equal(_transform(points, "fov_99_pixels"), [[1, 0, -10000], [0, 1, -20000], [0, 0, 1]])
+
     def test_position_half_width_does_not_round_twice(self, tmp_path: Path) -> None:
         (tmp_path / "Run_exprMat_file.csv").write_text("fov,cell_ID,A\n1,1,1\n1,2,2\n")
         (tmp_path / "Run_metadata_file.csv").write_text(

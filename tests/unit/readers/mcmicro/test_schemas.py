@@ -19,7 +19,6 @@ from spatialdata_io.readers.mcmicro._schemas import (
     normalize_markers,
     quantification_columns,
     validate_columns,
-    validate_expression,
     validate_measurements,
     validate_position_columns,
 )
@@ -198,20 +197,6 @@ class TestValidateMeasurements:
         )
         with pytest.raises(ReaderFormatError, match=f"nonfinite '{name}'"):
             validate_measurements(batch, columns, np.dtype(np.uint64), path)
-
-
-class TestValidateExpression:
-    """Signed finite intensities are valid; nonfinite values fail with source context."""
-
-    def test_finite_signed_values(self, tmp_path: Path) -> None:
-        validate_expression(np.array([[0, -0.25, 1e100]], dtype=np.float64), _path(tmp_path))
-
-    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
-    def test_nonfinite_values(self, tmp_path: Path, value: float) -> None:
-        with pytest.raises(ReaderFormatError, match="nonfinite marker") as caught:
-            validate_expression(np.array([[value]], dtype=np.float64), _path(tmp_path))
-        assert caught.value.context == QUANTIFICATION_CONTEXT
-        assert caught.value.path == _path(tmp_path)
 
 
 class TestValidatePositionColumns:

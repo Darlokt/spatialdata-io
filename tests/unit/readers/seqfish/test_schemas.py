@@ -19,6 +19,7 @@ from spatialdata_io.readers.seqfish._schemas import (
     transcript_types,
     validate_cell_columns,
     validate_cell_ids,
+    validate_cell_values,
 )
 
 if TYPE_CHECKING:
@@ -61,6 +62,21 @@ class TestValidateCellColumns:
         with pytest.raises(ReaderFormatError) as caught:
             validate_cell_columns(header, ArtifactFile(tmp_path / "cells.csv"))
         assert caught.value.context.artifact == "CellCoordinates"
+
+
+class TestValidateCellValues:
+    @pytest.mark.parametrize("field", ["area", "center_x", "center_y"])
+    def test_rejects_nonfinite_physical_metadata(self, tmp_path: Path, field: str) -> None:
+        valid = {"area": [0.0, 1.0], "center_x": [0.0, 2.0], "center_y": [0.0, 3.0]}
+        source = pa.table({**valid, field: [0.0, float("nan")]})
+        with pytest.raises(ReaderFormatError, match=f"nonfinite '{field}'"):
+            validate_cell_values(source, ArtifactFile(tmp_path / "cells.csv"))
+
+    def test_only_area_must_be_nonnegative(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "cells.csv")
+        validate_cell_values(pa.table({"area": [0.0, 1.0], "center_x": [-1.0, 2.0], "center_y": [-2.0, 3.0]}), path)
+        with pytest.raises(ReaderFormatError, match="negative cell area"):
+            validate_cell_values(pa.table({"area": [-1.0], "center_x": [0.0], "center_y": [0.0]}), path)
 
 
 class TestTranscriptTypes:

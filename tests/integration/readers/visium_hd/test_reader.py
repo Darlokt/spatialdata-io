@@ -67,6 +67,37 @@ def _invalidate(root: Path, kind: str, ids: tuple[int, ...]) -> None:
 class TestVisiumHD:
     """Supported layouts and linked products agree with independent source truth."""
 
+    def test_public_bin_selection_is_sorted_and_skips_unselected_counts(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path, segmented=False)
+        (bundle.root / "binned_outputs/square_002um/filtered_feature_bc_matrix.h5").unlink()
+        selected = [16, 8]
+
+        result = visium_hd(bundle.root, bin_sizes=selected, include_images=False)
+
+        assert selected == [16, 8]
+        assert list(result.tables) == ["square_008um_table", "square_016um_table"]
+        assert list(result.shapes) == ["square_008um", "square_016um"]
+        assert not result.labels
+        assert not result.images
+
+    def test_native_bins_align_during_calibration(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2,), segmented=False)
+        reads = mocker.spy(pq.ParquetFile, "iter_batches")
+
+        result = visium_hd(bundle.root, bin_sizes=(2,), include_images=False)
+
+        assert result.tables["square_002um_table"].obs_names.tolist() == [
+            "s_002um_00001_00003-1",
+            "s_002um_00000_00000-1",
+            "s_002um_00001_00000-1",
+            "s_002um_00000_00005-1",
+        ]
+        projected = [call.kwargs["columns"] for call in reads.call_args_list]
+        assert projected == [
+            ["barcode", "in_tissue", "array_row", "array_col", "pxl_row_in_fullres", "pxl_col_in_fullres"],
+            ["array_row", "array_col", "pxl_row_in_fullres", "pxl_col_in_fullres"],
+        ]
+
     @pytest.mark.parametrize(
         ("source_dtype", "first", "second", "output_dtype"),
         [("int32", 2**24, 1, "float32"), ("uint32", 2**32 - 1, 2, "float64")],

@@ -12,6 +12,7 @@ class TestTiffPackage:
         assert tiff.__all__ == [
             "TiffMetadata",
             "inspect_tiff",
+            "inspect_tiff_if_recognized",
             "read_tiff",
             "select_tiff_series",
             "validate_tiff_index",

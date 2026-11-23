@@ -176,9 +176,9 @@ class TestSquareProducts:
         points, linked = _square_products(square, {"global": Identity()})
 
         frame = points.compute()
-        # The points keep a RangeIndex, which stores no per-row array; the table IDs are uint64.
+        # The table and the points' RangeIndex use the same signed row IDs.
         assert isinstance(frame.index, pd.RangeIndex)
-        assert linked.obs["instance_id"].dtype == np.uint64
+        assert linked.obs["instance_id"].dtype == np.int64
         assert_array_equal(frame.index, [0, 1, 2])
         assert_array_equal(linked.obs["instance_id"], [0, 1, 2])
         assert linked.obs_names.tolist() == ["0", "1", "2"]

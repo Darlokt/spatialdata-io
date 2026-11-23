@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
@@ -63,9 +63,26 @@ _SUFFIXES: dict[Artifact, str] = {
 _EXTENSIONS = (".csv", ".csv.gz")
 _COUNTS_NAME = re.compile(rf"(?P<prefix>.+)_{_SUFFIXES[COUNTS]}\.csv(?:\.gz)?")
 _FOV_FILE = re.compile(r".*_F(?P<fov>[0-9]+)\.(?P<suffix>[A-Za-z]+)")
-_IMAGE_SUFFIXES = frozenset({"jpg", "jpeg", "png", "tif", "tiff"})
+type RasterEncoding = Literal["jpeg", "png", "tiff"]
+
+_IMAGE_ENCODINGS: dict[str, RasterEncoding] = {
+    "jpg": "jpeg",
+    "jpeg": "jpeg",
+    "png": "png",
+    "tif": "tiff",
+    "tiff": "tiff",
+}
+_IMAGE_SUFFIXES = frozenset(_IMAGE_ENCODINGS)
 _LABEL_SUFFIXES = frozenset({"tif", "tiff"})
 _ROOT_CONTEXT = ReaderErrorContext("cosmx", "dataset root")
+
+
+@dataclass(frozen=True, slots=True)
+class CsvFile:
+    """A validated path and the storage selected by its discovered name."""
+
+    path: ArtifactFile
+    compressed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +91,7 @@ class FovFile:
 
     fov: int
     path: ArtifactFile
+    encoding: RasterEncoding
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,10 +107,10 @@ class CosmxLayout:
     """Describe the artifacts of one export; geometry and schemas are read later."""
 
     file_prefix: str
-    counts: ArtifactFile
-    metadata: ArtifactFile
-    fov_positions: ArtifactFile | None
-    transcripts: ArtifactFile | None
+    counts: CsvFile
+    metadata: CsvFile
+    fov_positions: CsvFile | None
+    transcripts: CsvFile | None
     images: tuple[FovFile, ...]
     labels: CellLabels | None
 
@@ -135,16 +153,23 @@ def _present(root: DatasetRoot, names: tuple[str, ...], prefix: str, artifact: A
     return present[0] if present else None
 
 
-def _required(root: DatasetRoot, names: tuple[str, ...], prefix: str, artifact: Artifact) -> ArtifactFile:
+def _require_csv(root: DatasetRoot, name: str, artifact: Artifact) -> CsvFile:
+    """Retain the discovered CSV encoding independently of symlink resolution."""
+    return CsvFile(
+        require_metadata_file(root, name, context=ReaderErrorContext("cosmx", artifact)), name.endswith(".gz")
+    )
+
+
+def _required(root: DatasetRoot, names: tuple[str, ...], prefix: str, artifact: Artifact) -> CsvFile:
     """Resolve a required flat file; a missing one fails naming the plain spelling."""
     name = _present(root, names, prefix, artifact) or f"{prefix}_{_SUFFIXES[artifact]}.csv"
-    return require_metadata_file(root, name, context=ReaderErrorContext("cosmx", artifact))
+    return _require_csv(root, name, artifact)
 
 
-def _optional(root: DatasetRoot, names: tuple[str, ...], prefix: str, artifact: Artifact) -> ArtifactFile | None:
+def _optional(root: DatasetRoot, names: tuple[str, ...], prefix: str, artifact: Artifact) -> CsvFile | None:
     """Resolve an optional flat file when present."""
     name = _present(root, names, prefix, artifact)
-    return None if name is None else require_metadata_file(root, name, context=ReaderErrorContext("cosmx", artifact))
+    return None if name is None else _require_csv(root, name, artifact)
 
 
 def _fov_files(
@@ -155,7 +180,7 @@ def _fov_files(
     directory = optional_metadata_directory(root, name, context=context)
     if directory is None:
         return None
-    files: dict[int, ArtifactFile] = {}
+    files: dict[int, FovFile] = {}
     for entry in list_directory(directory, context=context):
         if entry.name.startswith("."):
             continue
@@ -177,8 +202,9 @@ def _fov_files(
             )
         if fov in files:
             raise _error(entry, artifact, found=f"two files for FOV {fov}", expected="one raster per FOV")
-        files[fov] = require_metadata_file(root, f"{name}/{entry.name}", context=context)
-    return directory, tuple(FovFile(fov, files[fov]) for fov in sorted(files))
+        path = require_metadata_file(root, f"{name}/{entry.name}", context=context)
+        files[fov] = FovFile(fov, path, _IMAGE_ENCODINGS[match["suffix"].lower()])
+    return directory, tuple(files[fov] for fov in sorted(files))
 
 
 def _labels(root: DatasetRoot) -> CellLabels | None:

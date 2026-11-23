@@ -109,12 +109,8 @@ def _read_expression(
 
 
 def _borders(group: h5py.Group, cell_count: int, path: ArtifactFile) -> npt.NDArray[np.int16]:
-    value = group.get("cellBorder")
-    if (
-        not isinstance(value, h5py.Dataset)
-        or value.shape != (cell_count, _BORDER_VERTICES, _SPATIAL_DIMENSIONS)
-        or value.dtype != np.dtype(np.int16)
-    ):
+    value = _schemas.require_dataset(group, "cellBorder", path, ndim=3)
+    if value.shape != (cell_count, _BORDER_VERTICES, _SPATIAL_DIMENSIONS) or value.dtype != np.dtype(np.int16):
         raise _schemas.schema_error(path, "cellBorder", found=str(value), expected=f"int16 shape ({cell_count}, 32, 2)")
     # The complete eager contour representation is required only in polygon mode.
     return cast("npt.NDArray[np.int16]", value[:])

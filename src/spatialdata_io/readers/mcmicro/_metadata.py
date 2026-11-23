@@ -84,7 +84,12 @@ def read_workflow(path: ArtifactFile) -> Literal["wsi", "tma"]:
         raise ReaderFormatError(
             context=_WORKFLOW_CONTEXT, path=path, found=f"workflow.tma tagged {tma.tag}", expected=expected
         )
-    return "tma" if yaml.SafeLoader.bool_values[tma.value.lower()] else "wsi"
+    enabled = yaml.SafeLoader.bool_values.get(tma.value.lower())
+    if enabled is None:
+        raise ReaderFormatError(
+            context=_WORKFLOW_CONTEXT, path=path, found=f"workflow.tma {tma.value!r}", expected=expected
+        )
+    return "tma" if enabled else "wsi"
 
 
 def read_markers(path: ArtifactFile) -> MarkerPanel:

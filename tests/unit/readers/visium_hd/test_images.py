@@ -34,7 +34,7 @@ from spatialdata_io.readers.visium_hd._images import (
     read_images,
     warp_cytassist,
 )
-from spatialdata_io.readers.visium_hd._layout import FullresImageSource, ImageLayout, discover_layout
+from spatialdata_io.readers.visium_hd._layout import FullresImageSource, ImageLayout, Selection, discover_layout
 from spatialdata_io.readers.visium_hd._metadata import (
     ScaleFactors,
     SourceMetadata,
@@ -65,7 +65,18 @@ def _identity_frame() -> SlideFrame:
 
 def _bundle(root: Path) -> tuple[ImageLayout, SlideFrame, ScaleFactors, SourceMetadata]:
     write_bundle(root, images=True, fullres="root")
-    layout = discover_layout(root, include_cytassist_image=True)
+    selection = Selection(
+        bin_sizes="all",
+        bin_counts_kind="filtered",
+        include_cell_boundaries=None,
+        include_nucleus_boundaries=None,
+        include_nucleus_table=False,
+        cell_counts_kind="filtered",
+        include_images=True,
+        include_cytassist_image=True,
+        fullres_image_file=None,
+    )
+    layout = discover_layout(root, selection)
     assert layout.images is not None
     assert layout.feature_slice is not None
     return (
@@ -395,9 +406,85 @@ class TestWarpGrid:
         with pytest.raises(ReaderFormatError, match="horizon"):
             _warp_grid((10, 10), matrix, context=_CONTEXT)
 
+    def test_unrepresentable_size(self) -> None:
+        with pytest.raises(ReaderFormatError, match="output dimensions"):
+            _warp_grid((100, 100), np.diag([1e20, 1e-20, 1]), context=_CONTEXT)
+
 
 class TestWarpCytassist:
     """Each tile exactly matches whole-array SciPy sampling without eager decoding."""
+
+    @pytest.mark.parametrize("chunks", [(1024, 1024), (32, 32), (16, 16), (1, 16), (16, 1)])
+    def test_inverse_horizon_matches_whole_interpolation(self, chunks: tuple[int, int]) -> None:
+        source = np.ones((32, 32), dtype=np.float64)
+        angle = np.pi / 6
+        reference = np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0.1, 0.1, 1]])
+        spot_to_grid = np.array([[2, 0, 1], [0, 2, 1], [0, 0, 1]])
+        pixels = da.from_array(source[None, :, :], chunks=(1, 8, 8))
+        tasks: list[object] = []
+        with Callback(pretask=lambda key, _dsk, _state: tasks.append(key)):
+            warped, output = warp_cytassist(
+                pixels,
+                _identity_frame(),
+                np.linalg.solve(reference, spot_to_grid),
+                make_raster_options(chunks=(1, *chunks)),
+                context=_CONTEXT,
+            )
+        assert tasks == []
+        assert warped.shape == (1, 57, 90)
+
+        row, col = np.indices((57, 90), dtype=np.float64)
+        homogeneous = np.stack((col + 0.5, row + 0.5, np.ones_like(row)), axis=-1)
+        mapped = homogeneous @ (np.linalg.inv(reference) @ output).T
+        coordinates = mapped[..., :2] / mapped[..., 2, None] - 0.5
+        truth = map_coordinates(
+            source, coordinates[..., ::-1].transpose(2, 0, 1), order=1, mode="constant", cval=0, prefilter=False
+        )
+        assert np.count_nonzero(truth) == 2_109
+        actual = warped.compute()
+        np.testing.assert_array_equal(actual[0] > 0, truth > 0)
+        np.testing.assert_allclose(actual[0], truth, rtol=0, atol=2 * np.finfo(np.float64).eps)
+        if chunks != (1024, 1024):
+            default, _ = warp_cytassist(
+                pixels,
+                _identity_frame(),
+                np.linalg.solve(reference, spot_to_grid),
+                make_raster_options(),
+                context=_CONTEXT,
+            )
+            np.testing.assert_array_equal(actual, default.compute())
+
+    def test_tile_outside_footprint_reads_no_source_pixels(self) -> None:
+        angle = np.pi / 4
+        reference = np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
+        spot_to_grid = np.array([[2, 0, 1], [0, 2, 1], [0, 0, 1]])
+        pixels = da.ones((1, 32, 32), chunks=(1, 8, 8))
+        warped, _ = warp_cytassist(
+            pixels,
+            _identity_frame(),
+            np.linalg.solve(reference, spot_to_grid),
+            make_raster_options(chunks=(1, 8, 8)),
+            context=_CONTEXT,
+        )
+
+        tasks: list[object] = []
+        with Callback(pretask=lambda key, _dsk, _state: tasks.append(key)):
+            actual = warped[:, :8, :8].compute(optimize_graph=False, scheduler="synchronous")
+        np.testing.assert_array_equal(actual, np.zeros((1, 8, 8)))
+        assert all("ones_like" not in str(key) for key in tasks)
+
+    def test_single_pixel_tiles_sample_exact_centres(self) -> None:
+        source = np.arange(12, dtype=np.uint16).reshape(1, 3, 4)
+        spot_to_grid = np.array([[2, 0, 1], [0, 2, 1], [0, 0, 1]], dtype=np.float64)
+        warped, _ = warp_cytassist(
+            da.from_array(source, chunks=(1, 2, 2)),
+            _identity_frame(),
+            spot_to_grid,
+            make_raster_options(chunks=(1, 1, 1)),
+            context=_CONTEXT,
+        )
+
+        np.testing.assert_array_equal(warped.compute(), source)
 
     @pytest.mark.parametrize("dtype", [np.uint8, np.uint16, np.float32])
     def test_projective_matches_scipy(self, dtype: type[np.uint8 | np.uint16 | np.float32]) -> None:

@@ -59,6 +59,15 @@ class TestReadFeatureNames:
 class TestReadTable:
     """Keep count order, sparsity, annotations and a complete feature vocabulary."""
 
+    def test_nullable_metadata_integers_validate_decoded_float_values(self, tmp_path: Path) -> None:
+        sources = _sources(
+            tmp_path,
+            "cell,A\na,1\nb,2\nc,3\n",
+            "EntityID,center_x,center_y,transcript_count\na,1,2,9007199254740993\nb,3,4,-1e-400\nc,5,6,\n",
+        )
+        table, _ = read_table(sources)
+        assert table.obs["transcript_count"].tolist() == [9007199254740992, 0, pd.NA]
+
     def test_sparse_order_blank_names_and_metadata(self, tmp_path: Path, mocker: MockerFixture) -> None:
         mocker.patch("spatialdata_io.readers.merscope._tables._BATCH_BYTES", 128)
         table, vocabulary = read_table(_sources(tmp_path))

@@ -104,8 +104,9 @@ images use micrometres while GeoJSON may use pixels or other units. Appending
 with `generic_to_zarr()` therefore requires an explicit `coordinate_system`,
 including when called through the CLI. Choose a distinct frame for unrelated
 coordinates; choosing a shared name asserts that the coordinates already map
-to that frame. It does not convert or register GeoJSON coordinates. Duplicate
-element names fail before the source is read.
+to that frame. It does not convert or register GeoJSON coordinates. Element
+names must satisfy SpatialData's naming rule. Names that already exist,
+including case variants, fail before the source is read.
 
 ```python
 from spatialdata_io import generic_to_zarr

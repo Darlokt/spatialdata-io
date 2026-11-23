@@ -179,8 +179,7 @@ class TestValidateCentroids:
         with pytest.raises(ReaderFormatError, match="invalid centroids"):
             validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
-                obs,
-                {"sample": _grid("sample", (8, 12), np.dtype("uint16"))},
+                _grid("sample", (8, 12), np.dtype("uint16")),
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 
@@ -192,23 +191,7 @@ class TestValidateCentroids:
         with pytest.raises(ReaderFormatError, match="outside"):
             validate_centroids(
                 obs[["centroid-1", "centroid-0"]].to_numpy(),
-                obs,
-                {"sample": _grid("sample", (8, 12), np.dtype("uint16"))},
-                ArtifactFile(tmp_path / "cells.h5ad"),
-            )
-
-    def test_frame_bounds_are_sample_local(self, tmp_path: Path) -> None:
-        """Frame bounds are sample local."""
-        obs = pd.DataFrame({"image": ["small.tiff", "large.tiff"], "centroid-0": [5, 5], "centroid-1": [2, 2]})
-
-        with pytest.raises(ReaderFormatError, match=r"small\.tiff"):
-            validate_centroids(
-                obs[["centroid-1", "centroid-0"]].to_numpy(),
-                obs,
-                {
-                    "small": _grid("small", (4, 4), np.dtype("uint16")),
-                    "large": _grid("large", (8, 12), np.dtype("uint16")),
-                },
+                _grid("sample", (8, 12), np.dtype("uint16")),
                 ArtifactFile(tmp_path / "cells.h5ad"),
             )
 

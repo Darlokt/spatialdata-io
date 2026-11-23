@@ -19,7 +19,7 @@ from spatialdata_io.readers._utils.table import (
 from spatialdata_io.readers.steinbock._images import read_rasters
 from spatialdata_io.readers.steinbock._layout import discover_layout, validate_masks_dir, validate_table_file
 from spatialdata_io.readers.steinbock._metadata import read_image_metadata
-from spatialdata_io.readers.steinbock._tables import read_table, set_positions
+from spatialdata_io.readers.steinbock._tables import read_table
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -242,7 +242,6 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
     }
     grids = {name: sample.grid for name, sample in samples.items()}
     table = read_table(layout.table, grids)
-    set_positions(table, grids, layout.table)
 
     # read_table validated eager frames; AnnData also types backed Dataset2D.
     prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=_LINKAGE_CONTEXT)

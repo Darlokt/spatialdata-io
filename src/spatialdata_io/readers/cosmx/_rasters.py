@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.image import LazyRaster, RasterOptions
     from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers.cosmx._layout import RasterEncoding
     from spatialdata_io.readers.cosmx._transforms import Placement
 
 _IMAGE_AXES = ("c", "y", "x")
@@ -57,12 +58,11 @@ _LABEL_CONTEXT = ReaderErrorContext("cosmx", LABELS)
 _PLACEMENT_CONTEXT = ReaderErrorContext("cosmx", "FOV raster placement")
 
 
-def _source(path: ArtifactFile, context: ReaderErrorContext) -> LazyRaster:
+def _source(path: ArtifactFile, encoding: RasterEncoding, context: ReaderErrorContext) -> LazyRaster:
     """Read one full-resolution raster through the shared suffix-specific boundary."""
-    suffix = path.suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
+    if encoding == "jpeg":
         return read_jpeg(path, context=context)
-    if suffix == ".png":
+    if encoding == "png":
         return read_png(path, context=context)
     metadata = inspect_tiff(path, context=context)
     return read_tiff(metadata, series=select_tiff_series(metadata, None, context=context), level=0, context=context)
@@ -104,11 +104,17 @@ def _frames(
     return {fov_frame(fov): local, global_frame(pixel_size_um): global_}
 
 
-def read_image(
-    path: ArtifactFile, *, fov: int, placement: Placement, options: RasterOptions, pixel_size_um: float | None = None
+def read_image(  # noqa: PLR0913, RUF100 - Independent raster, encoding, placement and options.
+    path: ArtifactFile,
+    *,
+    fov: int,
+    encoding: RasterEncoding = "tiff",
+    placement: Placement,
+    options: RasterOptions,
+    pixel_size_um: float | None = None,
 ) -> tuple[DataArray | DataTree, tuple[int, int]]:
     """Return a lazy CYX FOV image and its trusted YX grid."""
-    raster = _source(path, _IMAGE_CONTEXT)
+    raster = _source(path, encoding, _IMAGE_CONTEXT)
     declared = tuple(axis.lower() for axis in raster.axes)
     # Interleaved samples are the image channels.
     axes = tuple("c" if axis == "s" else axis for axis in declared)
@@ -138,7 +144,7 @@ def read_labels(  # noqa: PLR0913, RUF100 - Independent raster/grid/placement st
     pixel_size_um: float | None = None,
 ) -> tuple[DataArray | DataTree, np.dtype[np.generic]]:
     """Return lazy integer YX labels on the same grid as their FOV image, and their dtype."""
-    raster = _source(path, _LABEL_CONTEXT)
+    raster = _source(path, "tiff", _LABEL_CONTEXT)
     labels = _normalize(raster.data, raster.axes, path, _LABEL_CONTEXT, _LABEL_AXES)
     if grid is not None and labels.shape != grid:
         raise ReaderFormatError(

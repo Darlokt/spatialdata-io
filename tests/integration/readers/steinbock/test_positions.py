@@ -294,6 +294,16 @@ class TestSteinbockPositions:
         assert "spatial" not in table.obsm
         np.testing.assert_array_equal(table.obsm["spatial_pixels"], fixture.native_xy)
 
+    def test_valid_native_centroid_cannot_underflow_to_physical_zero(self, tmp_path: Path) -> None:
+        _write_dataset(tmp_path, {"sample-a": (5e-324, 3.0)})
+        path = tmp_path / "cells.h5ad"
+        table = ad.read_h5ad(path)
+        table.obs["centroid-1"] = 0.0
+        table.write_h5ad(path)
+        with pytest.raises(ReaderFormatError, match="nonzero") as caught:
+            steinbock(tmp_path)
+        assert caught.value.path == path
+
     def test_finite_source_coordinates_cannot_silently_overflow_physical_xy(self, tmp_path: Path) -> None:
         _write_dataset(tmp_path, {"sample-a": (1e308, 3.0)})
         with pytest.raises(ReaderFormatError, match="nonfinite physical positions"):

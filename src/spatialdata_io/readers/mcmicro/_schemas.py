@@ -54,8 +54,6 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    import numpy.typing as npt
-
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 STRING_DTYPE = pd.ArrowDtype(pa.string())
@@ -247,17 +245,6 @@ def validate_measurements(
                 found=f"nonfinite {name!r} values",
                 expected="finite morphology and centroids; only optional morphology may be empty",
             )
-
-
-def validate_expression(values: npt.NDArray[np.float64], path: ArtifactFile) -> None:
-    """Reject nonfinite typed marker intensities before sparse construction."""
-    if not np.isfinite(values).all():
-        raise ReaderFormatError(
-            context=QUANTIFICATION_CONTEXT,
-            path=path,
-            found="nonfinite marker intensities",
-            expected="finite float64 marker intensities",
-        )
 
 
 def validate_position_columns(columns: QuantificationColumns, *, multiple: bool, path: ArtifactFile) -> None:

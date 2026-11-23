@@ -50,14 +50,14 @@ if TYPE_CHECKING:
     "--instance-key",
     type=str,
     default=None,
-    help="Observation column holding positive integer label IDs. Default: the observation names.",
+    help="Observation column holding positive integer label IDs, with a valid table column name. Default: obs names.",
 )
 @click.option("--dataset-id", type=str, default="region", show_default=True, help="Prefix of the raster element names.")
 @click.option(
     "--data-axes",
     type=str,
     default=None,
-    help="Raw-image axes, for example CYX for a stack without axis metadata or YXC for RGB samples.",
+    help="Raw-image axes, for example CYX for a stack without axis metadata. Both C and S denote channels.",
 )
 @scale_factors_option
 @chunks_option

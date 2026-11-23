@@ -15,6 +15,7 @@ from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.cosmx import _tables
+from spatialdata_io.readers.cosmx._layout import CsvFile
 from spatialdata_io.readers.cosmx._tables import (
     build_table,
     read_counts,
@@ -37,10 +38,10 @@ _METADATA = (
 )
 
 
-def _write(tmp_path: Path, name: str, text: str, *, compressed: bool = False) -> ArtifactFile:
+def _write(tmp_path: Path, name: str, text: str, *, compressed: bool = False) -> CsvFile:
     path = tmp_path / (f"{name}.gz" if compressed else name)
     path.write_bytes(gzip.compress(text.encode(), mtime=0) if compressed else text.encode())
-    return ArtifactFile(path)
+    return CsvFile(ArtifactFile(path), compressed=compressed)
 
 
 class TestReadHeader:
@@ -55,13 +56,13 @@ class TestReadHeader:
         path = tmp_path / "c.csv"
         path.write_bytes(b'"unterminated\n')
         with pytest.raises(ReaderFormatError, match="malformed CSV") as error:
-            read_header(ArtifactFile(path), "cell metadata")
+            read_header(CsvFile(ArtifactFile(path), compressed=False), "cell metadata")
         assert error.value.context == ReaderErrorContext("cosmx", "cell metadata")
 
     def test_unreadable_source_preserves_exception_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _write(tmp_path, "m.csv", _METADATA)
-        failure = PermissionError(13, "denied", str(path))
-        mocker.patch.object(type(path), "open", side_effect=failure)
+        failure = PermissionError(13, "denied", str(path.path))
+        mocker.patch.object(type(path.path), "open", side_effect=failure)
         with pytest.raises(PermissionError) as caught:
             read_header(path, "cell metadata")
         assert caught.value is failure
@@ -81,8 +82,8 @@ class TestReadCounts:
         assert isinstance(counts.expression, sparse.csr_array)
         assert counts.expression.dtype == np.float32
         np.testing.assert_array_equal(counts.expression.toarray(), [[0, 3, 0], [4, 0, 1], [0, 0, 2]])
-        assert counts.fovs.tolist() == [2, 1, 1]
-        assert counts.cell_ids.tolist() == [1, 2, 1]
+        assert counts.keys.get_level_values(0).tolist() == [2, 1, 1]
+        assert counts.keys.get_level_values(1).tolist() == [1, 2, 1]
 
     @pytest.mark.parametrize(
         ("value", "dtype"),
@@ -119,12 +120,12 @@ class TestReadCounts:
         assert whole.expression.nnz == batched.expression.nnz
         for name in ("data", "indices", "indptr"):
             np.testing.assert_array_equal(getattr(whole.expression, name), getattr(batched.expression, name))
-        np.testing.assert_array_equal(whole.fovs, batched.fovs)
-        np.testing.assert_array_equal(whole.cell_ids, batched.cell_ids)
+        np.testing.assert_array_equal(whole.keys.get_level_values(0), batched.keys.get_level_values(0))
+        np.testing.assert_array_equal(whole.keys.get_level_values(1), batched.keys.get_level_values(1))
 
     def test_truncated_gzip_stream_fails(self, tmp_path: Path) -> None:
         path = _write(tmp_path, "c.csv", _COUNTS, compressed=True)
-        path.write_bytes(path.read_bytes()[:-12])
+        path.path.write_bytes(path.path.read_bytes()[:-12])
         with pytest.raises(ReaderFormatError, match="invalid gzip data"):
             read_counts(path)
 
@@ -138,15 +139,19 @@ class TestReadCounts:
         with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
             read_counts(path)
         assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
-        assert caught.value.path == path
+        assert caught.value.path == path.path
 
     @pytest.mark.parametrize("count", [2**24 + 2, 2**53])
     def test_maximum_unsigned_identifiers_remain_exact(self, tmp_path: Path, count: int) -> None:
         source = f"fov,cell_ID,A\n{2**64 - 1},{2**64 - 1},{count}\n"
         counts = read_counts(_write(tmp_path, "c.csv", source))
-        assert str(counts.fovs.dtype) == str(counts.cell_ids.dtype) == "uint64[pyarrow]"
-        assert counts.fovs.tolist() == counts.cell_ids.tolist() == [2**64 - 1]
-        assert counts.fovs.name is counts.cell_ids.name is None
+        assert (
+            str(counts.keys.get_level_values(0).dtype)
+            == str(counts.keys.get_level_values(1).dtype)
+            == "uint64[pyarrow]"
+        )
+        assert counts.keys.get_level_values(0).tolist() == counts.keys.get_level_values(1).tolist() == [2**64 - 1]
+        assert counts.keys.get_level_values(0).name is counts.keys.get_level_values(1).name is None
         assert counts.expression.dtype == np.dtype(np.float64)
         assert int(counts.expression.data[0]) == count
 
@@ -155,7 +160,7 @@ class TestReadCounts:
         self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
     ) -> None:
         path = _write(tmp_path, "c.csv", "fov,cell_ID,A\n1,1,1\n1,2\n", compressed=compressed)
-        sources = mocker.spy(type(path), "open")
+        sources = mocker.spy(type(path.path), "open")
         with pytest.raises(ReaderFormatError, match=r"malformed CSV \(") as caught:
             read_counts(path)
         assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")
@@ -176,7 +181,7 @@ class TestReadCounts:
         assert counts.expression.dtype == np.float32
         expected = np.array([[i, 0] for i, cell in enumerate(cells) if cell], dtype=np.int64).reshape(-1, 2)
         np.testing.assert_array_equal(counts.expression.toarray(), expected)
-        assert counts.cell_ids.tolist() == [cell for cell in cells if cell]
+        assert counts.keys.get_level_values(1).tolist() == [cell for cell in cells if cell]
 
     def test_large_sparse_expression_is_never_densified(self, tmp_path: Path, mocker: MockerFixture) -> None:
         features = [f"Gene{i}" for i in range(512)]
@@ -241,8 +246,8 @@ class TestReadMetadata:
 
     def test_types_and_samples(self, tmp_path: Path) -> None:
         metadata = read_metadata(_write(tmp_path, "m.csv", _METADATA))
-        assert metadata.fovs.tolist() == [1, 1, 2]
-        assert metadata.cell_ids.tolist() == [1, 2, 1]
+        assert metadata.keys.get_level_values(0).tolist() == [1, 1, 2]
+        assert metadata.keys.get_level_values(1).tolist() == [1, 2, 1]
         np.testing.assert_array_equal(metadata.local, [[2, 5], [6, 2], [2, 5]])
         np.testing.assert_array_equal(metadata.global_, [[102, 15], [106, 12], [202, 25]])
         np.testing.assert_array_equal(metadata.samples[0].local_half, [0.5, 0.5, 0.5])
@@ -300,7 +305,7 @@ class TestReadMetadata:
 
     def test_truncated_gzip_stream_fails(self, tmp_path: Path) -> None:
         path = _write(tmp_path, "m.csv", _METADATA, compressed=True)
-        path.write_bytes(path.read_bytes()[:-12])
+        path.path.write_bytes(path.path.read_bytes()[:-12])
         with pytest.raises(ReaderFormatError, match="invalid gzip data") as caught:
             read_metadata(path)
         assert caught.value.context == ReaderErrorContext("cosmx", "cell metadata")
@@ -332,7 +337,7 @@ class TestBuildTable:
     def test_aligned_linked_table(self, tmp_path: Path) -> None:
         metadata_path = _write(tmp_path, "m.csv", _METADATA)
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS))
-        table = build_table(counts, read_metadata(metadata_path), path=metadata_path, linked=True)
+        table = build_table(counts, read_metadata(metadata_path), path=metadata_path.path, linked=True)
         assert isinstance(table.X, sparse.csr_array)
         np.testing.assert_array_equal(table.X.toarray(), [[0, 0, 2], [4, 0, 1], [0, 3, 0]])
         assert table.obs_names.tolist() == ["0", "1", "2"]
@@ -361,7 +366,7 @@ class TestBuildTable:
         source = "fov,cell_ID,B,HLA-A,NegPrb1\n1,1,0,0,2\n1,2,4,0,1\n2,1,0,3,0\n"
         counts = read_counts(_write(tmp_path, "c.csv", source))
         metadata = read_metadata(metadata_path)
-        table = build_table(counts, metadata, path=metadata_path, linked=False, pixel_size_um=0.5)
+        table = build_table(counts, metadata, path=metadata_path.path, linked=False, pixel_size_um=0.5)
         assert isinstance(table.X, sparse.csr_array)
         assert np.shares_memory(table.X.data, counts.expression.data)
         assert table.obsm["spatial_pixels"] is metadata.local
@@ -381,21 +386,21 @@ class TestBuildTable:
     def test_unlinked_table(self, tmp_path: Path) -> None:
         metadata_path = _write(tmp_path, "m.csv", _METADATA)
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS))
-        table = build_table(counts, read_metadata(metadata_path), path=metadata_path, linked=False)
+        table = build_table(counts, read_metadata(metadata_path), path=metadata_path.path, linked=False)
         assert "spatialdata_attrs" not in table.uns
 
     def test_population_mismatch_fails_instead_of_intersecting(self, tmp_path: Path) -> None:
         metadata_path = _write(tmp_path, "m.csv", _METADATA)
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS.replace("2,1,0,3,0\n", "2,7,0,3,0\n")))
         with pytest.raises(ReaderFormatError, match="identical positive count and metadata populations"):
-            build_table(counts, read_metadata(metadata_path), path=metadata_path, linked=True)
+            build_table(counts, read_metadata(metadata_path), path=metadata_path.path, linked=True)
 
     def test_zero_and_signed_nonzero_subnormal_products_are_preserved(self, tmp_path: Path) -> None:
         metadata_path = _write(tmp_path, "m.csv", _METADATA)
         metadata = read_metadata(metadata_path)
         metadata.global_[:] = [[0, -0.0], [1, -1], [2, -2]]
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS))
-        table = build_table(counts, metadata, path=metadata_path, linked=False, pixel_size_um=5e-324)
+        table = build_table(counts, metadata, path=metadata_path.path, linked=False, pixel_size_um=5e-324)
         physical = table.obsm["spatial"]
         assert isinstance(physical, np.ndarray)
         np.testing.assert_array_equal(physical, [[0, -0.0], [5e-324, -5e-324], [1e-323, -1e-323]])

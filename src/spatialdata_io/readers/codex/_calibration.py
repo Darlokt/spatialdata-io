@@ -111,7 +111,12 @@ def read_experiment(path: ArtifactFile) -> Calibration:
         raise ReaderFormatError(
             context=context, path=path, found=repr(value), expected="positive xyResolution in nm/pixel"
         )
-    return Calibration(value / 1000, _EXPERIMENT_SOURCE, version)
+    size_um = value / 1000
+    if size_um == 0:
+        raise ReaderFormatError(
+            context=context, path=path, found=repr(value), expected="representable positive micrometre scale"
+        )
+    return Calibration(size_um, _EXPERIMENT_SOURCE, version)
 
 
 def resolve_calibration(pixel_size_um: float | None, experiment: ArtifactFile | None) -> Calibration | None:

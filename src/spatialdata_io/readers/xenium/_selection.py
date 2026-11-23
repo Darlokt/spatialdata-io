@@ -150,14 +150,17 @@ def xenium_explorer_selection(
         polygons.append(shapely.Polygon(ring))
     geometries = np.asarray(polygons, dtype=object)
 
-    invalid = invalid_geometry_mask(geometries)
-    if policy == "raise":
-        raise_invalid_geometries(invalid, order, context=_CONTEXT, path=file)
-    kept = ~invalid if policy == "drop" else np.ones(len(order), dtype=bool)
-    if not kept.any():
-        raise ReaderFormatError(
-            context=_CONTEXT, path=file, found="no valid selection", expected="at least one valid selection"
-        )
-    index = pd.Index(order, dtype="str", name="selection")[kept]
-    frame = gpd.GeoDataFrame(geometry=gpd.GeoSeries(geometries[kept], index=index))
+    index = pd.Index(order, dtype="str", name="selection")
+    if policy != "keep":
+        invalid = invalid_geometry_mask(geometries)
+        if policy == "raise":
+            raise_invalid_geometries(invalid, order, context=_CONTEXT, path=file)
+        elif invalid.any():
+            kept = ~invalid
+            if not kept.any():
+                raise ReaderFormatError(
+                    context=_CONTEXT, path=file, found="no valid selection", expected="at least one valid selection"
+                )
+            index, geometries = index[kept], geometries[kept]
+    frame = gpd.GeoDataFrame(geometry=gpd.GeoSeries(geometries, index=index))
     return ShapesModel.parse(frame, transformations={"global": Identity()})

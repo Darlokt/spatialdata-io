@@ -35,7 +35,7 @@ has no such attributes.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import h5py
@@ -71,14 +71,12 @@ class CountMetadata:
     library_id: str | None
     chemistry_description: str | None
     software_version: str | None
+    format_version: str | None = field(init=False)
 
-    @property
-    def format_version(self) -> str | None:
-        """Return the Space Ranger version as ``<major>.<minor>.<patch>``, if recognized."""
-        if self.software_version is None:
-            return None
-        match = _SOFTWARE_VERSION.fullmatch(self.software_version)
-        return None if match is None else match[1]
+    def __post_init__(self) -> None:
+        """Normalize the version while retaining the literal vendor attribute."""
+        match = None if self.software_version is None else _SOFTWARE_VERSION.fullmatch(self.software_version)
+        object.__setattr__(self, "format_version", None if match is None else match[1])
 
 
 def _positive_number(values: dict[str, object], key: str, *, path: ArtifactFile, context: ReaderErrorContext) -> float:
