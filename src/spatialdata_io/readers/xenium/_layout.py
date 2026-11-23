@@ -17,7 +17,7 @@ Artifacts, with the alternatives discovery accepts::
     ├── cells.zarr.zip                       # masks and cell-ID mappings
     ├── morphology_focus.ome.tif | morphology_focus/*.ome.tif
     ├── morphology_mip.ome.tif               # XOA 1.x only
-    ├── *he_image.ome.tif, *if_image.ome.tif (+ *imagealignment.csv)
+    ├── *he_image.ome.tif, *if_image.ome.tif (+ *imagealignment.csv or H&E *keypoints.csv)
     ├── analysis/ | analysis.tar.gz
     └── metrics_summary.csv, gene_panel.json, protein_panel.json   # optional
 
@@ -64,7 +64,6 @@ _ALIGNED_SUFFIXES: tuple[tuple[str, Literal["he", "if"]], ...] = (
     ("he_image.ome.tif", "he"),
     ("if_image.ome.tif", "if"),
 )
-_CSV_TWINS: tuple[tuple[str, TabularKind], ...] = ((".csv", "csv"), (".csv.gz", "csv_gz"))
 _MTX_MEMBERS = ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")
 
 
@@ -135,12 +134,19 @@ class MorphologyImage:
 
 
 @dataclass(frozen=True, slots=True)
+class AlignmentKeypoints:
+    """Xenium Explorer keypoints paired with an H&E image by sample name."""
+
+    file: ArtifactFile
+
+
+@dataclass(frozen=True, slots=True)
 class AlignedImage:
-    """A post-Xenium H&E or IF image and its optional alignment matrix."""
+    """A post-Xenium image and its optional matrix or H&E keypoints."""
 
     file: ArtifactFile
     kind: Literal["he", "if"]
-    alignment: ArtifactFile | None
+    alignment: ArtifactFile | AlignmentKeypoints | None
 
     @property
     def name(self) -> str:
@@ -187,38 +193,39 @@ class XeniumLayout:
 
 
 def _tabular(root: DatasetRoot, stem: str, types: pa.Schema, context: ReaderErrorContext) -> TabularSource:
-    """Prefer ``<stem>.parquet``; otherwise require exactly one CSV twin."""
-    parquet = optional_metadata_file(root, f"{stem}.parquet", context=context)
+    """Prefer Parquet, then a single CSV twin or the seekable transcript CSV."""
+    parquet_name = f"{stem}.parquet"
+    parquet = optional_metadata_file(root, parquet_name, context=context)
     if parquet is not None:
         return TabularSource(parquet, "parquet", types)
-    twins = [
-        TabularSource(file, kind, types)
-        for suffix, kind in _CSV_TWINS
-        if (file := optional_metadata_file(root, f"{stem}{suffix}", context=context)) is not None
-    ]
-    if len(twins) > 1:
+
+    plain = optional_metadata_file(root, f"{stem}.csv", context=context)
+    # A decompressed transcript CSV can sit beside the original gzip archive.
+    if stem == "transcripts" and plain is not None:
+        return TabularSource(plain, "csv", types)
+    compressed = optional_metadata_file(root, f"{stem}.csv.gz", context=context)
+    if plain is not None and compressed is not None:
         raise ReaderFormatError(
             context=context,
             path=root.path,
             found=f"both {stem}.csv and {stem}.csv.gz without {stem}.parquet",
             expected=f"{stem}.parquet or exactly one CSV twin",
         )
-    if not twins:
-        require_metadata_file(root, f"{stem}.parquet", context=context)
-    return twins[0]
-
-
-def _transcripts(root: DatasetRoot, types: pa.Schema, context: ReaderErrorContext) -> TabularSource:
-    """Require parquet or a plain CSV; one gzip stream cannot be split into lazy partitions."""
-    source = _tabular(root, "transcripts", types, context)
-    if source.kind == "csv_gz":
+    if plain is not None:
+        return TabularSource(plain, "csv", types)
+    if compressed is None:
+        return TabularSource(require_metadata_file(root, parquet_name, context=context), "parquet", types)
+    if stem == "transcripts":
         raise ReaderFormatError(
             context=context,
-            path=source.file,
-            found="only a single-stream gzip transcript CSV",
-            expected="transcripts.parquet or a decompressed transcripts.csv (for example gunzip -k transcripts.csv.gz)",
+            path=compressed,
+            found="only a gzip-compressed transcript CSV",
+            expected=(
+                "transcripts.parquet or a decompressed transcripts.csv "
+                "(run python -m gzip -d transcripts.csv.gz in the bundle directory)"
+            ),
         )
-    return source
+    return TabularSource(compressed, "csv_gz", types)
 
 
 def _counts(root: DatasetRoot, context: ReaderErrorContext) -> CountSource:
@@ -261,7 +268,7 @@ def _morphology(root: DatasetRoot, experiment: Experiment, key: str, purpose: st
 
 
 def _aligned(root: DatasetRoot, experiment: Experiment) -> tuple[AlignedImage, ...]:
-    """Find 10x-named aligned H&E/IF images at the root; their alignment CSVs are optional."""
+    """Pair aligned images with their matrix, falling back to matching H&E keypoints."""
     context = experiment.context("aligned images")
     entries = list_directory(root.path, context=context)
     images: list[AlignedImage] = []
@@ -277,7 +284,12 @@ def _aligned(root: DatasetRoot, experiment: Experiment) -> tuple[AlignedImage, .
         if matches:
             image = require_metadata_file(root, matches[0], context=context)
             name = matches[0].name.removesuffix(".ome.tif") + "alignment.csv"
-            alignment = optional_metadata_file(root, name, context=context)
+            alignment: ArtifactFile | AlignmentKeypoints | None = optional_metadata_file(root, name, context=context)
+            if alignment is None and kind == "he":
+                name = matches[0].name.removesuffix(suffix) + "keypoints.csv"
+                points = optional_metadata_file(root, name, context=experiment.context("image alignment keypoints"))
+                if points is not None:
+                    alignment = AlignmentKeypoints(points)
             images.append(AlignedImage(image, kind, alignment))
     return tuple(images)
 
@@ -335,7 +347,7 @@ def discover_layout(path: str | Path, selection: Selection, *, path_policy: Path
         nucleus_boundaries=_tabular(root, "nucleus_boundaries", boundary_types(family), context("nucleus boundaries"))
         if selection.nucleus_polygons
         else None,
-        transcripts=_transcripts(root, transcript_types(family), context("transcripts"))
+        transcripts=_tabular(root, "transcripts", transcript_types(family), context("transcripts"))
         if selection.transcripts
         else None,
         counts=_counts(root, context("cell-feature matrix")) if counts_needed else None,

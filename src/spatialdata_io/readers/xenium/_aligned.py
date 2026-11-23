@@ -4,14 +4,16 @@ The optional alignment CSV is a 3 x 3 row-major similarity matrix ``M`` mapping
 image pixel coordinates (x right, y down) to Xenium morphology pixels. In the
 micrometre ``global`` frame the image therefore carries
 ``Affine(diag(ps, ps, 1) @ M)``, with ``ps`` the Xenium pixel size from
-``experiment.xenium``, not the image's own pixel size. Without a CSV the image is
-taken to be registered to the Xenium pixel grid already and carries ``Scale(ps)``.
+``experiment.xenium``. Matching H&E keypoints can supply a least-squares
+similarity transform when the matrix is absent. Without either artifact the
+image is taken to share the Xenium pixel grid and carries ``Scale(ps)``.
 https://kb.10xgenomics.com/hc/en-us/articles/35386990499853-How-can-I-convert-coordinates-between-H-E-image-and-Xenium-data
 
 Level 0 of the first TIFF series is read with its declared axes, or the
 caller's ``data_axes``::
 
     YXS    interleaved samples, e.g. an RGB H&E scan
+    SYX    planar samples
     CYX    channels, e.g. an IF stack or an H&E stored as Hematoxylin/Eosin/Residual
     YX     one channel
 
@@ -37,7 +39,7 @@ from spatialdata.models import Image2DModel
 from spatialdata.transformations import Affine, Scale
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.csv import csv_errors
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
     RasterOptions,
@@ -48,7 +50,8 @@ from spatialdata_io.readers._utils.image import (
     validate_data_axes,
 )
 from spatialdata_io.readers._utils.paths import ArtifactFile, require_file
-from spatialdata_io.readers.xenium._schemas import ALIGNMENT_TYPES
+from spatialdata_io.readers.xenium._layout import AlignmentKeypoints
+from spatialdata_io.readers.xenium._schemas import ALIGNMENT_TYPES, KEYPOINT_TYPES, validate_header
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -59,6 +62,7 @@ if TYPE_CHECKING:
 
 _AXES = ("c", "y", "x")
 _MATRIX_SHAPE = (3, 3)
+_MIN_KEYPOINTS = 3
 _CONTEXT = ReaderErrorContext("xenium", "aligned image")
 
 
@@ -98,9 +102,60 @@ def read_alignment(path: ArtifactFile, *, context: ReaderErrorContext) -> NDArra
     return matrix
 
 
+def read_keypoint_alignment(path: ArtifactFile, *, context: ReaderErrorContext) -> NDArray[np.float64]:
+    """Fit the documented Xenium Explorer similarity from image to morphology pixels.
+
+    At least three finite, noncollinear pairs must constrain the fit. The
+    orthogonal part may include a reflection. Invalid data raise ReaderFormatError.
+    """
+    names = csv_header(path, context=context)
+    validate_header(names, KEYPOINT_TYPES.names, path=path, context=context)
+    with csv_errors(context=context, path=path):
+        table = pacsv.read_csv(
+            path,
+            read_options=pacsv.ReadOptions(use_threads=False),
+            convert_options=pacsv.ConvertOptions(
+                column_types=KEYPOINT_TYPES,
+                include_columns=KEYPOINT_TYPES.names,
+                null_values=[],
+                strings_can_be_null=False,
+            ),
+        )
+    xy = np.column_stack([column.to_numpy() for column in table.columns])
+    expected = "at least three finite noncollinear keypoint pairs constraining an invertible similarity transform"
+    if len(xy) < _MIN_KEYPOINTS or not np.isfinite(xy).all():
+        raise ReaderFormatError(context=context, path=path, found="too few or nonfinite keypoints", expected=expected)
+
+    fixed, moving = xy[:, :2], xy[:, 2:]
+    with np.errstate(over="ignore", invalid="ignore"):
+        fixed_center, moving_center = fixed.mean(axis=0), moving.mean(axis=0)
+        source = moving - moving_center
+        cross = (fixed - fixed_center).T @ source
+        squared_radius = np.sum(source**2)
+    if not np.isfinite(cross).all() or not np.isfinite(squared_radius):
+        raise ReaderFormatError(context=context, path=path, found="keypoint fit overflow", expected=expected)
+
+    # Orthogonal Procrustes allows both rotations and reflections. The common
+    # scale minimizes squared distances after applying that orthogonal map.
+    left, singular, right = np.linalg.svd(cross)
+    if singular[1] <= np.finfo(np.float64).eps * 2 * singular[0]:
+        raise ReaderFormatError(context=context, path=path, found="degenerate keypoint fit", expected=expected)
+    with np.errstate(over="ignore", invalid="ignore", under="ignore", divide="ignore"):
+        scale = singular.sum() / squared_radius
+        linear = scale * (left @ right)
+        translation = fixed_center - linear @ moving_center
+    if scale <= 0 or not np.isfinite(linear).all() or not np.isfinite(translation).all():
+        raise ReaderFormatError(context=context, path=path, found="unrepresentable keypoint fit", expected=expected)
+
+    matrix = np.eye(3)
+    matrix[:2, :2] = linear
+    matrix[:2, 2] = translation
+    return matrix
+
+
 def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, raster options and context.
     image: ArtifactFile,
-    alignment: ArtifactFile | None,
+    alignment: ArtifactFile | AlignmentKeypoints | None,
     *,
     pixel_size: float,
     data_axes: str | None,
@@ -116,8 +171,8 @@ def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, ras
         a note naming it), or ``raster`` requests more downsampling than the
         image extent allows.
     ReaderFormatError
-        If the image metadata, its declared axes or the alignment matrix are
-        malformed.
+        If the image metadata, its declared axes, the alignment matrix or the
+        keypoints are malformed.
     """
     metadata = inspect_tiff(image, context=context)
     lazy = read_tiff(metadata, series=0, level=0, context=context)
@@ -126,10 +181,14 @@ def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, ras
 
     transformation: BaseTransformation = Scale([pixel_size, pixel_size], axes=("y", "x"))
     if alignment is not None:
-        matrix = np.diag([pixel_size, pixel_size, 1.0]) @ read_alignment(
-            alignment, context=replace(context, artifact="image alignment")
+        matrix = (
+            read_keypoint_alignment(alignment.file, context=replace(context, artifact="image alignment keypoints"))
+            if isinstance(alignment, AlignmentKeypoints)
+            else read_alignment(alignment, context=replace(context, artifact="image alignment"))
         )
-        transformation = Affine(matrix, input_axes=("x", "y"), output_axes=("x", "y"))
+        transformation = Affine(
+            np.diag([pixel_size, pixel_size, 1.0]) @ matrix, input_axes=("x", "y"), output_axes=("x", "y")
+        )
     return Image2DModel.parse(
         data,
         dims=_AXES,
@@ -167,7 +226,7 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
     data_axes
         Axes of the stored array as one string, one distinct letter per
         dimension in any letter case including ``X`` and ``Y``, overriding the
-        TIFF axes, for example ``"YXS"``. ``S`` marks interleaved samples and
+        TIFF axes, for example ``"YXS"``. ``S`` marks samples and
         ``C`` channels; both become the channel axis, so at most one may
         appear.
     scale_factors

@@ -48,7 +48,7 @@ outs/
 └── analysis.tar.gz
 ```
 
-Each tabular artifact is read from its parquet file when present, otherwise from exactly one CSV twin; two twins of one artifact are ambiguous. `transcripts.csv.gz` is a single gzip stream that cannot be split into partitions and is rejected; decompress it to `transcripts.csv`. `experiment.xenium` names the morphology focus entry, and the set is every `.ome.tif` file beside it. The 3D `morphology.ome.tif` stack is not read.
+Each tabular artifact uses Parquet when present. Cells and boundaries otherwise require exactly one CSV twin. Transcript partitions require `transcripts.parquet` or `transcripts.csv`. For a gzip-only deposit, run `python -m gzip -d transcripts.csv.gz` in the bundle directory. Python writes `transcripts.csv` and keeps the original archive. `experiment.xenium` names the morphology focus entry, and the set is every `.ome.tif` file beside it. The 3D `morphology.ome.tif` stack is not read.
 
 ## Elements
 
@@ -75,7 +75,7 @@ Every element is in the `global` coordinate system in micrometres, with its orig
 | morphology images, labels | `Scale([pixel_size, pixel_size])` |
 | `cell_boundaries`, `nucleus_boundaries` | `Translation([pixel_size / 2, pixel_size / 2])` |
 | `cell_circles`, `transcripts` | `Identity()` |
-| `he_image`, `if_image` | `Affine(diag(pixel_size, pixel_size, 1) @ M)`, or `Scale([pixel_size, pixel_size])` without an alignment matrix |
+| `he_image`, `if_image` | `Affine(diag(pixel_size, pixel_size, 1) @ M)` with a matrix or H&E keypoint fit, otherwise `Scale([pixel_size, pixel_size])` |
 | Explorer selections | `Identity()` |
 
 `pixel_size` is the `experiment.xenium` value (0.2125 µm in the public bundles). 10x writes polygon vertices through the centres of boundary pixels in pixel-index coordinates, half a pixel up and left of the corner frame shared by masks, centroids and transcripts. The half-pixel translation registers the unchanged vertices: in samples of ten public bundles from XOA 1.0.2 to 4.0, more than 99.5 % of registered vertices fall on their own cell's mask pixels, against at most 96 % without it. Transcript `z` is in micrometres too.
@@ -140,6 +140,8 @@ The [10x output descriptions](https://www.10xgenomics.com/support/software/xeniu
 
 ## CSV twins
 
+Compressed cell and boundary CSVs are read sequentially. They may contain concatenated gzip members and zero padding. Corrupt gzip data raises `ReaderFormatError` with the artifact path.
+
 Arrow parses CSV twins, a plain `transcripts.csv`, the secondary-analysis CSVs, `metrics_summary.csv`, alignment matrices and Explorer selection exports directly into declared types. CSV twins and Parquet columns normalize to the same declared types; integer-family `cell_id` is positive uint64 in cells and boundaries, and signed int64 in transcripts to preserve `-1`; other families use text IDs. Arrow's CSV grammar is the contract:
 
 - spaces and tabs around a number are trimmed, and integers may be hexadecimal (`0x10` reads as 16);
@@ -189,7 +191,9 @@ sdata["he_image"] = xenium_aligned_image(
 )
 ```
 
-The alignment matrix `M` maps image pixels to morphology pixels; without it the image is assumed to share the morphology grid. Axes come from the TIFF metadata; `data_axes` overrides them with one string of distinct letters including `X` and `Y`, such as `"YXS"` (any letter case; `S` and `C` both become the channel axis, so at most one may appear), checked before the image is read. Declared axes that cannot become `c, y, x` raise a contextual `ReaderFormatError`; `data_axes` that do not fit the image raise `ValueError` naming it. Channel names follow what the file declares:
+The alignment matrix `M` maps image pixels to morphology pixels. For a bundle's `<sample>_he_image.ome.tif`, `xenium()` uses `<sample>_keypoints.csv` when the matrix CSV is absent. It fits a least-squares similarity with a common scale and allows reflection, as described by [10x Genomics](https://www.10xgenomics.com/support/software/xenium-explorer/latest/tutorials/xe-image-alignment#image-alignment-algorithm). The required float64 fields `alignmentX`, `alignmentY`, `fixedX` and `fixedY` may appear in any order. At least three finite, noncollinear pairs are required, and an unusable file raises `ReaderFormatError`. Without an alignment source the image is assumed to share the morphology grid.
+
+Axes come from the TIFF metadata, including `YXS` interleaved samples and `SYX` planar samples. `data_axes` overrides them with one string of distinct letters including `X` and `Y`, such as `"YXS"` (any letter case, with either `S` or `C` for channels). Declared axes that cannot become `c, y, x` raise a contextual `ReaderFormatError`. A `data_axes` value that does not fit the image raises `ValueError` naming it. Channel names follow the file metadata.
 
 - interleaved samples of a TIFF that declares an RGB colour model (photometric RGB, or JPEG-compressed YCbCr as in typical H&E scans) become `r, g, b`, with `a` for declared alpha;
 - other channels keep their OME channel names, or their OME channel IDs when names are missing or repeated, when the channel axis is the declared OME channel or samples axis; samples without a colour model are named `<name or ID>:sample:<index>`;

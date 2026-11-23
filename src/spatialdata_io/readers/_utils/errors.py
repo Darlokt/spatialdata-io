@@ -153,7 +153,7 @@ def add_reader_context(
     context: ReaderErrorContext,
     path: Path | None = None,
 ) -> None:
-    """Add reader context to an exception that its handler will re-raise.
+    """Add reader context once to an exception that its handler will re-raise.
 
     Parameters
     ----------
@@ -170,7 +170,9 @@ def add_reader_context(
     ``raise``. Parser failures converted to :class:`ReaderFormatError` should
     instead use explicit exception chaining.
     """
-    error.add_note(f"While handling {context.describe(path=path)}.")
+    note = f"While handling {context.describe(path=path)}."
+    if note not in getattr(error, "__notes__", ()):
+        error.add_note(note)
 
 
 def warn_user(message: str, /) -> None:

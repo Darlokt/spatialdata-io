@@ -6,9 +6,10 @@ from spatialdata_io.readers._utils import csv
 
 
 class TestCsvPackage:
-    def test_exports_only_header_errors_and_lazy_blocks(self) -> None:
+    def test_exports_only_sequential_streams_header_errors_and_lazy_blocks(self) -> None:
         assert csv.__all__ == [
             "csv_errors",
             "csv_header",
+            "open_csv_stream",
             "read_csv_blocks",
         ]

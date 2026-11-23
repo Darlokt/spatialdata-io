@@ -161,7 +161,7 @@ class TestDiscoverLayout:
         assert layout.transcripts.kind == "csv"
 
         (tmp_path / "transcripts.csv").rename(tmp_path / "transcripts.csv.gz")
-        with pytest.raises(ReaderFormatError, match="single-stream gzip transcript CSV"):
+        with pytest.raises(ReaderFormatError, match="only a gzip-compressed transcript CSV"):
             discover_layout(tmp_path, selection)
 
         (tmp_path / "transcripts.csv.gz").unlink()
@@ -251,6 +251,18 @@ class TestDiscoverLayout:
         (tmp_path / "other_he_image.ome.tif").write_bytes((tmp_path / "synthetic_he_image.ome.tif").read_bytes())
         with pytest.raises(ReaderFormatError, match="2 HE images"):
             discover_layout(tmp_path, selection)
+
+    def test_aligned_images_ignore_appledouble_and_other_samples_keypoints(self, tmp_path: Path) -> None:
+        fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(aligned=("he",)))
+        (tmp_path / "synthetic_he_imagealignment.csv").unlink()
+        for name in ("._synthetic_he_image.ome.tif", "._synthetic_keypoints.csv", "other_keypoints.csv"):
+            (tmp_path / name).touch()
+
+        layout = discover_layout(tmp_path, replace(NOTHING, aligned_images=True))
+
+        assert [(image.file.name, image.alignment) for image in layout.aligned] == [
+            ("synthetic_he_image.ome.tif", None)
+        ]
 
     def test_analysis_sources(self, tmp_path: Path) -> None:
         fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(analysis="archive"))

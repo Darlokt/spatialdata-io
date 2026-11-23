@@ -28,7 +28,7 @@ import shapely
 from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity, Translation
 
-from spatialdata_io.readers._utils.csv import csv_errors
+from spatialdata_io.readers._utils.csv import csv_errors, open_csv_stream
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
 from spatialdata_io.readers.xenium._schemas import (
@@ -41,7 +41,7 @@ from spatialdata_io.readers.xenium._schemas import (
     require_no_nulls,
     validate_header,
 )
-from spatialdata_io.readers.xenium._tables import open_twin, read_header
+from spatialdata_io.readers.xenium._tables import read_header
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -99,7 +99,10 @@ def _read_vertices(source: TabularSource, context: ReaderErrorContext) -> _Verti
     if source.kind == "parquet":
         table = pq.read_table(path, columns=columns)
     else:
-        with csv_errors(context=context, path=path), open_twin(source) as stream:
+        with (
+            open_csv_stream(path, context=context, compressed=source.kind == "csv_gz") as stream,
+            csv_errors(context=context, path=path),
+        ):
             table = pacsv.read_csv(
                 stream,
                 convert_options=pacsv.ConvertOptions(

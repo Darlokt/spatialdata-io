@@ -43,6 +43,7 @@ FLOAT64 = pa.float64()
 FLOAT32 = pa.float32()
 UINT64 = pa.uint64()
 ALIGNMENT_TYPES = pa.schema([(str(index), FLOAT64) for index in range(3)])
+KEYPOINT_TYPES = pa.schema([(name, FLOAT64) for name in ("fixedX", "fixedY", "alignmentX", "alignmentY")])
 SELECTION_TYPES = {"Selection": STRING, "X": FLOAT64, "Y": FLOAT64}
 
 CELL_ID = "cell_id"

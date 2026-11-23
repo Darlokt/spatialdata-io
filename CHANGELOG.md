@@ -23,9 +23,13 @@ Release notes for `v0.7.1` and earlier are available on the [Releases][] page.
   cell circles, an explicit `table_target`, the shared `invalid_geometries`
   policy, opt-in secondary analysis and run metadata in `attrs["xenium"]`. See
   the Xenium format guide.
+- Xenium uses matching H&E keypoints to estimate a similarity transform when
+  a bundle lacks the exported alignment matrix.
 
 ### Fixed
 
+- Xenium can read a decompressed `transcripts.csv` alongside its original gzip
+  file.
 - seqFISH transcript `cell` assignments use stable `uint64[pyarrow]` storage,
   preserving exact nonnegative IDs through `2**64 - 1` when different CSV
   partitions contain different identifier ranges. Zero remains unassigned.

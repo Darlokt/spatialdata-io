@@ -406,9 +406,11 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         XOA 1.x writes.
     include_aligned_images
         Return 10x-named post-Xenium images (``*he_image.ome.tif``,
-        ``*if_image.ome.tif``) at the root, with their optional
-        ``*imagealignment.csv``. Other images can be read with
-        :func:`xenium_aligned_image`.
+        ``*if_image.ome.tif``) at the root, using their optional
+        ``*imagealignment.csv``. When the H&E matrix is absent, matching
+        ``<sample>_keypoints.csv`` determines a least-squares similarity
+        transform. Invalid keypoints raise ``ReaderFormatError``. Other images
+        can be read with :func:`xenium_aligned_image`.
     include_analysis
         Add 10x secondary analysis to the table: clusterings as categorical
         ``obs`` columns named by method, PCA/UMAP projections as ``obsm``.

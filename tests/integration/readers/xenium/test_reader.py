@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import json
 import zipfile
 from typing import TYPE_CHECKING, Literal
@@ -548,6 +549,8 @@ class TestXenium:
             profile,
             fx.Options(tables="csv_gz", counts=("mtx_archive",), transcripts="csv", cells_store=False, images=False),
         )
+        csv_path = stripped.root / "transcripts.csv"
+        csv_path.with_suffix(".csv.gz").write_bytes(gzip.compress(csv_path.read_bytes(), mtime=0))
         full = fx.write_xenium_bundle(tmp_path / "full", profile)
         # Hexadecimal nuclei carry their labels only in cells.zarr.zip.
         nuclei = profile.family != "hex_ids"
@@ -588,6 +591,28 @@ class TestXenium:
         assert isinstance(_transform(result.images["if_image"]), Scale)
         assert _array(result.images["if_image"]).coords["c"].to_numpy().tolist() == ["CD20", "DAPI"]
         assert sorted(xenium(bundle.root, include_aligned_images=False).images) == ["morphology_focus"]
+
+    @pytest.mark.parametrize("with_matrix", [False, True])
+    def test_he_alignment_keypoints(self, tmp_path: Path, *, with_matrix: bool) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(aligned=("he", "if")))
+        matrix = tmp_path / "synthetic_he_imagealignment.csv"
+        if not with_matrix:
+            matrix.unlink()
+        (tmp_path / "synthetic_keypoints.csv").write_text(
+            "fixedX,fixedY,alignmentX,alignmentY\n4,6,0,0\n4,8,4,0\n7,6,0,6\n7,8,4,6\n"
+        )
+
+        result = xenium(bundle.root)
+
+        transform = _transform(result.images["he_image"])
+        assert isinstance(transform, Affine)
+        expected = [[0, -0.5, 10], [0.5, 0, 2], [0, 0, 1]] if with_matrix else [[0, 0.5, 4], [0.5, 0, 6], [0, 0, 1]]
+        np.testing.assert_allclose(
+            transform.to_affine_matrix(("x", "y"), ("x", "y")),
+            np.diag([fx.PIXEL_SIZE, fx.PIXEL_SIZE, 1]) @ expected,
+            atol=1e-14,
+        )
+        assert isinstance(_transform(result.images["if_image"]), Scale)
 
     @pytest.mark.parametrize("kind", ["directory", "archive"])
     def test_analysis(self, tmp_path: Path, kind: Literal["directory", "archive"]) -> None:

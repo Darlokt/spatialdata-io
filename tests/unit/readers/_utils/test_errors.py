@@ -130,6 +130,7 @@ class TestAddReaderContext:
             except ValueError as error:
                 traceback = error.__traceback__
                 add_reader_context(error, context=context, path=tmp_path / "artifact")
+                add_reader_context(error, context=context, path=tmp_path / "artifact")
                 raise
 
         with pytest.raises(ValueError, match="failure") as raised:
@@ -140,7 +141,7 @@ class TestAddReaderContext:
         while reraised_traceback is not None and reraised_traceback.tb_next is not None:
             reraised_traceback = reraised_traceback.tb_next
         assert reraised_traceback is traceback
-        assert "reader 'reader'" in raised.value.__notes__[0]
+        assert raised.value.__notes__ == [f"While handling {context.describe(path=tmp_path / 'artifact')}."]
 
 
 def _line(offset: int) -> int:

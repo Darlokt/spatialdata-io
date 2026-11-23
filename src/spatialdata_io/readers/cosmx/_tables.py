@@ -23,9 +23,6 @@ The table follows metadata row order. Counts are aligned to it by the exact
 
 from __future__ import annotations
 
-import gzip
-import zlib
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -38,8 +35,8 @@ import pyarrow.csv as pacsv
 from scipy import sparse
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
-from spatialdata_io.readers._utils.csv import csv_errors, csv_header
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header, open_csv_stream
+from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -70,9 +67,6 @@ from spatialdata_io.readers.cosmx._schemas import (
 from spatialdata_io.readers.cosmx._transforms import GLOBAL, GLOBAL_PIXELS, AxisSamples, FovPosition, fov_frame
 
 if TYPE_CHECKING:
-    import io
-    from collections.abc import Generator
-
     import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
@@ -90,28 +84,11 @@ _TABLE_CONTEXT = ReaderErrorContext("cosmx", "cell table")
 _READER_OBS_COLUMNS = (FOV, CELL_ID, REGION_KEY, FRAME_KEY)
 
 
-@contextmanager
-def _source(path: ArtifactFile, artifact: Artifact) -> Generator[io.BufferedIOBase]:
-    """Own one plain or gzip byte stream, translating corrupt gzip data read inside the block.
-
-    Gzip sources may hold one stream or concatenated members.
-    """
-    try:
-        with gzip.GzipFile(path, "rb") if path.name.endswith(".gz") else path.open("rb") as source:
-            yield source
-    except (gzip.BadGzipFile, EOFError, zlib.error) as error:
-        raise schema_error(
-            path, artifact, found=f"invalid gzip data: {error}", expected="a readable gzip stream"
-        ) from error
-    except OSError as error:
-        add_reader_context(error, context=ReaderErrorContext("cosmx", artifact), path=path)
-        raise
-
-
 def read_header(path: ArtifactFile, artifact: Artifact) -> tuple[str, ...]:
     """Parse one header with Arrow under its plain or gzip stream owner."""
-    with _source(path, artifact) as source:
-        return csv_header(path, context=ReaderErrorContext("cosmx", artifact), source=source)
+    context = ReaderErrorContext("cosmx", artifact)
+    with open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as source:
+        return csv_header(path, context=context, source=source)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +110,7 @@ def read_counts(path: ArtifactFile) -> Counts:
     fovs: list[pa.Array] = []
     cell_ids: list[pa.Array] = []
     with (
-        _source(path, COUNTS) as source,
+        open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as source,
         csv_errors(context=context, path=path),
         pacsv.open_csv(
             source,
@@ -182,7 +159,11 @@ class CellMetadata:
 def read_metadata(path: ArtifactFile) -> CellMetadata:
     """Read typed annotations and exact keys, retaining printed coordinate uncertainty."""
     types = metadata_types(read_header(path, METADATA), path)
-    with _source(path, METADATA) as stream, csv_errors(context=ReaderErrorContext("cosmx", METADATA), path=path):
+    context = ReaderErrorContext("cosmx", METADATA)
+    with (
+        open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as stream,
+        csv_errors(context=context, path=path),
+    ):
         source = pacsv.read_csv(
             stream,
             parse_options=_PARSE,
@@ -232,7 +213,11 @@ def read_fov_positions(path: ArtifactFile) -> dict[int, FovPosition]:
     if types is None:
         return {}
     fov_name, x_name, y_name = types.names
-    with _source(path, POSITIONS) as stream, csv_errors(context=ReaderErrorContext("cosmx", POSITIONS), path=path):
+    context = ReaderErrorContext("cosmx", POSITIONS)
+    with (
+        open_csv_stream(path, context=context, compressed=path.name.endswith(".gz")) as stream,
+        csv_errors(context=context, path=path),
+    ):
         source = pacsv.read_csv(
             stream,
             parse_options=_PARSE,

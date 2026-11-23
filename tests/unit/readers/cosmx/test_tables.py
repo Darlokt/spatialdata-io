@@ -155,7 +155,7 @@ class TestReadCounts:
         self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
     ) -> None:
         path = _write(tmp_path, "c.csv", "fov,cell_ID,A\n1,1,1\n1,2\n", compressed=compressed)
-        sources = mocker.spy(_tables.gzip, "GzipFile") if compressed else mocker.spy(type(path), "open")
+        sources = mocker.spy(type(path), "open")
         with pytest.raises(ReaderFormatError, match=r"malformed CSV \(") as caught:
             read_counts(path)
         assert caught.value.context == ReaderErrorContext("cosmx", "count matrix")

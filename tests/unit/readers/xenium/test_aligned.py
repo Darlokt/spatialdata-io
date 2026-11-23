@@ -12,7 +12,7 @@ from spatialdata.transformations import Affine, Scale, get_transformation
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium import xenium_aligned_image
-from spatialdata_io.readers.xenium._aligned import read_alignment
+from spatialdata_io.readers.xenium._aligned import read_alignment, read_keypoint_alignment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,14 +60,65 @@ class TestReadAlignment:
         assert caught.value.context == CONTEXT
 
 
+class TestReadKeypointAlignment:
+    """Keypoint pairs determine one similarity transform."""
+
+    def test_projected_fields_and_least_squares_fit(self, tmp_path: Path) -> None:
+        path = _csv(
+            tmp_path / "sample_keypoints.csv",
+            "alignmentY,note,fixedY,alignmentX,fixedX\n"
+            "-1,first,-3,-1,5\n-1,second,1,1,3\n1,third,-3,-1,-1\n1,fourth,1,1,1\n",
+        )
+
+        matrix = read_keypoint_alignment(path, context=CONTEXT)
+
+        # The points use x/y scales of 2 with an extra x residual of ±1.
+        # Isotropic least squares projects the residual out of the similarity.
+        np.testing.assert_allclose(matrix, [[0, -2, 2], [2, 0, -1], [0, 0, 1]], atol=1e-14)
+
+    @pytest.mark.parametrize(
+        ("text", "match"),
+        [
+            ("fixedX,fixedY,alignmentX,other\n", "missing columns"),
+            ("fixedX,fixedY,alignmentX,alignmentX\n", "repeated column names"),
+            ("fixedX,fixedY,alignmentX,alignmentY\n1,2,3,4\n", "too few"),
+            ("fixedX,fixedY,alignmentX,alignmentY\n0,0,0,0\n0,1,0,1\n1,0,1,nan\n", "nonfinite"),
+            ("fixedX,fixedY,alignmentX,alignmentY\n0,0,0,0\n0,1,0,1\n1,0,0,2\n", "degenerate"),
+            ("fixedX,fixedY,alignmentX,alignmentY\n0,0,0,0\n0,1,0,1\n0,2,1,0\n", "degenerate"),
+            ("fixedX,fixedY,alignmentX,alignmentY\n0,0,0,0\n0,1e200,0,1e200\n1e200,0,1e200,0\n", "overflow"),
+        ],
+        ids=["missing", "duplicate", "short", "nan", "source-line", "fixed-line", "overflow"],
+    )
+    def test_invalid_keypoints(self, tmp_path: Path, text: str, match: str) -> None:
+        path = _csv(tmp_path / "sample_keypoints.csv", text)
+
+        with pytest.raises(ReaderFormatError, match=match) as caught:
+            read_keypoint_alignment(path, context=CONTEXT)
+
+        assert caught.value.path == path
+        assert caught.value.context == CONTEXT
+
+
 class TestXeniumAlignedImage:
     """Aligned images keep declared axes and channel names and map pixels to micrometres."""
 
-    def test_rgb_samples_with_alignment(self, tmp_path: Path) -> None:
-        data = _rgb(tmp_path / "x_he_image.ome.tif")
+    @pytest.mark.parametrize("planar", [False, True])
+    def test_rgb_samples_with_alignment(self, tmp_path: Path, *, planar: bool) -> None:
+        path = tmp_path / "x_he_image.ome.tif"
+        data = _rgb(path)
+        if planar:
+            tifffile.imwrite(
+                path,
+                np.moveaxis(data, -1, 0),
+                photometric="rgb",
+                planarconfig="separate",
+                ome=True,
+                metadata={"axes": "SYX"},
+                tile=(16, 16),
+            )
         alignment = _csv(tmp_path / "x_he_imagealignment.csv", MATRIX)
 
-        image = xenium_aligned_image(tmp_path / "x_he_image.ome.tif", alignment, pixel_size=PIXEL_SIZE)
+        image = xenium_aligned_image(path, alignment, pixel_size=PIXEL_SIZE)
 
         assert image.dims == ("c", "y", "x")
         assert image.coords["c"].to_numpy().tolist() == ["r", "g", "b"]

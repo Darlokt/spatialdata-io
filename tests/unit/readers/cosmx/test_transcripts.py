@@ -14,7 +14,7 @@ import pytest
 from dask.callbacks import Callback
 from spatialdata.transformations import BaseTransformation, Identity, get_transformation
 
-from spatialdata_io.readers._utils.csv import read_csv_blocks
+from spatialdata_io.readers._utils.csv import _stream, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.cosmx import _transcripts
@@ -218,13 +218,11 @@ class TestGzipLayout:
         path = tmp_path / "tx.csv.gz"
         path.write_bytes(gzip.compress(first_member.encode(), mtime=0) + gzip.compress(_ROWS[1].encode(), mtime=0))
         decoder = mocker.spy(_transcripts, "_decode_member")
-        # The decoder owns gzip's read-ahead; this spy measures eager source I/O.
-        header_reader = mocker.spy(gzip._GzipReader, "read")  # noqa: SLF001, RUF100
+        # Measure decompressed bytes produced during the eager header read.
+        header_reader = mocker.spy(_stream._GzipStream, "readinto")
         points = read_transcripts(ArtifactFile(path), features=_FEATURES, placements=_PLACEMENTS)
         decoder.assert_not_called()
-        # Reading the header line decompresses one buffer of GzipFile's read-ahead, whose
-        # size is io.DEFAULT_BUFFER_SIZE: 8 KiB before Python 3.14 and 128 KiB since.
-        assert 0 < sum(len(block) for block in header_reader.spy_return_list) <= io.DEFAULT_BUFFER_SIZE
+        assert 0 < sum(header_reader.spy_return_list) <= io.DEFAULT_BUFFER_SIZE
         # Every first-member row is returned once, including when it crosses compressed task ranges.
         assert len(points.compute()) == 100_001
 

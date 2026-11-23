@@ -38,7 +38,7 @@ import pyarrow.parquet as pq
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
-from spatialdata_io.readers._utils.csv import csv_errors, csv_header
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header, open_csv_stream
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.metadata import decode_hdf5_text
 from spatialdata_io.readers._utils.names import sanitize_column_names
@@ -327,15 +327,8 @@ def read_feature_index(source: CountSource, *, context: ReaderErrorContext) -> F
 
 def read_header(source: TabularSource, *, context: ReaderErrorContext) -> tuple[str, ...]:
     """Read only the header record of a CSV twin."""
-    if source.kind == "csv":
-        return csv_header(source.file, context=context)
-    with gzip.open(source.file, "rb") as stream:
+    with open_csv_stream(source.file, context=context, compressed=source.kind == "csv_gz") as stream:
         return csv_header(source.file, context=context, source=stream)
-
-
-def open_twin(source: TabularSource) -> pa.NativeFile:
-    """Open a CSV twin for Arrow, decompressing a gzip twin as it is read."""
-    return pa.input_stream(source.file, compression="gzip" if source.kind == "csv_gz" else None)
 
 
 def read_cells(source: TabularSource, *, context: ReaderErrorContext) -> Cells:
@@ -360,7 +353,10 @@ def read_cells(source: TabularSource, *, context: ReaderErrorContext) -> Cells:
     else:
         header = read_header(source, context=context)
         validate_header(header, CELL_REQUIRED, path=path, context=context)
-        with csv_errors(context=context, path=path), open_twin(source) as stream:
+        with (
+            open_csv_stream(path, context=context, compressed=source.kind == "csv_gz") as stream,
+            csv_errors(context=context, path=path),
+        ):
             table = pacsv.read_csv(
                 stream,
                 convert_options=pacsv.ConvertOptions(

@@ -7,8 +7,8 @@ whose indexes restart at zero; every numeric field must hold a number, so an
 empty one is a malformed record. Integer cell IDs (XOA 1.0-1.2) are signed to
 keep ``-1``; they are read as text and must be decimal digits or ``-1``,
 because Arrow's grammar would wrap hexadecimal ``0xffffffffffffffff`` to ``-1``.
-A gzip CSV is one compressed stream that cannot be split and is rejected during
-discovery.
+Discovery requires a seekable source. A plain transcript CSV takes precedence
+over its gzip companion when both are present.
 
 Every task opens its source, reads only the documented columns of its partition
 with their declared Arrow types, and validates it when computed: no nulls,

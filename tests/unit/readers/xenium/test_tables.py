@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import tarfile
 from dataclasses import replace
@@ -449,6 +450,31 @@ class TestReadCells:
         path.write_text('"cell_id\n')
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
             read_header(TabularSource(ArtifactFile(path), "csv", cell_types("hex_ids")), context=CELLS)
+
+    def test_padded_gzip_cells_equal_plain_csv(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv"))
+        plain = bundle.root / "cells.csv"
+        compressed = plain.with_suffix(".csv.gz")
+        compressed.write_bytes(gzip.compress(plain.read_bytes(), mtime=0) + b"\0" * 16)
+        types = cell_types("polygon_sets")
+
+        reference = read_cells(TabularSource(ArtifactFile(plain), "csv", types), context=CELLS)
+        actual = read_cells(TabularSource(ArtifactFile(compressed), "csv_gz", types), context=CELLS)
+
+        pd.testing.assert_frame_equal(actual.frame, reference.frame)
+        pd.testing.assert_index_equal(actual.ids, reference.ids)
+
+    def test_truncated_gzip_cells_report_artifact_context(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv_gz"))
+        path = ArtifactFile(bundle.root / "cells.csv.gz")
+        path.write_bytes(path.read_bytes()[:-4])
+        source = TabularSource(path, "csv_gz", cell_types("polygon_sets"))
+
+        with pytest.raises(ReaderFormatError, match="invalid gzip data") as caught:
+            read_cells(source, context=CELLS)
+
+        assert caught.value.context == CELLS
+        assert caught.value.path == path
 
     def test_csv_missing_values_and_arrow_grammar(self, tmp_path: Path) -> None:
         """An empty typed field is missing, NaN text is NaN, other numbers follow Arrow's grammar."""
