@@ -199,6 +199,13 @@ def boundary_features(document: dict[str, object], path: ArtifactFile) -> tuple[
                 expected="an explicit positive string or integer id",
             )
         raw_ids.append(str(identifier))
+        if "geometry" not in feature:
+            raise ReaderFormatError(
+                context=BOUNDARIES_CONTEXT,
+                path=path,
+                found="missing Feature.geometry",
+                expected="a geometry field for every boundary feature",
+            )
         # GeoJSON requires this field; null properties carry no annotations.
         properties = feature.get("properties")
         if properties is not None and not isinstance(properties, dict):

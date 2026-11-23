@@ -37,7 +37,6 @@ from scipy import sparse
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
 from spatialdata_io.readers._utils.csv import csv_errors, csv_header, open_csv_stream
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
-from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     count_batch_to_csr,
@@ -54,11 +53,12 @@ from spatialdata_io.readers.cosmx._schemas import (
     METADATA,
     POSITIONS,
     REGION_KEY,
+    cell_keys,
     count_types,
     fov_position_types,
     metadata_types,
+    normalize_cell_metadata,
     placement_values,
-    require_finite,
     require_positive,
     schema_error,
 )
@@ -76,7 +76,6 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.cosmx._layout import CsvFile
-    from spatialdata_io.readers.cosmx._schemas import Artifact
 
 # A parser batch can combine a preceding unfinished record with one source
 # block. Required uint64 values use at most eight times this source target,
@@ -85,16 +84,6 @@ if TYPE_CHECKING:
 _BATCH_BYTES = 1024 * 1024
 _PARSE = pacsv.ParseOptions(newlines_in_values=True)
 _TABLE_CONTEXT = ReaderErrorContext("cosmx", "cell table")
-# Columns of obs that the reader generates or relies on by name; the vendor
-# 'cell' IDs too, when present, because they name the observations.
-_READER_OBS_COLUMNS = (FOV, CELL_ID, REGION_KEY, FRAME_KEY)
-
-
-def read_header(source: CsvFile, artifact: Artifact) -> tuple[str, ...]:
-    """Parse one header with Arrow under its plain or gzip stream owner."""
-    context = ReaderErrorContext("cosmx", artifact)
-    with open_csv_stream(source.path, context=context, compressed=source.compressed) as stream:
-        return csv_header(source.path, context=context, source=stream)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,9 +98,9 @@ class Counts:
 def read_counts(source: CsvFile) -> Counts:
     """Stream unsigned counts to CSR after validating and removing background rows."""
     path = source.path
-    types = count_types(read_header(source, COUNTS), path)
-    features = tuple(types.names[2:])
     context = ReaderErrorContext("cosmx", COUNTS)
+    types = count_types(csv_header(path, context=context, compressed=source.compressed), path)
+    features = tuple(types.names[2:])
     blocks: list[sparse.csr_array] = []
     fovs: list[pa.Array] = []
     cell_ids: list[pa.Array] = []
@@ -144,10 +133,7 @@ def read_counts(source: CsvFile) -> Counts:
     )
     all_fovs = pd.Index(pd.arrays.ArrowExtensionArray(pa.chunked_array(fovs, pa.uint64())))
     all_cells = pd.Index(pd.arrays.ArrowExtensionArray(pa.chunked_array(cell_ids, pa.uint64())))
-    keys = pd.MultiIndex.from_arrays([all_fovs, all_cells])
-    if keys.has_duplicates:
-        raise schema_error(path, COUNTS, found="duplicate (fov, cell_ID) count rows", expected="one count row per cell")
-    return Counts(expression, keys, features)
+    return Counts(expression, cell_keys(all_fovs, all_cells, path, COUNTS), features)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,8 +151,8 @@ class CellMetadata:
 def read_metadata(source: CsvFile) -> CellMetadata:
     """Read typed annotations and exact keys, retaining printed coordinate uncertainty."""
     path = source.path
-    types = metadata_types(read_header(source, METADATA), path)
     context = ReaderErrorContext("cosmx", METADATA)
+    types = metadata_types(csv_header(path, context=context, compressed=source.compressed), path)
     with (
         open_csv_stream(path, context=context, compressed=source.compressed) as stream,
         csv_errors(context=context, path=path),
@@ -178,17 +164,7 @@ def read_metadata(source: CsvFile) -> CellMetadata:
                 column_types=types, include_columns=types.names, null_values=["", "NA"], strings_can_be_null=False
             ),
         )
-    for name in (FOV, CELL_ID):
-        require_positive(records[name], path, METADATA, name)
-    numeric = [field.name for field in types if pa.types.is_floating(field.type)]
-    text = [field.name for field in types if pa.types.is_string(field.type) and field.name not in CENTERS]
-    for name in numeric:
-        require_finite(records[name], path, METADATA, name, nullable=True)
-    obs = records.select([FOV, CELL_ID, *numeric, *text]).to_pandas(types_mapper=pd.ArrowDtype)
-    fovs, cell_ids = pd.Index(obs[FOV].array), pd.Index(obs[CELL_ID].array)
-    keys = pd.MultiIndex.from_arrays([fovs, cell_ids])
-    if keys.has_duplicates:
-        raise schema_error(path, METADATA, found="duplicate (fov, cell_ID) keys", expected="one row per cell")
+    obs, keys = normalize_cell_metadata(records, path)
 
     local = np.empty((records.num_rows, 2), dtype=np.float64)
     global_ = np.empty_like(local)
@@ -200,29 +176,17 @@ def read_metadata(source: CsvFile) -> CellMetadata:
         AxisSamples(local[:, 0], global_[:, 0], halves[CENTERS[0]], halves[CENTERS[2]]),
         AxisSamples(local[:, 1], global_[:, 1], halves[CENTERS[1]], halves[CENTERS[3]]),
     )
-    if CELL in obs and (obs[CELL].eq("").any() or not obs[CELL].is_unique):
-        raise schema_error(
-            path, METADATA, found="missing or repeated vendor cell IDs", expected="unique nonempty 'cell' values"
-        )
-    # AtoMx's exact repeated text identity is redundant; other case variants
-    # retain their independent source values through column-name sanitization.
-    if "cell_id" in obs and CELL in obs and obs["cell_id"].equals(obs[CELL]):
-        obs = obs.drop(columns="cell_id")
-    reserved = (*_READER_OBS_COLUMNS, CELL) if CELL in obs else _READER_OBS_COLUMNS
-    obs.columns = sanitize_column_names(
-        list(obs.columns), source="cosmx: the cell metadata CSV header", reserved=reserved
-    )
-    return CellMetadata(obs, keys, group_fov_rows(fovs), local, global_, samples)
+    return CellMetadata(obs, keys, group_fov_rows(pd.Index(obs[FOV].array)), local, global_, samples)
 
 
 def read_fov_positions(source: CsvFile) -> dict[int, FovPosition]:
     """Read projected pixel positions; stage-only exports provide no pixel cross-check."""
     path = source.path
-    types = fov_position_types(read_header(source, POSITIONS), path)
+    context = ReaderErrorContext("cosmx", POSITIONS)
+    types = fov_position_types(csv_header(path, context=context, compressed=source.compressed), path)
     if types is None:
         return {}
     fov_name, x_name, y_name = types.names
-    context = ReaderErrorContext("cosmx", POSITIONS)
     with (
         open_csv_stream(path, context=context, compressed=source.compressed) as stream,
         csv_errors(context=context, path=path),

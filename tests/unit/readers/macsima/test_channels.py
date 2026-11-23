@@ -20,7 +20,8 @@ from spatialdata_io.readers.macsima._channels import (
     plan_stack,
 )
 from spatialdata_io.readers.macsima._layout import StackFiles
-from spatialdata_io.readers.macsima._metadata import ChannelMetadata, ChannelSource
+from spatialdata_io.readers.macsima._metadata import ChannelSource
+from spatialdata_io.readers.macsima._schemas import ChannelMetadata
 
 if TYPE_CHECKING:
     from spatialdata_io.readers.macsima._schemas import ImageType

@@ -56,10 +56,9 @@ if TYPE_CHECKING:
     from xarray import DataArray, DataTree
 
     from spatialdata_io.readers._utils.image import RasterOptions
-    from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers.dbit._layout import ImageSource
 
 _IMAGE_AXES = ("c", "y", "x")
-_TIFF_SUFFIXES = frozenset({".tif", ".tiff", ".btf"})
 _CONTEXT = ReaderErrorContext("dbit", "histology image")
 
 
@@ -75,7 +74,7 @@ def validate_image_options(data_axes: str | None, tiff_series: int | None, tiff_
 
 
 def read_image(
-    path: ArtifactFile,
+    source: ImageSource,
     *,
     data_axes: str | None,
     tiff_series: int | None,
@@ -83,18 +82,18 @@ def read_image(
     raster: RasterOptions,
 ) -> DataArray | DataTree:
     """Read bounded metadata and build the image without executing pixel tasks."""
-    is_tiff = path.suffix.lower() in _TIFF_SUFFIXES
-    if not is_tiff and (data_axes is not None or tiff_series is not None or tiff_level != 0):
+    path = source.path
+    if source.kind != "tiff" and (data_axes is not None or tiff_series is not None or tiff_level != 0):
         message = "data_axes, tiff_series and tiff_level require a TIFF-family image."
         raise ValueError(message)
 
     tiff = None
-    if is_tiff:
+    if source.kind == "tiff":
         metadata = inspect_tiff(path, context=_CONTEXT)
         series = select_tiff_series(metadata, tiff_series, context=_CONTEXT, option="tiff_series")
         lazy = read_tiff(metadata, series=series, level=tiff_level, context=_CONTEXT)
         tiff = (metadata, series)
-    elif path.suffix.lower() == ".png":
+    elif source.kind == "png":
         lazy = read_png(path, context=_CONTEXT)
     else:
         lazy = read_jpeg(path, context=_CONTEXT)

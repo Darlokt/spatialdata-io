@@ -66,6 +66,14 @@ With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with 
 
 The `fov_<fov>_pixels` systems (for example `fov_2_pixels`) are each FOV's local pixel frame. CosMx local coordinates are pixel indices with a reversed vertical axis: the raster pixel at row `r` and column `c` of an `H`-row FOV has local coordinates `(c, H - r)`. This was measured on the public 2021 Lung5_Rep2 release and on an AtoMx mouse-brain export, from label pixels against cell metadata and polygon extremes. Raster pixels are returned exactly as stored; the reflection is part of each raster's transformation.
 
+An optional FOV-position CSV requires one `fov` or `FOV` field and at least one
+complete coordinate pair. The pixel pairs are `x_px`/`y_px` and
+`x_global_px`/`y_global_px`. The stage pairs are `X_mm`/`Y_mm` and
+`x_global_mm`/`y_global_mm`. A header may contain one pair of each kind, but
+partial pairs and two conventions of the same kind fail during schema
+validation. Only the pixel pair supplies placement values. A stage-only header
+is validated and its rows are unused.
+
 Each FOV's local-to-global map is a translation per axis, possibly with a reversed axis: `global = ±local + offset`. Exports differ in the sign of the y axis. The sign and offset are derived from every metadata cell and accepted only when one offset lies within the printed rounding interval of all of them; no affine is fitted. A pixel FOV-position file (`fov,x_px,y_px` or `FOV,x_global_px,y_global_px,...`) must agree with the cells and places FOVs without cells; millimetre-only position files are accepted but not used. For a positive axis, the printed position's rounding interval is intersected with the cell-derived offset interval. The printed center is preserved when feasible; otherwise the midpoint of their intersection is used. This selects a feasible placement within source precision and cannot recover an unprinted exact origin. Reflected axes use cell evidence for their offsets. Stage positions alone do not establish stage-to-pixel calibration; no universal micrometre-per-pixel constant or scale fitted from a single FOV is applied. A FOV with rasters but no cells and no pixel position fails. A wholly cell-empty export is unsupported because it cannot establish the dataset's axis signs, even when pixel FOV positions are present.
 
 The raster convention has only been evidenced for exports whose global axes run in the same direction as the local axes. Rasters in an export with a reversed global axis therefore fail, while its table and transcripts are read. When both axes are positive, an FOV listed only in the pixel-position file also gets a local transcript frame, even if it contains no cells or rasters.
@@ -81,6 +89,10 @@ No scale is inferred automatically from headers, stage-only positions, paired pi
 ## Transcripts
 
 Transcript points are placed at their global `x_global_px`/`y_global_px` positions; the local coordinates are kept as `x_local` and `y_local`. Targets are categorical with the count features as categories. Annotations are `fov`, `cell_ID` (0 marks unassigned transcripts) and, when present, `z_raw`, `CellComp` and `cell`. `z_raw` is the vendor's slice number in arbitrary units and can be negative; it is not a physical coordinate.
+
+A UTF-8 byte-order mark at the start of the CSV header is removed. A literal
+U+FEFF at the start of a data field is preserved in plain and gzip transcripts,
+including at partition boundaries.
 
 Construction reads the CSV header, with small gzip decoder read-ahead; it does not decode a complete first member to discover boundaries. Each record must occupy one physical line. Plain CSV sources are split into newline-delimited blocks of about 8 MiB.
 

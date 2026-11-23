@@ -19,6 +19,8 @@ from spatialdata_io.readers.cosmx._schemas import (
     fov_position_types,
     half_units,
     metadata_types,
+    normalize_cell_metadata,
+    normalize_transcript_partition,
     placement_values,
     require_finite,
     require_positive,
@@ -27,6 +29,7 @@ from spatialdata_io.readers.cosmx._schemas import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 _CENTERS = ["CenterX_local_px", "CenterY_local_px", "CenterX_global_px", "CenterY_global_px"]
@@ -107,6 +110,56 @@ class TestMetadataTypes:
         assert error.value.context == ReaderErrorContext("cosmx", "cell metadata")
 
 
+class TestNormalizeCellMetadata:
+    @staticmethod
+    def _records(path: ArtifactFile, **overrides: Sequence[object]) -> pa.Table:
+        values: dict[str, Sequence[object]] = {
+            "fov": [2**64 - 1, 2**64 - 1],
+            "cell_ID": [7, 9],
+            "CenterX_local_px": ["1", "2"],
+            "CenterY_local_px": ["3", "4"],
+            "CenterX_global_px": ["11", "12"],
+            "CenterY_global_px": ["23", "24"],
+            "Area": [2.0, None],
+            "note": ["", "NA"],
+            "cell": ["007", "009"],
+            "cell_id": ["007", "009"],
+        }
+        values.update(overrides)
+        return pa.Table.from_pydict(values, schema=metadata_types(tuple(values), path))
+
+    def test_exact_keys_nullable_annotations_and_vendor_alias(self, tmp_path: Path) -> None:
+        path = _path(tmp_path)
+        obs, keys = normalize_cell_metadata(self._records(path), path)
+
+        assert keys.tolist() == [(2**64 - 1, 7), (2**64 - 1, 9)]
+        assert obs.columns.tolist() == ["fov", "cell_ID", "Area", "note", "cell"]
+        assert obs["cell"].tolist() == ["007", "009"]
+        assert obs["note"].tolist() == ["", "NA"]
+        assert obs["Area"].dtype == pd.ArrowDtype(pa.float64())
+        assert obs["Area"].tolist() == [2.0, pd.NA]
+
+    @pytest.mark.parametrize(
+        ("name", "values", "match"),
+        [
+            ("fov", [0, 1], "missing or zero 'fov'"),
+            ("cell_ID", [0, 1], "missing or zero 'cell_ID'"),
+            ("cell_ID", [1, 1], "duplicate"),
+            ("cell", ["", "001"], "vendor cell IDs"),
+            ("cell", ["001", "001"], "vendor cell IDs"),
+            ("Area", [float("inf"), None], "nonfinite 'Area'"),
+        ],
+    )
+    def test_normalized_source_validation(
+        self, tmp_path: Path, name: str, values: Sequence[object], match: str
+    ) -> None:
+        path = _path(tmp_path)
+        with pytest.raises(ReaderFormatError, match=match) as caught:
+            normalize_cell_metadata(self._records(path, **{name: values}), path)
+        assert caught.value.path == path
+        assert caught.value.context == ReaderErrorContext("cosmx", "cell metadata")
+
+
 class TestFovPositionTypes:
     """Both pixel conventions are recognized; millimetre-only files provide none."""
 
@@ -119,6 +172,7 @@ class TestFovPositionTypes:
                 ("FOV", "x_global_px", "y_global_px"),
             ),
             (["Slide", "X_mm", "Y_mm", "FOV"], None),
+            (["FOV", "x_global_mm", "y_global_mm"], None),
         ],
     )
     def test_conventions(self, tmp_path: Path, columns: list[str], expected: tuple[str, ...] | None) -> None:
@@ -130,7 +184,18 @@ class TestFovPositionTypes:
 
     @pytest.mark.parametrize(
         "columns",
-        [["x_px", "y_px"], ["fov", "FOV", "x_px", "y_px"], ["fov", "x_px", "y_px", "x_global_px", "y_global_px"]],
+        [
+            ["x_px", "y_px"],
+            ["fov", "FOV", "x_px", "y_px"],
+            ["fov", "x_px", "y_px", "x_global_px", "y_global_px"],
+            ["fov", "x_px"],
+            ["fov", "typo"],
+            ["FOV", "X_mm", "Y_mm", "x_global_px"],
+            ["FOV", "x_px", "y_global_px", "X_mm", "Y_mm"],
+            ["FOV", "Y_mm"],
+            ["FOV", "x_px", "y_px", "X_mm"],
+            ["FOV", "X_mm", "Y_mm", "x_global_mm", "y_global_mm"],
+        ],
     )
     def test_rejects(self, tmp_path: Path, columns: list[str]) -> None:
         with pytest.raises(ReaderFormatError) as error:
@@ -145,13 +210,13 @@ class TestTranscriptTypes:
         names = ["fov", "cell_ID", "cell", "x_local_px", "y_local_px", "x_global_px", "y_global_px", "z", "target", "x"]
         types = transcript_types(names, _path(tmp_path))
         assert types.names == [
+            "x_global_px",
+            "y_global_px",
+            "target",
             "fov",
             "cell_ID",
             "x_local_px",
             "y_local_px",
-            "x_global_px",
-            "y_global_px",
-            "target",
             "z",
             "cell",
         ]
@@ -164,6 +229,45 @@ class TestTranscriptTypes:
         with pytest.raises(ReaderFormatError, match="missing") as error:
             transcript_types(["fov", "target"], _path(tmp_path))
         assert error.value.context == ReaderErrorContext("cosmx", "transcripts")
+
+
+class TestNormalizeTranscriptPartition:
+    def test_output_columns_types_and_vocabulary(self, tmp_path: Path) -> None:
+        values = {
+            "x_global_px": [100.0],
+            "y_global_px": [200.0],
+            "target": ["A"],
+            "fov": [2**64 - 1],
+            "cell_ID": [0],
+            "x_local_px": [1.25],
+            "y_local_px": [3.5],
+            "z": [-1],
+            "CellComp": ["NA"],
+            "cell": [""],
+        }
+        path = _path(tmp_path)
+        frame = pa.Table.from_pydict(values, schema=transcript_types(tuple(values), path)).to_pandas(
+            types_mapper=pd.ArrowDtype
+        )
+        result = normalize_transcript_partition(frame, features=pd.Index(["B", "A"]), path=path)
+        assert result.columns.tolist() == [
+            "x",
+            "y",
+            "target",
+            "fov",
+            "cell_ID",
+            "x_local",
+            "y_local",
+            "z_raw",
+            "CellComp",
+            "cell",
+        ]
+        assert result["x"].dtype == result["y"].dtype == np.dtype(np.float64)
+        assert result["x_local"].dtype == result["y_local"].dtype == pd.ArrowDtype(pa.float64())
+        assert result["target"].cat.categories.tolist() == ["B", "A"]
+        assert result["fov"].iloc[0] == 2**64 - 1
+        assert result["cell_ID"].iloc[0] == 0
+        assert result["z_raw"].iloc[0] == -1
 
 
 class TestCountTypes:

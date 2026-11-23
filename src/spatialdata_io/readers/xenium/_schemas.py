@@ -18,7 +18,7 @@ consecutive PCA/UMAP component columns after its barcode field.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
@@ -64,9 +64,11 @@ READER_OBS = ("label_id", "nucleus_centroid_x", "nucleus_centroid_y", "region")
 
 VERTICES = ("vertex_x", "vertex_y")
 LABEL_ID = "label_id"
+BOUNDARY_REQUIRED = (CELL_ID, *VERTICES)
 
 BARCODE = "Barcode"
 CLUSTER = "Cluster"
+type AnalysisKind = Literal["clustering", "pca", "umap"]
 _ANALYSIS_PROJECTION_PREFIXES = {"pca": "PC", "umap": "UMAP"}
 _DECIMAL_ID = r"-1|[0-9]+"
 _MIN_PROJECTION_COLUMNS = 2
@@ -135,19 +137,20 @@ def summary_columns(  # noqa: PLR0913, RUF100 - Native metadata and the external
     return names
 
 
-def validate_analysis_header(names: Sequence[str], kind: str, *, path: Path, context: ReaderErrorContext) -> None:
-    """Require exact clustering fields or consecutive PCA/UMAP component fields."""
+def analysis_schema(names: Sequence[str], kind: AnalysisKind, *, path: Path, context: ReaderErrorContext) -> pa.Schema:
+    """Return the typed projection for exact clustering or consecutive PCA/UMAP fields."""
     names = list(names)
     if kind == "clustering":
         if names != [BARCODE, CLUSTER]:
             raise ReaderFormatError(context=context, path=path, found=f"header {names!r}", expected="Barcode,Cluster")
-        return
+        return pa.schema([(BARCODE, STRING), (CLUSTER, UINT64)])
     prefix = _ANALYSIS_PROJECTION_PREFIXES[kind]
     expected = [BARCODE, *(f"{prefix}-{index}" for index in range(1, len(names)))]
     if len(names) < _MIN_PROJECTION_COLUMNS or names != expected:
         raise ReaderFormatError(
             context=context, path=path, found=f"header {names!r}", expected=f"Barcode,{prefix}-1,..."
         )
+    return pa.schema([(BARCODE, STRING), *((name, FLOAT64) for name in expected[1:])])
 
 
 def _id_type(family: Family) -> pa.DataType:
@@ -168,6 +171,12 @@ def boundary_types(family: Family) -> pa.Schema:
     return pa.schema(
         [(CELL_ID, _id_type(family)), (VERTICES[0], FLOAT32), (VERTICES[1], FLOAT32), (LABEL_ID, pa.uint32())]
     )
+
+
+def boundary_columns(names: Sequence[str], *, path: Path, context: ReaderErrorContext) -> tuple[str, ...]:
+    """Select documented vertex fields and the mask label when present."""
+    validate_header(names, BOUNDARY_REQUIRED, path=path, context=context)
+    return (*BOUNDARY_REQUIRED, *((LABEL_ID,) if LABEL_ID in names else ()))
 
 
 def transcript_types(family: Family) -> pa.Schema:
@@ -207,15 +216,51 @@ def cast_column(
         ) from error
 
 
-def normalize_text(column: pa.ChunkedArray, name: str, *, path: Path, context: ReaderErrorContext) -> pa.ChunkedArray:
-    """Return non-null ``string`` values; binary text is decoded strictly as UTF-8."""
-    kind = column.type
-    if not (
+def validate_parquet_types(source: pa.Schema, declared: pa.Schema, *, path: Path, context: ReaderErrorContext) -> None:
+    """Check native physical types of projected fields without decoding values."""
+    for field in declared:
+        index = source.get_field_index(field.name)
+        if index == -1:
+            continue
+        stored = source.field(index).type
+        if not _compatible_parquet_type(stored, field):
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found=f"{field.name} of type {stored} in Parquet footer",
+                expected=f"a source representation of {field.name} as {field.type}",
+            )
+
+
+def _text_storage(kind: pa.DataType) -> bool:
+    return (
         pa.types.is_string(kind)
         or pa.types.is_large_string(kind)
         or pa.types.is_binary(kind)
         or pa.types.is_large_binary(kind)
-    ):
+    )
+
+
+def _compatible_parquet_type(stored: pa.DataType, field: pa.Field) -> bool:
+    """Use the case-specific representation rules used by the value decoders."""
+    if stored == field.type:
+        return True
+    if pa.types.is_string(field.type):
+        return _text_storage(stored)
+    if field.name == CELL_ID:
+        return pa.types.is_integer(stored)
+    if pa.types.is_boolean(field.type):
+        return False
+    # Numeric fields use Arrow's checked casts. A dictionary of native
+    # numbers remains numeric, and null-only optional columns are valid.
+    physical = stored.value_type if isinstance(stored, pa.DictionaryType) else stored
+    return pa.types.is_integer(physical) or pa.types.is_floating(physical) or pa.types.is_null(physical)
+
+
+def normalize_text(column: pa.ChunkedArray, name: str, *, path: Path, context: ReaderErrorContext) -> pa.ChunkedArray:
+    """Return non-null ``string`` values; binary text is decoded strictly as UTF-8."""
+    kind = column.type
+    if not _text_storage(kind):
         raise ReaderFormatError(
             context=context, path=path, found=f"{name} of type {kind}", expected=f"{name} as UTF-8 text"
         )
@@ -329,6 +374,40 @@ def require_finite(
         raise ReaderFormatError(
             context=context, path=path, found=f"nonfinite {name} values", expected=f"finite {name} values"
         )
+
+
+def normalize_cell_table(
+    table: pa.Table, declared: pa.Schema, *, path: Path, context: ReaderErrorContext
+) -> tuple[pa.Table, pd.Index]:
+    """Check cell annotation domains and preserve the complete Arrow table order."""
+    for field in declared:
+        index = table.schema.get_field_index(field.name)
+        if index == -1 or field.name == CELL_ID:
+            continue
+        column = cast_column(table[field.name], field.type, field.name, path=path, context=context)
+        if field.name == "nucleus_area":
+            # Writers store missing nucleus areas as null or NaN. Normalize both to NaN.
+            column = column.fill_null(float("nan"))
+        table = table.set_column(index, field.name, column)
+
+    cell_column = normalize_ids(table[CELL_ID], declared.field(CELL_ID).type, path=path, context=context)
+    table = table.set_column(table.schema.get_field_index(CELL_ID), CELL_ID, cell_column)
+    if any(table[name].null_count for name in CELL_REQUIRED):
+        raise ReaderFormatError(
+            context=context, path=path, found="missing required values", expected="complete cell records"
+        )
+    for name in CELL_FLOATS:
+        values = table[name].to_numpy()
+        require_finite(values, name, path=path, context=context, allow_nan=name == "nucleus_area")
+        if name in ("cell_area", "nucleus_area") and (values < 0).any():
+            raise ReaderFormatError(
+                context=context, path=path, found=f"negative {name} values", expected=f"nonnegative {name}"
+            )
+
+    ids = id_index(cell_column)
+    if not ids.is_unique:
+        raise ReaderFormatError(context=context, path=path, found="repeated cell IDs", expected="one row per cell")
+    return table, ids
 
 
 def require_no_nulls(table: pa.Table, *, path: Path, context: ReaderErrorContext) -> None:

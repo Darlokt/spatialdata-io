@@ -15,11 +15,12 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import contextmanager, nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 import pyarrow as pa
 import pyarrow.csv as pacsv
 
+from spatialdata_io.readers._utils.csv._stream import open_csv_stream
 from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_context
 
 if TYPE_CHECKING:
@@ -56,12 +57,25 @@ def _header_line(source: IO[bytes] | io.BufferedIOBase, path: Path, context: Rea
     return b"".join(pieces)
 
 
+@overload
+def csv_header(
+    path: Path, /, *, context: ReaderErrorContext, compressed: bool = False, delimiter: str = ","
+) -> tuple[str, ...]: ...
+
+
+@overload
+def csv_header(
+    path: Path, /, *, context: ReaderErrorContext, source: IO[bytes] | io.BufferedIOBase, delimiter: str = ","
+) -> tuple[str, ...]: ...
+
+
 def csv_header(
     path: Path,
     /,
     *,
     context: ReaderErrorContext,
     source: IO[bytes] | io.BufferedIOBase | None = None,
+    compressed: bool = False,
     delimiter: str = ",",
 ) -> tuple[str, ...]:
     """Parse the header record of a CSV with Arrow's grammar.
@@ -76,6 +90,9 @@ def csv_header(
         Open binary stream of ``path``'s content positioned at the header, such
         as a gzip stream or an archive member. Exactly one physical line is
         read from it, so the caller can continue with the records.
+    compressed
+        Open the path as gzip when selected by the reader. A caller providing
+        a stream owns its decompression.
     delimiter
         Field delimiter, such as a tab for a named TSV artifact.
 
@@ -96,7 +113,8 @@ def csv_header(
         If ``path`` cannot be read. The error gains a note naming ``context``.
     """
     try:
-        with path.open("rb") if source is None else nullcontext(source) as stream:
+        owner = open_csv_stream(path, context=context, compressed=compressed) if source is None else nullcontext(source)
+        with owner as stream:
             line = _header_line(stream, path, context)
     except OSError as error:
         add_reader_context(error, context=context, path=path)

@@ -120,7 +120,7 @@ class TestReadMarkers:
             ('"unterminated\n', "malformed CSV"),
             ("marker_name\n", "no markers"),
             ("marker_name,x\nA\n", r"malformed CSV \("),
-            ("channel_number\n1\n", "marker_name"),
+            ("channel_number\n1,wrong,width\n", "marker_name"),
         ],
     )
     def test_rejects(self, tmp_path: Path, text: str, match: str) -> None:

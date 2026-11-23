@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.experimental.iss._images import read_rasters
 from spatialdata_io.experimental.iss._layout import discover_layout, validate_artifact_names
+from spatialdata_io.experimental.iss._rasters import read_rasters
 from spatialdata_io.experimental.iss._schemas import DEFAULT_INSTANCE_KEY, REGION_KEY
 from spatialdata_io.experimental.iss._tables import read_table
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
@@ -65,6 +65,7 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
         positive integers. The column name follows SpatialData's table name
         rules and cannot be ``region`` in any letter case. By default the
         observation names are used and must consist of ASCII digits only.
+        Leading zeros are accepted and do not affect the label value.
     dataset_id
         Prefix of the raster element names. It must be a valid SpatialData
         element name: nonempty, only letters, digits, ``_``, ``-`` and ``.``,

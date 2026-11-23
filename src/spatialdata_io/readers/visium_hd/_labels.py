@@ -32,6 +32,7 @@ def make_bin_labels(  # noqa: PLR0913, RUF100 - Explicit grid, frame and raster 
     shape: tuple[int, int],
     pitch: float,
     *,
+    instance_ids: NDArray[np.uint32],
     options: RasterOptions,
 ) -> DataArray:
     """Build labels with table-order IDs, zero background and exact bin corners.
@@ -39,12 +40,8 @@ def make_bin_labels(  # noqa: PLR0913, RUF100 - Explicit grid, frame and raster 
     The eager allocation is one uint32 grid (45 MB for the 3350² native grid).
     Pixel centres and nominal square centres coincide without an added offset.
     """
-    if len(rows) > np.iinfo(np.uint32).max:
-        message = "The number of bin instances exceeds uint32 label capacity."
-        raise ValueError(message)
-
     labels = np.zeros(shape, dtype=np.uint32)
-    labels[rows, cols] = np.arange(1, len(rows) + 1, dtype=np.uint32)
+    labels[rows, cols] = instance_ids
 
     matrix = frame.grid_um_to_global @ np.diag([pitch, pitch, 1.0])
     # SpatialData annotates both single-scale and multiscale returns as a union.

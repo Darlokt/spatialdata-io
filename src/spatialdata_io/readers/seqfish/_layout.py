@@ -33,7 +33,6 @@ marker, so no format version is detected.
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -205,37 +204,26 @@ def discover_layout(
             expected=f"ROIs in {prefixes!r}",
         )
 
-    names = _element_names(requested, root)
-    layouts = tuple(_roi_layout(root, prefix, name, selection) for prefix, name in zip(requested, names, strict=True))
+    layouts = tuple(_roi_layout(root, prefix, selection) for prefix in requested)
     if conflicts := colliding_element_names(key for roi in layouts for key in roi.element_keys()):
+        folded = {key.lower() for key in conflicts}
+        involved = [
+            prefix
+            for prefix, roi in zip(requested, layouts, strict=True)
+            if any(key.lower() in folded for key in roi.element_keys())
+        ]
         raise ReaderFormatError(
             context=_CONTEXT,
             path=root.path,
-            found=f"colliding element keys {conflicts!r}",
-            expected="element names that are unique ignoring letter case across all selected products",
+            found=f"ROIs {involved!r} produce element keys {conflicts!r} that are equal ignoring case",
+            expected="unique element keys across all selected products; select a subset with rois",
         )
     return layouts
 
 
-def _element_names(prefixes: Sequence[str], root: DatasetRoot) -> list[str]:
-    """Repair invalid ROI prefixes into element names that stay distinct ignoring case."""
-    names = [
-        sanitize_element_name(prefix, source="seqfish: the ROI file prefix", parameter=None) for prefix in prefixes
-    ]
-    folded = Counter(name.lower() for name in names)
-    conflicts = [prefix for prefix, name in zip(prefixes, names, strict=True) if folded[name.lower()] > 1]
-    if conflicts:
-        raise ReaderFormatError(
-            context=_CONTEXT,
-            path=root.path,
-            found=f"ROIs {conflicts!r} whose element names are equal ignoring case",
-            expected="ROI element names that are distinct ignoring case; select one of them with rois",
-        )
-    return names
-
-
-def _roi_layout(root: DatasetRoot, prefix: str, name: str, selection: Selection) -> RoiLayout:
+def _roi_layout(root: DatasetRoot, prefix: str, selection: Selection) -> RoiLayout:
     """Resolve the ROI's tables and the artifacts of its selected products; none may be missing."""
+    name = sanitize_element_name(prefix, source="seqfish: the ROI file prefix", parameter=None)
 
     def artifact(kind: str, extension: str) -> ArtifactFile:
         return require_metadata_file(root, f"{prefix}_{kind}.{extension}", context=ReaderErrorContext("seqfish", kind))

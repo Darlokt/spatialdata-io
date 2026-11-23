@@ -12,7 +12,8 @@ import tifffile
 from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.macsima import _metadata
-from spatialdata_io.readers.macsima._metadata import ChannelMetadata, read_channel
+from spatialdata_io.readers.macsima._metadata import read_channel
+from spatialdata_io.readers.macsima._schemas import ChannelMetadata
 from tests.integration.readers.macsima._fixtures import (
     V0_CHANNELS,
     V1_CHANNELS,

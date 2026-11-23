@@ -76,15 +76,29 @@ def validate_table(table: ad.AnnData, *, path: ArtifactFile, instance_key: str |
         )
 
 
-def validate_index_ids(values: list[int], *, label_dtype: np.dtype[np.integer], path: ArtifactFile) -> None:
-    """Validate IDs parsed from observation names before building an integer array."""
+def parse_index_ids(index: pd.Index, *, label_dtype: np.dtype[np.integer], path: ArtifactFile) -> list[int]:
+    """Parse ASCII decimal observation names as exact positive label IDs."""
     maximum = np.iinfo(label_dtype).max
-    if any(value <= 0 or value > maximum for value in values):
-        raise _schema_error(
-            path,
-            "nonpositive or out-of-range index identifiers",
-            f"positive label IDs representable by {label_dtype}. Zero is background",
-        )
+    max_digits = len(str(maximum))
+    identifiers: list[int] = []
+    for name in index:
+        if not isinstance(name, str) or not name.isascii() or not name.isdigit():
+            raise _schema_error(
+                path,
+                "observation names that are not ASCII decimal digits",
+                "integer label IDs as observation names, or an explicit instance_key",
+            )
+        # Leading zeroes do not change the ID or contribute to its range.
+        significant = name.lstrip("0")
+        value = int(significant) if 0 < len(significant) <= max_digits else 0
+        if not 0 < value <= maximum:
+            raise _schema_error(
+                path,
+                "nonpositive or out-of-range index identifiers",
+                f"positive label IDs representable by {label_dtype}. Zero is background",
+            )
+        identifiers.append(value)
+    return identifiers
 
 
 def validate_instance_ids(column: pd.Series, *, label_dtype: np.dtype[np.integer], path: ArtifactFile) -> None:

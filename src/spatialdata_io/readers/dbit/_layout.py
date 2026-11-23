@@ -21,7 +21,7 @@ overrides may point anywhere.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
@@ -39,7 +39,14 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.paths import PathPolicy
 
-_IMAGE_SUFFIXES = frozenset({".tif", ".tiff", ".btf", ".png", ".jpg", ".jpeg"})
+_IMAGE_FORMATS: dict[str, Literal["tiff", "png", "jpeg"]] = {
+    ".tif": "tiff",
+    ".tiff": "tiff",
+    ".btf": "tiff",
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+}
 _LAYOUT_CONTEXT = ReaderErrorContext("dbit", "dataset layout")
 _TABLE_CONTEXT = ReaderErrorContext("dbit", "expression table")
 _BARCODE_CONTEXT = ReaderErrorContext("dbit", "barcode positions")
@@ -47,12 +54,28 @@ _IMAGE_CONTEXT = ReaderErrorContext("dbit", "histology image")
 
 
 @dataclass(frozen=True, slots=True)
+class TableSource:
+    """An H5AD path with the selected filename stem used for the dataset ID."""
+
+    path: ArtifactFile
+    stem: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImageSource:
+    """A histology image and the codec selected from its logical filename."""
+
+    path: ArtifactFile
+    kind: Literal["tiff", "png", "jpeg"]
+
+
+@dataclass(frozen=True, slots=True)
 class DbitLayout:
     """Validated artifact paths, without loaded data or open resources."""
 
-    table: ArtifactFile
+    table: TableSource
     barcode_positions: ArtifactFile
-    image: ArtifactFile | None
+    image: ImageSource | None
 
 
 def discover_layout(
@@ -74,12 +97,14 @@ def discover_layout(
             search_path=root.path,
         )
         table = require_metadata_file(root, table_candidate, context=_TABLE_CONTEXT)
+        table_stem = table_candidate.stem
     else:
         table = require_caller_file(root, table_file, context=_TABLE_CONTEXT)
-    if table.suffix.lower() != ".h5ad":
-        raise ReaderFormatError(
-            context=_TABLE_CONTEXT, path=table, found=table.suffix, expected="an .h5ad expression table"
-        )
+        if table.suffix.lower() != ".h5ad":
+            raise ReaderFormatError(
+                context=_TABLE_CONTEXT, path=table, found=table.suffix, expected="an .h5ad expression table"
+            )
+        table_stem = table.stem
 
     if barcode_positions_file is None:
         barcode_candidate = require_unique_path(
@@ -98,16 +123,20 @@ def discover_layout(
             search_path=root.path,
         )
         image = (
-            None if image_candidate is None else require_metadata_file(root, image_candidate, context=_IMAGE_CONTEXT)
+            None
+            if image_candidate is None
+            else ImageSource(require_metadata_file(root, image_candidate, context=_IMAGE_CONTEXT), "png")
         )
     else:
-        image = require_caller_file(root, image_file, context=_IMAGE_CONTEXT)
-    if image is not None and image.suffix.lower() not in _IMAGE_SUFFIXES:
-        raise ReaderFormatError(
-            context=_IMAGE_CONTEXT,
-            path=image,
-            found=image.suffix,
-            expected="a TIFF-family, PNG, or JPEG histology image",
-        )
+        image_path = require_caller_file(root, image_file, context=_IMAGE_CONTEXT)
+        kind = _IMAGE_FORMATS.get(image_path.suffix.lower())
+        if kind is None:
+            raise ReaderFormatError(
+                context=_IMAGE_CONTEXT,
+                path=image_path,
+                found=image_path.suffix,
+                expected="a TIFF-family, PNG, or JPEG histology image",
+            )
+        image = ImageSource(image_path, kind)
 
-    return DbitLayout(table, barcode_positions, image)
+    return DbitLayout(TableSource(table, table_stem), barcode_positions, image)

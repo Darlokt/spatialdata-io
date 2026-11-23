@@ -45,20 +45,15 @@ from dask import delayed
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.csv import csv_errors, read_csv_blocks, validate_csv_lines
+from spatialdata_io.readers._utils.csv import csv_data_buffer, csv_errors, csv_header, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
-from spatialdata_io.readers._utils.points import categorize_features, suppress_points_index_warning
+from spatialdata_io.readers._utils.points import suppress_points_index_warning
 from spatialdata_io.readers.cosmx._schemas import (
-    CELL,
-    CELL_ID,
-    FOV,
     TRANSCRIPTS,
-    require_finite,
-    require_positive,
+    normalize_transcript_partition,
     schema_error,
     transcript_types,
 )
-from spatialdata_io.readers.cosmx._tables import read_header
 from spatialdata_io.readers.cosmx._transforms import fov_frame, global_frame
 
 if TYPE_CHECKING:
@@ -73,28 +68,7 @@ if TYPE_CHECKING:
 
 _GZIP_RANGE_BYTES = 8 * 1024 * 1024
 _READ_BYTES = 1024 * 1024
-
-
-def _normalize(block: pd.DataFrame, *, features: pd.Index, path: ArtifactFile) -> pd.DataFrame:
-    """Validate one typed Arrow-backed partition and convert only required point-model columns."""
-    require_positive(pa.array(block[FOV]), path, TRANSCRIPTS, FOV)
-    for name in ("x_global_px", "y_global_px", "x_local_px", "y_local_px"):
-        require_finite(pa.array(block[name]), path, TRANSCRIPTS, name)
-    names = ["x_global_px", "y_global_px", "target", FOV, CELL_ID, "x_local_px", "y_local_px"]
-    names.extend(name for name in ("z", "CellComp", CELL) if name in block)
-    frame = block[names]
-    categories = categorize_features(frame["target"], features)
-    if categories is None:
-        raise schema_error(
-            path, TRANSCRIPTS, found="missing or unknown targets", expected="targets from the count vocabulary"
-        )
-    frame["target"] = categories
-    # PointsModel requires NumPy coordinates; local coordinates stay Arrow annotations.
-    frame["x_global_px"] = frame["x_global_px"].to_numpy(dtype="float64")
-    frame["y_global_px"] = frame["y_global_px"].to_numpy(dtype="float64")
-    return frame.rename(
-        columns={"x_global_px": "x", "y_global_px": "y", "x_local_px": "x_local", "y_local_px": "y_local", "z": "z_raw"}
-    )
+_CONTEXT = ReaderErrorContext("cosmx", TRANSCRIPTS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,10 +85,9 @@ def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
     """Parse gzip records with the same physical types and null policy as plain blocks."""
     path = projection.source.path
     if not payload:
-        return _normalize(_empty(projection.types), features=projection.features, path=path)
-    context = ReaderErrorContext("cosmx", TRANSCRIPTS)
-    validate_csv_lines(payload, context=context, path=path)
-    with pa.BufferReader(payload) as source, csv_errors(context=context, path=path):
+        return normalize_transcript_partition(_empty(projection.types), features=projection.features, path=path)
+    data = csv_data_buffer(payload, context=_CONTEXT, path=path)
+    with pa.BufferReader(data) as source, csv_errors(context=_CONTEXT, path=path):
         table = pacsv.read_csv(
             source,
             read_options=pacsv.ReadOptions(column_names=projection.names, use_threads=False),
@@ -125,7 +98,9 @@ def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
                 strings_can_be_null=False,
             ),
         )
-    return _normalize(table.to_pandas(types_mapper=pd.ArrowDtype), features=projection.features, path=path)
+    return normalize_transcript_partition(
+        table.to_pandas(types_mapper=pd.ArrowDtype), features=projection.features, path=path
+    )
 
 
 def _empty(types: pa.Schema) -> pd.DataFrame:
@@ -187,14 +162,13 @@ def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
     """Return one partition per plain-CSV block or compressed member range."""
     path = projection.source.path
     if not projection.source.compressed:
-        context = ReaderErrorContext("cosmx", TRANSCRIPTS)
         blocks = read_csv_blocks(
             path,
             header=projection.names,
             schema=projection.types,
-            context=context,
+            context=_CONTEXT,
         )
-        return blocks.map_partitions(_normalize, features=projection.features, path=path, meta=meta)
+        return blocks.map_partitions(normalize_transcript_partition, features=projection.features, path=path, meta=meta)
 
     size = path.stat().st_size
     offset: int | Delayed = 0
@@ -219,10 +193,10 @@ def read_transcripts(
     partition is computed.
     """
     path = source.path
-    names = read_header(source, TRANSCRIPTS)
+    names = csv_header(path, context=_CONTEXT, compressed=source.compressed)
     types = transcript_types(names, path)
     vocabulary = pd.Index(features)
-    meta = _normalize(_empty(types), features=vocabulary, path=path)
+    meta = normalize_transcript_partition(_empty(types), features=vocabulary, path=path)
     frame = _frame(_Projection(names, types, vocabulary, source), meta)
 
     transformations: dict[str, BaseTransformation] = {

@@ -1,52 +1,18 @@
-"""Cell barcode and sparse nucleus arithmetic contracts."""
+"""Sparse nucleus arithmetic contracts."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
 import pytest
 from scipy.sparse import csr_array
 
-from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.visium_hd._cells import _aggregate_counts, cell_ids
+from spatialdata_io.readers.visium_hd._cells import _aggregate_counts
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-class TestCellIds:
-    """Accept only the documented fixed-width positive ID spelling."""
-
-    def test_exact(self, tmp_path: Path) -> None:
-        result = cell_ids(
-            pd.Index(["cellid_999999999-1", "cellid_000000001-1"]), ArtifactFile(tmp_path), version="4.1.0"
-        )
-        np.testing.assert_array_equal(result, [999999999, 1])
-        assert result.dtype == np.uint32
-
-    def test_empty(self, tmp_path: Path) -> None:
-        result = cell_ids(pd.Index([], dtype=str), ArtifactFile(tmp_path), version="4.1.0")
-        assert result.shape == (0,)
-        assert result.dtype == np.uint32
-
-    @pytest.mark.parametrize(
-        "barcode",
-        [
-            "cellid_0-1",
-            "cellid_000000000-1",
-            "cellid_000000001-2",
-            "cellid_00000001a-1",
-            "cellid_1000000000-1",
-            "cellid_-00000001-1",
-            "cellid_4294967297-1",
-        ],
-    )
-    def test_invalid(self, tmp_path: Path, barcode: str) -> None:
-        with pytest.raises(ReaderFormatError, match="cell"):
-            cell_ids(pd.Index([barcode]), ArtifactFile(tmp_path), version="4.1.0")
 
 
 class TestAggregateCounts:

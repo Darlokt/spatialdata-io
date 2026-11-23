@@ -19,7 +19,7 @@ from spatialdata.models import get_table_keys
 from spatialdata.transformations import Scale, get_transformation
 from xarray import DataArray
 
-import spatialdata_io.readers.steinbock._images as image_owner
+import spatialdata_io.readers.steinbock._rasters as steinbock_rasters
 import spatialdata_io.readers.steinbock._reader as reader_owner
 import spatialdata_io.readers.steinbock._tables as table_owner
 from spatialdata_io._positions import POSITIONS_KEY
@@ -195,7 +195,7 @@ class TestSteinbockPositions:
 
     def test_resolves_calibration_once_before_single_final_linkage(self, tmp_path: Path, mocker: MockerFixture) -> None:
         _write_dataset(tmp_path, {"sample-a": (2.0, 3.0), "sample-b": (5.0, 7.0)})
-        spacing = mocker.spy(image_owner, "_calibration")
+        spacing = mocker.spy(steinbock_rasters, "_calibration")
         linkage = mocker.spy(reader_owner, "parse_linked_table")
         table = steinbock(tmp_path).tables["table"]
         assert spacing.call_count == 2

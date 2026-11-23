@@ -16,6 +16,7 @@ from spatialdata_io.readers.mcmicro._schemas import (
     QUANTIFICATION_CONTEXT,
     STRING_DTYPE,
     canonical_markers,
+    marker_types,
     normalize_markers,
     quantification_columns,
     validate_columns,
@@ -48,6 +49,17 @@ class TestValidateColumns:
         validate_columns(["a", "b"], _path(tmp_path), context=QUANTIFICATION_CONTEXT)
 
 
+class TestMarkerTypes:
+    def test_declares_all_fields_in_source_order(self, tmp_path: Path) -> None:
+        header = ("cycle", "marker_name", "new annotation")
+        assert marker_types(header, _path(tmp_path)) == pa.schema([(name, pa.string()) for name in header])
+
+    def test_requires_marker_identity(self, tmp_path: Path) -> None:
+        with pytest.raises(ReaderFormatError, match="marker_name") as caught:
+            marker_types(["cycle", "channel"], _path(tmp_path))
+        assert caught.value.path == _path(tmp_path)
+
+
 class TestCanonicalMarkers:
     """Every occurrence of a repeated marker receives MCQuant's one-based suffix."""
 
@@ -71,7 +83,6 @@ class TestNormalizeMarkers:
     @pytest.mark.parametrize(
         ("frame", "match"),
         [
-            (_markers(name=["A"]), "marker_name"),
             (_markers(marker_name=[]), "no markers"),
             (_markers(marker_name=["A", ""]), "empty or NUL"),
             (_markers(marker_name=["A\x00"]), "empty or NUL"),

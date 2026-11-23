@@ -16,6 +16,7 @@ from spatialdata_io.readers.xenium._schemas import (
     CELL_OPTIONAL_COUNTS,
     CELL_REQUIRED_COUNTS,
     TRANSCRIPT_REQUIRED,
+    analysis_schema,
     arrow_series,
     boundary_types,
     cast_column,
@@ -31,14 +32,15 @@ from spatialdata_io.readers.xenium._schemas import (
     summary_columns,
     transcript_columns,
     transcript_types,
-    validate_analysis_header,
     validate_header,
     validate_membership,
+    validate_parquet_types,
 )
 
 if TYPE_CHECKING:
     from zarr.core.common import JSON
 
+    from spatialdata_io.readers.xenium._schemas import AnalysisKind
     from spatialdata_io.readers.xenium._version import Family
 
 PATH = Path("bundle/cells.parquet")
@@ -69,11 +71,12 @@ class TestValidateHeader:
             validate_header(names, ("a", "b"), path=PATH, context=CONTEXT)
 
 
-class TestValidateAnalysisHeader:
+class TestAnalysisSchema:
     """Analysis headers have exact field order and consecutive projection components."""
 
     def test_clustering_header(self) -> None:
-        validate_analysis_header(["Barcode", "Cluster"], "clustering", path=PATH, context=ANALYSIS)
+        result = analysis_schema(["Barcode", "Cluster"], "clustering", path=PATH, context=ANALYSIS)
+        assert result == pa.schema([("Barcode", pa.string()), ("Cluster", pa.uint64())])
 
     @pytest.mark.parametrize(
         "names",
@@ -89,18 +92,19 @@ class TestValidateAnalysisHeader:
     )
     def test_rejects_clustering_headers(self, names: list[str]) -> None:
         with pytest.raises(ReaderFormatError, match="Barcode,Cluster") as error:
-            validate_analysis_header(names, "clustering", path=PATH, context=ANALYSIS)
+            analysis_schema(names, "clustering", path=PATH, context=ANALYSIS)
 
         assert error.value.path == PATH
         assert error.value.context == ANALYSIS
         assert f"header {names!r}" in str(error.value)
+        assert f"header {names!r}" in str(error.value)
 
     @pytest.mark.parametrize(("kind", "prefix"), [("pca", "PC"), ("umap", "UMAP")])
     @pytest.mark.parametrize("components", [1, 2, 3])
-    def test_projection_headers(self, kind: str, prefix: str, components: int) -> None:
-        validate_analysis_header(
-            ["Barcode", *(f"{prefix}-{i}" for i in range(1, components + 1))], kind, path=PATH, context=ANALYSIS
-        )
+    def test_projection_headers(self, kind: AnalysisKind, prefix: str, components: int) -> None:
+        columns = [f"{prefix}-{i}" for i in range(1, components + 1)]
+        result = analysis_schema(["Barcode", *columns], kind, path=PATH, context=ANALYSIS)
+        assert result == pa.schema([("Barcode", pa.string()), *((name, pa.float64()) for name in columns)])
 
     @pytest.mark.parametrize(("kind", "prefix"), [("pca", "PC"), ("umap", "UMAP")])
     @pytest.mark.parametrize(
@@ -136,14 +140,34 @@ class TestValidateAnalysisHeader:
             "empty-name",
         ],
     )
-    def test_rejects_projection_headers(self, kind: str, prefix: str, columns: list[str]) -> None:
+    def test_rejects_projection_headers(self, kind: AnalysisKind, prefix: str, columns: list[str]) -> None:
         names = [name.format(prefix=prefix) for name in columns]
         with pytest.raises(ReaderFormatError, match=rf"Barcode,{prefix}-1,\.\.\.") as error:
-            validate_analysis_header(names, kind, path=PATH, context=ANALYSIS)
+            analysis_schema(names, kind, path=PATH, context=ANALYSIS)
 
         assert error.value.path == PATH
         assert error.value.context == ANALYSIS
-        assert f"header {names!r}" in str(error.value)
+
+
+class TestValidateParquetTypes:
+    """Use physical field roles and ignore unconsumed optional columns."""
+
+    def test_accepts_vendor_storage_widths_and_extra_fields(self) -> None:
+        source = pa.schema(
+            [
+                ("cell_id", pa.binary()),
+                ("x_centroid", pa.float32()),
+                ("total_counts", pa.int64()),
+                ("nucleus_count", pa.null()),
+                ("extra", pa.struct([("label", pa.string())])),
+            ]
+        )
+        validate_parquet_types(source, cell_types("hex_ids"), path=PATH, context=CONTEXT)
+
+    @pytest.mark.parametrize(("name", "kind"), [("cell_id", pa.float64()), ("total_counts", pa.bool_())])
+    def test_rejects_incompatible_projected_field(self, name: str, kind: pa.DataType) -> None:
+        with pytest.raises(ReaderFormatError, match=f"{name} of type"):
+            validate_parquet_types(pa.schema([(name, kind)]), cell_types("integer_ids"), path=PATH, context=CONTEXT)
 
 
 class TestCellTypes:

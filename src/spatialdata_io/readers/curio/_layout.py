@@ -42,15 +42,6 @@ METRICS = "metrics"
 CLUSTER_FEATURES = "cluster features"
 MORAN_FEATURES = "Moran features"
 
-# Artifact names and file suffixes in ``CurioLayout`` field order.
-_ARTIFACTS = (
-    (COUNTS, "anndata.h5ad"),
-    (CLUSTERS, "cluster_assignment.txt"),
-    (METRICS, "Metrics.csv"),
-    (CLUSTER_FEATURES, "variable_features_clusters.txt"),
-    (MORAN_FEATURES, "variable_features_spatial_moransi.txt"),
-)
-
 
 @dataclass(frozen=True, slots=True)
 class CurioLayout:
@@ -69,9 +60,9 @@ def discover_layout(path: str | Path, *, path_policy: PathPolicy = "strict") -> 
     root = normalize_dataset_root(path, context=context, path_policy=path_policy)
     candidates = list_directory(root.path, context=context)
 
-    artifacts: list[ArtifactFile] = []
     prefixes: set[str] = set()
-    for artifact, suffix in _ARTIFACTS:
+
+    def resolve(artifact: str, suffix: str) -> ArtifactFile:
         # The pattern makes a missing or ambiguous file actionable.
         artifact_context = ReaderErrorContext("curio", f"{artifact} (*_{suffix})")
         candidate = require_unique_path(
@@ -80,7 +71,15 @@ def discover_layout(path: str | Path, *, path_policy: PathPolicy = "strict") -> 
             search_path=root.path,
         )
         prefixes.add(candidate.name.removesuffix(f"_{suffix}"))
-        artifacts.append(require_metadata_file(root, candidate, context=artifact_context))
+        return require_metadata_file(root, candidate, context=artifact_context)
+
+    layout = CurioLayout(
+        counts=resolve(COUNTS, "anndata.h5ad"),
+        clusters=resolve(CLUSTERS, "cluster_assignment.txt"),
+        metrics=resolve(METRICS, "Metrics.csv"),
+        cluster_features=resolve(CLUSTER_FEATURES, "variable_features_clusters.txt"),
+        moran_features=resolve(MORAN_FEATURES, "variable_features_spatial_moransi.txt"),
+    )
 
     if len(prefixes) != 1 or "" in prefixes:
         raise ReaderFormatError(
@@ -90,4 +89,4 @@ def discover_layout(path: str | Path, *, path_policy: PathPolicy = "strict") -> 
             expected="one nonempty sample prefix shared by all five artifacts",
         )
 
-    return CurioLayout(*artifacts)
+    return layout

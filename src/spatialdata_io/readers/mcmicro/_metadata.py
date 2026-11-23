@@ -24,7 +24,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
-import pyarrow as pa
 import pyarrow.csv as pacsv
 import yaml
 
@@ -33,8 +32,8 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers.mcmicro._schemas import (
     MARKERS_CONTEXT,
     MarkerPanel,
+    marker_types,
     normalize_markers,
-    validate_columns,
 )
 
 if TYPE_CHECKING:
@@ -97,14 +96,14 @@ def read_markers(path: ArtifactFile) -> MarkerPanel:
     try:
         with path.open("rb") as source, csv_errors(context=MARKERS_CONTEXT, path=path):
             columns = csv_header(path, context=MARKERS_CONTEXT, source=source)
-            validate_columns(columns, path, context=MARKERS_CONTEXT)
+            types = marker_types(columns, path)
             source.seek(0)
             table = pacsv.read_csv(
                 source,
                 parse_options=pacsv.ParseOptions(newlines_in_values=True),
                 convert_options=pacsv.ConvertOptions(
-                    column_types={name: pa.string() for name in columns},
-                    include_columns=list(columns),
+                    column_types=types,
+                    include_columns=types.names,
                     null_values=[],
                     strings_can_be_null=False,
                 ),

@@ -29,6 +29,18 @@ def _file(tmp_path: Path, payload: bytes) -> ArtifactFile:
 
 
 class TestCsvHeader:
+    def test_opens_selected_gzip_encoding_on_suffixless_path(self, tmp_path: Path) -> None:
+        path = tmp_path / "payload"
+        path.write_bytes(gzip.compress(b"id,targ") + gzip.compress(b"et\n1,A\n"))
+        assert csv_header(path, context=_CONTEXT, compressed=True) == ("id", "target")
+
+    def test_selected_gzip_corruption_has_artifact_context(self, tmp_path: Path) -> None:
+        path = _file(tmp_path, b"not-gzip")
+        with pytest.raises(ReaderFormatError, match="invalid gzip") as caught:
+            csv_header(path, context=_CONTEXT, compressed=True)
+        assert caught.value.path == path
+        assert caught.value.context == _CONTEXT
+
     def test_malformed_cr_only_file_has_bounded_header_read(self, tmp_path: Path) -> None:
         with io.BytesIO(b"a,b\r" + b"1,2\r" * 1_000_000) as source:
             with pytest.raises(ReaderFormatError, match="LF or CRLF"):

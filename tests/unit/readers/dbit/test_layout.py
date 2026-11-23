@@ -30,9 +30,12 @@ class TestDiscoverLayout:
 
         layout = discover_layout(tmp_path, table_file=None, barcode_positions_file=None, image_file=None)
 
-        assert layout.table == (tmp_path / "sample.h5ad").resolve()
+        assert layout.table.path == (tmp_path / "sample.h5ad").resolve()
+        assert layout.table.stem == "sample"
         assert layout.barcode_positions == (tmp_path / "barcode_list.txt").resolve()
-        assert layout.image == (tmp_path / "prefix_tissue_lowres_image.png").resolve()
+        assert layout.image is not None
+        assert layout.image.path == (tmp_path / "prefix_tissue_lowres_image.png").resolve()
+        assert layout.image.kind == "png"
         assert not hasattr(layout, "__dict__")
 
         with pytest.raises(FrozenInstanceError):
@@ -83,9 +86,10 @@ class TestDiscoverLayout:
             image_file="tissue_lowres_image.png",
         )
 
-        assert layout.table.name == "sample.h5ad"
+        assert layout.table.path.name == "sample.h5ad"
         assert layout.barcode_positions.name == "barcode_list.txt"
-        assert layout.image == tmp_path / "tissue_lowres_image.png"
+        assert layout.image is not None
+        assert layout.image.path == tmp_path / "tissue_lowres_image.png"
 
     def test_absolute_overrides_outside_root(self, tmp_path: Path) -> None:
         root = tmp_path / "dataset"
@@ -100,9 +104,11 @@ class TestDiscoverLayout:
             image_file=tmp_path / "image.jpeg",
         )
 
-        assert layout.table == tmp_path / "sample.h5ad"
+        assert layout.table.path == tmp_path / "sample.h5ad"
         assert layout.barcode_positions == tmp_path / "barcode_list.txt"
-        assert layout.image == tmp_path / "image.jpeg"
+        assert layout.image is not None
+        assert layout.image.path == tmp_path / "image.jpeg"
+        assert layout.image.kind == "jpeg"
 
     @pytest.mark.parametrize("artifact", ["sample.h5ad", "barcode_list.txt", "tissue_lowres_image.png"])
     def test_discovered_symlink_cannot_escape_root(self, tmp_path: Path, artifact: str) -> None:

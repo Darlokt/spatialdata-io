@@ -65,7 +65,7 @@ def _read_slices(path: ArtifactFile) -> tuple[pd.Index, NDArray[np.object_]]:
     identifiers: list[pd.Index] = []
     try:
         with pq.ParquetFile(path) as source:
-            columns = boundary_columns(source.schema_arrow.names, path)
+            columns = boundary_columns(source.schema_arrow, path)
             if not source.metadata.num_rows:
                 raise schema_error(
                     path, BOUNDARIES, found="no cell boundaries", expected="a nonempty cell footprint population"

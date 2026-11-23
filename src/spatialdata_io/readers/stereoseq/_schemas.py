@@ -41,6 +41,7 @@ GEF names, cell fields ``obs`` columns; all are fixed, valid column names.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -97,6 +98,25 @@ def require_group(parent: h5py.Group, name: str, path: ArtifactFile) -> h5py.Gro
     if not isinstance(value, h5py.Group):
         raise schema_error(path, name, found=type(value).__name__, expected="an HDF5 group")
     return value
+
+
+def square_bin_names(group: h5py.Group, path: ArtifactFile) -> dict[int, str]:
+    """Identify each positive native square bin by its unique numeric size."""
+    bins: dict[int, str] = {}
+    for name in group:
+        match = re.fullmatch(r"bin0*([1-9][0-9]*)", name)
+        if match is None:
+            continue
+        try:
+            size = int(match[1])
+        except ValueError as error:
+            raise schema_error(path, group.name, found=f"bin name {name!r}", expected="a positive bin size") from error
+        if size in bins:
+            raise schema_error(
+                path, group.name, found=f"aliases {bins[size]!r} and {name!r}", expected="unique numeric bin names"
+            )
+        bins[size] = name
+    return bins
 
 
 def require_dataset(parent: h5py.Group, name: str, path: ArtifactFile, *, ndim: int = 1) -> h5py.Dataset:

@@ -124,7 +124,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         ``region`` values. Must be a valid SpatialData element name: nonempty,
         only letters, digits, ``_``, ``-`` and ``.``, not ``.`` or ``..``, not
         starting with ``__``, and not ``table`` in any letter case; it is
-        checked before any I/O. Defaults to the H5AD filename stem, repaired
+        checked before any I/O. Defaults to the selected H5AD filename stem, repaired
         with one warning if it breaks these rules: other characters become
         ``_``, a leading run of underscores becomes one, an empty name, ``.``
         or ``..`` becomes ``unnamed``, and a reserved name gains a trailing
@@ -165,9 +165,8 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         inside the directory. ``"relaxed"`` also accepts symlinks to targets
         stored elsewhere, as in git-annex or DVC datasets. Relative paths may
         not leave the directory with ``..`` in either mode, and absolute file
-        options may point anywhere. File options keep the name the caller
-        gave, and relaxed reads keep each artifact's own name rather than that
-        of its link target.
+        options may point anywhere. The selected file names supply the default
+        dataset ID and the image format under either policy.
 
     Returns
     -------
@@ -297,7 +296,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         raise ValueError(message)
 
     barcodes = read_barcodes(layout.barcode_positions)
-    table = read_table(layout.table, barcodes)
+    table = read_table(layout.table.path, barcodes)
 
     images: dict[str, DataArray | DataTree] = {}
     transformations: dict[str, BaseTransformation] = {GRID_FRAME: Identity()}
@@ -325,7 +324,7 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     normalize_owned_anndata(
         table,
         context=_TABLE_CONTEXT,
-        path=layout.table,
+        path=layout.table.path,
         expression_layers=("counts",) if "counts" in table.layers else (),
         duplicate_sums=duplicate_sums,
     )
@@ -340,12 +339,12 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
         table,
         TableLinkage((dataset_id,), "region", "pixel_id"),
         context=_TABLE_CONTEXT,
-        path=layout.table,
+        path=layout.table.path,
         expected_instance_ids={dataset_id: grid.index},
     )
 
     result = SpatialData(images=images, shapes={dataset_id: grid}, tables={"table": table})
     set_reader_provenance(result.attrs, reader="dbit")
     if duplicate_sums:
-        warn_user(f"dbit {layout.table.name}: " + "; ".join(map(str, duplicate_sums)))
+        warn_user(f"dbit {layout.table.path.name}: " + "; ".join(map(str, duplicate_sums)))
     return result

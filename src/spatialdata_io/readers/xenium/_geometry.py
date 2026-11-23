@@ -23,25 +23,25 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
-import pyarrow.parquet as pq
 import shapely
 from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity, Translation
 
-from spatialdata_io.readers._utils.csv import csv_errors, open_csv_stream
+from spatialdata_io.readers._utils.csv import csv_errors, csv_header, open_csv_stream
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.geometry import invalid_geometry_mask, raise_invalid_geometries
+from spatialdata_io.readers.xenium._parquet import open_parquet
 from spatialdata_io.readers.xenium._schemas import (
     CELL_ID,
     LABEL_ID,
     VERTICES,
+    boundary_columns,
     cast_column,
     id_index,
     normalize_ids,
     require_no_nulls,
-    validate_header,
+    validate_parquet_types,
 )
-from spatialdata_io.readers.xenium._tables import read_header
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -93,12 +93,15 @@ class _Vertices:
 
 def _read_vertices(source: TabularSource, context: ReaderErrorContext) -> _Vertices:
     path, types = source.file, source.types
-    names = pq.read_schema(path).names if source.kind == "parquet" else read_header(source, context=context)
-    validate_header(names, (CELL_ID, *VERTICES), path=path, context=context)
-    columns = [CELL_ID, *VERTICES, *((LABEL_ID,) if LABEL_ID in names else ())]
     if source.kind == "parquet":
-        table = pq.read_table(path, columns=columns)
+        with open_parquet(path, context=context) as parquet:
+            schema = parquet.schema_arrow
+            columns = boundary_columns(schema.names, path=path, context=context)
+            validate_parquet_types(schema, types, path=path, context=context)
+            table = parquet.read(columns=list(columns))
     else:
+        header = csv_header(path, context=context, compressed=source.kind == "csv_gz")
+        columns = boundary_columns(header, path=path, context=context)
         with (
             open_csv_stream(path, context=context, compressed=source.kind == "csv_gz") as stream,
             csv_errors(context=context, path=path),
@@ -106,7 +109,7 @@ def _read_vertices(source: TabularSource, context: ReaderErrorContext) -> _Verti
             table = pacsv.read_csv(
                 stream,
                 convert_options=pacsv.ConvertOptions(
-                    column_types=types, include_columns=columns, null_values=[], strings_can_be_null=False
+                    column_types=types, include_columns=list(columns), null_values=[], strings_can_be_null=False
                 ),
             )
     require_no_nulls(table, path=path, context=context)

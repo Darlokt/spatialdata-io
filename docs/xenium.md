@@ -115,6 +115,14 @@ With `include_analysis=True`, 10x secondary analysis from `analysis/` or `analys
 
 When labels are requested without a table or boundary polygons, the reader inspects the native mask metadata and calibration without loading cell IDs, summary vectors, segmentation methods or polygon membership arrays. It still checks the bundle family, named polygon-set structure, mask dtypes and matching grids, and the mask transform against `pixel_size`. Single-set transcript-assignment imports cannot return labels. Unused identity and summary arrays are neither loaded nor validated in this mode. Table and polygon reads retain their identity, label and polygon-membership cross-checks. Label pixels always remain lazy, and the native store closes before return.
 
+For cells, boundaries, and transcripts, the reader validates the names and
+types of documented Parquet fields from the footer. Text fields support UTF-8
+string and binary storage, including their large-width variants. Integer cell
+IDs use integer storage. Other numeric fields use native integer or floating
+storage and are converted with checked Arrow casts. Transcript `is_gene`
+uses boolean storage. Additional cell annotations retain their source order
+and are preserved for table construction.
+
 ## Transcripts
 
 Points have NumPy `x`, `y`, `z` (float32 µm), a categorical `feature_name` whose known categories are the count-matrix features in source order, `cell_id` with the vendor sentinel for unassigned transcripts (`UNASSIGNED`, or `-1` with integer IDs), `transcript_id`, `overlaps_nucleus`, `qv` and, when present, `fov_name`, `nucleus_distance`, `codeword_index`, `codeword_category` and `is_gene`. These other columns are Arrow-backed (`uint64[pyarrow]` `transcript_id`, `uint8[pyarrow]` `overlaps_nucleus`, `float[pyarrow]` `qv`, `int64[pyarrow]` or `string[pyarrow]` `cell_id`, ...); the coordinates are NumPy because `PointsModel` requires it. Binary columns of early bundles are decoded strictly as UTF-8. Every transcript is kept: the count matrix contains assigned transcripts with `qv >= 20`, so `points[points.qv >= 20]` reproduces it.

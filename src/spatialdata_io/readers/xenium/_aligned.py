@@ -42,14 +42,13 @@ from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTOR
 from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
-    RasterOptions,
     inspect_tiff,
     make_raster_options,
     normalize_cyx_image,
     read_tiff,
     validate_data_axes,
 )
-from spatialdata_io.readers._utils.paths import ArtifactFile, require_file
+from spatialdata_io.readers._utils.paths import require_file
 from spatialdata_io.readers.xenium._layout import AlignmentKeypoints
 from spatialdata_io.readers.xenium._schemas import ALIGNMENT_TYPES, KEYPOINT_TYPES, validate_header
 
@@ -59,6 +58,11 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
+
+    from spatialdata_io.readers._utils.image import (
+        RasterOptions,
+    )
+    from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _AXES = ("c", "y", "x")
 _MATRIX_SHAPE = (3, 3)

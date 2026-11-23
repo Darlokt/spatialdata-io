@@ -229,6 +229,7 @@ class TestBoundaryFeatures:
             "id_bool",
             "id_float",
             "id_zero",
+            "geometry_missing",
             "property_type",
             "property_geometry",
         ],
@@ -251,6 +252,8 @@ class TestBoundaryFeatures:
             feature["id"] = 1.0
         elif invalid == "id_zero":
             feature["id"] = 0
+        elif invalid == "geometry_missing":
+            feature.pop("geometry")
         elif invalid == "property_type":
             feature["properties"] = "not an object"
         elif invalid == "property_geometry":

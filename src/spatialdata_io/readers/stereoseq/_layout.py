@@ -58,9 +58,6 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.names import sanitize_element_name
 from spatialdata_io.readers._utils.paths import (
-    ArtifactDirectory,
-    ArtifactFile,
-    DatasetRoot,
     list_directory,
     normalize_dataset_root,
     require_caller_file,
@@ -72,7 +69,12 @@ from spatialdata_io.readers._utils.paths import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from spatialdata_io.readers._utils.paths import PathPolicy
+    from spatialdata_io.readers._utils.paths import (
+        ArtifactDirectory,
+        ArtifactFile,
+        DatasetRoot,
+        PathPolicy,
+    )
 
 type Family = Literal["compact_numbered", "numbered", "outs", "flat"]
 type ImageRole = Literal["registered", "mask", "tissue_cut", "distance_mask", "expression"]

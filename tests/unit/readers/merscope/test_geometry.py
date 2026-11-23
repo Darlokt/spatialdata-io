@@ -49,6 +49,24 @@ def _read(path: ArtifactFile) -> gpd.GeoDataFrame:
 class TestReadBoundaries:
     """Union all valid components per source identity without inferring a z population."""
 
+    @pytest.mark.parametrize("name", ["EntityID", "ZIndex", "Geometry", "Type"])
+    def test_rejects_bad_physical_types_before_decoding_batches(
+        self, tmp_path: Path, mocker: MockerFixture, name: str
+    ) -> None:
+        shape = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        path = _write_boundaries(tmp_path / "boundaries.parquet", [shape], ["001"])
+        table = pq.read_table(path)
+        invalid = {"EntityID": [1.0], "ZIndex": [True], "Geometry": [shape.wkb_hex], "Type": [{"kind": "Cell"}]}
+        pq.write_table(table.set_column(table.schema.get_field_index(name), name, pa.array(invalid[name])), path)
+        read = mocker.spy(geometry_module.pq.ParquetFile, "iter_batches")
+
+        with pytest.raises(ReaderFormatError, match=rf"{name} dtype") as caught:
+            read_boundaries(path, policy="keep")
+
+        read.assert_not_called()
+        assert caught.value.path == path
+        assert caught.value.context.artifact == "cell boundaries"
+
     def test_keep_preserves_literal_components_vertices_holes_repeats_and_order(self, tmp_path: Path) -> None:
         outer = Polygon([(0, 0), (4, 0), (4, 4), (0, 4)], holes=[[(1, 1), (1, 2), (2, 2), (2, 1)]])
         island = Polygon([(6, 0), (7, 0), (6, 1)])

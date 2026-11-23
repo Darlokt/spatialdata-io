@@ -42,7 +42,8 @@ if TYPE_CHECKING:
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 STRING_DTYPE = pd.ArrowDtype(pa.string())
-REQUIRED_COLUMNS = frozenset({"cell_id", "region", "x", "y"})
+_CSV_CELL_FIELDS = {"cell_id": pa.uint64(), "region": pa.string(), "x": pa.float64(), "y": pa.float64()}
+REQUIRED_COLUMNS = frozenset(_CSV_CELL_FIELDS)
 CELL_TABLE_CONTEXT = ReaderErrorContext("codex", "cell table")
 _CYCLE_COLUMN = re.compile(r"cyc\d+_ch\d+")
 # The region names the shapes element. Other element names are fixed, and
@@ -142,21 +143,22 @@ def region_name(regions: pd.Series, path: ArtifactFile) -> str:
 
 def csv_types(columns: list[str], features: list[str]) -> pa.Schema:
     """Declare fixed CSV types after source names and cycle roles were validated."""
-    numeric = {*features, "x", "y"}
+    cycle_fields = set(features)
     return pa.schema(
-        [
-            (name, pa.uint64() if name == "cell_id" else pa.float64() if name in numeric else pa.string())
-            for name in columns
-        ]
+        [(name, pa.float64() if name in cycle_fields else _CSV_CELL_FIELDS.get(name, pa.string())) for name in columns]
     )
 
 
-def validate_csv_annotations(frame: pd.DataFrame, path: ArtifactFile) -> None:
+def validate_csv_annotations(annotations: pa.Table, path: ArtifactFile) -> None:
     """Reject NUL in source text; typed CSV ingestion validates numeric fields and widths."""
-    for column in frame:
-        if column not in {"cell_id", "x", "y"} and frame[column].str.contains("\x00", regex=False).any():
+    options = pc.MatchSubstringOptions("\x00")
+    for field in annotations.schema:
+        if not pa.types.is_string(field.type):
+            continue
+        matches = pc.call_function("match_substring", [annotations[field.name]], options=options)
+        if pc.call_function("any", [matches]).as_py():
             raise schema_error(
-                path, found=f"NUL character in {column!r}", expected="text fields without NUL characters"
+                path, found=f"NUL character in {field.name!r}", expected="text fields without NUL characters"
             )
 
 

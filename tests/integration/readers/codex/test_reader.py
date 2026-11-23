@@ -681,6 +681,21 @@ class TestCodexCalibration:
 class TestCodexPathPolicy:
     """Discovered artifacts follow the dataset root's symlink policy."""
 
+    @pytest.mark.parametrize("kind", ["csv", "fcs"])
+    def test_in_root_links_preserve_discovered_formats(self, tmp_path: Path, kind: str) -> None:
+        cells = tmp_path / f"cells.{kind}"
+        image = tmp_path / "stitched.tif"
+        (write_csv if kind == "csv" else write_fcs)(cells)
+        write_image(image)
+        expected = codex(tmp_path)
+        payloads = tmp_path / "payloads"
+        payloads.mkdir()
+        cells.symlink_to(cells.rename(payloads / "cells"))
+        image.symlink_to(image.rename(payloads / "image"))
+
+        assert_spatial_data_objects_are_identical(codex(tmp_path), expected)
+        assert_spatial_data_objects_are_identical(codex(tmp_path, path_policy="relaxed"), expected)
+
     def test_out_of_root_symlinks_require_the_relaxed_policy(
         self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
     ) -> None:

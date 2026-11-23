@@ -13,7 +13,7 @@ import pytest
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.steinbock._images import SampleGrid
+from spatialdata_io.readers.steinbock._rasters import SampleGrid
 from spatialdata_io.readers.steinbock._schemas import (
     IMAGE_METADATA_TYPES,
     _format_error,

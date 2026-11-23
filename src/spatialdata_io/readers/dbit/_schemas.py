@@ -56,6 +56,9 @@ BARCODE_LENGTH = 8
 GRID_FRAME = "grid_pixels"
 IMAGE_FRAME = "image_pixels"
 MAX_GRID_SIDE = 50
+_BARCODE_PATTERN = rf"[ACGT]{{{BARCODE_LENGTH}}}"
+_PAIR_PATTERN = rf"[ACGT]{{{2 * BARCODE_LENGTH}}}"
+_POSITION_PATTERN = rf"[AB][1-9][0-9]{{0,{len(str(MAX_GRID_SIDE)) - 1}}}"
 BARCODE_CONTEXT = ReaderErrorContext("dbit", "barcode positions")
 _TABLE_CONTEXT = ReaderErrorContext("dbit", "expression table")
 
@@ -78,9 +81,9 @@ def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
 
     frame["sequence"] = frame["sequence"].str.upper()
     positions, sequences = frame["position"], frame["sequence"]
-    if (
-        not positions.str.fullmatch(r"[AB]([1-9]|[1-4][0-9]|50)").all()
-        or not sequences.str.fullmatch(r"[ACGT]{8}").all()
+    ordinals = positions.str.slice(1).astype(GRID_DTYPE) if positions.str.fullmatch(_POSITION_PATTERN).all() else None
+    if not (
+        ordinals is not None and sequences.str.fullmatch(_BARCODE_PATTERN).all() and ordinals.le(MAX_GRID_SIDE).all()
     ):
         raise ReaderFormatError(
             context=BARCODE_CONTEXT,
@@ -94,7 +97,7 @@ def normalize_barcodes(frame: pd.DataFrame, path: ArtifactFile) -> None:
         )
 
     frame["axis"] = positions.str.slice(0, 1)
-    frame["position"] = positions.str.slice(1).astype(GRID_DTYPE)
+    frame["position"] = ordinals
 
     extents: list[int] = []
     for axis in ("A", "B"):
@@ -171,7 +174,7 @@ def validate_table(table: ad.AnnData, path: ArtifactFile) -> None:
 
 def validate_barcode_prefixes(names: pd.Index, path: ArtifactFile) -> None:
     """Require one unique upper-case 16-base B/A prefix per observation."""
-    if not names.str.fullmatch(r"[ACGT]{16}").all() or not names.is_unique:
+    if not names.str.fullmatch(_PAIR_PATTERN).all() or not names.is_unique:
         raise ReaderFormatError(
             context=_TABLE_CONTEXT,
             path=path,

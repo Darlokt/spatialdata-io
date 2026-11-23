@@ -29,7 +29,7 @@ def _pitches(handle: h5py.File, source: SquareSource | CellSource) -> tuple[int,
         _schemas.require_group(handle, "cellBin", path)
         return (_schemas.integer_attribute(handle.attrs, "resolution", path, "cell resolution", positive=True),)
     group = _schemas.require_group(handle, "geneExp", path)
-    bins = [name for name in group if name.startswith("bin") and name[3:].isdigit() and int(name[3:]) > 0]
+    bins = _schemas.square_bin_names(group, path)
     if not bins:
         raise _schemas.schema_error(
             path, "image calibration", found="no stored square bins", expected="GEF expression pitch metadata"
@@ -42,7 +42,7 @@ def _pitches(handle: h5py.File, source: SquareSource | CellSource) -> tuple[int,
             "expression resolution",
             positive=True,
         )
-        for name in sorted(bins)
+        for name in sorted(bins.values())
     )
 
 

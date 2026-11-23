@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
+from spatialdata_io.readers._utils.image import make_raster_options, validate_tiff_index
 from spatialdata_io.readers.generic._images import VALID_IMAGE_TYPES, image
 from spatialdata_io.readers.generic._shapes import VALID_SHAPE_TYPES, geojson
 
@@ -89,7 +90,10 @@ def generic(  # noqa: PLR0913, RUF100
         If the suffix is unsupported, a required image option is missing, an
         option of the other input kind is given, or :func:`image` or
         :func:`geojson` rejects an option or the file.
-    TypeError, IndexError, FileNotFoundError, IsADirectoryError
+    TypeError
+        If an option has an unsupported type, including a raster option that
+        compares equal to its default on the GeoJSON route.
+    IndexError, FileNotFoundError, IsADirectoryError
         As raised by :func:`image` or :func:`geojson`.
     """
     source = Path(path)
@@ -97,13 +101,16 @@ def generic(  # noqa: PLR0913, RUF100
     frame = "global" if coordinate_system is None else coordinate_system
 
     if suffix in VALID_SHAPE_TYPES:
+        validate_tiff_index(tiff_series, parameter="tiff_series", optional=True)
+        validate_tiff_index(tiff_level, parameter="tiff_level", optional=False)
+        factors = make_raster_options(scale_factors).scale_factors
         if data_axes is not None:
             message = "data_axes cannot be used with GeoJSON inputs."
             raise ValueError(message)
         if tiff_series is not None or tiff_level != 0:
             message = "tiff_series and tiff_level cannot be used with GeoJSON inputs."
             raise ValueError(message)
-        if scale_factors or chunks is not None:
+        if factors or chunks is not None:
             message = "scale_factors and chunks cannot be used with GeoJSON inputs."
             raise ValueError(message)
         return geojson(source, coordinate_system=frame, invalid_geometries=invalid_geometries)

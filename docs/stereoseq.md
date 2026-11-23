@@ -165,6 +165,9 @@ Aligned square `exon` and cell `cellExpExon` payloads become a separate canonica
 Raw feature order follows the GEF, including zero-occurrence features. Square observations follow the first occurrence of each XY pair in the expression records, including positions with zero totals. Their table `instance_id` columns contain consecutive int64 integers starting at zero, matching the points' `RangeIndex`. Cells follow source cell order and retain the source integer cell IDs, including gaps. Imported analysis identifiers keep their source representation. AnnData observation names are the corresponding decimal strings. Physical coordinates are available as float64 XY micrometres in `obsm["spatial"]`; `obsm["spatial_grid"]` retains exact source grid values. Returned points contain native int64 `x` and `y` columns. Cell-type and cluster IDs remain categorical annotations.
 
 Each GEF stores its groups and datasets in the selected file. HDF5 soft and external links, virtual datasets, and external dataset storage are rejected.
+Square-bin names identify a unique positive numeric size. Two names for the
+same size, such as `bin1` and `bin01`, are ambiguous in both count reading and
+image-only calibration.
 
 Every linked table has categorical `obs["region"]` and an `obs["instance_id"]` that exactly identifies its independent target. A selected table with no observations fails because each declared region must occur in the linked table; no empty region or partial dataset is invented.
 

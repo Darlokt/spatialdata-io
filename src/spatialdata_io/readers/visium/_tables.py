@@ -36,7 +36,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
 
-from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
 from spatialdata_io.readers._utils.csv import csv_errors
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
@@ -59,6 +59,7 @@ from spatialdata_io.readers.visium._schemas import (
 if TYPE_CHECKING:
     from anndata import AnnData
 
+    from spatialdata_io._positions import PositionsMetadata
     from spatialdata_io.readers.visium._layout import VisiumLayout
     from spatialdata_io.readers.visium._metadata import ScaleFactors
 
@@ -97,6 +98,10 @@ def read_positions(layout: VisiumLayout) -> pd.DataFrame:
             found=str(error),
             expected="required columns and consistent CSV record widths",
         ) from error
+    except ReaderFormatError as error:
+        if layout.position_format == "headerless":
+            error.add_note(f"Headerless positions require the six fields in this order {POSITION_COLUMNS!r}.")
+        raise
     except OSError as error:
         add_reader_context(error, context=context, path=layout.positions)
         raise

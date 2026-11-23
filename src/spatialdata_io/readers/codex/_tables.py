@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
+    from spatialdata_io.readers.codex._layout import CellTableSource
 
 # A native batch may join the previous partial record to one source block.
 # Required float64 values have at least one digit plus a separator: their
@@ -145,8 +146,9 @@ def _read_csv(path: ArtifactFile) -> ad.AnnData:
         raise schema_error(path, found="no cells", expected="a nonempty cell population")
 
     expression = blocks[0] if len(blocks) == 1 else sparse.vstack(blocks, format="csr")
-    obs = pa.Table.from_batches(annotations).to_pandas(types_mapper=pd.ArrowDtype)
-    validate_csv_annotations(obs, path)
+    fields = pa.Table.from_batches(annotations)
+    validate_csv_annotations(fields, path)
+    obs = fields.to_pandas(types_mapper=pd.ArrowDtype)
     obs.index = pd.RangeIndex(len(obs)).astype(str)
     var = pd.DataFrame(index=features)
     if labels is not None:
@@ -189,9 +191,10 @@ def _read_fcs(path: ArtifactFile) -> ad.AnnData:
     return table
 
 
-def read_cell_table(path: ArtifactFile) -> CellTable:
+def read_cell_table(source: CellTableSource) -> CellTable:
     """Read one nonempty cell population and normalize its IDs, region and positions."""
-    fcs = path.suffix.lower() == ".fcs"
+    path = source.path
+    fcs = source.kind == "fcs"
     table = _read_fcs(path) if fcs else _read_csv(path)
     # This reader constructs eager AnnData, never backed annotation frames.
     obs = cast("pd.DataFrame", table.obs)

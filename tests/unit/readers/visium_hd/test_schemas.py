@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
 from numpy.testing import assert_array_equal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd._schemas import (
     MAPPINGS_SCHEMA,
     POSITIONS_SCHEMA,
+    bin_instance_ids,
     parse_bin_barcodes,
+    parse_cell_barcodes,
     validate_mappings,
     validate_position_batch,
     validate_schema,
@@ -72,6 +76,49 @@ class TestParseBinBarcodes:
             parse_bin_barcodes(pd.Index(names), 8, (4, 4), tmp_path, version=VERSION)
 
 
+class TestParseCellBarcodes:
+    """Accept only the documented fixed-width positive ID spelling."""
+
+    def test_exact(self, tmp_path: Path) -> None:
+        result = parse_cell_barcodes(
+            pd.Index(["cellid_999999999-1", "cellid_000000001-1"]), ArtifactFile(tmp_path), version="4.1.0"
+        )
+        np.testing.assert_array_equal(result, [999999999, 1])
+        assert result.dtype == np.uint32
+
+    def test_empty(self, tmp_path: Path) -> None:
+        result = parse_cell_barcodes(pd.Index([], dtype=str), ArtifactFile(tmp_path), version="4.1.0")
+        assert result.shape == (0,)
+        assert result.dtype == np.uint32
+
+    @pytest.mark.parametrize(
+        "barcode",
+        [
+            "cellid_0-1",
+            "cellid_000000000-1",
+            "cellid_000000001-2",
+            "cellid_00000001a-1",
+            "cellid_1000000000-1",
+            "cellid_-00000001-1",
+            "cellid_4294967297-1",
+        ],
+    )
+    def test_invalid(self, tmp_path: Path, barcode: str) -> None:
+        with pytest.raises(ReaderFormatError, match="cell"):
+            parse_cell_barcodes(pd.Index([barcode]), ArtifactFile(tmp_path), version="4.1.0")
+
+
+class TestBinInstanceIds:
+    def test_uses_positive_consecutive_uint32_ids(self) -> None:
+        result = bin_instance_ids(3)
+        assert result.dtype == np.uint32
+        assert_array_equal(result, [1, 2, 3])
+
+    def test_rejects_unrepresentable_population(self) -> None:
+        with pytest.raises(ValueError, match="uint32 label capacity"):
+            bin_instance_ids(np.iinfo(np.uint32).max + 1)
+
+
 class TestValidatePositionBatch:
     """Position nullability, finiteness and tissue flags."""
 
@@ -106,6 +153,7 @@ class TestMappingsSchema:
     """Projected barcode-mapping physical field types, in any order beside extra columns."""
 
     def test_named_contract(self, tmp_path: Path) -> None:
+        assert [field.name for field in MAPPINGS_SCHEMA if field.nullable] == ["cell_id"]
         validate_schema(
             pa.schema(
                 [

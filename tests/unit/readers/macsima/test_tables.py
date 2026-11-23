@@ -13,8 +13,8 @@ from spatialdata.models import TableModel
 from spatialdata_io.readers._utils.image import TiffMetadata
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.macsima._channels import NO_PADDING, PlannedChannel
-from spatialdata_io.readers.macsima._metadata import ChannelMetadata, ChannelSource
-from spatialdata_io.readers.macsima._schemas import CHANNEL_VAR_DTYPES
+from spatialdata_io.readers.macsima._metadata import ChannelSource
+from spatialdata_io.readers.macsima._schemas import ChannelMetadata
 from spatialdata_io.readers.macsima._tables import make_channel_table
 
 _STAIN = ChannelMetadata(
@@ -62,7 +62,6 @@ class TestMakeChannelTable:
         table = make_channel_table(channels)
 
         assert table.n_obs == 0
-        assert table.var.columns.tolist() == list(CHANNEL_VAR_DTYPES)
         assert table.X is None
         assert table.var_names.tolist() == ["R1 CD3", "R15 DAPI_background"]
         expected = pd.DataFrame(

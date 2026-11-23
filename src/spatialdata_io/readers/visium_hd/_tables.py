@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData
 
-from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.counts import read_10x_h5_components
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import (
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from scipy.sparse import csr_array
 
+    from spatialdata_io._positions import PositionsMetadata
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.visium_hd._layout import BinLayout
     from spatialdata_io.readers.visium_hd._transforms import SlideFrame

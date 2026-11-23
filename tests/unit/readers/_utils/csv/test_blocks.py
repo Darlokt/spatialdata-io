@@ -8,6 +8,7 @@ import cloudpickle
 import dask
 import pandas as pd
 import pyarrow as pa
+import pyarrow.csv as pacsv
 import pytest
 
 from spatialdata_io.readers._utils.csv import _blocks, csv_header, read_csv_blocks
@@ -288,10 +289,19 @@ class TestPairedQuotes:
         assert _blocks._paired_quotes(block) is expected
 
 
-class TestValidateCsvLines:
-    def test_accepts_encoded_payload_without_copying_type(self, tmp_path: Path) -> None:
-        path = ArtifactFile(tmp_path / "transcripts.csv.gz")
-        _blocks.validate_csv_lines(bytearray(b'"a",0\r\n"b""c",1\n'), context=_CONTEXT, path=path)
+class TestCsvDataBuffer:
+    def test_borrows_unmodified_record_buffer(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "records")
+        payload = bytearray(b'"a",0\r\n"b""c",1\n')
+        assert _blocks.csv_data_buffer(payload, context=_CONTEXT, path=path) is payload
+
+    def test_preserves_initial_literal_bom_in_decoded_records(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "records")
+        payload = bytearray("\ufeffA,42\n".encode())
+        records = _blocks.csv_data_buffer(payload, context=_CONTEXT, path=path)
+        table = pacsv.read_csv(pa.py_buffer(records), read_options=pacsv.ReadOptions(column_names=["target", "id"]))
+        assert table["target"].to_pylist() == ["\ufeffA"]
+        assert payload.decode() == "\ufeffA,42\n"
 
     @pytest.mark.parametrize(
         ("payload", "found"),
@@ -300,7 +310,7 @@ class TestValidateCsvLines:
     def test_malformed_encoded_payload_names_the_source(self, tmp_path: Path, payload: bytes, found: str) -> None:
         path = ArtifactFile(tmp_path / "transcripts.csv.gz")
         with pytest.raises(ReaderFormatError, match=found) as caught:
-            _blocks.validate_csv_lines(bytearray(payload), context=_CONTEXT, path=path)
+            _blocks.csv_data_buffer(bytearray(payload), context=_CONTEXT, path=path)
         assert caught.value.context == _CONTEXT
         assert caught.value.path == path
 

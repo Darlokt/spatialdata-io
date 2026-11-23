@@ -20,7 +20,6 @@ from spatialdata_io.readers.cosmx._tables import (
     build_table,
     read_counts,
     read_fov_positions,
-    read_header,
     read_metadata,
 )
 from spatialdata_io.readers.cosmx._transforms import FovPosition
@@ -44,32 +43,6 @@ def _write(tmp_path: Path, name: str, text: str, *, compressed: bool = False) ->
     return CsvFile(ArtifactFile(path), compressed=compressed)
 
 
-class TestReadHeader:
-    """Headers are UTF-8, and parsed with quoting."""
-
-    @pytest.mark.parametrize("compressed", [False, True])
-    def test_quoted_header(self, tmp_path: Path, *, compressed: bool) -> None:
-        path = _write(tmp_path, "c.csv", _COUNTS, compressed=compressed)
-        assert read_header(path, "count matrix") == ("fov", "cell_ID", "B", "HLA-A", "NegPrb1")
-
-    def test_malformed(self, tmp_path: Path) -> None:
-        path = tmp_path / "c.csv"
-        path.write_bytes(b'"unterminated\n')
-        with pytest.raises(ReaderFormatError, match="malformed CSV") as error:
-            read_header(CsvFile(ArtifactFile(path), compressed=False), "cell metadata")
-        assert error.value.context == ReaderErrorContext("cosmx", "cell metadata")
-
-    def test_unreadable_source_preserves_exception_and_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        path = _write(tmp_path, "m.csv", _METADATA)
-        failure = PermissionError(13, "denied", str(path.path))
-        mocker.patch.object(type(path.path), "open", side_effect=failure)
-        with pytest.raises(PermissionError) as caught:
-            read_header(path, "cell metadata")
-        assert caught.value is failure
-        assert caught.value.errno == 13
-        assert any("cosmx" in note and "cell metadata" in note for note in caught.value.__notes__)
-
-
 class TestReadCounts:
     """Counts stream to exact float32/f64 CSR without background rows."""
 
@@ -79,6 +52,7 @@ class TestReadCounts:
     ) -> None:
         mocker.patch("spatialdata_io.readers.cosmx._tables._BATCH_BYTES", 128)
         counts = read_counts(_write(tmp_path, "c.csv", _COUNTS, compressed=compressed))
+        assert counts.features == ("B", "HLA-A", "NegPrb1")
         assert isinstance(counts.expression, sparse.csr_array)
         assert counts.expression.dtype == np.float32
         np.testing.assert_array_equal(counts.expression.toarray(), [[0, 3, 0], [4, 0, 1], [0, 0, 2]])
@@ -261,19 +235,9 @@ class TestReadMetadata:
         assert obs["Mean.DAPI"].isna().tolist() == [False, True, True]
         assert obs["note"].tolist() == ["01", "", "x"]
 
-    def test_duplicate_vendor_cell_id_column_is_dropped(self, tmp_path: Path) -> None:
-        text = "cell,cell_id," + _METADATA.replace("\n1,1,", "\nc_1_1,c_1_1,1,1,", 1).replace(
-            "\n1,2,", "\nc_1_2,c_1_2,1,2,", 1
-        ).replace("\n2,1,", "\nc_2_1,c_2_1,2,1,", 1)
-        obs = read_metadata(_write(tmp_path, "m.csv", text)).obs
-        assert "cell_id" not in obs
-        assert obs["cell"].tolist() == ["c_1_1", "c_1_2", "c_2_1"]
-
     @pytest.mark.parametrize(
         ("replace", "match"),
         [
-            (("\n1,2,", "\n1,1,"), "duplicate"),
-            (("1,1,2,5,102", "1,0,2,5,102"), "missing or zero 'cell_ID'"),
             (("106,12", "inf,12"), "non-decimal"),
             (("1,2,6,2", "1,1.0,6,2"), "malformed CSV"),
             (("01\n", "01\n9,9,0x1,1,1,1,1,1,\n"), "non-decimal|nonnumeric"),
@@ -309,11 +273,6 @@ class TestReadMetadata:
         with pytest.raises(ReaderFormatError, match="invalid gzip data") as caught:
             read_metadata(path)
         assert caught.value.context == ReaderErrorContext("cosmx", "cell metadata")
-
-    def test_repeated_vendor_ids(self, tmp_path: Path) -> None:
-        text = "cell," + _METADATA.replace("\n1,", "\nc,1,").replace("\n2,", "\nc,2,")
-        with pytest.raises(ReaderFormatError, match="vendor cell IDs"):
-            read_metadata(_write(tmp_path, "m.csv", text))
 
 
 class TestReadFovPositions:

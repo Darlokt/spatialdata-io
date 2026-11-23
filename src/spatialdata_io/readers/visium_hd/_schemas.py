@@ -1,4 +1,4 @@
-"""Source schemas of the Visium HD position and barcode-mapping Parquet files.
+"""Visium HD tabular contracts for positions, barcodes and feature identity.
 
 Every bin size has one ``spatial/tissue_positions.parquet`` with one row per
 grid square, including squares outside the tissue and without counts::
@@ -34,6 +34,7 @@ import re
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -41,7 +42,6 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import pandas as pd
     from numpy.typing import NDArray
 
 POSITIONS_SCHEMA = pa.schema(
@@ -56,12 +56,87 @@ POSITIONS_SCHEMA = pa.schema(
 )
 MAPPINGS_SCHEMA = pa.schema(
     [
-        pa.field("square_002um", pa.string()),
+        pa.field("square_002um", pa.string(), nullable=False),
         pa.field("cell_id", pa.string()),
-        pa.field("in_cell", pa.bool_()),
-        pa.field("in_nucleus", pa.bool_()),
+        pa.field("in_cell", pa.bool_(), nullable=False),
+        pa.field("in_nucleus", pa.bool_(), nullable=False),
     ]
 )
+NUCLEUS_FEATURE_COLUMNS = ("gene_ids", "genome", "feature_types")
+MAX_CELL_ID = 999_999_999
+
+
+def validate_nucleus_feature_columns(frame: pd.DataFrame, path: Path, *, context: ReaderErrorContext) -> None:
+    """Require the ordered feature identity annotations used across nucleus count sources."""
+    missing = tuple(name for name in NUCLEUS_FEATURE_COLUMNS if name not in frame)
+    if missing:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"missing feature columns {missing!r}",
+            expected=repr(NUCLEUS_FEATURE_COLUMNS),
+        )
+
+
+def bin_instance_ids(count: int) -> NDArray[np.uint32]:
+    """Generate one uint32 row ID per selected bin, reserving zero for label background."""
+    if count > np.iinfo(np.uint32).max:
+        message = "The number of bin instances exceeds uint32 label capacity."
+        raise ValueError(message)
+    return np.arange(1, count + 1, dtype=np.uint32)
+
+
+def parse_cell_barcodes(names: pd.Index[str], path: Path, *, version: str | None) -> NDArray[np.uint32]:
+    """Decode canonical positive cell barcodes without accepting alternate spellings."""
+    context = ReaderErrorContext("visium_hd", "cell barcodes", version)
+    valid = names.str.fullmatch(r"cellid_[0-9]{9}-1", na=False)
+    if not valid.all():
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="noncanonical cell barcode",
+            expected="cellid_{positive_id:09d}-1",
+        )
+
+    values = names.str.slice(7, 16).to_numpy(dtype=np.uint32)
+    if np.any(values == 0):
+        raise ReaderFormatError(context=context, path=path, found="zero cell ID", expected="positive cell IDs")
+    return values
+
+
+def boundary_cell_ids(frame: pd.DataFrame, path: Path, *, context: ReaderErrorContext) -> NDArray[np.uint32]:
+    """Require one unique, positive vendor cell ID per boundary feature."""
+    expected = f"unique nonnull integer cell_id properties from 1 through {MAX_CELL_ID}"
+    if "cell_id" not in frame:
+        raise ReaderFormatError(context=context, path=path, found="missing cell_id", expected=expected)
+    ids = frame["cell_id"]
+    if ids.isna().any() or not pd.api.types.is_integer_dtype(ids.dtype):
+        raise ReaderFormatError(context=context, path=path, found="null or non-integer cell_id", expected=expected)
+    if ((ids <= 0) | (ids > MAX_CELL_ID)).any() or ids.duplicated().any():
+        raise ReaderFormatError(
+            context=context, path=path, found="duplicate or out-of-range cell_id", expected=expected
+        )
+    return ids.to_numpy(dtype=np.uint32)
+
+
+def boundary_centroids(
+    frame: pd.DataFrame, name: str, path: Path, *, context: ReaderErrorContext
+) -> NDArray[np.float64] | None:
+    """Return optional vendor centroid properties as one finite XY pair per feature."""
+    if name not in frame:
+        return None
+    expected = "one finite [x, y] centroid per polygon"
+    try:
+        centroids = np.array(frame[name].tolist(), dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ReaderFormatError(
+            context=context, path=path, found="malformed centroid property", expected=expected
+        ) from error
+    if centroids.shape != (len(frame), 2) or not np.isfinite(centroids).all():
+        raise ReaderFormatError(
+            context=context, path=path, found="missing or nonfinite centroid property", expected=expected
+        )
+    return centroids
 
 
 def validate_schema(schema: pa.Schema, required: pa.Schema, path: Path, *, context: ReaderErrorContext) -> None:
@@ -129,10 +204,10 @@ def validate_position_batch(batch: pa.RecordBatch, path: Path, *, context: Reade
 
 def validate_mappings(batch: pa.RecordBatch, path: Path, *, context: ReaderErrorContext) -> None:
     """Check mapping nullability and nucleus/cell membership relationships."""
-    for name in ("square_002um", "in_cell", "in_nucleus"):
-        if batch.column(name).null_count:
+    for field in MAPPINGS_SCHEMA:
+        if not field.nullable and batch.column(field.name).null_count:
             raise ReaderFormatError(
-                context=context, path=path, found=f"null {name}", expected="nonnull bin and membership fields"
+                context=context, path=path, found=f"null {field.name}", expected="nonnull bin and membership fields"
             )
 
     in_cell = batch.column("in_cell").to_numpy(zero_copy_only=False)

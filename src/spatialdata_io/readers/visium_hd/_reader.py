@@ -33,6 +33,7 @@ from spatialdata_io.readers.visium_hd._labels import make_bin_labels
 from spatialdata_io.readers.visium_hd._layout import Selection, discover_layout
 from spatialdata_io.readers.visium_hd._metadata import read_bin_scale_factors, read_source_metadata
 from spatialdata_io.readers.visium_hd._positions import PositionSelection, fit_slide_frame, read_grid_shape
+from spatialdata_io.readers.visium_hd._schemas import bin_instance_ids
 from spatialdata_io.readers.visium_hd._tables import link_table, make_bin_table, read_bin_table, read_counts
 from spatialdata_io.readers.visium_hd._transforms import SPOT_PITCH_UM
 
@@ -299,6 +300,7 @@ def _segmentations(
                 source.barcode_mappings,
                 table,
                 boundaries.shapes.index,
+                population_path=selected.counts,
                 version=version,
             )
 
@@ -588,13 +590,16 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         rows = obs["array_row"].to_numpy(dtype=np.uint32)
         cols = obs["array_col"].to_numpy(dtype=np.uint32)
 
-        ids = pd.Index(np.arange(1, table.n_obs + 1, dtype=np.uint32))
+        instance_ids = bin_instance_ids(table.n_obs)
+        ids = pd.Index(instance_ids)
         table.obs["instance_id"] = ids
         name = f"square_{size:03d}um"
         if options.bin_geometry == "squares":
             shapes[name] = bin_squares(rows, cols, size, frame, ids)
         else:
-            labels[name] = make_bin_labels(frame, rows, cols, grid, size, options=options.images.raster)
+            labels[name] = make_bin_labels(
+                frame, rows, cols, grid, size, instance_ids=instance_ids, options=options.images.raster
+            )
 
         tables[f"{name}_table"] = link_table(
             table, name, ids, position="nominal bin centre", counts_path=source.counts, version=version

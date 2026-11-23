@@ -334,6 +334,27 @@ class TestSeqfish:
         assert list(selected.tables) == ["table_Roi2", "table_Roi1"]
         assert list(seqfish(root, rois=("Roi2",)).tables) == ["table_Roi2"]
 
+    def test_selected_products_share_layout_keys_with_linkage(self, tmp_path: Path) -> None:
+        rois = ("table_a", "a_DAPI")
+        root = write_seqfish_dataset(tmp_path, rois=rois)
+        with pytest.raises(ReaderFormatError, match="table_a_DAPI"):
+            seqfish(root, rois=rois)
+
+        result = seqfish(root, rois=rois, include_images=False, include_transcripts=False, shape_geometry="both")
+
+        assert list(result.tables) == ["table_table_a", "table_a_DAPI"]
+        assert list(result.labels) == ["table_a_Segmentation", "a_DAPI_Segmentation"]
+        assert list(result.shapes) == [
+            "table_a_Boundaries",
+            "table_a_CellCoordinates",
+            "a_DAPI_Boundaries",
+            "a_DAPI_CellCoordinates",
+        ]
+        for roi in rois:
+            table = result.tables[f"table_{roi}"]
+            assert result[f"table_{roi}"] is table
+            assert get_table_keys(table) == (f"{roi}_Segmentation", "region", "instance_id")
+
     def test_macos_apple_double_companions_are_ignored(self, tmp_path: Path) -> None:
         root = write_seqfish_dataset(tmp_path)
         expected = seqfish(root)

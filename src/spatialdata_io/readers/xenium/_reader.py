@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 from spatialdata import SpatialData
-from xarray import DataArray, DataTree
+from xarray import DataTree
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
@@ -40,7 +40,9 @@ if TYPE_CHECKING:
     import anndata as ad
     import dask.dataframe as dd
     import geopandas as gpd
+    from xarray import DataArray
 
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.geometry import InvalidGeometryPolicy
     from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers.xenium._cells import CellStore, MaskRole

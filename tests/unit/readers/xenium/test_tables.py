@@ -33,7 +33,6 @@ from spatialdata_io.readers.xenium._tables import (
     read_cells,
     read_counts,
     read_feature_index,
-    read_header,
 )
 from tests.integration.readers.xenium import _fixtures as fx
 
@@ -361,6 +360,37 @@ class TestReadFeatureIndex:
 class TestReadCells:
     """Cell tables from parquet and CSV twins are typed, finite and identical."""
 
+    def test_invalid_parquet_footer_reports_the_source(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "cells.parquet")
+        path.write_bytes(b"corrupt parquet file")
+
+        with pytest.raises(ReaderFormatError, match="malformed Parquet") as caught:
+            read_cells(TabularSource(path, "parquet", cell_types("polygon_sets")), context=CELLS)
+
+        assert caught.value.context == CELLS
+        assert caught.value.path == path
+
+    @pytest.mark.parametrize("mode", ["missing", "physical_type"])
+    def test_rejects_malformed_footer_before_reading_payload(
+        self, tmp_path: Path, mocker: MockerFixture, mode: str
+    ) -> None:
+        fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        path = ArtifactFile(tmp_path / "cells.parquet")
+        table = pq.read_table(path)
+        if mode == "missing":
+            table = table.drop_columns(["x_centroid"])
+        else:
+            wrong = pa.array([[1]] * table.num_rows, type=pa.list_(pa.int32()))
+            table = table.set_column(table.column_names.index("x_centroid"), "x_centroid", wrong)
+        pq.write_table(table, path)
+        payload = mocker.patch.object(pq.ParquetFile, "read", side_effect=AssertionError("read malformed payload"))
+
+        with pytest.raises(ReaderFormatError, match="x_centroid") as caught:
+            read_cells(TabularSource(path, "parquet", cell_types("polygon_sets")), context=CELLS)
+
+        payload.assert_not_called()
+        assert caught.value.path == path
+
     @pytest.mark.parametrize("profile", [fx.XOA_1_0, fx.XOA_1_3, fx.XOA_2_0, fx.XOA_4_0])
     def test_parquet_and_csv_twins_agree(self, tmp_path: Path, profile: fx.Profile) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, profile, fx.Options(csv_twins=True))
@@ -481,7 +511,7 @@ class TestReadCells:
 
         path.write_text('"cell_id\n')
         with pytest.raises(ReaderFormatError, match="malformed CSV"):
-            read_header(TabularSource(ArtifactFile(path), "csv", cell_types("hex_ids")), context=CELLS)
+            read_cells(TabularSource(ArtifactFile(path), "csv", cell_types("hex_ids")), context=CELLS)
 
     def test_padded_gzip_cells_equal_plain_csv(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(tables="csv"))

@@ -13,8 +13,8 @@ from spatialdata.transformations import Identity, get_transformation
 from xarray import DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
-from spatialdata_io.experimental.iss._images import _read_raster, read_rasters
 from spatialdata_io.experimental.iss._layout import discover_layout
+from spatialdata_io.experimental.iss._rasters import _read_raster, read_rasters
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile

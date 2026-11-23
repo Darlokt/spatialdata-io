@@ -66,8 +66,6 @@ from typing import TYPE_CHECKING, Literal
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
-    ArtifactFile,
-    DatasetRoot,
     list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
@@ -82,7 +80,12 @@ from spatialdata_io.readers.visium_hd._metadata import reconcile_identities
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from spatialdata_io.readers._utils.paths import ArtifactDirectory, PathPolicy
+    from spatialdata_io.readers._utils.paths import (
+        ArtifactDirectory,
+        ArtifactFile,
+        DatasetRoot,
+        PathPolicy,
+    )
     from spatialdata_io.readers.visium_hd._metadata import Identity
 
 _FULLRES_NAME = re.compile(r"(?:.+_)?tissue_image\.(?:btf|tif|tiff)", flags=re.IGNORECASE)

@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import pandas as pd
 
-from spatialdata_io._positions import POSITIONS_KEY, FixedFrame, PositionsMetadata
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io._positions import POSITIONS_KEY
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     finalize_count_arrays,
@@ -30,6 +30,9 @@ if TYPE_CHECKING:
     import anndata as ad
     import numpy.typing as npt
     from scipy.sparse import csr_array
+
+    from spatialdata_io._positions import FixedFrame, PositionsMetadata
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
 
 
 def select_cells(table: ad.AnnData, retained: pd.Index, *, context: ReaderErrorContext, path: Path) -> ad.AnnData:

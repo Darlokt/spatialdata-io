@@ -12,7 +12,6 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.codex._schemas import (
-    STRING_DTYPE,
     cell_columns,
     csv_column_names,
     csv_types,
@@ -117,15 +116,13 @@ class TestValidateCsvAnnotations:
     @pytest.mark.parametrize("column", ["region", "note"])
     def test_nul_text_fails(self, tmp_path: Path, column: str) -> None:
         with pytest.raises(ReaderFormatError, match="NUL"):
-            validate_csv_annotations(
-                pd.DataFrame({column: ["1\x00suffix"]}, dtype=STRING_DTYPE), ArtifactFile(tmp_path / "cells.csv")
-            )
+            validate_csv_annotations(pa.table({column: ["1\x00suffix"]}), ArtifactFile(tmp_path / "cells.csv"))
 
     def test_literal_text_is_unchanged(self, tmp_path: Path) -> None:
-        frame = pd.DataFrame({"note": ["0042", "", "NA", "NULL", "1e-400"]}, dtype=STRING_DTYPE)
-        original = frame.copy()
+        original = {"note": ["0042", "", "NA", "NULL", "1e-400"]}
+        frame = pa.table(original)
         validate_csv_annotations(frame, ArtifactFile(tmp_path / "cells.csv"))
-        pd.testing.assert_frame_equal(frame, original, check_exact=True)
+        assert frame.to_pydict() == original
 
 
 class TestValidateFcsMetadata:

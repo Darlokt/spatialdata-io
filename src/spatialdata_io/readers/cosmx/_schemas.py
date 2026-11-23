@@ -51,6 +51,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.names import sanitize_column_names
+from spatialdata_io.readers._utils.points import categorize_features
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -70,20 +72,37 @@ TRANSCRIPTS: Artifact = "transcripts"
 IMAGES: Artifact = "composite images"
 LABELS: Artifact = "cell labels"
 
-STRING_DTYPE = pd.ArrowDtype(pa.string())
-
 FOV = "fov"
 CELL_ID = "cell_ID"
 CELL = "cell"
 REGION_KEY = "region"
 FRAME_KEY = "spatial_pixel_frame"
 CENTERS = ("CenterX_local_px", "CenterY_local_px", "CenterX_global_px", "CenterY_global_px")
-TRANSCRIPT_REQUIRED = (FOV, CELL_ID, "x_local_px", "y_local_px", "x_global_px", "y_global_px", "target")
-TRANSCRIPT_OPTIONAL = ("z", "CellComp", CELL)
+_READER_OBS_COLUMNS = (FOV, CELL_ID, REGION_KEY, FRAME_KEY)
+_TRANSCRIPT_REQUIRED = pa.schema(
+    [
+        ("x_global_px", pa.float64()),
+        ("y_global_px", pa.float64()),
+        ("target", pa.string()),
+        (FOV, pa.uint64()),
+        (CELL_ID, pa.uint64()),
+        ("x_local_px", pa.float64()),
+        ("y_local_px", pa.float64()),
+    ]
+)
+_TRANSCRIPT_OPTIONAL = pa.schema([("z", pa.int64()), ("CellComp", pa.string()), (CELL, pa.string())])
+_TRANSCRIPT_OUTPUT_NAMES = {
+    "x_global_px": "x",
+    "y_global_px": "y",
+    "x_local_px": "x_local",
+    "y_local_px": "y_local",
+    "z": "z_raw",
+}
 
 # Vendor morphology and stain-intensity fields; every other metadata field stays exact text.
 _NUMERIC_METADATA = re.compile(r"Area|Area\.um2|AspectRatio|Width|Height|(?:Mean|Max)\..+")
 _FOV_POSITION_PIXELS = (("x_px", "y_px"), ("x_global_px", "y_global_px"))
+_FOV_POSITION_STAGE = (("X_mm", "Y_mm"), ("x_global_mm", "y_global_mm"))
 _DECIMAL = r"[+-]?(?:\d+(?:\.(?P<fraction>\d*))?|\.(?P<leading>\d+))(?:[eE](?P<exponent>[+-]?\d+))?"
 _MIN_HALF_POWER, _MAX_HALF_POWER = -323, 308
 # Round each representable decimal half-unit once; halving a rounded power of
@@ -161,39 +180,91 @@ def metadata_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema:
     )
 
 
+def cell_keys(fovs: pd.Index, identifiers: pd.Index, path: ArtifactFile, artifact: Artifact) -> pd.MultiIndex:
+    """Validate the exact compound key of one count or metadata population."""
+    keys = pd.MultiIndex.from_arrays([fovs, identifiers])
+    if keys.has_duplicates:
+        raise schema_error(path, artifact, found="duplicate (fov, cell_ID) keys", expected="one row per cell")
+    return keys
+
+
+def normalize_cell_metadata(records: pa.Table, path: ArtifactFile) -> tuple[pd.DataFrame, pd.MultiIndex]:
+    """Validate cell identities and return typed observation annotations and their exact keys."""
+    for name in (FOV, CELL_ID):
+        require_positive(records[name], path, METADATA, name)
+    numeric = [field.name for field in records.schema if pa.types.is_floating(field.type)]
+    text = [field.name for field in records.schema if pa.types.is_string(field.type) and field.name not in CENTERS]
+    for name in numeric:
+        require_finite(records[name], path, METADATA, name, nullable=True)
+    obs = records.select([FOV, CELL_ID, *numeric, *text]).to_pandas(types_mapper=pd.ArrowDtype)
+    keys = cell_keys(pd.Index(obs[FOV].array), pd.Index(obs[CELL_ID].array), path, METADATA)
+
+    if CELL in obs and (obs[CELL].eq("").any() or not obs[CELL].is_unique):
+        raise schema_error(
+            path, METADATA, found="missing or repeated vendor cell IDs", expected="unique nonempty 'cell' values"
+        )
+    # AtoMx can repeat the exact vendor ID. Independent spellings remain annotations.
+    if "cell_id" in obs and CELL in obs and obs["cell_id"].equals(obs[CELL]):
+        obs = obs.drop(columns="cell_id")
+    reserved = (*_READER_OBS_COLUMNS, CELL) if CELL in obs else _READER_OBS_COLUMNS
+    obs.columns = sanitize_column_names(
+        list(obs.columns), source="cosmx: the cell metadata CSV header", reserved=reserved
+    )
+    return obs, keys
+
+
 def fov_position_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema | None:
-    """Return the FOV and pixel-position fields, or None for millimetre-only exports."""
+    """Return the FOV and pixel-position fields, or None for an evidenced stage pair."""
     _validate_columns(columns, path, POSITIONS)
     identifiers = [name for name in (FOV, "FOV") if name in columns]
     if len(identifiers) != 1:
         raise schema_error(
             path, POSITIONS, found=f"columns {list(columns)!r}", expected="exactly one 'fov' or 'FOV' field"
         )
-    pixels = [pair for pair in _FOV_POSITION_PIXELS if set(pair).issubset(columns)]
+    names = set(columns)
+    pixels = [pair for pair in _FOV_POSITION_PIXELS if names.intersection(pair)]
+    stage = [pair for pair in _FOV_POSITION_STAGE if names.intersection(pair)]
+    for pair in (*pixels, *stage):
+        if not names.issuperset(pair):
+            raise schema_error(
+                path, POSITIONS, found=f"incomplete position pair {pair!r}", expected="both x and y fields"
+            )
     if len(pixels) > 1:
         raise schema_error(path, POSITIONS, found="two pixel-position conventions", expected="one x/y pixel pair")
+    if len(stage) > 1:
+        raise schema_error(path, POSITIONS, found="two stage-position conventions", expected="one x/y millimetre pair")
+    if not pixels and not stage:
+        raise schema_error(
+            path,
+            POSITIONS,
+            found=f"columns {list(columns)!r} without recognized coordinates",
+            expected="a complete pixel or millimetre x/y position pair",
+        )
     return pa.schema([(identifiers[0], pa.uint64()), *((name, pa.string()) for name in pixels[0])]) if pixels else None
 
 
 def transcript_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema:
-    """Declare one projected event schema for plain and compressed sources."""
-    _require(columns, TRANSCRIPT_REQUIRED, path, TRANSCRIPTS)
-    names = (*TRANSCRIPT_REQUIRED, *(name for name in TRANSCRIPT_OPTIONAL if name in columns))
-    return pa.schema(
-        [
-            (
-                name,
-                pa.uint64()
-                if name in {FOV, CELL_ID}
-                else pa.int64()
-                if name == "z"
-                else pa.float64()
-                if name.endswith("_px")
-                else pa.string(),
-            )
-            for name in names
-        ]
-    )
+    """Project typed event fields in normalized output order for both encodings."""
+    _require(columns, _TRANSCRIPT_REQUIRED.names, path, TRANSCRIPTS)
+    return pa.schema([*_TRANSCRIPT_REQUIRED, *(field for field in _TRANSCRIPT_OPTIONAL if field.name in columns)])
+
+
+def normalize_transcript_partition(frame: pd.DataFrame, *, features: pd.Index, path: ArtifactFile) -> pd.DataFrame:
+    """Validate the projected Arrow partition and prepare its coordinates and annotations."""
+    require_positive(pa.array(frame[FOV]), path, TRANSCRIPTS, FOV)
+    for field in _TRANSCRIPT_REQUIRED:
+        if pa.types.is_floating(field.type):
+            require_finite(pa.array(frame[field.name]), path, TRANSCRIPTS, field.name)
+    categories = categorize_features(frame["target"], features)
+    if categories is None:
+        raise schema_error(
+            path, TRANSCRIPTS, found="missing or unknown targets", expected="targets from the count vocabulary"
+        )
+    frame["target"] = categories
+    # PointsModel requires native NumPy x/y; local coordinates stay Arrow annotations.
+    for name in ("x_global_px", "y_global_px"):
+        frame[name] = frame[name].to_numpy(dtype=np.float64)
+    return frame.rename(columns=_TRANSCRIPT_OUTPUT_NAMES)
 
 
 def require_positive(column: pa.Array | pa.ChunkedArray, path: ArtifactFile, artifact: Artifact, name: str) -> None:

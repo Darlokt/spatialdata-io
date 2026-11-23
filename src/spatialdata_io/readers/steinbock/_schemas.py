@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     import anndata as ad
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.steinbock._images import SampleGrid
+    from spatialdata_io.readers.steinbock._rasters import SampleGrid
 
 CELL_TABLE_CONTEXT = ReaderErrorContext("steinbock", "cell table")
 IMAGE_METADATA_CONTEXT = ReaderErrorContext("steinbock", "images.csv")

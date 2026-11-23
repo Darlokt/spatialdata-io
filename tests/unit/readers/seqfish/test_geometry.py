@@ -41,6 +41,18 @@ def _write_boundaries(
 class TestReadBoundaries:
     """Align source IDs exactly while preserving holes and multipart geometry."""
 
+    def test_missing_geometry_reports_the_source_artifact(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "boundaries.geojson")
+        path.write_text(
+            '{"type":"FeatureCollection","features":[{"type":"Feature","id":9,"properties":null}]}', encoding="utf-8"
+        )
+        with pytest.raises(ReaderFormatError, match=r"missing Feature\.geometry") as caught:
+            read_boundaries(
+                path, instance_ids=pd.Index([9]), frame="global", scale=Scale([1, 1], axes=("x", "y")), policy="keep"
+            )
+        assert caught.value.path == path
+        assert caught.value.context.artifact == "Boundaries"
+
     def test_keep_preserves_invalid_source_topology(self, tmp_path: Path) -> None:
         invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
         path = _write_boundaries(tmp_path / "boundaries.geojson", [invalid], ("9",))

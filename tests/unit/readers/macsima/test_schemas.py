@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers.macsima._schemas import CHANNEL_VAR_DTYPES, normalize_image_type
+from spatialdata_io.readers.macsima._schemas import ChannelMetadata, channel_var_columns, normalize_image_type
 
 if TYPE_CHECKING:
     from spatialdata_io.readers.macsima._schemas import SchemaMajor
@@ -39,11 +39,12 @@ class TestNormalizeImageType:
             normalize_image_type(value, major=major, context=_CONTEXT, path=_PATH)
 
 
-class TestChannelVarDtypes:
+class TestChannelVarColumns:
     """The channel table keeps the legacy column names in a fixed order."""
 
     def test_columns_and_types_in_output_order(self) -> None:
-        assert list(CHANNEL_VAR_DTYPES.items()) == [
+        columns = channel_var_columns([ChannelMetadata("DAPI", 1, "stain", None, None, None, None, None)])
+        assert [(name, str(values.dtype)) for name, values in columns.items()] == [
             ("name", "string"),
             ("cycle", "uint64"),
             ("imagetype", "string"),

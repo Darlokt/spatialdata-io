@@ -126,6 +126,16 @@ class TestStereoseq:
         with pytest.raises(ReaderFormatError, match="image calibration companion"):
             stereoseq(fixture.root, image_roles=("registered",))
 
+    def test_duplicate_numeric_bin_names_fail_for_counts_and_calibration(self, tmp_path: Path) -> None:
+        fixture = write_dataset(tmp_path, family="outs", products=("square", "registered"))
+        with h5py.File(fixture.square, "r+") as handle:
+            handle["geneExp/bin01"] = handle["geneExp/bin1"]
+
+        with pytest.raises(ReaderFormatError, match="unique numeric bin names"):
+            stereoseq(fixture.root, bin_sizes=(1,))
+        with pytest.raises(ReaderFormatError, match="unique numeric bin names"):
+            stereoseq(fixture.root, image_roles=("registered",))
+
     @pytest.mark.parametrize("kind", ["square", "cells"])
     @pytest.mark.parametrize("slot", ["counts", "exon"])
     def test_integer_counts_above_limit_fail_even_when_float64_can_represent_them(

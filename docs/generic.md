@@ -15,6 +15,9 @@ inferred, and `~` in a path is expanded.
 
 Options of the other kind must keep their defaults; for example `data_axes`
 with a GeoJSON file or `invalid_geometries="drop"` with an image fails.
+GeoJSON accepts `tiff_level=0` as an integer and an empty sequence for
+`scale_factors`. Boolean and floating-point levels and non-sequence factors
+raise `TypeError`.
 
 ## Images
 

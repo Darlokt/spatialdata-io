@@ -43,14 +43,14 @@ from spatialdata.models import ShapesModel
 from spatialdata.transformations import Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
-from spatialdata_io.readers.visium_hd._transforms import SlideFrame, grid_to_global, image_to_global
+from spatialdata_io.readers.visium_hd._schemas import boundary_cell_ids, boundary_centroids
+from spatialdata_io.readers.visium_hd._transforms import grid_to_global, image_to_global
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
-
-MAX_CELL_ID = 999_999_999
+    from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,37 +61,25 @@ class BoundaryData:
     centroids: NDArray[np.float64] | None
 
 
-def _validate_source(
-    source: gpd.GeoDataFrame, path: ArtifactFile, *, context: ReaderErrorContext
+def _polygon_vertices(
+    geometry: gpd.GeoSeries, path: ArtifactFile, *, context: ReaderErrorContext
 ) -> NDArray[np.float64]:
-    """Validate external IDs and ring representation independently of topology policy."""
+    """Read planar exterior-ring coordinates independently of topology policy."""
 
     def fail(found: str, expected: str) -> ReaderFormatError:
         return ReaderFormatError(context=context, found=found, expected=expected, path=path)
 
-    if "cell_id" not in source:
-        msg = "missing cell_id"
-        raise fail(msg, "unique nonnull positive integer cell_id properties")
-
-    ids = source["cell_id"]
-    if ids.isna().any() or not pd.api.types.is_integer_dtype(ids.dtype):
-        msg = "null or non-integer cell_id"
-        raise fail(msg, "unique integer cell_id values from 1 through 999999999")
-    if ((ids <= 0) | (ids > MAX_CELL_ID)).any() or ids.duplicated().any():
-        msg = "duplicate or out-of-range cell_id"
-        raise fail(msg, "unique integer cell_id values from 1 through 999999999")
-
-    if source.geometry.isna().any() or source.geometry.is_empty.any() or (source.geometry.geom_type != "Polygon").any():
+    if geometry.isna().any() or geometry.is_empty.any() or (geometry.geom_type != "Polygon").any():
         msg = "missing, empty or non-Polygon geometry"
         raise fail(msg, "one nonempty Polygon per feature")
-    if (shapely.get_num_interior_rings(source.geometry.to_numpy()) != 0).any():
+    if (shapely.get_num_interior_rings(geometry.to_numpy()) != 0).any():
         msg = "Polygon interior rings"
         raise fail(msg, "one exterior ring without holes")
-    if shapely.has_z(source.geometry.to_numpy()).any() or shapely.has_m(source.geometry.to_numpy()).any():
+    if shapely.has_z(geometry.to_numpy()).any() or shapely.has_m(geometry.to_numpy()).any():
         msg = "non-planar polygon coordinates"
         raise fail(msg, "two-dimensional polygon vertices")
 
-    coordinates = shapely.get_coordinates(source.geometry.to_numpy())
+    coordinates = shapely.get_coordinates(geometry.to_numpy())
     if not np.isfinite(coordinates).all():
         msg = "nonfinite polygon coordinates"
         raise fail(msg, "finite polygon coordinates")
@@ -122,23 +110,15 @@ def read_boundaries(
         add_reader_context(error, context=context, path=path)
         raise
 
-    coordinates = _validate_source(source, path, context=context)
+    ids = boundary_cell_ids(source, path, context=context)
+    coordinates = _polygon_vertices(source.geometry, path, context=context)
     transformed = image_to_global(frame, coordinates, context=context)
     geometry = shapely.set_coordinates(source.geometry.to_numpy(), transformed)
-    index = pd.Index(source["cell_id"].to_numpy(dtype=np.uint32), name="cell_id")
+    index = pd.Index(ids, name="cell_id")
     shapes = gpd.GeoDataFrame({"geometry": geometry}, index=index)
 
-    centroid_name = f"{kind}_centroid"
-    centroids = None
-    if centroid_name in source:
-        try:
-            centroids = np.array(source[centroid_name].tolist(), dtype=np.float64)
-        except (TypeError, ValueError) as error:
-            msg = "malformed centroid property"
-            raise fail(msg, "one finite [x, y] centroid per polygon") from error
-        if centroids.shape != (len(source), 2) or not np.isfinite(centroids).all():
-            msg = "missing or nonfinite centroid property"
-            raise fail(msg, "one finite [x, y] centroid per polygon")
+    centroids = boundary_centroids(source, f"{kind}_centroid", path, context=context)
+    if centroids is not None:
         centroids = image_to_global(frame, centroids, context=context)
 
     return BoundaryData(ShapesModel.parse(shapes, transformations={"global": Identity()}), centroids)

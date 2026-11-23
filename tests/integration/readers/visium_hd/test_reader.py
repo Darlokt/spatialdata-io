@@ -67,6 +67,21 @@ def _invalidate(root: Path, kind: str, ids: tuple[int, ...]) -> None:
 class TestVisiumHD:
     """Supported layouts and linked products agree with independent source truth."""
 
+    @pytest.mark.parametrize(
+        "artifact",
+        ["binned_outputs/square_002um/raw_feature_bc_matrix.h5", "segmented_outputs/filtered_feature_cell_matrix.h5"],
+    )
+    def test_nucleus_feature_columns_name_the_incomplete_source(self, tmp_path: Path, artifact: str) -> None:
+        write_bundle(tmp_path, sizes=(2,))
+        path = tmp_path / artifact
+        with h5py.File(path, "r+") as handle:
+            del handle["matrix/features/genome"]
+
+        with pytest.raises(ReaderFormatError, match="genome") as caught:
+            visium_hd(tmp_path, bin_sizes=(), include_images=False, include_nucleus_table=True)
+
+        assert caught.value.path == path
+
     def test_public_bin_selection_is_sorted_and_skips_unselected_counts(self, tmp_path: Path) -> None:
         bundle = write_bundle(tmp_path, segmented=False)
         (bundle.root / "binned_outputs/square_002um/filtered_feature_bc_matrix.h5").unlink()

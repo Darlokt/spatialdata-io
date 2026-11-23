@@ -79,10 +79,19 @@ With footprints included, the table links through categorical `cells_region` and
 
 ## Cell boundaries and coordinates
 
-Boundary Parquet requires `EntityID`, `ZIndex` and WKB `Geometry`, with optional
-`Type` restricted to Cell/cell. Required columns are projected. Geometry must
-be nonempty finite planar Polygon or MultiPolygon, and source IDs and plane
-annotations must be valid under every policy. `ZIndex` may be null, as permitted by the [VPT geometry schema](https://vizgen.github.io/vizgen-postprocessing/output_data_formats/geometry_file_format.html); populated values must be nonnegative uint64 plane indexes. Every slice participates in the XY footprint independently of its plane annotation. This applies to the supported instrument, Cellpose and Watershed layouts; it does not add support for other entity types. No geometry is repaired.
+Boundary Parquet requires integer or text `EntityID`, `ZIndex`, and binary WKB
+`Geometry`, with optional text `Type` (`Cell` or `cell`). The reader validates
+these physical field types in the footer before decoding geometry. A
+dictionary-encoded field uses its dictionary value type. Source IDs and plane
+annotations must be valid under every geometry policy, and each geometry slice
+must be a nonempty, finite, planar Polygon or MultiPolygon.
+
+`ZIndex` permits nulls and integer or float64 storage. The VPT row-based
+producer can produce float64 when integer plane numbers and missing values
+share a column. Every populated plane must be a nonnegative integer
+representable as uint64. Every slice contributes to the XY footprint
+independently of its plane annotation in the supported instrument, Cellpose and
+Watershed layouts. [Vizgen geometry schema](https://vizgen.github.io/vizgen-postprocessing/output_data_formats/geometry_file_format.html), [VPT segmentation result](https://github.com/Vizgen/vpt-core/blob/develop/src/vpt_core/segmentation/seg_result.py#L20-L48), [VPT Parquet writer](https://github.com/Vizgen/vpt-core/blob/develop/src/vpt_core/io/output_tools.py#L38-L49)
 
 Projected boundary records are decoded and validated in batches of at most
 4,096 rows. WKB and coordinate-validation temporaries therefore cover one batch;

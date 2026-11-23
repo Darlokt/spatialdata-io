@@ -207,22 +207,39 @@ class TestNormalizeMetadata:
 
 
 class TestBoundaryColumns:
-    """Project only the geometry contract and optional entity type."""
+    """Validate the Parquet schema, ignoring the payload types of unused fields."""
 
     def test_projection(self, tmp_path: Path) -> None:
-        assert boundary_columns(
-            ["extra", "Geometry", "Type", "EntityID", "ZIndex"], ArtifactFile(tmp_path / "cells.parquet")
-        ) == ("EntityID", "ZIndex", "Geometry", "Type")
-        assert boundary_columns(["Geometry", "EntityID", "ZIndex"], ArtifactFile(tmp_path / "cells.parquet")) == (
-            "EntityID",
-            "ZIndex",
-            "Geometry",
+        schema = pa.schema(
+            [
+                ("extra", pa.struct([("data", pa.float64())])),
+                ("Geometry", pa.binary()),
+                ("Type", pa.dictionary(pa.int32(), pa.string())),
+                ("EntityID", pa.int64()),
+                ("ZIndex", pa.uint64()),
+            ]
         )
+        path = ArtifactFile(tmp_path / "cells.parquet")
+        assert boundary_columns(schema, path) == ("EntityID", "ZIndex", "Geometry", "Type")
+        assert boundary_columns(schema.remove(2), path) == ("EntityID", "ZIndex", "Geometry")
+
+    @pytest.mark.parametrize("z_type", [pa.int64(), pa.float64(), pa.null(), pa.dictionary(pa.int8(), pa.uint64())])
+    def test_accepts_nullable_integer_planes(self, tmp_path: Path, z_type: pa.DataType) -> None:
+        schema = pa.schema([("Geometry", pa.large_binary()), ("EntityID", pa.large_string()), ("ZIndex", z_type)])
+        assert boundary_columns(schema, ArtifactFile(tmp_path / "cells.parquet")) == ("EntityID", "ZIndex", "Geometry")
+
+    @pytest.mark.parametrize("z_type", [pa.bool_(), pa.string(), pa.dictionary(pa.int8(), pa.string())])
+    def test_rejects_unsupported_plane_types(self, tmp_path: Path, z_type: pa.DataType) -> None:
+        schema = pa.schema([("Geometry", pa.binary()), ("EntityID", pa.uint64()), ("ZIndex", z_type)])
+        with pytest.raises(ReaderFormatError, match="ZIndex dtype"):
+            boundary_columns(schema, ArtifactFile(tmp_path / "cells.parquet"))
 
     @pytest.mark.parametrize("names", [["EntityID"], ["EntityID", "ZIndex", "Geometry", "ZIndex"]])
     def test_missing_or_repeated(self, tmp_path: Path, names: list[str]) -> None:
         with pytest.raises(ReaderFormatError):
-            boundary_columns(names, ArtifactFile(tmp_path / "cells.parquet"))
+            boundary_columns(
+                pa.schema([(name, pa.string()) for name in names]), ArtifactFile(tmp_path / "cells.parquet")
+            )
 
 
 class TestValidateOutputAnnotations:
@@ -237,11 +254,16 @@ class TestValidateOutputAnnotations:
 
 
 class TestNormalizeBoundaryIds:
-    """Validate physical primitive types before WKB geometry decoding."""
+    """Validate source values after the footer establishes their physical types."""
 
     @pytest.mark.parametrize(
         "planes",
-        [pa.array([None, 2], type=pa.int64()), pa.nulls(2), pa.array([0, None]).dictionary_encode()],
+        [
+            pa.array([None, 2], type=pa.int64()),
+            pa.array([None, 2.0]),
+            pa.nulls(2),
+            pa.array([0, None]).dictionary_encode(),
+        ],
     )
     def test_nullable_plane_annotations(self, tmp_path: Path, planes: pa.Array) -> None:
         table = pa.table({"EntityID": ["a", "a"], "ZIndex": planes, "Type": ["Cell", "Cell"]})
@@ -262,10 +284,8 @@ class TestNormalizeBoundaryIds:
     @pytest.mark.parametrize(
         "table",
         [
-            pa.table({"EntityID": [1.0], "ZIndex": [0]}),
-            pa.table({"EntityID": ["1"], "ZIndex": [{"plane": 0}]}),
+            pa.table({"EntityID": ["1"], "ZIndex": [-1]}),
             pa.table({"EntityID": ["1"], "ZIndex": [0.5]}),
-            pa.table({"EntityID": ["1"], "ZIndex": ["-1"]}),
             pa.table({"EntityID": ["1"], "ZIndex": [0], "Type": ["Nucleus"]}),
             pa.table({"EntityID": ["1"], "ZIndex": [0], "Type": pa.array([None], type=pa.string())}),
             pa.table({"EntityID": pa.array([], type=pa.string()), "ZIndex": pa.array([], type=pa.int64())}),

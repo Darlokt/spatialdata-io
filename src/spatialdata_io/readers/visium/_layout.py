@@ -57,9 +57,6 @@ from typing import TYPE_CHECKING
 from spatialdata_io.readers._utils.counts import MtxFiles
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.paths import (
-    ArtifactDirectory,
-    ArtifactFile,
-    DatasetRoot,
     list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
@@ -71,11 +68,18 @@ from spatialdata_io.readers._utils.paths import (
     require_metadata_directory,
     require_metadata_file,
 )
-from spatialdata_io.readers.visium._metadata import CountMetadata, read_count_metadata
-from spatialdata_io.readers.visium._schemas import PositionFormat, classify_position_row
+from spatialdata_io.readers.visium._metadata import read_count_metadata
+from spatialdata_io.readers.visium._schemas import classify_position_row
 
 if TYPE_CHECKING:
-    from spatialdata_io.readers._utils.paths import PathPolicy
+    from spatialdata_io.readers._utils.paths import (
+        ArtifactDirectory,
+        ArtifactFile,
+        DatasetRoot,
+        PathPolicy,
+    )
+    from spatialdata_io.readers.visium._metadata import CountMetadata
+    from spatialdata_io.readers.visium._schemas import PositionFormat
 
 FILTERED_H5 = "filtered_feature_bc_matrix.h5"
 FILTERED_MTX = "filtered_feature_bc_matrix"

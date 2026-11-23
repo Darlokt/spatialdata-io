@@ -90,6 +90,16 @@ def validate_columns(columns: Sequence[str], path: ArtifactFile, *, context: Rea
         )
 
 
+def marker_types(columns: Sequence[str], path: ArtifactFile) -> pa.Schema:
+    """Require the marker-name field and preserve every panel column as exact text."""
+    validate_columns(columns, path, context=MARKERS_CONTEXT)
+    if MARKER_NAME not in columns:
+        raise ReaderFormatError(
+            context=MARKERS_CONTEXT, path=path, found=f"columns {list(columns)!r}", expected=f"a {MARKER_NAME!r} column"
+        )
+    return pa.schema([(name, pa.string()) for name in columns])
+
+
 @dataclass(frozen=True, slots=True)
 class MarkerPanel:
     """Own canonical MCQuant feature IDs and the complete marker annotations."""
@@ -111,13 +121,6 @@ def canonical_markers(names: Sequence[str]) -> tuple[str, ...]:
 
 def normalize_markers(frame: pd.DataFrame, path: ArtifactFile) -> MarkerPanel:
     """Index the owned Arrow-string panel with collision-free MCQuant feature IDs."""
-    if MARKER_NAME not in frame.columns:
-        raise ReaderFormatError(
-            context=MARKERS_CONTEXT,
-            path=path,
-            found=f"columns {frame.columns.tolist()!r}",
-            expected=f"a {MARKER_NAME!r} column",
-        )
     if frame.empty:
         raise ReaderFormatError(
             context=MARKERS_CONTEXT, path=path, found="no markers", expected="one row per registered image channel"

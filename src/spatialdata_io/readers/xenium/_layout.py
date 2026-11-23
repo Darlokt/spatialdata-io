@@ -39,15 +39,13 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata_io.readers._utils.counts import MtxFiles
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
-    ArtifactFile,
-    DatasetRoot,
     list_directory,
     normalize_dataset_root,
     optional_metadata_directory,
     optional_metadata_file,
     require_metadata_file,
 )
-from spatialdata_io.readers.xenium._metadata import Experiment, read_experiment
+from spatialdata_io.readers.xenium._metadata import read_experiment
 from spatialdata_io.readers.xenium._schemas import boundary_types, cell_types, transcript_types
 
 if TYPE_CHECKING:
@@ -55,7 +53,12 @@ if TYPE_CHECKING:
 
     import pyarrow as pa
 
-    from spatialdata_io.readers._utils.paths import PathPolicy
+    from spatialdata_io.readers._utils.paths import (
+        ArtifactFile,
+        DatasetRoot,
+        PathPolicy,
+    )
+    from spatialdata_io.readers.xenium._metadata import Experiment
 
 type TabularKind = Literal["parquet", "csv", "csv_gz"]
 type TableTarget = Literal["cell_labels", "cell_boundaries", "cell_circles"]

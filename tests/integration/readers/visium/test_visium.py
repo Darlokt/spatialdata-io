@@ -272,6 +272,19 @@ class TestVisiumSyntheticWorkflow:
         assert result.tables["table"].obs["spot_id"].tolist() == [barcode, "barcode-b", "barcode-c"]
         assert result.shapes["sample"].index.tolist() == [barcode, "barcode-b", "barcode-c"]
 
+    def test_reports_invalid_six_field_positions(self, tmp_path: Path) -> None:
+        _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
+        _write_spatial(tmp_path, version="v1")
+        positions = tmp_path / "spatial/tissue_positions_list.csv"
+        positions.write_text("barcode,tissue,row,col,image_row,image_col\n")
+
+        with pytest.raises(ReaderFormatError, match="malformed CSV") as caught:
+            visium(tmp_path)
+
+        assert caught.value.path == positions
+        assert caught.value.context.artifact == "tissue positions"
+        assert "in_tissue" in caught.value.__notes__[0]
+
     @pytest.mark.parametrize("version", ["v1_headered", "v2"])
     def test_named_positions_preserve_multiline_extension_header(
         self, tmp_path: Path, version: Literal["v1_headered", "v2"]

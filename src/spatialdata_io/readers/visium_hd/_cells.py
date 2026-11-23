@@ -37,7 +37,14 @@ from scipy.sparse import csr_array
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import as_csr_array, count_accumulation_dtype, finalize_count_arrays
-from spatialdata_io.readers.visium_hd._schemas import MAPPINGS_SCHEMA, validate_mappings, validate_schema
+from spatialdata_io.readers.visium_hd._schemas import (
+    MAPPINGS_SCHEMA,
+    NUCLEUS_FEATURE_COLUMNS,
+    parse_cell_barcodes,
+    validate_mappings,
+    validate_nucleus_feature_columns,
+    validate_schema,
+)
 from spatialdata_io.readers.visium_hd._tables import read_counts
 
 if TYPE_CHECKING:
@@ -48,34 +55,10 @@ if TYPE_CHECKING:
 _BATCH_SIZE = 65_536
 
 
-def cell_ids(names: pd.Index[str], path: ArtifactFile, *, version: str | None) -> NDArray[np.uint32]:
-    """Decode canonical positive cell barcodes without accepting alternate spellings."""
-    context = ReaderErrorContext("visium_hd", "cell barcodes", version)
-    valid = names.str.fullmatch(r"cellid_[0-9]{9}-1", na=False)
-    if not valid.all():
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="noncanonical cell barcode",
-            expected="cellid_{positive_id:09d}-1",
-        )
-
-    values = names.str.slice(7, 16).to_numpy(dtype=np.uint32)
-    if np.any(values == 0):
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found="zero cell ID",
-            expected="positive cell IDs",
-        )
-
-    return values
-
-
 def read_cell_table(path: ArtifactFile, *, make_var_names_unique: bool, version: str | None) -> ad.AnnData:
     """Preserve the chosen raw or filtered cell population and source order."""
     counts, obs, var = read_counts(path, version=version)
-    obs["instance_id"] = cell_ids(obs.index, path, version=version)
+    obs["instance_id"] = parse_cell_barcodes(obs.index, path, version=version)
     table = ad.AnnData(counts, obs=obs, var=var)
     if make_var_names_unique:
         table.var_names_make_unique()
@@ -118,21 +101,25 @@ def _aggregate_counts(  # noqa: PLR0913, RUF100 - Explicit operands, target size
     return as_csr_array(aggregated)
 
 
-def read_nucleus_table(
+def read_nucleus_table(  # noqa: PLR0913 - Separate count and mapping artifacts and matched populations.
     raw_file: ArtifactFile,
     mapping_file: ArtifactFile,
     population: ad.AnnData,
     known_cell_ids: pd.Index,
     *,
+    population_path: ArtifactFile,
     version: str | None,
 ) -> ad.AnnData:
     """Sum raw 2 µm bins, including out-of-tissue bins, in selected cell order."""
     context = ReaderErrorContext("visium_hd", "nucleus aggregation", version)
     mapping_context = ReaderErrorContext("visium_hd", "barcode mappings", version)
+    # The population is built from owned eager counts; AnnData's type also supports backed tables.
+    cell_var = cast("pd.DataFrame", population.var)
+    validate_nucleus_feature_columns(cell_var, population_path, context=context)
     counts, obs, var = read_counts(raw_file, version=version)
+    validate_nucleus_feature_columns(var, raw_file, context=context)
     if any(
-        not np.array_equal(var[column].to_numpy(), population.var[column].to_numpy())
-        for column in ("gene_ids", "genome", "feature_types")
+        not np.array_equal(var[column].to_numpy(), cell_var[column].to_numpy()) for column in NUCLEUS_FEATURE_COLUMNS
     ):
         raise ReaderFormatError(
             context=context,
@@ -175,7 +162,7 @@ def read_nucleus_table(
             members = batch.column("in_nucleus").to_numpy(zero_copy_only=False)
             assigned: pd.Index[str] = pd.Index(batch.column("cell_id"), dtype=population_names.dtype)
             nonnull = assigned.dropna().unique()
-            if not pd.Index(cell_ids(nonnull, mapping_file, version=version)).isin(known_cell_ids).all():
+            if not pd.Index(parse_cell_barcodes(nonnull, mapping_file, version=version)).isin(known_cell_ids).all():
                 raise ReaderFormatError(
                     context=context,
                     path=mapping_file,

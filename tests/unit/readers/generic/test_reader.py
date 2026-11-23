@@ -130,3 +130,13 @@ class TestGeneric:
     def test_rejects_unknown_suffix(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="Unsupported input suffix"):
             generic(tmp_path / "image.bmp", data_axes="yxc")
+
+    @pytest.mark.parametrize("level", [False, 0.0])
+    def test_rejects_invalid_neutral_tiff_level_for_geojson(self, tmp_path: Path, level: object) -> None:
+        with pytest.raises(TypeError, match="tiff_level"):
+            generic(tmp_path / "shapes.geojson", tiff_level=cast("int", level))
+
+    @pytest.mark.parametrize("factors", [0, "", False])
+    def test_rejects_invalid_neutral_scale_factors_for_geojson(self, tmp_path: Path, factors: object) -> None:
+        with pytest.raises(TypeError, match="scale_factors"):
+            generic(tmp_path / "shapes.geojson", scale_factors=cast("tuple[int, ...]", factors))

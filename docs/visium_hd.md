@@ -141,6 +141,9 @@ range raise before conversion.
 2 µm counts** over bins with `in_nucleus=True`, including bins outside the tissue
 mask, in the selected cell population's order. Returned counts follow the
 [completed-count dtype policy](table_contracts.md#completed-raw-counts).
+Both matrices must provide `gene_ids`, `genome`, and `feature_types` in their
+feature annotations. A missing column raises an error that identifies its
+matrix. The feature identity values must match in source order.
 Duplicate HDF5 entries for one barcode and feature fail. Counts must be
 finite, nonnegative and integer-valued.
 Nucleus reconstruction accumulates decoded bins without converting them to

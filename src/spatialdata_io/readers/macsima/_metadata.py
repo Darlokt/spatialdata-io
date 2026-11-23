@@ -54,7 +54,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.image import inspect_tiff, ome_pixel_sizes_um, require_matching_pixel_sizes
 from spatialdata_io.readers.macsima._schemas import (
     EXPOSURE_UNIT,
-    ImageType,
+    ChannelMetadata,
     SchemaMajor,
     normalize_image_type,
 )
@@ -74,25 +74,6 @@ _ARTIFACT = "channel image"
 _VERSION_KEYS = ("SoftwareVersion", "Software version")  # v1, v0
 # MACSiQView declares pixel sizes in µm or nm; other units are unproved.
 _PIXEL_SIZE_UNITS = frozenset({UnitsLength.MICROMETER, UnitsLength.NANOMETER})
-
-
-@dataclass(frozen=True, slots=True)
-class ChannelMetadata:
-    """Acquisition annotations of one channel, normalized across schema versions.
-
-    ``name`` is the marker; bleach images already carry the ``_background``
-    suffix, so ordering and nuclei matching see the final name. ``exposure_ms``
-    is in milliseconds.
-    """
-
-    name: str
-    cycle: int
-    image_type: ImageType
-    well: str | None
-    roi: int | None
-    fluorophore: str | None
-    clone: str | None
-    exposure_ms: float | None
 
 
 @dataclass(frozen=True, slots=True)

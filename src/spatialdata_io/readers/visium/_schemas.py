@@ -39,15 +39,6 @@ if TYPE_CHECKING:
 
 type PositionFormat = Literal["headered", "headerless"]
 
-POSITION_COLUMNS = (
-    "barcode",
-    "in_tissue",
-    "array_row",
-    "array_col",
-    "pxl_row_in_fullres",
-    "pxl_col_in_fullres",
-)
-OBS_POSITION_COLUMNS = ("in_tissue", "array_row", "array_col")
 POSITION_SOURCE_SCHEMA = pa.schema(
     [
         ("barcode", pa.string()),
@@ -58,6 +49,8 @@ POSITION_SOURCE_SCHEMA = pa.schema(
         ("pxl_col_in_fullres", pa.float64()),
     ]
 )
+POSITION_COLUMNS = tuple(POSITION_SOURCE_SCHEMA.names)
+OBS_POSITION_COLUMNS = ("in_tissue", "array_row", "array_col")
 REGION_KEY = "region"
 INSTANCE_KEY = "spot_id"
 SPOT_ID_DTYPE = pd.ArrowDtype(pa.string())

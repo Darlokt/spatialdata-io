@@ -15,9 +15,10 @@ from spatialdata_io.readers._utils.table import (
     parse_linked_table,
     prepare_anndata_dataframe,
 )
-from spatialdata_io.readers.curio._geometry import read_shapes
-from spatialdata_io.readers.curio._layout import CLUSTER_FEATURES, COUNTS, discover_layout
-from spatialdata_io.readers.curio._schemas import DEFINING_FEATURES_KEY, STRING_DTYPE
+from spatialdata_io.readers.curio._geometry import make_shapes
+from spatialdata_io.readers.curio._layout import COUNTS, discover_layout
+from spatialdata_io.readers.curio._positions import prepare_positions
+from spatialdata_io.readers.curio._schemas import STRING_DTYPE
 from spatialdata_io.readers.curio._tables import read_table
 
 if TYPE_CHECKING:
@@ -181,7 +182,8 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
     """
     layout = discover_layout(path, path_policy=path_policy)
     table = read_table(layout)
-    shapes = read_shapes(table, layout.counts)
+    xy = prepare_positions(table, layout.counts)
+    shapes = make_shapes(xy, table.obs_names)
 
     # Bead IDs link the table rows to the circles built from the same rows.
     table.obs["region"] = pd.Categorical(["cells"] * table.n_obs)
@@ -193,8 +195,6 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
     prepare_anndata_dataframe(
         cast("pd.DataFrame", table.var), context=ReaderErrorContext("curio", "features"), allow_float_nulls=True
     )
-    prepare_anndata_dataframe(table.uns[DEFINING_FEATURES_KEY], context=ReaderErrorContext("curio", CLUSTER_FEATURES))
-
     duplicate_sums: list[SparseDuplicateSummary] = []
     normalize_owned_anndata(
         table, context=ReaderErrorContext("curio", COUNTS), path=layout.counts, duplicate_sums=duplicate_sums

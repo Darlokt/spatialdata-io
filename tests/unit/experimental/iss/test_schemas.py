@@ -11,7 +11,7 @@ import pytest
 from scipy import sparse
 
 from spatialdata_io.experimental.iss._schemas import (
-    validate_index_ids,
+    parse_index_ids,
     validate_instance_ids,
     validate_output_column,
     validate_table,
@@ -134,11 +134,13 @@ class TestValidateOutputColumn:
         )
 
 
-class TestValidateIndexIds:
-    """Reject invalid parsed decimal IDs before constructing an Arrow integer array."""
+class TestParseIndexIds:
+    """Validate decimal names and the label dtype's range before assignment."""
 
-    @pytest.mark.parametrize("value", [0, -1, 65536])
-    def test_nonpositive_or_out_of_range(self, tmp_path: Path, value: int) -> None:
+    @pytest.mark.parametrize("value", ["0", "65536"])
+    def test_nonpositive_or_out_of_range(self, tmp_path: Path, value: str) -> None:
         """Respect label background and dtype bounds without float conversion."""
         with pytest.raises(ReaderFormatError, match="nonpositive or out-of-range"):
-            validate_index_ids([value], label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "table.h5ad"))
+            parse_index_ids(
+                pd.Index([value]), label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "table.h5ad")
+            )

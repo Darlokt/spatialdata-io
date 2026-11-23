@@ -613,6 +613,20 @@ class TestDbit:
 class TestDbitPathPolicy:
     """Discovered artifacts follow the dataset root's symlink policy."""
 
+    def test_in_root_links_preserve_discovered_names_and_formats(self, tmp_path: Path) -> None:
+        _write_layout(tmp_path)
+        table = tmp_path / "sample.h5ad"
+        image = tmp_path / "tissue_lowres_image.png"
+        _write_image(image)
+        expected = dbit(tmp_path)
+        payloads = tmp_path / "payloads"
+        payloads.mkdir()
+        table.symlink_to(table.rename(payloads / "expression"))
+        image.symlink_to(image.rename(payloads / "histology"))
+
+        assert_spatial_data_objects_are_identical(dbit(tmp_path), expected)
+        assert_spatial_data_objects_are_identical(dbit(tmp_path, path_policy="relaxed"), expected)
+
     def test_out_of_root_symlinks_require_the_relaxed_policy(
         self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
     ) -> None:

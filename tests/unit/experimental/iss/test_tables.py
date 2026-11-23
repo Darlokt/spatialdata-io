@@ -212,6 +212,20 @@ class TestReadTable:
 class TestSetInstanceIds:
     """Preserve exact integers and reject nonsensical label references."""
 
+    def test_decimal_names_with_many_leading_zeroes(self, tmp_path: Path) -> None:
+        obs = pd.DataFrame(index=["0" * 5000 + "7"])
+        _set_instance_ids(
+            obs, instance_key=None, label_dtype=np.dtype(np.uint16), path=ArtifactFile(tmp_path / "counts.h5ad")
+        )
+        assert obs["instance_id"].tolist() == [7]
+
+    def test_overlong_decimal_names_fail_with_table_context(self, tmp_path: Path) -> None:
+        obs = pd.DataFrame(index=["9" * 5000])
+        path = ArtifactFile(tmp_path / "counts.h5ad")
+        with pytest.raises(ReaderFormatError, match="nonpositive or out-of-range") as caught:
+            _set_instance_ids(obs, instance_key=None, label_dtype=np.dtype(np.uint16), path=path)
+        assert caught.value.path == path
+
     @pytest.mark.parametrize("identifier", [1, 7, 2**53 + 1, 2**63, 2**64 - 1])
     def test_generated_ids_use_uint64(self, tmp_path: Path, identifier: int) -> None:
         obs = pd.DataFrame(index=[str(identifier), "2"])

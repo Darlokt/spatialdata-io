@@ -14,7 +14,7 @@ from scipy import sparse
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.steinbock._images import Calibration, SampleGrid
+from spatialdata_io.readers.steinbock._rasters import Calibration, SampleGrid
 from spatialdata_io.readers.steinbock._tables import (
     _set_instance_ids,
     _set_positions,

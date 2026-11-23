@@ -13,13 +13,13 @@ from spatialdata.transformations import get_transformation
 from xarray import DataArray, DataTree
 
 import spatialdata_io.readers._utils.image.tiff._dask as tiff_dask
-import spatialdata_io.readers.steinbock._images as steinbock_images
+import spatialdata_io.readers.steinbock._rasters as steinbock_rasters
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
-from spatialdata_io.readers.steinbock._images import _calibration, _read_raster, read_rasters
 from spatialdata_io.readers.steinbock._layout import SampleLayout
+from spatialdata_io.readers.steinbock._rasters import _calibration, _read_raster, read_rasters
 from spatialdata_io.readers.steinbock._schemas import ImageMetadata
 
 if TYPE_CHECKING:
@@ -137,7 +137,7 @@ class TestReadRasters:
             photometric="rgb",
             planarconfig="separate" if planar else "contig",
         )
-        names = mocker.spy(steinbock_images, "ome_channel_names")
+        names = mocker.spy(steinbock_rasters, "ome_channel_names")
 
         with pytest.raises(ReaderFormatError, match="Axis 's' has length 3") as caught:
             read_rasters(sample, make_raster_options(), metadata=None, calibrated_frame=sample.name)

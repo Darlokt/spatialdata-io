@@ -64,6 +64,29 @@ def _expected() -> pd.DataFrame:
 class TestReadTranscripts:
     """Points are lazy, global, typed, and identical for every partitioning."""
 
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_literal_bom_prefix_survives_initial_and_later_partitions(
+        self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
+    ) -> None:
+        parts = (
+            "target,fov,cell_ID,x_local_px,y_local_px,x_global_px,y_global_px\n\ufeffA,1,0,1,2,1001,5002\n".encode(),
+            b"A,1,0,2,3,1002,5003\n",
+            "\ufeffA,1,0,3,4,1003,5004\n".encode(),
+        )
+        if compressed:
+            parts = tuple(gzip.compress(part, mtime=0) for part in parts)
+            mocker.patch.object(_transcripts, "_GZIP_RANGE_BYTES", len(parts[0]) + len(parts[1]))
+        else:
+            _small_blocks(mocker)
+        path = ArtifactFile(tmp_path / ("tx.csv.gz" if compressed else "tx.csv"))
+        path.write_bytes(b"".join(parts))
+        points = read_transcripts(
+            CsvFile(path, compressed=compressed), features=("A", "\ufeffA"), placements=_PLACEMENTS
+        )
+
+        assert points.npartitions > 1
+        assert points.compute()["target"].tolist() == ["\ufeffA", "A", "\ufeffA"]
+
     @pytest.mark.parametrize("split_members", [False, True])
     def test_multiline_gzip_record_fails_at_every_partition_size(
         self, tmp_path: Path, mocker: MockerFixture, *, split_members: bool

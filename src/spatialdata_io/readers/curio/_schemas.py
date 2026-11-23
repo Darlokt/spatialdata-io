@@ -25,9 +25,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 from spatialdata.models import TableModel
 
 from spatialdata_io._positions import POSITIONS_KEY
@@ -196,7 +196,9 @@ def validate_moran(moran: pd.DataFrame, features: pd.DataFrame, path: ArtifactFi
         )
 
     # Arrow parses nan and inf as float64 values; the statistics must be finite.
-    if not np.isfinite(moran.to_numpy(dtype=np.float64)).all():
-        raise schema_error(
-            MORAN_FEATURES, path, found="nonfinite Moran statistics", expected="finite float64 Moran statistics"
-        )
+    for name in moran:
+        column = pa.array(moran[name])
+        if column.null_count or pc.call_function("all", [pc.call_function("is_finite", [column])]).as_py() is False:
+            raise schema_error(
+                MORAN_FEATURES, path, found="nonfinite Moran statistics", expected="finite float64 Moran statistics"
+            )

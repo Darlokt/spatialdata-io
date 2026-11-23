@@ -41,12 +41,12 @@ from spatialdata_io.experimental.iss._schemas import (
     MIN_INSTANCE_BITS,
     REGION_KEY,
     TABLE_CONTEXT,
-    validate_index_ids,
+    parse_index_ids,
     validate_instance_ids,
     validate_output_column,
     validate_table,
 )
-from spatialdata_io.readers._utils.errors import ReaderFormatError, add_reader_context
+from spatialdata_io.readers._utils.errors import add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
 from spatialdata_io.readers._utils.table import prepare_anndata_dataframe
 
@@ -101,19 +101,7 @@ def _set_instance_ids(
 ) -> None:
     """Set exact positive integer IDs within the label dtype's range in an owned frame."""
     if instance_key is None:
-        # int() also accepts signs, underscores, whitespace and non-ASCII digits.
-        names = obs.index.tolist()
-        if not all(isinstance(name, str) and name.isascii() and name.isdigit() for name in names):
-            raise ReaderFormatError(
-                context=TABLE_CONTEXT,
-                path=path,
-                found="observation names that are not ASCII decimal digits",
-                expected="integer label IDs as observation names, or an explicit instance_key",
-            )
-        # Python integers keep IDs above 2**53 exact.
-        values = [int(name) for name in names]
-        validate_index_ids(values, label_dtype=label_dtype, path=path)
-
+        values = parse_index_ids(obs.index, label_dtype=label_dtype, path=path)
         column = pd.Series(values, index=obs.index, dtype=INSTANCE_ID_DTYPE)
         validate_output_column(obs, DEFAULT_INSTANCE_KEY, column, path=path)
         obs[DEFAULT_INSTANCE_KEY] = column

@@ -30,7 +30,7 @@ import pyarrow as pa
 import zarr
 from zarr.storage import ZipStore
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
+from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.xenium._cell_ids import decode_cell_ids
 from spatialdata_io.readers.xenium._labels import MaskSource
 from spatialdata_io.readers.xenium._schemas import cast_column, summary_columns
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from zarr.core.metadata import ArrayMetadata
 
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.xenium._version import Family
 

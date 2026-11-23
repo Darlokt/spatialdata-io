@@ -146,9 +146,9 @@ class TestValidateMetrics:
 class TestValidateMoran:
     """Supplied dynamic statistics require known IDs and finite nonmissing values."""
 
-    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
-    def test_nonfinite_statistic(self, tmp_path: Path, value: float) -> None:
-        """Reject the nan and inf spellings that Arrow parses as float64 values."""
+    @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf, None])
+    def test_nonfinite_statistic(self, tmp_path: Path, value: float | None) -> None:
+        """Reject missing values and the nan and inf spellings that Arrow parses as float64 values."""
         # pa.array keeps NaN a value, as Arrow's CSV parser does, rather than a null.
         frame = pd.DataFrame({"I": pd.arrays.ArrowExtensionArray(pa.array([0.5, value]))}, index=["a", "b"])
 

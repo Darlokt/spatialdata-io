@@ -33,9 +33,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pacsv
-import pyarrow.parquet as pq
 
-from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
+from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.counts import (
     MtxFiles,
     read_10x_h5,
@@ -47,35 +46,33 @@ from spatialdata_io.readers._utils.csv import csv_errors, csv_header, open_csv_s
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.metadata import decode_hdf5_text
 from spatialdata_io.readers._utils.names import sanitize_column_names
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory, require_file
+from spatialdata_io.readers._utils.paths import require_directory, require_file
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
     parse_linked_table,
     prepare_anndata_dataframe,
 )
 from spatialdata_io.readers.xenium._layout import H5Counts
+from spatialdata_io.readers.xenium._parquet import open_parquet
 from spatialdata_io.readers.xenium._schemas import (
     CELL_COLUMNS,
-    CELL_FLOATS,
     CELL_ID,
-    CELL_OPTIONAL_COUNTS,
     CELL_REQUIRED,
-    CELL_REQUIRED_COUNTS,
     READER_OBS,
     STRING_DTYPE,
-    cast_column,
     header_types,
-    id_index,
-    normalize_ids,
-    require_finite,
+    normalize_cell_table,
     validate_header,
+    validate_parquet_types,
 )
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
     from scipy import sparse
 
+    from spatialdata_io._positions import PositionsMetadata
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
+    from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
     from spatialdata_io.readers.xenium._analysis import Analysis
     from spatialdata_io.readers.xenium._cells import CellStore
     from spatialdata_io.readers.xenium._layout import CountSource, TableTarget, TabularSource
@@ -331,12 +328,6 @@ def read_feature_index(source: CountSource, *, context: ReaderErrorContext) -> F
         )
 
 
-def read_header(source: TabularSource, *, context: ReaderErrorContext) -> tuple[str, ...]:
-    """Read only the header record of a CSV twin."""
-    with open_csv_stream(source.file, context=context, compressed=source.kind == "csv_gz") as stream:
-        return csv_header(source.file, context=context, source=stream)
-
-
 def read_cells(source: TabularSource, *, context: ReaderErrorContext) -> Cells:
     """Read ``cells.parquet`` or its CSV twin as validated, Arrow-backed annotations.
 
@@ -354,10 +345,13 @@ def read_cells(source: TabularSource, *, context: ReaderErrorContext) -> Cells:
     """
     path = source.file
     if source.kind == "parquet":
-        table = pq.read_table(path)
-        validate_header(table.column_names, CELL_REQUIRED, path=path, context=context)
+        with open_parquet(path, context=context) as parquet:
+            schema = parquet.schema_arrow
+            validate_header(schema.names, CELL_REQUIRED, path=path, context=context)
+            validate_parquet_types(schema, source.types, path=path, context=context)
+            table = parquet.read()
     else:
-        header = read_header(source, context=context)
+        header = csv_header(path, context=context, compressed=source.kind == "csv_gz")
         validate_header(header, CELL_REQUIRED, path=path, context=context)
         with (
             open_csv_stream(path, context=context, compressed=source.kind == "csv_gz") as stream,
@@ -373,34 +367,7 @@ def read_cells(source: TabularSource, *, context: ReaderErrorContext) -> Cells:
                 ),
             )
 
-    names, types = table.column_names, source.types
-    for name in (*CELL_FLOATS, *CELL_REQUIRED_COUNTS, *CELL_OPTIONAL_COUNTS):
-        if name in names:
-            column = cast_column(table[name], types.field(name).type, name, path=path, context=context)
-            if name == "nucleus_area":
-                # Cells without a nucleus have no area: fastparquet-written files
-                # store null, Polars-written files and CSV twins NaN. Both become NaN.
-                column = column.fill_null(float("nan"))
-            table = table.set_column(names.index(name), name, column)
-    ids = normalize_ids(table[CELL_ID], types.field(CELL_ID).type, path=path, context=context)
-    table = table.set_column(names.index(CELL_ID), CELL_ID, ids)
-
-    if any(table[name].null_count for name in CELL_REQUIRED):
-        raise ReaderFormatError(
-            context=context, path=path, found="missing required values", expected="complete cell records"
-        )
-    for name in CELL_FLOATS:
-        values = table[name].to_numpy()
-        require_finite(values, name, path=path, context=context, allow_nan=name == "nucleus_area")
-        # NaN comparisons are false, so cells without a nucleus pass.
-        if name in ("cell_area", "nucleus_area") and (values < 0).any():
-            raise ReaderFormatError(
-                context=context, path=path, found=f"negative {name} values", expected=f"nonnegative {name}"
-            )
-
-    ids = id_index(table[CELL_ID])
-    if not ids.is_unique:
-        raise ReaderFormatError(context=context, path=path, found="repeated cell IDs", expected="one row per cell")
+    table, ids = normalize_cell_table(table, source.types, path=path, context=context)
     return Cells(table.to_pandas(types_mapper=pd.ArrowDtype), ids)
 
 

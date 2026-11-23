@@ -221,8 +221,9 @@ def validate_output_annotations(
             )
 
 
-def boundary_columns(names: Sequence[str], path: ArtifactFile) -> tuple[str, ...]:
-    """Project the identity, plane and geometry fields and the optional entity type."""
+def boundary_columns(schema: pa.Schema, path: ArtifactFile) -> tuple[str, ...]:
+    """Validate boundary footer fields and choose the projected physical columns."""
+    names = schema.names
     _validate_columns(names, path, BOUNDARIES)
     # Unlike csv_header, a Parquet schema may repeat a field name.
     if len(set(names)) != len(names):
@@ -232,21 +233,42 @@ def boundary_columns(names: Sequence[str], path: ArtifactFile) -> tuple[str, ...
         raise schema_error(
             path, BOUNDARIES, found=f"columns {list(names)!r}", expected="EntityID, ZIndex and Geometry fields"
         )
-    return (*columns, "Type") if "Type" in names else columns
+    projection = (*columns, "Type") if "Type" in names else columns
+    types = {name: _boundary_value_type(schema.field(name).type) for name in projection}
+    text = (pa.string(), pa.large_string())
+    if not (pa.types.is_integer(types["EntityID"]) or types["EntityID"] in text):
+        raise schema_error(
+            path, BOUNDARIES, found=f"EntityID dtype {types['EntityID']}", expected="exact integer or text identities"
+        )
+    plane = types["ZIndex"]
+    # Building a VPT GeoDataFrame from mixed integer and missing plane values
+    # can produce a float64 column. Its populated values are checked below.
+    if not (pa.types.is_integer(plane) or pa.types.is_null(plane) or plane == pa.float64()):
+        raise schema_error(
+            path, BOUNDARIES, found=f"ZIndex dtype {plane}", expected="nullable integer or float64 plane indexes"
+        )
+    geometry = types["Geometry"]
+    if not (
+        pa.types.is_binary(geometry) or pa.types.is_large_binary(geometry) or pa.types.is_fixed_size_binary(geometry)
+    ):
+        raise schema_error(path, BOUNDARIES, found=f"Geometry dtype {geometry}", expected="binary WKB geometry")
+    if "Type" in types and types["Type"] not in text:
+        raise schema_error(path, BOUNDARIES, found=f"Type dtype {types['Type']}", expected="text entity types")
+    return projection
+
+
+def _boundary_value_type(kind: pa.DataType) -> pa.DataType:
+    """Validate a dictionary-encoded column by its stored value type."""
+    return kind.value_type if isinstance(kind, pa.DictionaryType) else kind
 
 
 def normalize_boundary_ids(table: pa.Table | pa.RecordBatch, path: ArtifactFile) -> pd.Index:
-    """Validate slice identities, planes and types, keeping repeated rows for the footprint union."""
-    ids = table.column("EntityID")
-    if not (pa.types.is_integer(ids.type) or pa.types.is_string(ids.type) or pa.types.is_large_string(ids.type)):
-        raise schema_error(
-            path, BOUNDARIES, found=f"EntityID dtype {ids.type}", expected="exact integer or text identities"
-        )
-    identifiers = pd.Series(ids, dtype=STRING_DTYPE)
+    """Validate projected values after footer checks, keeping repeated rows for the footprint union."""
+    identifiers = pd.Series(table.column("EntityID"), dtype=STRING_DTYPE)
     validate_cell_ids(identifiers, path, BOUNDARIES)
     # VPT permits absent plane annotations. XY footprint construction uses every
     # geometry row, independently of this optional 3D stack annotation. The
-    # checked cast accepts any Arrow type holding nonnegative integral values.
+    # checked cast preserves nulls and rejects negative, fractional and out-of-range values.
     try:
         pc.cast(table.column("ZIndex"), pa.uint64(), safe=True)
     except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as error:

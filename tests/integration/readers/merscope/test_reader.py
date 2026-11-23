@@ -55,8 +55,12 @@ class TestMerscope:
         assert_spatial_data_objects_are_identical(actual, expected)
 
     @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
+    @pytest.mark.parametrize("plane_dtype", ["Int64", "float64"])
     def test_nullable_planes_preserve_xy_footprints(
-        self, tmp_path: Path, profile: Literal["standard", "cellpose", "watershed"]
+        self,
+        tmp_path: Path,
+        profile: Literal["standard", "cellpose", "watershed"],
+        plane_dtype: Literal["Int64", "float64"],
     ) -> None:
         fixture = write_merscope_dataset(tmp_path, profile=profile)
         vpt = None if profile == "standard" else fixture.analysis
@@ -65,7 +69,9 @@ class TestMerscope:
             "cell_boundaries.parquet" if profile == "standard" else f"{profile}_micron_space.parquet"
         )
         boundaries = gpd.read_parquet(path)
-        boundaries["ZIndex"] = pd.array([None, 2, None, 0], dtype="Int64")
+        planes = [None, 2, None, 0]
+        boundaries["ZIndex"] = pd.array(planes, dtype="Int64") if plane_dtype == "Int64" else planes
+        assert str(boundaries["ZIndex"].dtype) == plane_dtype
         boundaries.to_parquet(path)
         actual = merscope(fixture.root, vpt_directory=vpt)
         name = "slide_region_polygons"

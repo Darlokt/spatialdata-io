@@ -101,9 +101,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         inside the directory. ``"relaxed"`` also accepts symlinks to targets
         stored elsewhere, as in git-annex or DVC datasets. Relative paths may
         not leave the directory with ``..`` in either mode, and absolute file
-        options may point anywhere. File options keep the name the caller
-        gave, and relaxed reads keep each artifact's own name rather than that
-        of its link target.
+        options may point anywhere. The selected file name determines the
+        table and image formats under either policy.
 
     Returns
     -------
@@ -247,7 +246,7 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         table,
         TableLinkage((cells.region,), "region", "cell_id"),
         context=ReaderErrorContext("codex", "linked cell table"),
-        path=layout.cell_table,
+        path=layout.cell_table.path,
         expected_instance_ids={cells.region: shapes.index},
     )
 

@@ -335,5 +335,6 @@ class TestElementNames:
             warnings.simplefilter("ignore", UserWarning)
             with pytest.raises(ReaderFormatError, match="equal ignoring case") as caught:
                 discover_layout(tmp_path, _selection())
-        assert caught.value.found == f"ROIs {sorted(prefixes)!r} whose element names are equal ignoring case"
+        assert caught.value.found.startswith(f"ROIs {sorted(prefixes)!r} produce element keys")
+        assert "table_" in caught.value.found
         assert caught.value.context.artifact == "ROI layout"

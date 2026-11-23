@@ -14,6 +14,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_options
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.dbit._images import read_image, validate_image_options
+from spatialdata_io.readers.dbit._layout import ImageSource
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,6 +25,11 @@ DEFAULT_OPTIONS = make_raster_options()
 
 
 _RASTER_CONTEXT = ReaderErrorContext("test", "raster")
+
+
+def _image(path: Path) -> ImageSource:
+    kind = "png" if path.suffix == ".png" else "jpeg" if path.suffix == ".jpg" else "tiff"
+    return ImageSource(ArtifactFile(path), kind)
 
 
 class TestValidateImageOptions:
@@ -73,7 +79,7 @@ class TestReadImage:
         source = np.arange(np.prod(shape), dtype=np.uint16).reshape(shape)
         tifffile.imwrite(path, source, metadata={"axes": "YX"})
 
-        image = read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+        image = read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
         assert image.dims == ("c", "y", "x")
@@ -87,7 +93,7 @@ class TestReadImage:
         tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "CYX"})
 
         image = read_image(
-            ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=make_raster_options(chunks=2)
+            _image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=make_raster_options(chunks=2)
         )
 
         assert isinstance(image, DataArray)
@@ -116,7 +122,7 @@ class TestReadImage:
         source = np.arange(30 * samples, dtype=np.uint8).reshape(5, 6, samples)
         tifffile.imwrite(path, source, photometric=photometric, planarconfig="contig", extrasamples=extrasamples)
 
-        image = read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+        image = read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
         assert image.coords["c"].to_numpy().tolist() == expected
@@ -141,9 +147,7 @@ class TestReadImage:
         metadata = {"axes": "YXS"} if name is None else {"axes": "YXS", "Channel": {"Name": [name]}}
         tifffile.imwrite(path, source, photometric=photometric, planarconfig="contig", metadata=metadata)
 
-        image = read_image(
-            ArtifactFile(path), data_axes=data_axes, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS
-        )
+        image = read_image(_image(path), data_axes=data_axes, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
         assert image.coords["c"].to_numpy().tolist() == expected
@@ -160,7 +164,7 @@ class TestReadImage:
             metadata={"axes": "TZCYX", "Channel": {"Name": names}},
         )
 
-        image = read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+        image = read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
         assert image.coords["c"].to_numpy().tolist() == (
@@ -174,12 +178,12 @@ class TestReadImage:
         tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "QYX"})
 
         with pytest.raises(ReaderFormatError, match="Axis 'q'") as caught:
-            read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+            read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
         assert caught.value.context == ReaderErrorContext("dbit", "histology image")
         assert caught.value.path == path
         assert type(caught.value.__cause__) is ValueError
 
-        image = read_image(ArtifactFile(path), data_axes="CYX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+        image = read_image(_image(path), data_axes="CYX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
         np.testing.assert_array_equal(image.data.compute(), source)
@@ -189,7 +193,7 @@ class TestReadImage:
         tifffile.imwrite(path, np.ones((2, 5, 6), dtype=np.uint8), photometric="minisblack", metadata={"axes": "CYX"})
 
         with pytest.raises(ValueError, match="rank") as caught:
-            read_image(ArtifactFile(path), data_axes="YX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+            read_image(_image(path), data_axes="YX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert type(caught.value) is ValueError
         context = ReaderErrorContext("dbit", "histology image")
@@ -203,7 +207,7 @@ class TestReadImage:
             path, source, ome=True, photometric="minisblack", metadata={"axes": "ZYX", "Channel": {"Name": ["DAPI"]}}
         )
 
-        image = read_image(ArtifactFile(path), data_axes="CYX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+        image = read_image(_image(path), data_axes="CYX", tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert image.coords["c"].to_numpy().tolist() == [0, 1, 2]
         np.testing.assert_array_equal(image.data.compute(), source)
@@ -213,7 +217,7 @@ class TestReadImage:
         source = np.arange(3 * 40 * 50, dtype=np.uint16).reshape(3, 40, 50)
         tifffile.imwrite(path, source, photometric="minisblack", metadata={"axes": "CYX"}, tile=(16, 16))
 
-        image = read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+        image = read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert isinstance(image, DataArray)
         # Default tiles exceed the image, so each chunk is one whole channel.
@@ -226,7 +230,7 @@ class TestReadImage:
         path.write_bytes(imagecodecs.png_encode(source))
 
         image = read_image(
-            ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=make_raster_options((2,), 4)
+            _image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=make_raster_options((2,), 4)
         )
 
         assert isinstance(image, DataTree)
@@ -251,7 +255,7 @@ class TestReadImage:
         mocker.patch("spatialdata_io.readers.dbit._images.inspect_tiff", return_value=metadata)
 
         with pytest.raises(ReaderFormatError, match="1 OME channels for 2 raster channels"):
-            read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+            read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
     @pytest.mark.parametrize(("series", "level"), [(1, 0), (0, 1)])
     def test_out_of_range_selection(self, tmp_path: Path, series: int, level: int) -> None:
@@ -259,7 +263,7 @@ class TestReadImage:
         tifffile.imwrite(path, np.ones((5, 6), dtype=np.uint8))
 
         with pytest.raises(IndexError, match="index") as caught:
-            read_image(ArtifactFile(path), data_axes=None, tiff_series=series, tiff_level=level, raster=DEFAULT_OPTIONS)
+            read_image(_image(path), data_axes=None, tiff_series=series, tiff_level=level, raster=DEFAULT_OPTIONS)
 
         context = ReaderErrorContext("dbit", "histology image")
         assert caught.value.__notes__ == [f"While handling {context.describe(path=path)}."]
@@ -271,14 +275,12 @@ class TestReadImage:
             writer.write(np.full((3, 4), 9, dtype=np.uint16), metadata={"axes": "YX"})
 
         with pytest.raises(ReaderFormatError, match="found 2 TIFF series") as caught:
-            read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+            read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
         assert caught.value.expected == "one TIFF series or an explicit tiff_series selection"
         assert caught.value.context == ReaderErrorContext("dbit", "histology image")
 
         for series, expected in ((0, np.zeros((1, 5, 6), dtype=np.uint8)), (1, np.full((1, 3, 4), 9, np.uint16))):
-            image = read_image(
-                ArtifactFile(path), data_axes=None, tiff_series=series, tiff_level=0, raster=DEFAULT_OPTIONS
-            )
+            image = read_image(_image(path), data_axes=None, tiff_series=series, tiff_level=0, raster=DEFAULT_OPTIONS)
             assert isinstance(image, DataArray)
             assert image.dtype == expected.dtype
             np.testing.assert_array_equal(image.data.compute(), expected)
@@ -288,9 +290,7 @@ class TestReadImage:
         path.write_bytes(imagecodecs.png_encode(np.zeros((4, 9), dtype=np.uint8)))
 
         with pytest.raises(ValueError, match=r"exceed the spatial extent of the histology image \(4 x 9 pixels\)"):
-            read_image(
-                ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=make_raster_options((2, 3))
-            )
+            read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=make_raster_options((2, 3)))
 
     @pytest.mark.parametrize("suffix", [".tif", ".png", ".jpg"])
     def test_malformed_image_has_reader_context(self, tmp_path: Path, suffix: str) -> None:
@@ -298,7 +298,7 @@ class TestReadImage:
         path.write_bytes(b"invalid image")
 
         with pytest.raises(ValueError, match=r"TIFF|PNG|JPEG") as caught:
-            read_image(ArtifactFile(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
+            read_image(_image(path), data_axes=None, tiff_series=None, tiff_level=0, raster=DEFAULT_OPTIONS)
 
         assert any("dbit" in note and "histology image" in note for note in caught.value.__notes__)
 
@@ -306,7 +306,7 @@ class TestReadImage:
     def test_encoded_images_reject_tiff_options(self, tmp_path: Path, series: int | None, level: int) -> None:
         with pytest.raises(ValueError, match="TIFF-family"):
             read_image(
-                ArtifactFile(tmp_path / "image.png"),
+                _image(tmp_path / "image.png"),
                 data_axes=None,
                 tiff_series=series,
                 tiff_level=level,
@@ -316,7 +316,7 @@ class TestReadImage:
     def test_encoded_images_reject_axis_override(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="data_axes"):
             read_image(
-                ArtifactFile(tmp_path / "image.png"),
+                _image(tmp_path / "image.png"),
                 data_axes="YXC",
                 tiff_series=None,
                 tiff_level=0,

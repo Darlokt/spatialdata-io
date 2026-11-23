@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.steinbock._images import SampleGrid
+    from spatialdata_io.readers.steinbock._rasters import SampleGrid
 
 # Columns the reader reads by name or generates; imported columns that equal
 # one ignoring letter case are renamed rather than these.

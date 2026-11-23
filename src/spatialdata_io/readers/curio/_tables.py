@@ -39,6 +39,7 @@ import pyarrow.csv as pacsv
 from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, add_reader_context
 from spatialdata_io.readers._utils.names import sanitize_column_names, sanitize_uns_keys
+from spatialdata_io.readers._utils.table import prepare_anndata_dataframe
 from spatialdata_io.readers.curio._layout import CLUSTER_FEATURES, CLUSTERS, COUNTS, METRICS, MORAN_FEATURES
 from spatialdata_io.readers.curio._schemas import (
     CLUSTER_TYPES,
@@ -84,6 +85,7 @@ def read_table(layout: CurioLayout) -> ad.AnnData:
     _add_metrics(table, layout.metrics)
 
     defining = _read_defining_features(layout.cluster_features)
+    prepare_anndata_dataframe(defining, context=ReaderErrorContext("curio", CLUSTER_FEATURES))
     table.uns[DEFINING_FEATURES_KEY] = defining
 
     table.var = _join_moran(var, layout.moran_features)

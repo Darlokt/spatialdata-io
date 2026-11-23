@@ -30,28 +30,27 @@ from typing import TYPE_CHECKING, override
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pyarrow.csv as pacsv
 
 from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.xenium._layout import AnalysisDirectory
-from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, arrow_series, validate_analysis_header
+from spatialdata_io.readers.xenium._schemas import BARCODE, CLUSTER, analysis_schema, arrow_series
 
 if TYPE_CHECKING:
     from collections.abc import Generator
     from pathlib import Path
     from typing import IO
 
+    import pyarrow as pa
     from numpy.typing import NDArray
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers.xenium._layout import AnalysisSource
+    from spatialdata_io.readers.xenium._schemas import AnalysisKind
 
-_MEMBER = re.compile(
-    r"(?:analysis/)?(?P<kind>clustering|pca|umap)/(?P<method>[A-Za-z0-9_.-]+)/(?P<file>clusters|projection)\.csv"
-)
-_FILES = {"clustering": "clusters", "pca": "projection", "umap": "projection"}
+_MEMBER = re.compile(r"(?:analysis/)?(?P<kind>[a-z]+)/(?P<method>[A-Za-z0-9_.-]+)/(?P<file>clusters|projection)\.csv")
+_FILES: dict[AnalysisKind, str] = {"clustering": "clusters", "pca": "projection", "umap": "projection"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,30 +85,36 @@ class _AnalysisCSV(RawIOBase):
         return prefix if len(prefix) == size else prefix + self._source.read(size - len(prefix))
 
 
-def _identity(name: str, seen: set[tuple[str, str]], path: Path, context: ReaderErrorContext) -> tuple[str, str] | None:
+def _identity(
+    name: str, seen: set[tuple[AnalysisKind, str]], path: Path, context: ReaderErrorContext
+) -> tuple[AnalysisKind, str] | None:
     """Reject ambiguous semantic artifacts before reading any selected payload."""
     match = _MEMBER.fullmatch(name)
-    if match is None or match["file"] != _FILES[match["kind"]]:
+    if match is None:
         return None
-    identity = match["kind"], match["method"]
-    if (match["kind"], match["method"].lower()) in seen:
+    kind = match["kind"]
+    if kind not in ("clustering", "pca", "umap") or match["file"] != _FILES[kind]:
+        return None
+    identity = kind, match["method"]
+    folded = kind, match["method"].lower()
+    if folded in seen:
         raise ReaderFormatError(
             context=context,
             path=path,
             found=f"repeated analysis identity {identity!r}",
             expected="one CSV per kind and method, ignoring letter case",
         )
-    seen.add((match["kind"], match["method"].lower()))
+    seen.add(folded)
     return identity
 
 
 def _members(
     source: AnalysisSource, context: ReaderErrorContext
-) -> Generator[tuple[int, str, str, IO[bytes], Path], None, None]:
+) -> Generator[tuple[int, AnalysisKind, str, IO[bytes], Path], None, None]:
     """Own selected CSV streams after rejecting repeated semantic identities."""
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[AnalysisKind, str]] = set()
     if isinstance(source, AnalysisDirectory):
-        files: list[tuple[str, str, Path]] = []
+        files: list[tuple[AnalysisKind, str, Path]] = []
         for relative, path in source.files:
             identity = _identity(relative.as_posix(), seen, path, context)
             if identity is not None:
@@ -119,7 +124,7 @@ def _members(
                 yield order, kind, method, handle, path
         return
     with tarfile.open(source.file, "r:gz") as archive:
-        members: list[tuple[int, str, str, tarfile.TarInfo]] = []
+        members: list[tuple[int, AnalysisKind, str, tarfile.TarInfo]] = []
         ordered = sorted((member for member in archive if member.isfile()), key=lambda member: member.name)
         for order, member in enumerate(ordered):
             identity = _identity(str(PurePosixPath(member.name)), seen, source.file, context)
@@ -137,19 +142,17 @@ def _members(
                 yield order, kind, method, member_handle, source.file
 
 
-def _table(
-    handle: IO[bytes], header: tuple[str, ...], value: pa.DataType, path: Path, context: ReaderErrorContext
-) -> pa.Table:
+def _table(handle: IO[bytes], schema: pa.Schema, path: Path, context: ReaderErrorContext) -> pa.Table:
     """Parse an owned CSV stream with text barcodes and typed values."""
     # Keep Arrow's header-only, record numbering and first-record BOM semantics
     # without seeking backwards in a compressed archive.
-    with _AnalysisCSV(header, handle) as stream, csv_errors(context=context, path=path):
+    with _AnalysisCSV(tuple(schema.names), handle) as stream, csv_errors(context=context, path=path):
         return pacsv.read_csv(
             stream,
             read_options=pacsv.ReadOptions(use_threads=False),
             convert_options=pacsv.ConvertOptions(
-                column_types={BARCODE: pa.string(), **dict.fromkeys(header[1:], value)},
-                include_columns=list(header),
+                column_types=schema,
+                include_columns=schema.names,
                 null_values=[],
                 strings_can_be_null=False,
             ),
@@ -207,12 +210,11 @@ def read_analysis(source: AnalysisSource, barcodes: pd.Index, *, context: Reader
     with closing(_members(source, context)) as members:
         for order, kind, method, handle, path in members:
             header = csv_header(path, context=context, source=handle)
-            validate_analysis_header(header, kind, path=path, context=context)
+            columns = analysis_schema(header, kind, path=path, context=context)
+            table = _table(handle, columns, path, context)
             if kind == "clustering":
-                table = _table(handle, header, pa.uint64(), path, context)
                 clusters[order] = (method, _clusters(table, barcodes, path, context))
             else:
-                table = _table(handle, header, pa.float64(), path, context)
                 projections[order] = (f"{kind}_{method}", _projection(table, header, barcodes, path, context))
     return Analysis(
         dict(clusters[order] for order in sorted(clusters)), dict(projections[order] for order in sorted(projections))

@@ -2,7 +2,7 @@
 
 The table has no observations and ``X=None``; each ``var`` row describes one
 image channel, indexed by its channel name, with the columns and dtypes of
-``_schemas.CHANNEL_VAR_DTYPES``. It annotates no element.
+the channel metadata schema. It annotates no element.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import pandas as pd
 from anndata import AnnData
 from spatialdata.models import TableModel
 
-from spatialdata_io.readers.macsima._schemas import CHANNEL_VAR_DTYPES
+from spatialdata_io.readers.macsima._schemas import channel_var_columns
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -27,21 +27,6 @@ def make_channel_table(channels: Sequence[PlannedChannel]) -> AnnData:
     ``var_names`` are the image channel names. The table annotates no element
     and therefore has no region or instance keys.
     """
-    metadata = [channel.source.metadata for channel in channels]
-    values = {
-        "name": [row.name for row in metadata],
-        "cycle": [row.cycle for row in metadata],
-        "imagetype": [row.image_type for row in metadata],
-        "well": [row.well for row in metadata],
-        "ROI": [row.roi for row in metadata],
-        "fluorophore": [row.fluorophore for row in metadata],
-        "clone": [row.clone for row in metadata],
-        # A missing exposure becomes NaN in the float column.
-        "exposure": [row.exposure_ms for row in metadata],
-    }
-    # Typed columns keep ROI IDs above 2**53 exact; DataFrame inference would
-    # round a nullable integer column through float64.
     index = pd.Index([channel.name for channel in channels])
-    columns = {name: pd.Series(values[name], index=index, dtype=dtype) for name, dtype in CHANNEL_VAR_DTYPES.items()}
-    var = pd.DataFrame(columns, index=index)
+    var = pd.DataFrame(channel_var_columns([channel.source.metadata for channel in channels]), index=index)
     return TableModel.parse(AnnData(var=var))

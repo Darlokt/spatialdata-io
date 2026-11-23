@@ -98,11 +98,14 @@ def _paired_quotes(block: bytes | bytearray) -> bool:
     return quotes % 2 == 0
 
 
-def validate_csv_lines(block: bytes | bytearray, /, *, context: ReaderErrorContext, path: ArtifactFile) -> None:
-    """Require physical CSV lines with paired quotes and LF or CRLF endings.
+def csv_data_buffer(
+    block: bytes | bytearray, /, *, context: ReaderErrorContext, path: ArtifactFile
+) -> bytes | bytearray:
+    """Prepare headerless physical CSV records for Arrow without changing field values.
 
     A partition owner calls this on a complete record block before Arrow
     parsing so the validity of a record cannot depend on block boundaries.
+    The input buffer is reused unless a literal initial U+FEFF needs protection.
     """
     if b"\r" in block and re.search(rb"\r(?!\n)", block):
         raise ReaderFormatError(
@@ -125,6 +128,9 @@ def validate_csv_lines(block: bytes | bytearray, /, *, context: ReaderErrorConte
                     expected="one record per line with paired quotes; quoted fields cannot span lines",
                 )
             start = end + 1
+    # Arrow treats the start of each input as a possible file BOM. A blank
+    # record protects a literal U+FEFF in the first field of a data block.
+    return b"\n" + block if block.startswith(codecs.BOM_UTF8) else block
 
 
 def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
@@ -135,13 +141,9 @@ def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
         block = block[newline + 1 :] if newline >= 0 else b""
     if not block:
         return _empty(spec)
-    validate_csv_lines(block, context=spec.context, path=spec.path)
-    # Arrow treats the first bytes of every input as a possible BOM. An
-    # ignored empty line keeps a literal U+FEFF in the first field intact.
-    if block.startswith(codecs.BOM_UTF8):
-        block = b"\n" + block
+    records = csv_data_buffer(block, context=spec.context, path=spec.path)
     # Every record is one line now, so Arrow's default newline chunking applies.
-    with pa.BufferReader(block) as source, csv_errors(context=spec.context, path=spec.path):
+    with pa.BufferReader(records) as source, csv_errors(context=spec.context, path=spec.path):
         table = pacsv.read_csv(
             source,
             read_options=pacsv.ReadOptions(column_names=list(spec.names), block_size=1024 * 1024, use_threads=False),

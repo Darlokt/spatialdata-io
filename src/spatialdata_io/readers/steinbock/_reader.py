@@ -16,9 +16,9 @@ from spatialdata_io.readers._utils.table import (
     parse_linked_table,
     prepare_anndata_dataframe,
 )
-from spatialdata_io.readers.steinbock._images import read_rasters
 from spatialdata_io.readers.steinbock._layout import discover_layout, validate_masks_dir, validate_table_file
 from spatialdata_io.readers.steinbock._metadata import read_image_metadata
+from spatialdata_io.readers.steinbock._rasters import read_rasters
 from spatialdata_io.readers.steinbock._tables import read_table
 
 if TYPE_CHECKING:

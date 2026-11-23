@@ -31,13 +31,13 @@ import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity
 
-from spatialdata_io.readers._utils.csv import read_csv_blocks
+from spatialdata_io.readers._utils.csv import csv_header, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.points import categorize_features, suppress_points_index_warning
+from spatialdata_io.readers.xenium._parquet import open_parquet
 from spatialdata_io.readers.xenium._schemas import (
     CELL_ID,
     STRING,
@@ -50,8 +50,8 @@ from spatialdata_io.readers.xenium._schemas import (
     require_no_nulls,
     transcript_columns,
     validate_membership,
+    validate_parquet_types,
 )
-from spatialdata_io.readers.xenium._tables import read_header
 
 if TYPE_CHECKING:
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
@@ -125,7 +125,7 @@ def _normalize(table: pa.Table, spec: _Partitioning) -> pd.DataFrame:
 
 
 def _read_row_group(spec: _Partitioning, row_group: int, offset: int) -> pd.DataFrame:
-    with pq.ParquetFile(spec.source.file) as parquet:
+    with open_parquet(spec.source.file, context=spec.context) as parquet:
         table = parquet.read_row_group(row_group, columns=[name for name, _ in spec.types])
     return _normalize(table, spec).set_axis(pd.RangeIndex(offset, offset + table.num_rows))
 
@@ -176,12 +176,15 @@ def read_transcripts(
     path = source.file
     row_counts: list[int] = []
     if source.kind == "parquet":
-        with pq.ParquetFile(path) as parquet:
-            names = tuple(parquet.schema_arrow.names)
+        with open_parquet(path, context=context) as parquet:
+            schema = parquet.schema_arrow
+            names = tuple(schema.names)
+            types = transcript_columns(names, source.types, path=path, context=context)
+            validate_parquet_types(schema, source.types, path=path, context=context)
             row_counts = [parquet.metadata.row_group(index).num_rows for index in range(parquet.num_row_groups)]
     else:
-        names = read_header(source, context=context)
-    types = transcript_columns(names, source.types, path=path, context=context)
+        names = csv_header(path, context=context)
+        types = transcript_columns(names, source.types, path=path, context=context)
 
     spec = _Partitioning(
         source, tuple(types.items()), features, cells, -1 if family == "integer_ids" else "UNASSIGNED", context

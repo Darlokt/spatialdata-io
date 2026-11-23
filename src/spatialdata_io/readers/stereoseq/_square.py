@@ -178,16 +178,7 @@ def read_square(source: SquareSource) -> tuple[SquareCounts, ...]:
             _schemas.validate_transcriptomics(handle.attrs, source.file)
             group = _schemas.require_group(handle, "geneExp", source.file)
 
-            available: dict[int, str] = {}
-            for name in group:
-                if not name.startswith("bin") or not name[3:].isdigit() or int(name[3:]) <= 0:
-                    continue
-                size = int(name[3:])
-                if size in available:
-                    raise _schemas.schema_error(
-                        source.file, "geneExp", found=repr(list(group)), expected="unique numeric bin names"
-                    )
-                available[size] = name
+            available = _schemas.square_bin_names(group, source.file)
 
             selected = tuple(sorted(available)) if source.bins == "all" else source.bins
             if not selected or any(size not in available for size in selected):
