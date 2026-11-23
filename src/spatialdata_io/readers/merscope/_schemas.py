@@ -235,7 +235,7 @@ def boundary_columns(schema: pa.Schema, path: ArtifactFile) -> tuple[str, ...]:
         )
     projection = (*columns, "Type") if "Type" in names else columns
     types = {name: _boundary_value_type(schema.field(name).type) for name in projection}
-    text = (pa.string(), pa.large_string())
+    text = (pa.string(), pa.large_string(), pa.string_view())
     if not (pa.types.is_integer(types["EntityID"]) or types["EntityID"] in text):
         raise schema_error(
             path, BOUNDARIES, found=f"EntityID dtype {types['EntityID']}", expected="exact integer or text identities"
@@ -243,13 +243,16 @@ def boundary_columns(schema: pa.Schema, path: ArtifactFile) -> tuple[str, ...]:
     plane = types["ZIndex"]
     # Building a VPT GeoDataFrame from mixed integer and missing plane values
     # can produce a float64 column. Its populated values are checked below.
-    if not (pa.types.is_integer(plane) or pa.types.is_null(plane) or plane == pa.float64()):
+    if not (pa.types.is_integer(plane) or pa.types.is_null(plane) or pa.types.is_floating(plane)):
         raise schema_error(
-            path, BOUNDARIES, found=f"ZIndex dtype {plane}", expected="nullable integer or float64 plane indexes"
+            path, BOUNDARIES, found=f"ZIndex dtype {plane}", expected="nullable integer or floating-point plane indexes"
         )
     geometry = types["Geometry"]
     if not (
-        pa.types.is_binary(geometry) or pa.types.is_large_binary(geometry) or pa.types.is_fixed_size_binary(geometry)
+        pa.types.is_binary(geometry)
+        or pa.types.is_large_binary(geometry)
+        or pa.types.is_fixed_size_binary(geometry)
+        or pa.types.is_binary_view(geometry)
     ):
         raise schema_error(path, BOUNDARIES, found=f"Geometry dtype {geometry}", expected="binary WKB geometry")
     if "Type" in types and types["Type"] not in text:
@@ -314,7 +317,7 @@ def transcript_types(columns: Sequence[str], path: ArtifactFile) -> dict[str, pa
 def normalize_transcript_partition(
     frame: pd.DataFrame,
     *,
-    features: tuple[str, ...],
+    features: pd.Index,
     path: ArtifactFile,
     assignment: Literal["current", "original"],
     cell_population: pd.Index | None = None,
@@ -324,7 +327,7 @@ def normalize_transcript_partition(
     ``cell_population`` is the unique Arrow-string index of current cells;
     assigned events must belong to it. ``None`` skips the check.
     """
-    categories = categorize_features(frame["gene"], pd.Index(features))
+    categories = categorize_features(frame["gene"], features)
     if categories is None:
         raise schema_error(
             path, TRANSCRIPTS, found="unknown gene names", expected="the complete source feature vocabulary"

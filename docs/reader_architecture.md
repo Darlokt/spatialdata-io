@@ -41,11 +41,11 @@ A product module can consume another product's result when there is a real depen
 
 ## From file to typed value
 
-1. **Select the source.** Use the logical artifact name to choose its role and encoding. Keep that decision alongside its validated storage path. A resolved symlink can have a different basename. For format versions with different columns, pair the selected file with its version's field types during discovery.
+1. **Select the source.** Use the logical artifact name to choose its role and encoding. Keep that decision alongside its validated storage path. A resolved symlink can have a different basename. When filenames break ties in channel order, retain the order established by discovery across path policies. For format versions with different columns, pair the selected file with its version's field types during discovery.
 2. **Declare the physical schema once.** For fixed CSV fields, use one ordered Arrow schema and derive names from it. For a variable panel, make a schema function that takes the validated header and evidence identifying expression features. For Parquet, inspect the footer before reading batches. Declare allowed physical representations and checked conversions. Keep native HDF5 compound types, FCS event buffers, TIFF metadata and imported H5AD annotations in their native representation when that expresses the source contract.
 3. **Separate decoding from meaning.** The parser owns file lifetime, projection, null spellings, batching and error context. Bind those options to the schema's field policy. The schema owner checks facts such as positive IDs, finite required coordinates or unique feature names. Where a field carries scientific information in its spelling, retain that spelling until it is interpreted. For example, CosMx uses the printed precision of a position to bound registration uncertainty.
 4. **Carry the established facts forward.** Give private functions the precise type their producer established. Check a JSON key before narrowing a dictionary to a type requiring it. A frozen record can carry a mutable owned frame. State which stage may update that frame. Preserve Arrow-backed annotations until the AnnData or spatial model boundary and avoid a second conversion merely to pass between helpers.
-5. **Check relationships where both sides meet.** A schema can establish that a barcode is valid on one side. Its membership in a second artifact belongs to alignment. Finish filtering, aggregation, scaling and construction of target elements before linking each table once. Use an independent target index when available. With lazy labels, use known bounds such as the inspected dtype and document the extent of the check.
+5. **Check relationships where both sides meet.** A schema can establish that a barcode is valid on one side. Its membership in a second artifact belongs to alignment. Likewise, a finite pitch and an invertible image registration can compose to a singular transform in float64. Check the composed mapping at the stage that produces it. Finish filtering, aggregation, scaling and construction of target elements before linking each table once. Use an independent target index when available. With lazy labels, use known bounds such as the inspected dtype and document the extent of the check.
 
 ### A worked example
 
@@ -53,12 +53,14 @@ In MCMICRO, `_layout.py` pairs each quantification file with its segmentation ta
 
 For a fixed schema, start with classic Visium's `_schemas.POSITION_SOURCE_SCHEMA` and its headered and positional fixtures. For multiple versions, Xenium's `_layout.TabularSource` carries the file, storage kind and schema for an artifact. Its element readers consume that selection directly. [Visium format](visium.md) · [Xenium format](xenium.md)
 
+Plain and gzip transcript partitions share one decoder for complete physical CSV records. It checks quote pairing and line endings, preserves a literal U+FEFF in data, and enlarges its normal 1 MiB Arrow parser block when a record requires it. Partition boundaries therefore do not determine whether a long transcript row can be read. Memory must still accommodate the whole record. Count-matrix readers have separate bounded-batch contracts.
+
 ## Acceptance for a new reader
 
 | Where to check | Evidence to include |
 | --- | --- |
 | Mirrored unit tests such as `test_layout.py` and `test_schemas.py` | Exercise supported layout alternatives, source selection, column order, extra and missing fields, exact identifier widths, nulls and semantic constraints at their owning boundary. Strictly type each private producer and consumer. |
-| Product tests | Use fixed expected coordinates, units, values, categories and sparse order. Check lazy products at construction and on a computed selection. Include equivalent encodings and malformed artifacts. Put data-dependent checks in the task that owns the data. |
+| Product tests | Use fixed expected coordinates, units, values, categories and sparse order. Check lazy products at construction and on a computed selection. Compare the same records or pixels across supported encodings and chunk boundaries. Include a damaged later member in archive fixtures to expose readers that silently return partial results. Put data-dependent checks in the task that owns the data. |
 | Public workflow and CLI | Supply a small synthetic input per supported layout or version. Assert element names, axis and feature order, transforms, final regions and IDs, options and provenance together. Include the failure that would result if two files disagreed. |
 | Format documentation and performance | Record the source evidence for scientific choices, missing-data behavior and ownership. For claims about copying, graph size or I/O, measure identical inputs and verify numerical equivalence. |
 

@@ -78,7 +78,7 @@ _ARCHIVE_METADATA = "__MACOSX"
 
 @dataclass(frozen=True, slots=True)
 class StackFiles:
-    """Candidate channel files of one processed folder, in lexical path order.
+    """Candidate channel files of one processed folder, in lexical discovery order.
 
     ``name`` is the folder name repaired into a valid SpatialData element
     name; it names the stack's elements and coordinate system. ``directory``
@@ -135,7 +135,7 @@ def _is_candidate(path: Path, directory: ArtifactDirectory) -> bool:
 
 
 def _candidate_files(root: DatasetRoot, directory: ArtifactDirectory) -> tuple[ArtifactFile, ...]:
-    """Return the candidate TIFFs below a folder of ``root`` in lexical path order."""
+    """Resolve the candidate TIFFs below a folder of ``root`` in discovery order."""
     # Hidden paths are never candidates, so hidden folders are not even entered.
     paths = list_directory(directory, context=_CONTEXT, recursive=True, enter_hidden_directories=False)
     return tuple(

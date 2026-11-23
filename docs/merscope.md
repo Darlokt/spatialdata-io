@@ -79,14 +79,15 @@ With footprints included, the table links through categorical `cells_region` and
 
 ## Cell boundaries and coordinates
 
-Boundary Parquet requires integer or text `EntityID`, `ZIndex`, and binary WKB
-`Geometry`, with optional text `Type` (`Cell` or `cell`). The reader validates
-these physical field types in the footer before decoding geometry. A
-dictionary-encoded field uses its dictionary value type. Source IDs and plane
-annotations must be valid under every geometry policy, and each geometry slice
-must be a nonempty, finite, planar Polygon or MultiPolygon.
+Boundary Parquet requires `EntityID` (integer or text), `ZIndex`, and `Geometry`
+(binary WKB). It also accepts an optional text `Type` column with `Cell` or
+`cell` values. The reader validates these physical field types in the footer
+before decoding geometry. Arrow text and binary view types are also accepted.
+A dictionary-encoded field uses its dictionary value type. Source IDs and
+plane annotations must be valid under every geometry policy, and each geometry
+slice must be a nonempty, finite, planar Polygon or MultiPolygon.
 
-`ZIndex` permits nulls and integer or float64 storage. The VPT row-based
+`ZIndex` permits nulls and integer or floating-point storage. The VPT row-based
 producer can produce float64 when integer plane numbers and missing values
 share a column. Every populated plane must be a nonnegative integer
 representable as uint64. Every slice contributes to the XY footprint

@@ -58,7 +58,7 @@ The well is the external identifier of the OME plate well; a file may record at 
 | `images["<stack>_nuclei_image"]` | Optional stack of nuclear-stain channels. |
 | `tables["<stack>_nuclei_table"]` | Metadata of the channels of `<stack>_nuclei_image`. |
 
-Channels are ordered by cycle, then by the `name` column (the marker, with `_background` for bleach images), then by file path; `exclude_cycles` removes cycles first. A channel is named after its marker, or `R<cycle> <marker>` with `include_cycle_in_channel_names=True`. Repeated names are numbered in channel order, for example `DAPI (1)` and `DAPI (2)`; names are assigned once per stack, so a channel has the same name in both images, and generated names that collide with a real marker fail.
+Channels are ordered by cycle, then by the `name` column (the marker, with `_background` for bleach images), then by the discovered file path. A symlink contributes its own path to that order under either path policy. `exclude_cycles` removes cycles first. A channel is named after its marker, or `R<cycle> <marker>` with `include_cycle_in_channel_names=True`. Repeated names are numbered in channel order, for example `DAPI (1)` and `DAPI (2)`; names are assigned once per stack, so a channel has the same name in both images, and generated names that collide with a real marker fail.
 
 When a stack contains more stain channels named exactly `nuclei_channel_name` than `split_threshold_nuclei_channel`, all of them form the nuclei stack and the main stack keeps only the first and the last of them: the registration reference and the end-of-run image. `split_threshold_nuclei_channel=None` never splits. Bleach images such as `DAPI_background` are never nuclear channels.
 

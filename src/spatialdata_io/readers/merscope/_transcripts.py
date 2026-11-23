@@ -60,14 +60,15 @@ def read_transcripts(
     schema = pa.schema(types)
     dataframe = read_csv_blocks(path, header=names, schema=schema, context=_CONTEXT)
 
+    vocabulary = pd.Index(features)
     population = None if cell_population is None else pd.Index(cell_population, dtype=STRING_DTYPE)
     empty = schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
     meta = normalize_transcript_partition(
-        empty, features=features, path=path, assignment=source.assignment, cell_population=population
+        empty, features=vocabulary, path=path, assignment=source.assignment, cell_population=population
     )
     normalized = dataframe.map_partitions(
         normalize_transcript_partition,
-        features=features,
+        features=vocabulary,
         path=path,
         assignment=source.assignment,
         cell_population=population,

@@ -39,13 +39,11 @@ from typing import TYPE_CHECKING, BinaryIO
 
 import dask.dataframe as dd
 import pandas as pd
-import pyarrow as pa
-import pyarrow.csv as pacsv
 from dask import delayed
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity, Scale
 
-from spatialdata_io.readers._utils.csv import csv_data_buffer, csv_errors, csv_header, read_csv_blocks
+from spatialdata_io.readers._utils.csv import csv_header, parse_csv_records, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.points import suppress_points_index_warning
 from spatialdata_io.readers.cosmx._schemas import (
@@ -59,6 +57,7 @@ from spatialdata_io.readers.cosmx._transforms import fov_frame, global_frame
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    import pyarrow as pa
     from dask.delayed import Delayed
     from spatialdata.transformations import BaseTransformation
 
@@ -79,33 +78,6 @@ class _Projection:
     types: pa.Schema
     features: pd.Index
     source: CsvFile
-
-
-def _parse(payload: bytes | bytearray, projection: _Projection) -> pd.DataFrame:
-    """Parse gzip records with the same physical types and null policy as plain blocks."""
-    path = projection.source.path
-    if not payload:
-        return normalize_transcript_partition(_empty(projection.types), features=projection.features, path=path)
-    data = csv_data_buffer(payload, context=_CONTEXT, path=path)
-    with pa.BufferReader(data) as source, csv_errors(context=_CONTEXT, path=path):
-        table = pacsv.read_csv(
-            source,
-            read_options=pacsv.ReadOptions(column_names=projection.names, use_threads=False),
-            convert_options=pacsv.ConvertOptions(
-                include_columns=projection.types.names,
-                column_types=projection.types,
-                null_values=[],
-                strings_can_be_null=False,
-            ),
-        )
-    return normalize_transcript_partition(
-        table.to_pandas(types_mapper=pd.ArrowDtype), features=projection.features, path=path
-    )
-
-
-def _empty(types: pa.Schema) -> pd.DataFrame:
-    """Return an empty Arrow-backed frame of the projected fields."""
-    return types.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
 
 
 def _decode_member(
@@ -155,7 +127,8 @@ def _gzip_range(projection: _Projection, offset: int, *, start: int, stop: int) 
             offset, pending = _decode_member(handle, offset, path, payload, pending)
     if start == 0:
         del payload[: payload.find(b"\n") + 1]
-    return offset, _parse(payload, projection)
+    block = parse_csv_records(payload, header=projection.names, schema=projection.types, context=_CONTEXT, path=path)
+    return offset, normalize_transcript_partition(block, features=projection.features, path=path)
 
 
 def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
@@ -196,7 +169,8 @@ def read_transcripts(
     names = csv_header(path, context=_CONTEXT, compressed=source.compressed)
     types = transcript_types(names, path)
     vocabulary = pd.Index(features)
-    meta = normalize_transcript_partition(_empty(types), features=vocabulary, path=path)
+    empty = types.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
+    meta = normalize_transcript_partition(empty, features=vocabulary, path=path)
     frame = _frame(_Projection(names, types, vocabulary, source), meta)
 
     transformations: dict[str, BaseTransformation] = {

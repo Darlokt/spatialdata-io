@@ -408,6 +408,76 @@ class TestInspectTiff:
         with pytest.raises(RasterFormatError, match="reuses TIFF IFD"):
             inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
 
+    @pytest.mark.parametrize(
+        ("blocks", "error"),
+        [
+            ('<TiffData IFD="0" FirstZ="2"/>', "FirstZ"),
+            ('<TiffData IFD="7"/>', "only 2 IFDs"),
+            ('<TiffData IFD="1" PlaneCount="2"/>', "only 2 IFDs"),
+            ('<TiffData IFD="0"/><TiffData IFD="1"/>', "logical plane"),
+            ('<TiffData IFD="0"/><TiffData FirstZ="1" IFD="0"/>', "reuses TIFF IFD"),
+            ('<TiffData IFD="0" PlaneCount="2"/><TiffData FirstZ="1" IFD="1"/>', None),
+        ],
+    )
+    def test_logical_plane_identity_within_one_image(self, tmp_path: Path, blocks: str, error: str | None) -> None:
+        path = ArtifactFile(tmp_path / "planes.ome.tiff")
+        xml = (
+            '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06"><Image ID="Image:0">'
+            '<Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint8" SizeX="4" SizeY="3" SizeZ="2" SizeC="1" '
+            f'SizeT="1"><Channel ID="Channel:0:0"/>{blocks}</Pixels></Image></OME>'
+        )
+        with tifffile.TiffWriter(path) as writer:
+            for index in range(2):
+                writer.write(
+                    np.full((3, 4), index, dtype=np.uint8), description=xml if index == 0 else None, metadata=None
+                )
+        if error is not None:
+            with pytest.raises(RasterFormatError, match=error):
+                inspect_tiff(path, context=_RASTER_CONTEXT)
+        else:
+            raster = read_tiff(inspect_tiff(path, context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT)
+            np.testing.assert_array_equal(raster.data[:, 0, 0].compute(), [0, 1])
+
+    @pytest.mark.parametrize(
+        ("references", "ifds", "error"),
+        [
+            (("first.tif", "second.tif"), (0, 0), "conflicting file names"),
+            (("first.tif", None), (0, 0), "reuses TIFF IFD"),
+            ((None, None), (0, 1), "FileName"),
+            (("first.tif", None), (0, 1), None),
+        ],
+    )
+    def test_external_uuid_identifies_one_file(
+        self, tmp_path: Path, references: tuple[str | None, str | None], ifds: tuple[int, int], error: str | None
+    ) -> None:
+        root = ArtifactFile(tmp_path / "root.tif")
+        external_uuid = "urn:uuid:22222222-2222-4222-8222-222222222222"
+        images = []
+        for image, (name, ifd) in enumerate(zip(references, ifds, strict=True)):
+            attribute = "" if name is None else f' FileName="{name}"'
+            images.append(
+                f'<Image ID="Image:{image}"><Pixels ID="Pixels:{image}" DimensionOrder="XYZCT" Type="uint8" '
+                f'SizeX="4" SizeY="3" SizeZ="1" SizeC="1" SizeT="1"><Channel ID="Channel:{image}:0"/>'
+                f'<TiffData IFD="{ifd}"><UUID{attribute}>{external_uuid}</UUID></TiffData></Pixels></Image>'
+            )
+        xml = (
+            '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" '
+            f'UUID="urn:uuid:11111111-1111-4111-8111-111111111111">{"".join(images)}</OME>'
+        )
+        tifffile.imwrite(root, np.zeros((3, 4), dtype=np.uint8), description=xml, metadata=None)
+        for name, first in (("first.tif", 11), ("second.tif", 73)):
+            with tifffile.TiffWriter(tmp_path / name) as writer:
+                for value in (first, first + 1):
+                    writer.write(np.full((3, 4), value, dtype=np.uint8), metadata=None)
+        if error is not None:
+            with pytest.raises(RasterFormatError, match=error):
+                inspect_tiff(root, context=_RASTER_CONTEXT)
+        else:
+            metadata = inspect_tiff(root, context=_RASTER_CONTEXT)
+            for series, value in enumerate((11, 12)):
+                raster = read_tiff(metadata, series=series, level=0, context=_RASTER_CONTEXT)
+                np.testing.assert_array_equal(raster.data.compute(), np.full((3, 4), value))
+
     def test_explicit_zero_plane_count_cannot_decode_an_entire_file(self, tmp_path: Path) -> None:
         path = tmp_path / "empty_mapping.ome.tif"
         xml = (

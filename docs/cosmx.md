@@ -100,6 +100,11 @@ Compressed `.csv.gz` sources support concatenated, independently compressed memb
 
 One task owns members beginning in about 8 MiB of compressed data, including the complete final member crossing that range. Decoder buffers use 1 MiB chunks, but complete members accumulate before CSV parsing, and projected Arrow fields and the returned pandas partition require additional storage. The compressed range target does not bound decoded partition size. A single-stream gzip file forms one nonempty partition containing all its rows; use plain CSV for independently readable partitions of a large single stream. Unknown targets and malformed values also fail when their partition is computed.
 
+The same typed CSV decoder handles plain and gzip transcript partitions. Its
+parser block grows when a physical record exceeds 1 MiB, so a long record's
+acceptance does not depend on which neighboring records share the partition.
+An oversized record can still use memory beyond the partition size target.
+
 ## Options and execution
 
 `scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale. Interleaved samples (TIFF `S`, PNG and JPEG components) become image channels. Channels are named `r, g, b` (or `r, g, b, a`) only when the file declares RGB(A) samples: TIFF `PhotometricInterpretation` RGB or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6, and three-component JPEG. Other images, including three-sample grayscale TIFFs, get positional channels `0, 1, ...`. JPEG and PNG composites decode their whole frame for any selection. TIFF sources read the native tiles, or whole-row strips grouped into bands with a 16 MiB decoded-byte target, that intersect the selected output chunks. A native strip larger than that target remains a single source chunk. Requested output chunks may span several source tiles or bands, so even a small selection can decode all source chunks needed for its output chunk. Construction executes no raster or transcript tasks.

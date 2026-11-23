@@ -20,12 +20,21 @@ unread.
 
 from __future__ import annotations
 
+import gzip
 import re
 import tarfile
+import zlib
 from contextlib import closing
 from dataclasses import dataclass
 from io import RawIOBase
 from pathlib import PurePosixPath
+
+# Typeshed omits the specific header errors distinguished by TarFile.next().
+from tarfile import (
+    InvalidHeaderError,  # pyrefly: ignore[missing-module-attribute]
+    ReadError,
+    TruncatedHeaderError,  # pyrefly: ignore[missing-module-attribute]
+)
 from typing import TYPE_CHECKING, override
 
 import numpy as np
@@ -85,6 +94,19 @@ class _AnalysisCSV(RawIOBase):
         return prefix if len(prefix) == size else prefix + self._source.read(size - len(prefix))
 
 
+class _AnalysisMember(tarfile.TarInfo):
+    """Report a damaged member header even after earlier headers were read."""
+
+    @classmethod
+    @override
+    def fromtarfile(cls, tarfile: tarfile.TarFile) -> _AnalysisMember:
+        """Prevent archive iteration from treating a damaged header as the end."""
+        try:
+            return super().fromtarfile(tarfile)
+        except (InvalidHeaderError, TruncatedHeaderError) as error:
+            raise ReadError(str(error)) from error
+
+
 def _identity(
     name: str, seen: set[tuple[AnalysisKind, str]], path: Path, context: ReaderErrorContext
 ) -> tuple[AnalysisKind, str] | None:
@@ -123,23 +145,34 @@ def _members(
             with path.open("rb") as handle:
                 yield order, kind, method, handle, path
         return
-    with tarfile.open(source.file, "r:gz") as archive:
-        members: list[tuple[int, AnalysisKind, str, tarfile.TarInfo]] = []
-        ordered = sorted((member for member in archive if member.isfile()), key=lambda member: member.name)
-        for order, member in enumerate(ordered):
-            identity = _identity(str(PurePosixPath(member.name)), seen, source.file, context)
-            if identity is not None:
-                members.append((order, *identity, member))
-        # Parse in physical order. The gzip stream needs one rewind after preflight;
-        # the saved order determines the returned annotations.
-        for order, kind, method, member in sorted(members, key=lambda item: item[3].offset):
-            member_handle = archive.extractfile(member)
-            if member_handle is None:  # pragma: no cover - isfile() members always have a payload
-                raise ReaderFormatError(
-                    context=context, path=source.file, found=f"{member.name} without payload", expected="a regular CSV"
-                )
-            with member_handle:
-                yield order, kind, method, member_handle, source.file
+    try:
+        with tarfile.open(source.file, "r:gz", tarinfo=_AnalysisMember) as archive:
+            members: list[tuple[int, AnalysisKind, str, tarfile.TarInfo]] = []
+            ordered = sorted((member for member in archive if member.isfile()), key=lambda member: member.name)
+            for order, member in enumerate(ordered):
+                identity = _identity(str(PurePosixPath(member.name)), seen, source.file, context)
+                if identity is not None:
+                    members.append((order, *identity, member))
+            # Parse in physical order. The gzip stream needs one rewind after preflight;
+            # the saved order determines the returned annotations.
+            for order, kind, method, member in sorted(members, key=lambda item: item[3].offset):
+                member_handle = archive.extractfile(member)
+                if member_handle is None:  # pragma: no cover - isfile() members always have a payload
+                    raise ReaderFormatError(
+                        context=context,
+                        path=source.file,
+                        found=f"{member.name} without payload",
+                        expected="a regular CSV",
+                    )
+                with member_handle:
+                    yield order, kind, method, member_handle, source.file
+    except (tarfile.TarError, gzip.BadGzipFile, EOFError, zlib.error) as error:
+        raise ReaderFormatError(
+            context=context,
+            path=source.file,
+            found=f"malformed analysis archive ({error})",
+            expected="a gzip tar archive",
+        ) from error
 
 
 def _table(handle: IO[bytes], schema: pa.Schema, path: Path, context: ReaderErrorContext) -> pa.Table:
@@ -201,9 +234,9 @@ def read_analysis(source: AnalysisSource, barcodes: pd.Index, *, context: Reader
     Raises
     ------
     ReaderFormatError
-        If a CSV has an unexpected header, malformed or nonfinite values,
-        nonpositive clusters, unknown or repeated barcodes, or repeated semantic
-        artifacts.
+        If the archive is malformed or a CSV has an unexpected header,
+        malformed or nonfinite values, nonpositive clusters, unknown or
+        repeated barcodes, or repeated semantic artifacts.
     """
     clusters: dict[int, tuple[str, pd.Categorical]] = {}
     projections: dict[int, tuple[str, NDArray[np.float64]]] = {}

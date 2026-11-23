@@ -69,9 +69,12 @@ class TestReadTranscripts:
         self, tmp_path: Path, mocker: MockerFixture, *, compressed: bool
     ) -> None:
         parts = (
-            "target,fov,cell_ID,x_local_px,y_local_px,x_global_px,y_global_px\n\ufeffA,1,0,1,2,1001,5002\n".encode(),
-            b"A,1,0,2,3,1002,5003\n",
-            "\ufeffA,1,0,3,4,1003,5004\n".encode(),
+            (
+                "target,fov,cell_ID,x_local_px,y_local_px,x_global_px,y_global_px,CellComp\r\n"
+                '\ufeffA,1,0,1,2,1001,5002,"plasma, membrane"\r\n'
+            ).encode(),
+            b'A,1,0,2,3,1002,5003,"nuclear ""rim"""\r\n\r\n',
+            "\ufeffA,1,0,3,4,1003,5004,Unassigned\r\n".encode(),
         )
         if compressed:
             parts = tuple(gzip.compress(part, mtime=0) for part in parts)
@@ -85,7 +88,31 @@ class TestReadTranscripts:
         )
 
         assert points.npartitions > 1
-        assert points.compute()["target"].tolist() == ["\ufeffA", "A", "\ufeffA"]
+        computed = points.compute()
+        assert computed["target"].tolist() == ["\ufeffA", "A", "\ufeffA"]
+        assert computed["CellComp"].tolist() == ["plasma, membrane", 'nuclear "rim"', "Unassigned"]
+
+    @pytest.mark.parametrize("rows", [(), (b"\r\n", b"\n")], ids=["header-only", "blank-lines"])
+    @pytest.mark.parametrize("compressed", [False, True])
+    def test_header_and_blank_partitions_return_typed_empty_points(
+        self, tmp_path: Path, mocker: MockerFixture, rows: tuple[bytes, ...], *, compressed: bool
+    ) -> None:
+        parts = (_HEADER.encode(), *rows)
+        if compressed:
+            parts = tuple(gzip.compress(part, mtime=0) for part in parts)
+            mocker.patch.object(_transcripts, "_GZIP_RANGE_BYTES", 17)
+            mocker.patch.object(_transcripts, "_READ_BYTES", 9)
+        else:
+            _small_blocks(mocker)
+        path = ArtifactFile(tmp_path / ("tx.csv.gz" if compressed else "tx.csv"))
+        path.write_bytes(b"".join(parts))
+        points = read_transcripts(CsvFile(path, compressed=compressed), features=_FEATURES, placements=_PLACEMENTS)
+
+        computed = points.compute()
+        assert computed.empty
+        assert computed["target"].cat.categories.tolist() == list(_FEATURES)
+        assert computed["x"].dtype == np.dtype(np.float64)
+        assert str(computed["cell_ID"].dtype) == "uint64[pyarrow]"
 
     @pytest.mark.parametrize("split_members", [False, True])
     def test_multiline_gzip_record_fails_at_every_partition_size(

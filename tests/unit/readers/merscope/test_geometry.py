@@ -49,6 +49,33 @@ def _read(path: ArtifactFile) -> gpd.GeoDataFrame:
 class TestReadBoundaries:
     """Union all valid components per source identity without inferring a z population."""
 
+    @pytest.mark.parametrize("name", ["EntityID", "Geometry", "Type"])
+    def test_arrow_view_encodings_keep_exact_text_and_wkb(self, tmp_path: Path, name: str) -> None:
+        shape = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        path = _write_boundaries(tmp_path / "boundaries.parquet", [shape], ["001"])
+        source = pq.read_table(path)
+        kind = pa.binary_view() if name == "Geometry" else pa.string_view()
+        pq.write_table(source.set_column(source.schema.get_field_index(name), name, source[name].cast(kind)), path)
+
+        assert pq.read_schema(path).field(name).type == kind
+        result = read_boundaries(path, policy="keep")
+
+        assert result.source_ids.tolist() == ["001"]
+        assert shapely.equals_exact(result.shapes.geometry.iloc[0], shape, 0)
+
+    @pytest.mark.parametrize("plane_type", [pa.float16(), pa.float32()])
+    def test_nullable_floating_planes_preserve_footprints(self, tmp_path: Path, plane_type: pa.DataType) -> None:
+        shape = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        path = _write_boundaries(tmp_path / "boundaries.parquet", [shape, shape], ["001", "NA"])
+        source = pq.read_table(path)
+        planes = pa.array([None, 2.0], type=plane_type)
+        pq.write_table(source.set_column(source.schema.get_field_index("ZIndex"), "ZIndex", planes), path)
+
+        result = read_boundaries(path, policy="keep")
+
+        assert result.source_ids.tolist() == ["001", "NA"]
+        assert all(shapely.equals_exact(geometry, shape, 0) for geometry in result.shapes.geometry)
+
     @pytest.mark.parametrize("name", ["EntityID", "ZIndex", "Geometry", "Type"])
     def test_rejects_bad_physical_types_before_decoding_batches(
         self, tmp_path: Path, mocker: MockerFixture, name: str

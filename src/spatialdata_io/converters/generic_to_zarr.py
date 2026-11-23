@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from spatialdata import SpatialData
 
 from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.names import validate_element_name
+from spatialdata_io.readers._utils.names import contains_element_name, validate_element_name
 from spatialdata_io.readers.generic import generic
 
 if TYPE_CHECKING:
@@ -99,8 +99,8 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     spatial_data: SpatialData | None = None
     if output_path.exists():
         spatial_data = SpatialData.read(output_path)
-        folded_name = element_name.lower()
-        if any(existing.lower() == folded_name for _, existing, _ in spatial_data.gen_elements()):
+        existing_names = (existing for _, existing, _ in spatial_data.gen_elements())
+        if contains_element_name(existing_names, element_name):
             message = (
                 f"Name {element_name!r} already exists in {output_path}; provide a different "
                 "name or delete the existing element."

@@ -34,7 +34,7 @@ dependencies = [
   "numpy",
   "ome-types",
   "pandas>=3",
-  "pyarrow",
+  "pyarrow>=21",
   "pyogrio",
   "pyyaml",
   "readfcs",

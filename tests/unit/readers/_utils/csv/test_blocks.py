@@ -222,18 +222,14 @@ class TestReadCsvBlocks:
         assert any(partition.empty for partition in partitions)
         assert pd.concat(partitions)["id"].tolist() == ["1", "2", "3"]
 
-    @pytest.mark.parametrize(("length", "readable"), [(1024 * 1024 - 8, True), (2 * 1024 * 1024 + 1, False)])
-    def test_records_beyond_two_arrow_blocks_fail(self, tmp_path: Path, *, length: int, readable: bool) -> None:
-        path = _file(tmp_path, b"id,gene,x\n" + b"0,A,0\n" * 3 + b"1," + b"G" * length + b",1\n")
+    @pytest.mark.parametrize("block_bytes", [1024 * 1024, 8 * 1024 * 1024])
+    @pytest.mark.parametrize("ending", [b"\n", b"\r\n", b""])
+    def test_long_record_keeps_its_projected_identity(self, tmp_path: Path, block_bytes: int, ending: bytes) -> None:
+        path = _file(tmp_path, b"id,gene,x\nfirst," + b"A" * 900_000 + b",0\nlast," + b"G" * 2_200_000 + b",1" + ending)
         frame = read_csv_blocks(
-            path, header=_HEADER, schema=pa.schema({"id": pa.string()}), context=_CONTEXT, block_bytes=2**30
+            path, header=_HEADER, schema=pa.schema({"id": pa.string()}), context=_CONTEXT, block_bytes=block_bytes
         )
-
-        if readable:
-            assert frame.compute()["id"].tolist() == ["0", "0", "0", "1"]
-        else:
-            with pytest.raises(ReaderFormatError, match="straddles two block boundaries"):
-                frame.compute()
+        assert frame.compute()["id"].tolist() == ["first", "last"]
 
     @pytest.mark.parametrize("record", [b"1,A\n", b"1,A,0,extra\n"])
     def test_unprojected_record_width_errors_only_when_its_partition_runs(self, tmp_path: Path, record: bytes) -> None:
@@ -293,12 +289,12 @@ class TestCsvDataBuffer:
     def test_borrows_unmodified_record_buffer(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "records")
         payload = bytearray(b'"a",0\r\n"b""c",1\n')
-        assert _blocks.csv_data_buffer(payload, context=_CONTEXT, path=path) is payload
+        assert _blocks._csv_data_buffer(payload, context=_CONTEXT, path=path) is payload
 
     def test_preserves_initial_literal_bom_in_decoded_records(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "records")
         payload = bytearray("\ufeffA,42\n".encode())
-        records = _blocks.csv_data_buffer(payload, context=_CONTEXT, path=path)
+        records = _blocks._csv_data_buffer(payload, context=_CONTEXT, path=path)
         table = pacsv.read_csv(pa.py_buffer(records), read_options=pacsv.ReadOptions(column_names=["target", "id"]))
         assert table["target"].to_pylist() == ["\ufeffA"]
         assert payload.decode() == "\ufeffA,42\n"
@@ -310,7 +306,7 @@ class TestCsvDataBuffer:
     def test_malformed_encoded_payload_names_the_source(self, tmp_path: Path, payload: bytes, found: str) -> None:
         path = ArtifactFile(tmp_path / "transcripts.csv.gz")
         with pytest.raises(ReaderFormatError, match=found) as caught:
-            _blocks.csv_data_buffer(bytearray(payload), context=_CONTEXT, path=path)
+            _blocks._csv_data_buffer(bytearray(payload), context=_CONTEXT, path=path)
         assert caught.value.context == _CONTEXT
         assert caught.value.path == path
 
@@ -332,3 +328,26 @@ class TestReadBlock:
                 _blocks._read_block(record, spec, first=False)
 
         assert owner.closed
+
+
+class TestParserBlockSize:
+    @pytest.mark.parametrize("ending", [b"", b"\n", b"\r\n"])
+    def test_longest_record_or_default(self, ending: bytes, mocker: MockerFixture) -> None:
+        mocker.patch.object(_blocks, "_ARROW_BLOCK_BYTES", 8)
+        for length in range(25):
+            rows = [b"1", b"A" * length, b"", b"B" * (24 - length), b"CC"]
+            records = b"\n".join(rows) + ending
+            assert _blocks._parser_block_size(records) == max(
+                8, *(len(row) for row in records.splitlines(keepends=True))
+            )
+
+
+class TestParseCsvRecords:
+    def test_unrepresentable_parser_block_has_source_context(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        mocker.patch.object(_blocks, "_parser_block_size", return_value=2**31)
+        path = ArtifactFile(tmp_path / "points.csv")
+        with pytest.raises(ReaderFormatError, match="Arrow parser block") as caught:
+            _blocks.parse_csv_records(
+                b"0,A,0", header=_HEADER, schema=pa.schema({"id": pa.string()}), context=_CONTEXT, path=path
+            )
+        assert caught.value.path == path

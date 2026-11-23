@@ -5,15 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, cast
 
 from spatialdata import SpatialData
-from spatialdata.transformations import Affine, Identity, Scale
-from spatialdata.transformations import Sequence as TransformSequence
+from spatialdata.transformations import Identity, Scale
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
-from spatialdata_io.readers.codex._calibration import resolve_calibration, validate_calibration
+from spatialdata_io.readers.codex._calibration import image_transformation, resolve_calibration, validate_calibration
 from spatialdata_io.readers.codex._geometry import make_shapes
 from spatialdata_io.readers.codex._images import read_image, validate_image_options
 from spatialdata_io.readers.codex._layout import discover_layout
@@ -24,6 +23,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pandas as pd
+    from spatialdata.transformations import Affine
 
 
 def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boundary typed.
@@ -67,8 +67,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         Stitched image to read when the directory holds several. Resolved like
         ``cell_table_file``.
     pixel_size_um
-        Positive finite micrometres per native table pixel. The caller asserts
-        that it belongs to the selected table; there is no default.
+        Positive finite micrometres per native table pixel, representable as
+        float64. The caller asserts that it belongs to the selected table.
     experiment_file
         Akoya experiment JSON (version ``1.5.0.38`` or ``1.7.0.6``) whose
         ``xyResolution`` in nm/pixel calibrates the table. It is never
@@ -78,6 +78,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     image_to_table
         Invertible finite XY ``Affine`` from image pixel coordinates (pixel
         centres at ``column + 0.5, row + 0.5``) to native table ``x, y``.
+        With calibration, the composed float64 transform into ``global`` must
+        remain finite and invertible.
         Without it the image is not registered to the table. Requires an image.
     data_axes
         Source TIFF axes as one string of distinct letters including ``X`` and
@@ -180,7 +182,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         If an option has an invalid value, an image option is given without an
         image, ``data_axes`` cannot be mapped to CYX for the image (with a note
         naming it), ``pixel_size_um`` conflicts with the experiment, or the
-        calibration overflows a cell position.
+        calibration overflows a cell position or yields a nonfinite or
+        singular physical image transform.
     FileNotFoundError, NotADirectoryError, IsADirectoryError
         If a path is missing or has the wrong kind.
     ValueError
@@ -226,7 +229,7 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
             tiff_series=tiff_series,
             raster=raster,
             frame="image_pixels" if image_to_table is None else frame,
-            transformation=Identity() if image_to_table is None else TransformSequence([image_to_table, to_frame]),
+            transformation=image_transformation(image_to_table, calibration),
         )
 
     cells = read_cell_table(layout.cell_table)

@@ -196,15 +196,15 @@ def _place_on_canvas(sources: Sequence[ChannelSource]) -> tuple[tuple[Padding, .
 def plan_stack(stack: StackFiles, sources: Sequence[ChannelSource], options: ChannelOptions) -> StackPlan:
     """Select, order, name, and place the channels of one stack.
 
-    Channels are ordered by cycle, then name, then file path. Excluded cycles
-    are removed first. When more stain channels named exactly
+    ``sources`` follow lexical discovery order. Sorting by cycle and name
+    keeps that order for ties. Excluded cycles are removed first. When more stain channels named exactly
     ``nuclei_channel_name`` exist than the split threshold, they form a
     separate nuclei stack; the main stack keeps the first and the last of them
     (the registration reference and the end-of-run image).
     """
     selected = sorted(
         (source for source in sources if source.metadata.cycle not in options.exclude_cycles),
-        key=lambda source: (source.metadata.cycle, source.metadata.name, source.tiff.path.as_posix()),
+        key=lambda source: (source.metadata.cycle, source.metadata.name),
     )
     if not selected:
         message = f"exclude_cycles removes every channel of stack {stack.name!r} in {str(stack.directory)!r}."

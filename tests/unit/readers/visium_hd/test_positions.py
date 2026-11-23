@@ -99,8 +99,9 @@ class TestIterPositionBatches:
         table = pq.read_table(path).take(np.arange(288, -1, -1)).append_column("extra", pa.array([True] * 289))
         pq.write_table(table, path)
         batches = list(iter_position_batches(path, (17, 17), version=VERSION))
-        assert sum(batch.num_rows for batch in batches) == 289
-        assert "extra" not in batches[0].schema.names
+        assert sum(batch.num_rows for batch, _ in batches) == 289
+        assert "extra" not in batches[0][0].schema.names
+        np.testing.assert_array_equal(np.concatenate([indices for _, indices in batches]), np.arange(288, -1, -1))
 
     @pytest.mark.parametrize("mode", ["missing", "row", "col", "duplicate", "nonfinite"])
     def test_invalid_grid(self, tmp_path: Path, mode: str) -> None:

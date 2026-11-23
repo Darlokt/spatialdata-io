@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import pickle
 import re
 import shutil
@@ -26,7 +27,7 @@ from spatialdata_io import __version__
 from spatialdata_io._cli.commands.cosmx import cosmx_command
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers.cosmx import _reader, cosmx
+from spatialdata_io.readers.cosmx import _reader, _transcripts, cosmx
 from tests.integration.readers.cosmx._fixtures import (
     LANDMARKS,
     POSITIONS,
@@ -70,6 +71,35 @@ def _labels(result: SpatialData, fov: int) -> DataArray:
 
 class TestCosmx:
     """Assemble supported exports through the public reader."""
+
+    @pytest.mark.parametrize("storage", ["plain", "grouped-gzip", "split-gzip"])
+    def test_long_records_keep_their_values_across_storage_and_partitions(
+        self, tmp_path: Path, mocker: MockerFixture, storage: str
+    ) -> None:
+        fixture = write_cosmx_dataset(tmp_path, rasters=False)
+        header = b"target,fov,cell_ID,x_local_px,y_local_px,x_global_px,y_global_px,ignored\n"
+        first = b"GeneA,2,1,2,5,1002,5005.5," + b"a" * 900_000 + b"\n"
+        second = b"GeneB,10,1,2,5,3002.25,7005," + b"b" * 1_300_000 + b"\n"
+        source = fixture.root / "Run_1_tx_file.csv"
+        if storage == "plain":
+            source.write_bytes(header + first + second)
+        else:
+            members = (gzip.compress(header + first, mtime=0), gzip.compress(second, mtime=0))
+            if storage == "split-gzip":
+                mocker.patch.object(_transcripts, "_GZIP_RANGE_BYTES", len(members[0]))
+            source.unlink()
+            source.with_suffix(".csv.gz").write_bytes(b"".join(members))
+
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            points = cosmx(fixture.root).points["Run_1_transcripts"]
+        assert not tasks
+        assert (points.npartitions > 1) == (storage == "split-gzip")
+        computed = points.compute()
+        assert "ignored" not in computed
+        assert computed["target"].tolist() == ["GeneA", "GeneB"]
+        assert computed["fov"].tolist() == [2, 10]
+        np.testing.assert_array_equal(computed[["x", "y"]].to_numpy(), [[1002, 5005.5], [3002.25, 7005]])
 
     def test_strict_symlinks_use_discovered_encodings(self, tmp_path: Path) -> None:
         fixture = write_cosmx_dataset(tmp_path, compressed=True)

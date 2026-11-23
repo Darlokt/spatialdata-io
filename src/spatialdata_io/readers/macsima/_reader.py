@@ -140,7 +140,7 @@ def macsima(  # noqa: PLR0913, RUF100 - Keyword-only options mirror the document
         Per stack, with ``<stack>`` its (repaired) folder name:
 
         - ``images["<stack>_image"]``: lazy ``(c, y, x)`` image in the source
-          dtype. Channels are ordered by cycle, then name, then file path, and
+          dtype. Channels are ordered by cycle, then name, then discovered file path, and
           named after the marker (bleach images add ``_background``),
           optionally prefixed with the cycle. Repeated names are numbered in
           that order, for example ``DAPI (1)`` and ``DAPI (2)``.

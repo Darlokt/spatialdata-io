@@ -22,6 +22,7 @@ chroma samples.
 from __future__ import annotations
 
 from functools import cache
+from operator import itemgetter
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -161,8 +162,8 @@ def _require_linked_tiff(path: Path) -> None:
         raise RasterFormatError(message)
 
 
-def _remaining_planes(pixels: Pixels, block: TiffData) -> int:
-    """Count logical planes from FirstZ/C/T in OME's fastest-to-slowest dimension order."""
+def _logical_plane_range(pixels: Pixels, block: TiffData) -> tuple[int, int]:
+    """Return the first logical plane and total planes in OME dimension order."""
     samples = (pixels.channels[0].samples_per_pixel or 1) if pixels.channels else 1
     dimensions = {
         "Z": (pixels.size_z, block.first_z),
@@ -172,59 +173,87 @@ def _remaining_planes(pixels: Pixels, block: TiffData) -> int:
     stride, offset = 1, 0
     for axis in pixels.dimension_order.value[2:]:
         extent, first = dimensions[axis]
+        if first >= extent:
+            message = f"OME First{axis}={first} is outside the {extent} logical {axis} planes in {pixels.id}."
+            raise RasterFormatError(message)
         offset += first * stride
         stride *= extent
-    return stride - offset
+    return offset, stride
 
 
 def _validate_ome_mappings(root: Path, tiff: tifffile.TiffFile, ome: OME) -> None:
     """Validate linked files before series discovery and compare IFD ranges per image."""
     root = root.resolve()
-    checked_sources = {root}
-    intervals: dict[Path, list[tuple[int, int, int]]] = {}
+    paths_by_uuid: dict[str, Path] = {}
+    physical: dict[Path, list[tuple[int, int, tuple[int, int]]]] = {}
+    logical: dict[int, list[tuple[int, int, tuple[Path, int]]]] = {}
 
     @cache
     def file_plane_count(path: Path) -> int:
         if path == root:
             return len(tiff.pages)
+        _require_linked_tiff(path)
         with tifffile.TiffFile(path) as other:
             return len(other.pages)
 
     for image_number, image in enumerate(ome.images):
         for block in image.pixels.tiff_data_blocks:
-            linked = _tiff_data_path(root, ome, block)
-            if linked not in checked_sources:
-                _require_linked_tiff(linked)
-                checked_sources.add(linked)
+            linked = _tiff_data_path(root, ome, block, paths_by_uuid)
             count = block.plane_count
             if count == 0:
                 # tifffile interprets zero as an omitted count and would expose undeclared pixels.
                 message = f"OME image {image_number} declares PlaneCount=0 for {linked}."
                 raise RasterFormatError(message)
-            if len(ome.images) == 1:
-                continue
+            start, total = _logical_plane_range(image.pixels, block)
+            file_planes = file_plane_count(linked)
             if count is None:
-                count = 1 if "ifd" in block.model_fields_set else file_plane_count(linked)
-            used = min(count, _remaining_planes(image.pixels, block))
-            if used > 0:
-                intervals.setdefault(linked, []).append((block.ifd, block.ifd + used, image_number))
-    _reject_overlapping_ifds(intervals)
-
-
-def _reject_overlapping_ifds(intervals: dict[Path, list[tuple[int, int, int]]]) -> None:
-    """Reject a physical IFD claimed by distinct images, even when later TiffData overwrites a mapping."""
-    for path, runs in intervals.items():
-        previous_image, end = -1, 0
-        for start, stop, image in sorted(runs):
-            if start < end and image != previous_image:
+                count = 1 if "ifd" in block.model_fields_set else file_planes
+            used = min(count, total - start)
+            if block.ifd + used > file_planes:
                 message = (
-                    f"OME image {image} reuses TIFF IFD {start} in {path} already owned by image {previous_image}."
+                    f"OME image {image_number} needs IFD {block.ifd + used - 1} in {linked}, "
+                    f"with only {file_planes} IFDs."
                 )
                 raise RasterFormatError(message)
-            previous_image, end = image, max(stop, end)
+            if len(ome.images) == 1 and len(image.pixels.tiff_data_blocks) == 1:
+                continue
+            # Within a block the IFD and the logical plane increase together.
+            # Equal offsets and owners give identical assignments over an overlap.
+            delta = start - block.ifd
+            physical.setdefault(linked, []).append((block.ifd, block.ifd + used, (image_number, delta)))
+            logical.setdefault(image_number, []).append((start, start + used, (linked, delta)))
+
+    _require_unique_planes(physical, logical)
 
 
-def _tiff_data_path(root: Path, ome: OME, block: TiffData) -> Path:
+def _require_unique_planes(
+    physical: dict[Path, list[tuple[int, int, tuple[int, int]]]],
+    logical: dict[int, list[tuple[int, int, tuple[Path, int]]]],
+) -> None:
+    """Require both directions of the OME image-plane to file-IFD mapping to be unambiguous."""
+    for path, runs in physical.items():
+        if (ifd := _first_conflict(runs)) is not None:
+            message = f"OME mapping reuses TIFF IFD {ifd} in {path} for different image planes."
+            raise RasterFormatError(message)
+    for number, plane_runs in logical.items():
+        if (plane := _first_conflict(plane_runs)) is not None:
+            message = f"OME image {number} assigns logical plane {plane} to different TIFF IFDs."
+            raise RasterFormatError(message)
+
+
+def _first_conflict[Owner](runs: list[tuple[int, int, Owner]]) -> int | None:
+    """Locate the first overlapping half-open interval with a different plane mapping."""
+    end = 0
+    previous: Owner | None = None
+    runs.sort(key=itemgetter(0))
+    for start, stop, owner in runs:
+        if start < end and owner != previous:
+            return start
+        previous, end = owner, max(stop, end)
+    return None
+
+
+def _tiff_data_path(root: Path, ome: OME, block: TiffData, paths_by_uuid: dict[str, Path]) -> Path:
     """Return the TIFF file that stores one OME ``TiffData`` block.
 
     A block without a file reference, or whose UUID is the document's own UUID,
@@ -232,8 +261,15 @@ def _tiff_data_path(root: Path, ome: OME, block: TiffData) -> Path:
     original ``FileName`` beside their own UUID, and tifffile resolves such
     references by UUID, as the OME-TIFF specification intends.
     """
-    if block.uuid is None or block.uuid.file_name is None or block.uuid.value == ome.uuid:
+    if block.uuid is None or block.uuid.value == ome.uuid:
         return root
+    uuid = block.uuid.value
+    known = paths_by_uuid.get(uuid)
+    if block.uuid.file_name is None:
+        if known is None:
+            message = f"OME reference to UUID {uuid} needs a FileName on its first external reference."
+            raise RasterFormatError(message)
+        return known
     # tifffile opens linked files beside the source's real path, so a symlinked
     # source is checked where tifffile reads instead of zero-filling missing data.
     directory = root.parent
@@ -244,6 +280,10 @@ def _tiff_data_path(root: Path, ome: OME, block: TiffData) -> Path:
             f"{block.uuid.file_name!r} resolves to {linked}."
         )
         raise RasterFormatError(message)
+    if known is not None and linked != known:
+        message = f"OME UUID {uuid} has conflicting file names resolving to {known} and {linked}."
+        raise RasterFormatError(message)
+    paths_by_uuid[uuid] = linked
     return linked
 
 

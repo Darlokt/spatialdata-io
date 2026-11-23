@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import tarfile
 from typing import TYPE_CHECKING, Literal
@@ -175,6 +176,51 @@ class TestReadAnalysis:
         assert list(result.clusters) == ["alpha", "bravo"]
         assert result.clusters["alpha"].categories.tolist() == ["1"]
         assert result.clusters["bravo"].categories.tolist() == ["2"]
+
+    @pytest.mark.parametrize("kind", ["non-gzip", "truncated"])
+    def test_malformed_archive(self, tmp_path: Path, kind: str) -> None:
+        path = tmp_path / "analysis.tar.gz"
+        if kind == "non-gzip":
+            path.write_bytes(b"not a gzip archive")
+        else:
+            payload = b"Barcode,Cluster\n" + b"a-1,1\n" * 500
+            with tarfile.open(path, "w:gz") as archive:
+                info = tarfile.TarInfo(CLUSTERS)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+            compressed = path.read_bytes()
+            path.write_bytes(compressed[: len(compressed) // 2])
+
+        with pytest.raises(ReaderFormatError, match="malformed analysis archive") as caught:
+            read_analysis(AnalysisArchive(ArtifactFile(path)), BARCODES, context=CONTEXT)
+
+        assert caught.value.context == CONTEXT
+        assert caught.value.path == path
+
+    @pytest.mark.parametrize("problem", ["checksum", "truncated-header"])
+    def test_damaged_second_member_rejects_whole_archive(
+        self, tmp_path: Path, mocker: MockerFixture, problem: str
+    ) -> None:
+        path = tmp_path / "analysis.tar.gz"
+        tar = io.BytesIO()
+        with tarfile.open(fileobj=tar, mode="w") as archive:
+            for name in (CLUSTERS, CLUSTERS.replace("graphclust", "second")):
+                payload = b"Barcode,Cluster\na-1,1\n"
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+        raw = tar.getvalue()
+        second_header = 2 * tarfile.BLOCKSIZE
+        if problem == "checksum":
+            damaged = raw[:second_header] + b"!" + raw[second_header + 1 :]
+        else:
+            damaged = raw[: second_header + 1]
+        path.write_bytes(gzip.compress(damaged))
+
+        parse = mocker.spy(_analysis, "_table")
+        with pytest.raises(ReaderFormatError, match="malformed analysis archive"):
+            read_analysis(AnalysisArchive(ArtifactFile(path)), BARCODES, context=CONTEXT)
+        parse.assert_not_called()
 
     def test_data_bom_is_part_of_the_literal_barcode(self, tmp_path: Path) -> None:
         source = _directory(tmp_path, {CLUSTERS: "Barcode,Cluster\n\ufeffa-1,1\n"})

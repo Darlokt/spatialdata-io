@@ -351,7 +351,7 @@ class TestNormalizeTranscriptPartition:
         frame = pa.Table.from_pandas(frame).cast(pa.schema(list(types.items()))).to_pandas(types_mapper=pd.ArrowDtype)
         result = normalize_transcript_partition(
             frame,
-            features=("A", "B", "Blank-1"),
+            features=pd.Index(["A", "B", "Blank-1"]),
             path=ArtifactFile(tmp_path / "tx.csv"),
             assignment=assignment,
             cell_population=pd.Index([str(2**63 + 1)], dtype=STRING_DTYPE),
@@ -376,7 +376,7 @@ class TestNormalizeTranscriptPartition:
         with pytest.raises(ReaderFormatError):
             normalize_transcript_partition(
                 frame,
-                features=("A",),
+                features=pd.Index(["A"]),
                 path=ArtifactFile(tmp_path / "tx.csv"),
                 assignment="current",
                 cell_population=pd.Index(["a"], dtype=STRING_DTYPE),
@@ -391,5 +391,5 @@ class TestNormalizeTranscriptPartition:
             }
         ).to_pandas(types_mapper=pd.ArrowDtype)
         assert normalize_transcript_partition(
-            frame, features=("A",), path=ArtifactFile(tmp_path / "tx.csv"), assignment="current"
+            frame, features=pd.Index(["A"]), path=ArtifactFile(tmp_path / "tx.csv"), assignment="current"
         ).empty

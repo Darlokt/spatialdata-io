@@ -22,10 +22,10 @@ quoted field left open is malformed CSV with an undefined result.
 
 Columns are text unless the caller supplies Arrow types. No text is a null:
 empty fields are empty strings, and an empty field in a column with a non-text
-type is a malformed record. Arrow parses each partition in 1 MiB blocks and
-rejects a record that straddles two of their boundaries, so records up to
-1 MiB are always read and records over 2 MiB never. The Dask block target does
-not bound the allocation of an oversized record.
+type is a malformed record. Arrow uses a 1 MiB parser block, enlarged for an
+individual long record so its position in the partition does not change whether
+it can be decoded. The Dask block target does not bound the allocation of an
+oversized record.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 CSV_BLOCK_BYTES = 8 * 1024 * 1024
 """Default approximate bytes per partition; one partition holds whole records only."""
 
+_ARROW_BLOCK_BYTES = 1024 * 1024
 _QUOTE, _NEWLINE = ord('"'), ord("\n")
 # Quotes are counted in cache-sized slices: NumPy releases the GIL, so threaded
 # partitions check their blocks in parallel.
@@ -74,9 +75,9 @@ class _BlockSpec:
     context: ReaderErrorContext
 
 
-def _empty(spec: _BlockSpec) -> pd.DataFrame:
-    """Return an empty frame with the projected Arrow-backed columns of ``spec``."""
-    return spec.schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
+def _empty(schema: pa.Schema) -> pd.DataFrame:
+    """Return an empty frame with the projected Arrow-backed columns of ``schema``."""
+    return schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
 
 
 def _paired_quotes(block: bytes | bytearray) -> bool:
@@ -98,7 +99,7 @@ def _paired_quotes(block: bytes | bytearray) -> bool:
     return quotes % 2 == 0
 
 
-def csv_data_buffer(
+def _csv_data_buffer(
     block: bytes | bytearray, /, *, context: ReaderErrorContext, path: ArtifactFile
 ) -> bytes | bytearray:
     """Prepare headerless physical CSV records for Arrow without changing field values.
@@ -133,28 +134,68 @@ def csv_data_buffer(
     return b"\n" + block if block.startswith(codecs.BOM_UTF8) else block
 
 
-def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
-    """Parse one owned byte block into the projected Arrow-backed columns."""
-    if first:
-        # The header is one physical line, as csv_header requires.
-        newline = block.find(b"\n")
-        block = block[newline + 1 :] if newline >= 0 else b""
+def _parser_block_size(records: bytes | bytearray) -> int:
+    """Size Arrow blocks to fit whole records regardless of partition alignment."""
+    size = boundary = _ARROW_BLOCK_BYTES
+    while boundary < len(records):
+        # Only a record crossing a nominal boundary can exceed the default.
+        # Jump past it so even a record spanning many blocks is visited once.
+        start = records.rfind(b"\n", 0, boundary) + 1
+        newline = records.find(b"\n", boundary)
+        end = len(records) if newline == -1 else newline + 1
+        size = max(size, end - start)
+        boundary = (end // _ARROW_BLOCK_BYTES + 1) * _ARROW_BLOCK_BYTES
+    return size
+
+
+def parse_csv_records(
+    block: bytes | bytearray,
+    /,
+    *,
+    header: Sequence[str],
+    schema: pa.Schema,
+    context: ReaderErrorContext,
+    path: ArtifactFile,
+) -> pd.DataFrame:
+    """Parse a headerless block of complete physical CSV records for a lazy points partition.
+
+    The owner supplies the source header and projected Arrow schema. Empty text
+    stays literal, and malformed records fail with their source context. The
+    returned columns are Arrow-backed, including for an empty partition.
+    """
     if not block:
-        return _empty(spec)
-    records = csv_data_buffer(block, context=spec.context, path=spec.path)
-    # Every record is one line now, so Arrow's default newline chunking applies.
-    with pa.BufferReader(records) as source, csv_errors(context=spec.context, path=spec.path):
+        return _empty(schema)
+    records = _csv_data_buffer(block, context=context, path=path)
+    size = _parser_block_size(records)
+    try:
+        options = pacsv.ReadOptions(column_names=list(header), block_size=size, use_threads=False)
+    except OverflowError as error:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"a {size}-byte CSV record",
+            expected="a record fitting an Arrow parser block",
+        ) from error
+    with pa.BufferReader(records) as source, csv_errors(context=context, path=path):
         table = pacsv.read_csv(
             source,
-            read_options=pacsv.ReadOptions(column_names=list(spec.names), block_size=1024 * 1024, use_threads=False),
+            read_options=options,
             convert_options=pacsv.ConvertOptions(
-                include_columns=spec.schema.names,
-                column_types=spec.schema,
+                include_columns=schema.names,
+                column_types=schema,
                 null_values=[],
                 strings_can_be_null=False,
             ),
         )
     return table.to_pandas(types_mapper=pd.ArrowDtype)
+
+
+def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
+    """Drop the file header in the first partition and decode the projected records."""
+    if first:
+        newline = block.find(b"\n")
+        block = block[newline + 1 :] if newline >= 0 else b""
+    return parse_csv_records(block, header=spec.names, schema=spec.schema, context=spec.context, path=spec.path)
 
 
 def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error origin and partition size.
@@ -207,4 +248,4 @@ def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error ori
     read_blocks = cast("Callable[..., tuple[bytes, list[list[Delayed]]]]", read_bytes)
     _, blocks = read_blocks([glob.escape(str(path))], delimiter=b"\n", blocksize=block_bytes, sample=False)
     parts = [delayed(_read_block)(block, spec, first=index == 0) for index, block in enumerate(blocks[0])]
-    return dd.from_delayed(parts, meta=_empty(spec))
+    return dd.from_delayed(parts, meta=_empty(schema))

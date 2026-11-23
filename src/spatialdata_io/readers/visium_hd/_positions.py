@@ -137,8 +137,8 @@ def read_grid_shape(positions: ArtifactFile, *, version: str | None) -> tuple[in
 
 def iter_position_batches(
     positions: ArtifactFile, shape: tuple[int, int], *, version: str | None
-) -> Iterator[pa.RecordBatch]:
-    """Yield projected source batches, validating complete unique grid coverage.
+) -> Iterator[tuple[pa.RecordBatch, NDArray[np.int64]]]:
+    """Yield source batches and their verified flattened grid indices.
 
     One boolean per grid site records coverage; decoded source columns have at
     most ``POSITION_BATCH_SIZE`` rows. No complete positions frame is built.
@@ -149,7 +149,7 @@ def iter_position_batches(
 
 def _verified_batches(
     source: pq.ParquetFile, positions: ArtifactFile, shape: tuple[int, int], *, version: str | None
-) -> Iterator[pa.RecordBatch]:
+) -> Iterator[tuple[pa.RecordBatch, NDArray[np.int64]]]:
     context = _context(version)
     if source.metadata.num_rows != shape[0] * shape[1]:
         raise ReaderFormatError(
@@ -175,7 +175,7 @@ def _verified_batches(
                 context=context, path=positions, found="duplicate grid indices", expected="one row per grid site"
             )
         seen[indices] = True
-        yield batch
+        yield batch, indices
 
 
 def _pixels(batch: pa.RecordBatch) -> NDArray[np.float64]:
@@ -204,7 +204,6 @@ class PositionSelection:
         "_rows",
         "_sorted_indices",
         "_tissue",
-        "_width",
         "_x",
         "_y",
     )
@@ -221,9 +220,8 @@ class PositionSelection:
         self._path = positions
         self._context = _context(version)
         self._names = names
-        self._width = shape[1]
         self._rows, self._cols = parse_bin_barcodes(names, size_um, shape, positions, version=version)
-        indices = self._rows.astype(np.int64) * self._width + self._cols
+        indices = self._rows.astype(np.int64) * shape[1] + self._cols
         # Search spatially sorted IDs, then scatter values back into matrix order.
         self._order = np.argsort(indices)
         self._sorted_indices = indices[self._order]
@@ -231,13 +229,11 @@ class PositionSelection:
         self._x = np.empty(len(names), dtype=np.float64)
         self._y = np.empty(len(names), dtype=np.float64)
 
-    def add(self, batch: pa.RecordBatch) -> None:
+    def add(self, batch: pa.RecordBatch, indices: NDArray[np.int64]) -> None:
         """Scatter one verified source batch into the corresponding selected rows."""
-        rows = batch.column("array_row").to_numpy().astype(np.int64)
-        grid = rows * self._width + batch.column("array_col").to_numpy()
-        matches = np.searchsorted(self._sorted_indices, grid)
+        matches = np.searchsorted(self._sorted_indices, indices)
         source_rows = np.flatnonzero(matches < len(self._names))
-        source_rows = source_rows[self._sorted_indices[matches[source_rows]] == grid[source_rows]]
+        source_rows = source_rows[self._sorted_indices[matches[source_rows]] == indices[source_rows]]
         if not source_rows.size:
             return
         destination = self._order[matches[source_rows]]
@@ -291,7 +287,7 @@ def read_positions(  # noqa: PLR0913, RUF100 - Explicit file, grid, population, 
         frame.spot_to_image, np.array([[0, 0], [factor - 1, factor - 1]], dtype=np.float64), context=registration
     )
     offset = (corners[1] - corners[0]) / 2
-    for batch in iter_position_batches(positions, shape, version=version):
+    for batch, indices in iter_position_batches(positions, shape, version=version):
         expected = apply_projective(frame.spot_to_image, factor * _grid(batch), context=registration) + offset
         error_px = np.max(np.linalg.norm(expected - _pixels(batch), axis=1), initial=0.0)
         if error_px > MAX_PROJECTIVE_ERROR_PX:
@@ -302,7 +298,7 @@ def read_positions(  # noqa: PLR0913, RUF100 - Explicit file, grid, population, 
                 expected=f"the 2 micrometre registration with residual <= {MAX_PROJECTIVE_ERROR_PX:g} pixels",
             )
 
-        selected.add(batch)
+        selected.add(batch, indices)
     return selected.to_frame()
 
 
@@ -332,9 +328,9 @@ def fit_slide_frame(
     count = 0
 
     with _open(positions, version=version) as source:
-        for batch in _verified_batches(source, positions, shape, version=version):
+        for batch, indices in _verified_batches(source, positions, shape, version=version):
             if selected is not None:
-                selected.add(batch)
+                selected.add(batch, indices)
             grid, pixels = _grid(batch), _pixels(batch)
             sample = np.isin(grid[:, 1], sample_rows) & np.isin(grid[:, 0], sample_cols)
             sample_source.append(grid[sample])

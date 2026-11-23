@@ -455,6 +455,32 @@ class TestMacsimaRejects:
 class TestMacsimaPathPolicy:
     """Discovered folders and channel files follow the dataset root's symlink policy."""
 
+    def test_in_root_links_keep_tied_channels_in_discovered_order(self, tmp_path: Path) -> None:
+        first = ChannelSpec("CD3", 1, "APC", file_name="a.tif")
+        second = ChannelSpec("CD3", 1, "PE", file_name="b.tif")
+        pixels = np.stack(
+            [
+                write_channel(tmp_path, first, version=1, index=0, physical_size=("0.10003", "µm")),
+                write_channel(tmp_path, second, version=1, index=1, physical_size=("100.03", "nm")),
+            ]
+        )
+        expected = macsima(tmp_path)
+        payloads = tmp_path / ".payloads"
+        payloads.mkdir()
+        for logical, target in (("a.tif", "z"), ("b.tif", "a")):
+            source = tmp_path / logical
+            source.symlink_to(source.rename(payloads / target))
+
+        for policy in ("relaxed", "strict"):
+            result = macsima(tmp_path, path_policy=policy)
+            image = _image(result, f"{tmp_path.name}_image")
+            transformation = get_transformation(image, "global")
+            assert isinstance(transformation, Scale)
+            np.testing.assert_array_equal(transformation.scale, [0.10003, 0.10003])
+            assert image.coords["c"].to_numpy().tolist() == ["CD3 (1)", "CD3 (2)"]
+            np.testing.assert_array_equal(image.data.compute(), pixels)
+            assert_spatial_data_objects_are_identical(result, expected)
+
     def test_out_of_root_symlinks_require_the_relaxed_policy(
         self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
     ) -> None:

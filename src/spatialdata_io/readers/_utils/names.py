@@ -66,6 +66,12 @@ _INDEX_COLUMN = "_index"
 _LEADING_UNDERSCORES = re.compile(r"^_{2,}")
 
 
+def contains_element_name(names: Iterable[str], name: str, /) -> bool:
+    """Check a single candidate against an existing namespace using SpatialData's lowercase rule."""
+    key = name.lower()
+    return any(existing.lower() == key for existing in names)
+
+
 def colliding_element_names(names: Iterable[str], /) -> list[str]:
     """Return the sorted distinct spellings that collide in SpatialData's element namespace.
 
@@ -150,7 +156,7 @@ def validate_element_name(name: object, /, *, parameter: str, reserved: Collecti
         message = f"{parameter} must be a valid SpatialData element name: {_RULE}; found {name!r}."
         raise ValueError(message)
 
-    if name.lower() in {reserved_name.lower() for reserved_name in reserved}:
+    if contains_element_name(reserved, name):
         message = (
             f"{parameter} must be a valid SpatialData element name other than {sorted(reserved)!r} in any letter "
             f"case, because SpatialData compares element names case-insensitively; found {name!r}."

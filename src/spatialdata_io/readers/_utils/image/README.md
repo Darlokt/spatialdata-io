@@ -63,11 +63,15 @@ downsampling can round. Readers name the element in the message.
 
 Readers dispatching on file content can use `inspect_tiff_if_recognized()`.
 It returns metadata for all four classic TIFF and BigTIFF signatures, returns
-`None` for other formats, and reports malformed recognized TIFFs. In a multi-image
-OME-TIFF, each physical IFD belongs to a single image. Inspection checks the
-resolved plane ranges per file, including ranges with an omitted plane count,
-before any pixel tasks are constructed. An explicit zero plane count raises
-because the TIFF decoder would otherwise read planes the block does not declare.
+`None` for other formats, and reports malformed recognized TIFFs.
+
+In an OME-TIFF, each logical image plane must map unambiguously to a file and
+an IFD present in that file. Each IFD can belong to only one logical plane.
+Inspection checks the declared Z/C/T starting coordinates and overlapping
+ranges in both directions. Overlapping declarations of the same assignment are
+accepted. These checks run on mapping intervals before any pixel tasks are
+constructed. An explicit zero plane count raises because the TIFF decoder would
+otherwise read planes the block does not declare.
 
 TIFF inspection and reading are separate because readers may need metadata to
 choose a series or level:
@@ -191,7 +195,10 @@ TIFF and must remain within that file's directory. Absolute references, parent
 traversal, and symlinks resolving outside that directory are rejected before
 linked pixels are opened. A `TiffData` UUID equal to the document's own UUID
 refers to the inspected file, whatever its recorded `FileName`, so renamed
-single-file OME-TIFFs remain readable. Inspection rejects missing image planes.
+single-file OME-TIFFs remain readable. The first external reference to a UUID
+must identify its file. Later references may omit the name or resolve to the
+same path. Conflicting names for one external UUID fail before the decoder can
+reuse the wrong file. Inspection rejects missing image planes.
 Lazy tasks recheck their requested planes when reopening the file so the loss
 of a linked image raises an error during computation.
 

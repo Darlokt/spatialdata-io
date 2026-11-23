@@ -524,6 +524,21 @@ class TestCodex:
 class TestCodexCalibration:
     """Calibrate the proved table frame and explicitly register selected images."""
 
+    @pytest.mark.parametrize(
+        ("pixel_size_um", "native_scale"),
+        [(5e-324, 0.1), (1e200, 1e200), (5e-324, 1.0)],
+        ids=["underflow", "overflow", "inverse_overflow"],
+    )
+    def test_rejects_unrepresentable_physical_image_registration(
+        self, tmp_path: Path, pixel_size_um: float, native_scale: float
+    ) -> None:
+        write_csv(tmp_path / "cells.csv", cell_frame().assign(x=1.0, y=1.0))
+        write_image(tmp_path / "stitched.tif")
+        mapping = Affine(np.diag([native_scale, native_scale, 1.0]), input_axes=("x", "y"), output_axes=("x", "y"))
+
+        with pytest.raises(ValueError, match="finite and invertible"):
+            codex(tmp_path, pixel_size_um=pixel_size_um, image_to_table=mapping)
+
     @pytest.mark.parametrize("source_format", ["csv", "fcs"])
     @pytest.mark.parametrize("factor", [1, 2])
     def test_calibrated_landmarks(self, tmp_path: Path, source_format: str, factor: int) -> None:
@@ -539,6 +554,7 @@ class TestCodexCalibration:
         with Callback(pretask=lambda key, *_: tasks.append(str(key))):
             result = codex(tmp_path, pixel_size_um=0.5, image_to_table=mapping)
         assert not tasks
+        np.testing.assert_array_equal(mapping.matrix, [[factor, 0, 10], [0, -factor, 40], [0, 0, 1]])
         table = result.tables["table"]
         np.testing.assert_array_equal(table.obsm["spatial"], [[10, 0.75], [1.25, 15], [6.5, 4]])
         np.testing.assert_array_equal(

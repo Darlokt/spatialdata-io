@@ -13,6 +13,7 @@ from spatialdata._core.validation import check_valid_dataframe_column_name, chec
 
 from spatialdata_io.readers._utils.names import (
     colliding_element_names,
+    contains_element_name,
     sanitize_column_names,
     sanitize_element_name,
     sanitize_uns_keys,
@@ -37,6 +38,17 @@ _INVALID = [
     "a\nb",
     "a+b",
 ]
+
+
+class TestContainsElementName:
+    def test_stops_at_the_first_matching_spelling(self) -> None:
+        names = iter(("Cells", "Tissue", "Labels"))
+        assert contains_element_name(names, "tissue")
+        assert next(names) == "Labels"
+
+    def test_uses_spatialdata_lowercase_rule(self) -> None:
+        assert not contains_element_name(["image\u017f"], "images")
+        assert not contains_element_name([], "cells")
 
 
 class TestCollidingElementNames:

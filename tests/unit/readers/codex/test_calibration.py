@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 class TestValidateCalibration:
     """Reject invalid public assumptions before I/O."""
 
-    @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+    @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf"), 10**309, -(10**309)])
     def test_invalid_scale(self, value: float) -> None:
         with pytest.raises(ValueError, match="positive finite"):
             validate_calibration(value, None)
@@ -68,6 +68,12 @@ class TestValidateCalibration:
         else:
             mapping.matrix[0, 0] = np.inf
         with pytest.raises(ValueError, match="3-by-3 affine"):
+            validate_calibration(None, mapping)
+
+    def test_nonfinite_inverse_translation(self) -> None:
+        matrix = np.array([[0.5, 0, 1e308], [0, 1, 0], [0, 0, 1]])
+        mapping = Affine(matrix, input_axes=("x", "y"), output_axes=("x", "y"))
+        with pytest.raises(ValueError, match="invertible"):
             validate_calibration(None, mapping)
 
     def test_mutated_complex_matrix_cannot_lose_its_imaginary_component(self) -> None:

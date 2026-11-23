@@ -123,7 +123,7 @@ class TestMakeChannelOptions:
 class TestPlanStack:
     """Plan one stack from inspected channel sources."""
 
-    def test_orders_by_cycle_then_name_then_path(self) -> None:
+    def test_orders_by_cycle_then_name_and_preserves_discovery_order_for_ties(self) -> None:
         sources = [
             _source("Zeta", 2),
             _source("CD3", 1, path="/data/b.tif"),
@@ -134,7 +134,7 @@ class TestPlanStack:
         plan = plan_stack(_STACK, sources, _OPTIONS)
 
         assert _names(plan.channels) == ["CD3 (1)", "CD3 (2)", "Alpha", "Zeta"]
-        assert [channel.source.tiff.path.name for channel in plan.channels[:2]] == ["a.tif", "b.tif"]
+        assert [channel.source.tiff.path.name for channel in plan.channels[:2]] == ["b.tif", "a.tif"]
         assert plan.nuclei is None
         assert (plan.name, plan.pixel_size_um) == ("run", 0.17)
 
