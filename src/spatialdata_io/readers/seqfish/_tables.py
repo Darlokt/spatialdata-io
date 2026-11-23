@@ -33,9 +33,8 @@ from spatialdata_io.readers._utils.csv import csv_errors, csv_header
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
-    as_csr_array,
+    count_batch_to_csr,
     finalize_count_arrays,
-    normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
 )
@@ -56,12 +55,6 @@ _TABLE_CONTEXT = ReaderErrorContext("seqfish", "table")
 # At two source bytes per count, its uint64 value payload is at most eight
 # times this block target; parser allocations, dense copies and CSR are extra.
 _BATCH_BYTES = 1024 * 1024
-
-
-def _count_block(batch: pa.RecordBatch) -> sparse.csr_array:
-    """Convert the count columns of one typed batch to canonical CSR."""
-    counts = batch.select(range(1, batch.num_columns)).to_tensor(row_major=True)
-    return as_csr_array(np.asarray(counts))
 
 
 def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[str, ...]]:
@@ -85,7 +78,9 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
             # Finalizing it now retains float32 values instead of 8-byte
             # integers; stacking promotes every block exactly to float64 if any
             # block needs it, which is the dtype one final call would select.
-            blocks.extend(finalize_count_arrays((_count_block(batch),), context=COUNTS_CONTEXT, path=path))
+            blocks.append(
+                count_batch_to_csr(batch.select(range(1, batch.num_columns)), context=COUNTS_CONTEXT, path=path)
+            )
 
     if not blocks:
         raise ReaderFormatError(
@@ -182,5 +177,4 @@ def finalize_table(table: ad.AnnData, *, frame: str, region: str | None, counts:
         return parse_linked_table(
             table, TableLinkage((region,), "region", "instance_id"), context=_TABLE_CONTEXT, path=counts
         )
-    normalize_owned_anndata(table)
     return table

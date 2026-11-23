@@ -23,7 +23,6 @@ from spatialdata_io.readers._utils.table import (
     parse_linked_table,
     prepare_anndata_dataframe,
 )
-from spatialdata_io.readers.stereoseq._schemas import EXPRESSION_LAYERS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,8 +30,6 @@ if TYPE_CHECKING:
     import anndata as ad
     import numpy.typing as npt
     from scipy.sparse import csr_array
-
-    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
 
 
 def select_cells(table: ad.AnnData, retained: pd.Index, *, context: ReaderErrorContext, path: Path) -> ad.AnnData:
@@ -94,14 +91,13 @@ def finalize_positions(  # noqa: PLR0913 - position meaning and error context ar
     table.uns[POSITIONS_KEY] = metadata
 
 
-def link_table(  # noqa: PLR0913 - linkage target, identity and error context are separate inputs.
+def link_table(
     table: ad.AnnData,
     target: str,
     index: pd.Index,
     *,
     context: ReaderErrorContext,
     path: Path,
-    duplicate_sums: list[SparseDuplicateSummary] | None = None,
 ) -> ad.AnnData:
     """Add the linkage columns once, then validate exact target membership."""
     obs = cast("pd.DataFrame", table.obs)
@@ -130,7 +126,5 @@ def link_table(  # noqa: PLR0913 - linkage target, identity and error context ar
         TableLinkage((target,), "region", "instance_id"),
         context=context,
         path=path,
-        expression_layers=tuple(name for name in EXPRESSION_LAYERS if name in table.layers),
-        duplicate_sums=duplicate_sums,
         expected_instance_ids={target: index},
     )

@@ -150,19 +150,16 @@ otherwise float64 when at most 2**53. The operands select that arithmetic
 dtype before multiplication, proving every nonnegative integer partial sum
 exact. Failure raises a precision error; this conservative bound can reject
 exceptional inputs whose actual sums would still be safe.
-Completed nucleus values return to float32 when their maximum is at most 2²⁴. Source integers
-already rounded by Scanpy cannot be recovered.
-Every returned expression matrix is a canonical SciPy CSR sparse **array**.
-Nothing is densified. Linkage is performed once after all filtering, using
-the actual returned shape indexes or derived grid-label IDs. Source count
-validation inherits Scanpy conversion and duplicate handling; the reader does
-not reject valid duplicate count entries or rescan counts before upstream
-conversion. See [table numerical limits](table_contracts.md#persistence-ownership-and-numerical-limits).
+Completed nucleus values use float32 through 2²⁴ and float64 above that threshold.
+Linkage uses the returned shape indexes or derived grid-label IDs after filtering.
 
-Barcode mappings are projected in batches of at most 65,536 rows. Their string
-columns remain Arrow-backed during alignment, preserving literal barcodes and
-null cell assignments. An unassigned bin contributes to no nucleus; a valid
-cell outside the selected population also contributes to no returned nucleus.
+The raw 2 µm matrix and its barcode annotations stay in memory until aggregation
+finishes. The reader projects barcode mappings in batches of up to 65,536 rows.
+When all literal barcodes in a batch match the corresponding matrix rows, their
+row positions identify the bins directly. Reordered rows require an exact lookup
+that can use more memory. Every raw barcode must occur once. Arrow-backed strings
+preserve null cell assignments. Unassigned bins and bins assigned to cells outside
+the selected population contribute to no returned nucleus.
 Grid coordinates convert directly from uint32 into float64 XY arrays before
 registration and nominal-centre arithmetic.
 
@@ -231,7 +228,8 @@ Full-resolution images are discovered among root `tissue_image` TIFF names and
 supported files directly inside `microscope_image/`; more than one is ambiguous.
 `fullres_image_file` overrides this selection. A file whose first bytes are a
 TIFF or BigTIFF signature is read as TIFF whatever its suffix (including
-`.btf`); otherwise `.png`, `.jpg` and `.jpeg` select those decoders. A TIFF
+`.btf`). For PNG and JPEG, the suffix of the discovered or supplied name
+selects the decoder, including when that name is a symlink. A TIFF
 must have one series unless `tiff_series` selects one; several series without
 a selection raise a contextual `ReaderFormatError`. `data_axes` overrides the
 TIFF's declared axes as one case-insensitive string such as `"CYX"`;
@@ -279,10 +277,7 @@ All-bin squares can require several GiB: the default includes every available
 size, and a full 6.5 mm grid has 11.2 million 2 µm bins. Labels require about 45 MB
 for that uint32 grid, plus model, graph, table and serialization overhead. The
 11 mm grid has 30.5 million bins. Polygon construction batches limit temporary
-vertex buffers, but the returned geometries themselves are eager. Nucleus counts
-use the shared Scanpy source and can require at least 4.4 GiB even on the tiny
-example because the raw matrix includes every barcode. This cost is not hidden
-behind a filtered-count approximation.
+vertex buffers. The returned geometries are eager.
 
 ## CLI and migration
 

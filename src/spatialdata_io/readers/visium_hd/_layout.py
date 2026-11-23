@@ -111,13 +111,21 @@ class SegmentationLayout:
 
 
 @dataclass(frozen=True, slots=True)
+class FullresImageSource:
+    """A microscope image path and the lowercase suffix of its selected name."""
+
+    path: ArtifactFile
+    suffix: str
+
+
+@dataclass(frozen=True, slots=True)
 class ImageLayout:
     """Selected optional rasters."""
 
     hires: ArtifactFile | None
     lowres: ArtifactFile | None
     cytassist: ArtifactFile | None
-    fullres: ArtifactFile | None
+    fullres: FullresImageSource | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,10 +207,11 @@ def _image_file(  # noqa: PLR0913, RUF100 - each image prefers its own root entr
     return optional_metadata_file(root, path, context=context)
 
 
-def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path, ...]) -> ArtifactFile | None:
+def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path, ...]) -> FullresImageSource | None:
     context = _context("full-resolution image")
     if override is not None:
-        return require_caller_file(root, override, context=context)
+        path = require_caller_file(root, override, context=context)
+        return FullresImageSource(path, path.suffix.lower())
 
     candidates = [entry for entry in entries if _FULLRES_NAME.fullmatch(entry.name)]
     folder = optional_metadata_directory(root, "microscope_image", context=context)
@@ -211,8 +220,10 @@ def _fullres(root: DatasetRoot, override: str | Path | None, entries: tuple[Path
             entry for entry in list_directory(folder, context=context) if entry.suffix.lower() in _FULLRES_SUFFIXES
         )
 
-    path = optional_unique_path(candidates, context=context, search_path=root.path)
-    return None if path is None else require_metadata_file(root, path, context=context)
+    candidate = optional_unique_path(candidates, context=context, search_path=root.path)
+    if candidate is None:
+        return None
+    return FullresImageSource(require_metadata_file(root, candidate, context=context), candidate.suffix.lower())
 
 
 def _bin_directories(root: DatasetRoot) -> dict[int, ArtifactDirectory]:

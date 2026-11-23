@@ -17,12 +17,14 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
+from spatialdata_io.readers._utils.table import normalize_owned_anndata
 from spatialdata_io.readers.stereoseq._analysis import read_analyses
 from spatialdata_io.readers.stereoseq._cells import read_cells
 from spatialdata_io.readers.stereoseq._geometry import make_points, make_polygons
 from spatialdata_io.readers.stereoseq._layout import discover_layout
 from spatialdata_io.readers.stereoseq._metadata import read_image_pitch
 from spatialdata_io.readers.stereoseq._rasters import read_image, read_mask
+from spatialdata_io.readers.stereoseq._schemas import EXPRESSION_LAYERS
 from spatialdata_io.readers.stereoseq._square import read_square
 from spatialdata_io.readers.stereoseq._tables import finalize_positions, link_table, select_cells
 
@@ -217,13 +219,19 @@ def _analysis_products(
         path=source.file,
     )
     points = make_points(analysis.coordinates, analysis.instance_ids, transformations=transformations)
+    normalize_owned_anndata(
+        analysis.table,
+        expression_layers=tuple(name for name in EXPRESSION_LAYERS if name in analysis.table.layers),
+        duplicate_sums=duplicate_sums,
+        context=context,
+        path=source.file,
+    )
     table = link_table(
         analysis.table,
         f"{analysis.name}_points",
         analysis.instance_ids,
         context=context,
         path=source.file,
-        duplicate_sums=duplicate_sums,
     )
     return points, table
 
@@ -425,7 +433,7 @@ def stereoseq(  # noqa: PLR0913 - every product selection is an explicit public 
         bin or image role, malformed GEF, H5AD or TIFF content, inconsistent
         samples, origins or pitches, analysis rows or features absent from the
         matching GEF, or invalid polygons under ``"raise"``. Malformed analysis
-        expression raises ``ValueError`` from final linkage.
+        expression raises ``ValueError`` during expression normalization.
     """
     sample_id = _sample_id(sample_id)
     bins = _bin_selection(bin_sizes)

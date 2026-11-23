@@ -37,7 +37,7 @@ outside this boundary.
 ## Canonical and kind-marked path representation
 
 The validation functions return allocation-free nominal types around ordinary
-canonical absolute `Path` objects:
+absolute `Path` objects:
 
 ```python
 ArtifactFile = NewType("ArtifactFile", Path)
@@ -66,9 +66,9 @@ imports them for annotations and stores returned values; it must not call the
 Dataset validators of a strict root and the root-free validators return the
 canonical resolved target. This gives path-backed delayed tasks one stable
 source spelling and prevents a validated symlink alias from later being
-redirected elsewhere. Caller validators, and every validator of a relaxed root,
-return the resolved parent directory joined with the given final name instead;
-see the origin rules below. Readers that derive
+redirected elsewhere. Caller validators and relaxed dataset validators preserve
+the given final name, using the resolved parent where the origin rules below
+allow it. Readers that derive
 scientific identifiers from a candidate's lexical filename must record that
 identifier before validation or store it separately from the canonical I/O
 path.
@@ -134,15 +134,14 @@ Paths have three origins:
 
 | Origin | Lexical check | Target, strict root | Target, relaxed root | Returned path |
 | --- | --- | --- | --- | --- |
-| Dataset (reader-owned name, discovered entry, metadata value; no `~` expansion) | inside the root | inside the root | anywhere | strict: canonical target; relaxed: resolved parent + own name |
+| Dataset (reader-owned name, discovered entry, metadata value; no `~` expansion) | inside the root | inside the root | anywhere | strict: canonical target; relaxed: resolved parent + own name if the parent is inside the root, original path under the root otherwise |
 | Relative caller path (`~` expanded) | inside the root | inside the root | anywhere | resolved parent + given name |
 | Absolute caller path (`~` expanded) | none | anywhere | anywhere | resolved parent + given name |
 
-"Resolved parent + name" keeps the final name the dataset or the caller gave,
-because git-annex and DVC targets are named by content hashes (DVC cache entries
-have no suffix). Names and suffixes that identify samples, channels or formats
-therefore never come from a link target, and paths joined to a returned
-directory stay lexically inside the root. A strict rejection names the relaxed
+Preserving the final name keeps suffixes available when git-annex or DVC use
+content hashes as target names. For relaxed dataset paths beneath an external
+directory symlink, preserving the parent spelling under the root also lets
+readers look up children and siblings. A strict rejection names the relaxed
 policy in its message.
 
 Paths that require containment are checked lexically before filesystem access,
@@ -196,25 +195,13 @@ The values are directly consumable by APIs that accept `Path` or
 `os.PathLike[str]`; callers do not unwrap or reconstruct them:
 
 ```python
-import scanpy as sc
-
+from spatialdata_io.readers._utils.counts import read_10x_h5
 from spatialdata_io.readers._utils.image import inspect_tiff, read_tiff
 
-adata = sc.read_10x_h5(layout.counts_h5)
+adata = read_10x_h5(layout.counts_h5, context=context)
 metadata = inspect_tiff(layout.morphology, context=context)
 image = read_tiff(metadata, series=0, level=0)
 ```
-
-The direct Scanpy call demonstrates ecosystem compatibility. Vendor readers
-should use the focused shared count-source boundary once it is available so
-sparse-array normalization and source error context remain centralized.
-
-Likewise, `root.path` can be passed directly to a directory consumer such
-as `scanpy.read_10x_mtx()`. Focused shared source utilities should accept the
-nominal artifact type and trust its path contract instead of resolving or
-kind-checking it again. Broad direct-entry utilities such as the existing image
-inspection functions may retain their own input normalization while accepting
-the marker as an ordinary `Path`.
 
 The markers do not change execution semantics. TIFF metadata inspection remains
 bounded and eager, TIFF pixels remain lazy and native-chunked, PNG/JPEG pixel
@@ -224,9 +211,11 @@ boundaries rather than this path package.
 ## Optional artifacts
 
 Optional means that only the final path component may be absent. Its parent must
-resolve to an existing directory. This makes malformed layouts explicit:
+resolve to an existing directory and satisfy the root's policy. This makes
+malformed layouts explicit:
 
 - lexically escaping path: raise `ReaderFormatError`, even when absent;
+- absent leaf under a parent that resolves outside a strict root: raise `ReaderFormatError`;
 - absent leaf under a valid directory: return `None`;
 - missing or dangling parent: raise `FileNotFoundError`;
 - dangling leaf symlink: raise `FileNotFoundError`;

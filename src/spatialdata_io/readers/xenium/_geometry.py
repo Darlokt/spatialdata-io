@@ -281,7 +281,7 @@ def apply_policy(polygons: Polygons, policy: InvalidGeometryPolicy) -> NDArray[n
     invalid = polygons.degenerate.copy()
     invalid[built] = invalid_geometry_mask(polygons.geometries[built])
     if policy == "raise" and invalid.any():
-        raise_invalid_geometries(invalid, identifiers.tolist(), context=polygons.context, path=polygons.path)
+        raise_invalid_geometries(invalid, identifiers, context=polygons.context, path=polygons.path)
     return ~invalid
 
 

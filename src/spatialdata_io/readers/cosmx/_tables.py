@@ -40,9 +40,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
-    as_csr_array,
-    finalize_count_arrays,
-    normalize_owned_anndata,
+    count_batch_to_csr,
     parse_linked_table,
     prepare_anndata_dataframe,
 )
@@ -128,10 +126,9 @@ def read_counts(path: ArtifactFile) -> Counts:
             retained = batch if pc.call_function("all", [keep]).as_py() else batch.filter(keep)
             if not retained.num_rows:
                 continue
-            values = np.asarray(retained.select(features).to_tensor(row_major=True))
             # Each row is complete: finalize now and retain only sparse float
             # storage. Stacking promotes blocks exactly if any needs float64.
-            blocks.extend(finalize_count_arrays((as_csr_array(values),), context=context, path=path))
+            blocks.append(count_batch_to_csr(retained.select(features), context=context, path=path))
             fovs.append(retained.column(FOV))
             cell_ids.append(retained.column(CELL_ID))
     expression = (
@@ -311,5 +308,4 @@ def build_table(
     table.uns[POSITIONS_KEY] = descriptions
     if linked:
         return parse_linked_table(table, TableLinkage(tuple(regions), REGION_KEY, CELL_ID), context=_TABLE_CONTEXT)
-    normalize_owned_anndata(table)
     return table

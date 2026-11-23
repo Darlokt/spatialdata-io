@@ -61,7 +61,7 @@ _READER_UNS_KEYS = (POSITIONS_KEY, TableModel.ATTRS_KEY)
 def read_table(path: ArtifactFile, barcodes: Barcodes) -> ad.AnnData:
     """Return the owned source-order table with exact A/B grid positions.
 
-    Expression storage is left as read; final linkage normalizes it.
+    The reader normalizes expression storage after completing the table.
     """
     try:
         table = ad.read_h5ad(path)

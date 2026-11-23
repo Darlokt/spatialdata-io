@@ -10,7 +10,12 @@ from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTOR
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
+from spatialdata_io.readers._utils.table import (
+    TableLinkage,
+    normalize_owned_anndata,
+    parse_linked_table,
+    prepare_anndata_dataframe,
+)
 from spatialdata_io.readers.steinbock._images import read_rasters
 from spatialdata_io.readers.steinbock._layout import discover_layout, validate_masks_dir, validate_table_file
 from spatialdata_io.readers.steinbock._metadata import read_image_metadata
@@ -243,13 +248,18 @@ def steinbock(  # noqa: PLR0913, RUF100 - explicit format choices keep the publi
     prepare_anndata_dataframe(cast("pd.DataFrame", table.obs), context=_LINKAGE_CONTEXT)
     prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=_LINKAGE_CONTEXT)
     duplicate_sums: list[SparseDuplicateSummary] = []
+    normalize_owned_anndata(
+        table,
+        context=_LINKAGE_CONTEXT,
+        path=layout.table,
+        duplicate_sums=duplicate_sums,
+        expression_layers=("counts",) if "counts" in table.layers else (),
+    )
     table = parse_linked_table(
         table,
         TableLinkage(tuple(table.obs["region"].unique()), "region", "cell_id"),
         context=_LINKAGE_CONTEXT,
         path=layout.table,
-        duplicate_sums=duplicate_sums,
-        expression_layers=("counts",) if "counts" in table.layers else (),
     )
 
     result = SpatialData(

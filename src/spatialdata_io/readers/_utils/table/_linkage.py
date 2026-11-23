@@ -17,7 +17,6 @@ from spatialdata_io.readers._utils.errors import (
 )
 from spatialdata_io.readers._utils.table._normalize import (
     _require_owned_in_memory_anndata,
-    normalize_owned_anndata,
 )
 
 if TYPE_CHECKING:
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
 
     from anndata import AnnData
 
-    from spatialdata_io.readers._utils.table._duplicates import SparseDuplicateSummary
 
 type _IdentifierFamily = Literal["integer", "string"]
 type _IntegerDType = np.dtype[np.signedinteger[Any] | np.unsignedinteger[Any]]
@@ -45,27 +43,7 @@ _OBSERVED_INTEGER_DTYPES = frozenset(
 _MISMATCH_PREVIEW_SIZE = 5
 
 
-@dataclass(frozen=True, slots=True)
-class _IntegerIdentifiers:
-    """Integer instance identifiers and their observed dtype."""
-
-    dtype: _IntegerDType
-
-
-@dataclass(frozen=True, slots=True)
-class _StringIdentifiers:
-    """String instance identifiers."""
-
-
-type _ObservedIdentifiers = _IntegerIdentifiers | _StringIdentifiers
-
-
-@dataclass(frozen=True, slots=True)
-class _ValidatedIdentifiers:
-    """Unique observed ``(region, instance)`` pairs and the kind of their instance identifiers."""
-
-    pairs: pd.MultiIndex
-    identifiers: _ObservedIdentifiers
+type _ObservedIdentifiers = _IntegerDType | Literal["string"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,11 +133,11 @@ def _observed_identifier_kind(
     family = _inferred_family(values)
     inspected = _categorical_values(values)
     if family == "string":
-        return _StringIdentifiers()
+        return "string"
     if family == "integer":
         dtype = inspected.dtype
         if dtype in _OBSERVED_INTEGER_DTYPES:
-            return _IntegerIdentifiers(cast("_IntegerDType", dtype))
+            return cast("_IntegerDType", dtype)
     raise ReaderFormatError(
         context=context,
         path=path,
@@ -294,77 +272,53 @@ def _integer_comparison_values(
     return values.astype(dtype, copy=False)
 
 
-def _expected_pairs(
-    expected_instance_ids: Mapping[str, pd.Index],
+def _validate_membership(  # noqa: PLR0913 - compare one region with its diagnostic context.
+    observed: pd.Index,
+    target: pd.Index,
+    kind: _ObservedIdentifiers,
     *,
-    observed: _ObservedIdentifiers,
+    region: str,
     context: ReaderErrorContext,
     path: Path | None,
-) -> pd.MultiIndex:
-    """Return the ``(region, instance)`` pairs of every supplied target index.
+) -> None:
+    """Compare unique IDs within one region, preserving integer precision."""
+    family = _validate_expected_index(target, region=region, context=context, path=path)
+    expected_family = "string" if isinstance(kind, str) else "integer"
+    if family != expected_family:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"{family} target identifiers for region {region!r}",
+            expected=f"{expected_family} identifiers matching the table instance column",
+        )
+    if not isinstance(kind, str):
+        target = pd.Index(_integer_comparison_values(target, dtype=kind, region=region, context=context, path=path))
+    if observed.equals(target):
+        return
+    missing = target.difference(observed, sort=False)
+    unexpected = observed.difference(target, sort=False)
+    if len(missing) or len(unexpected):
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=(
+                f"{len(missing)} target pairs missing from the table and {len(unexpected)} unexpected table pairs "
+                f"in region {region!r}; missing preview {missing[:_MISMATCH_PREVIEW_SIZE].tolist()!r}, "
+                f"unexpected preview {unexpected[:_MISMATCH_PREVIEW_SIZE].tolist()!r}"
+            ),
+            expected="exact target-instance membership for every supplied region",
+        )
 
-    Each index must have the same identifier family as the table instance column.
-    """
-    observed_family: _IdentifierFamily = "integer" if isinstance(observed, _IntegerIdentifiers) else "string"
-    region_arrays: list[np.ndarray] = []
-    instance_arrays: list[np.ndarray] = []
-    for region, index in expected_instance_ids.items():
-        family = _validate_expected_index(index, region=region, context=context, path=path)
-        if family != observed_family:
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found=f"{family} target identifiers for region {region!r}",
-                expected=f"{observed_family} identifiers matching the table instance column",
-            )
-        if isinstance(observed, _IntegerIdentifiers):
-            instances = _integer_comparison_values(
-                index, dtype=observed.dtype, region=region, context=context, path=path
-            )
-        else:
-            instances = index.to_numpy(dtype=object, copy=False)
-        instance_arrays.append(instances)
-        region_arrays.append(np.full(len(index), region, dtype=object))
-    return pd.MultiIndex.from_arrays((np.concatenate(region_arrays), np.concatenate(instance_arrays)))
 
-
-def _validate_expected_membership(
-    observed: _ValidatedIdentifiers,
-    expected_instance_ids: Mapping[str, pd.Index],
+def _validate_instances(
+    adata: AnnData,
+    linkage: TableLinkage,
+    targets: Mapping[str, pd.Index],
     *,
     context: ReaderErrorContext,
     path: Path | None,
 ) -> None:
-    """Require exact table membership for every region with a supplied target index."""
-    expected_pairs = _expected_pairs(expected_instance_ids, observed=observed.identifiers, context=context, path=path)
-    region_values = observed.pairs.get_level_values(0)
-    known_observed_pairs = observed.pairs[region_values.isin(list(expected_instance_ids))]
-    missing_from_table = expected_pairs.difference(known_observed_pairs, sort=False)
-    unexpected_in_table = known_observed_pairs.difference(expected_pairs, sort=False)
-    if len(missing_from_table) == 0 and len(unexpected_in_table) == 0:
-        return
-    missing_preview = missing_from_table[:_MISMATCH_PREVIEW_SIZE].tolist()
-    unexpected_preview = unexpected_in_table[:_MISMATCH_PREVIEW_SIZE].tolist()
-    raise ReaderFormatError(
-        context=context,
-        path=path,
-        found=(
-            f"{len(missing_from_table)} target pairs missing from the table and "
-            f"{len(unexpected_in_table)} unexpected table pairs; "
-            f"missing preview {missing_preview!r}, unexpected preview {unexpected_preview!r}"
-        ),
-        expected="exact target-instance membership for every supplied region",
-    )
-
-
-def _validated_pairs(
-    adata: AnnData,
-    linkage: TableLinkage,
-    *,
-    context: ReaderErrorContext,
-    path: Path | None,
-) -> _ValidatedIdentifiers:
-    """Validate the linkage columns of ``adata.obs`` and return their observed pairs.
+    """Validate the linkage columns and supplied target indexes region by region.
 
     Regions must be exactly the declared set and every pair must be unique.
     """
@@ -381,85 +335,54 @@ def _validated_pairs(
     instance_values = obs[linkage.instance_key]
     _validate_region_values(region_values, linkage, context=context, path=path)
     identifiers = _validate_instance_values(instance_values, context=context, path=path)
-    observed_pairs = pd.MultiIndex.from_arrays((region_values, instance_values))
-    if not observed_pairs.is_unique:
-        duplicate_preview = observed_pairs[observed_pairs.duplicated(keep=False)][:_MISMATCH_PREVIEW_SIZE].tolist()
-        raise ReaderFormatError(
-            context=context,
-            path=path,
-            found=f"duplicate (region, instance) pairs; preview {duplicate_preview!r}",
-            expected="unique instance identifiers within each region",
-        )
-    return _ValidatedIdentifiers(observed_pairs, identifiers)
+    groups = (
+        ((linkage.regions[0], instance_values),)
+        if len(linkage.regions) == 1
+        else instance_values.groupby(region_values, observed=True, sort=False)
+    )
+    for region, values in groups:
+        index = pd.Index(values.array)
+        if not index.is_unique:
+            preview = index[index.duplicated(keep=False)][:_MISMATCH_PREVIEW_SIZE].tolist()
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found=f"duplicate (region, instance) pairs in region {region!r}; preview {preview!r}",
+                expected="unique instance identifiers within each region",
+            )
+        if region in targets:
+            _validate_membership(index, targets[region], identifiers, region=region, context=context, path=path)
 
 
-def parse_linked_table(  # noqa: PLR0913 - explicit representation and linkage options have separate owners
+def parse_linked_table(
     adata: AnnData,
     linkage: TableLinkage,
     /,
     *,
     context: ReaderErrorContext,
     path: Path | None = None,
-    expression_layers: tuple[str, ...] = (),
     expected_instance_ids: Mapping[str, pd.Index] | None = None,
-    duplicate_sums: list[SparseDuplicateSummary] | None = None,
 ) -> AnnData:
-    """Normalize and link a reader-owned table to SpatialData elements.
-
-    The table must be an owned, eager, in-memory :class:`~anndata.AnnData`.
-    Region, instance, and optional exact target membership are validated before
-    expression mutation. ``X`` and declared expression layers are then
-    normalized to canonical CSR sparse arrays before the public
-    :meth:`spatialdata.models.TableModel.parse` boundary is called exactly once.
+    """Link a reader-owned table after its expression and annotations are final.
 
     Parameters
     ----------
     adata
-        Exclusively reader-owned, unparsed, in-memory table.
+        Owned in-memory table. Its producer supplies finite canonical CSR expression.
     linkage
-        Declared regions and observation linkage columns.
+        Region and instance columns and the ordered target regions.
     context
-        Reader and artifact identity for linkage, normalization and parser
-        failures.
+        Reader and artifact identity for validation and parser failures.
     path
-        Optional source artifact of the table, added to the same failures.
-    expression_layers
-        Named layers whose documented meaning is expression or counts.
+        Source artifact for diagnostics.
     expected_instance_ids
-        Optional borrowed target indexes keyed by a subset of declared regions.
-        Each supplied index must exactly match table instances in that region;
-        index order is irrelevant.
-    duplicate_sums
-        Optional reader-owned summary destination. Integer duplicate reduction
-        is lossless with or without this collector, as in :func:`normalize_owned_anndata`.
-        The reader emits one summarized normalization warning after successfully
-        assembling the complete result.
+        Independently materialized target indexes for any subset of regions.
+        Each supplied index must match the unique instances in its region.
 
     Returns
     -------
     anndata.AnnData
-        The identical normalized and linked table.
-
-    Raises
-    ------
-    ValueError
-        If the descriptor, ownership, stale metadata, or mapping keys violate
-        the reader-authored call contract, or normalization finds invalid data.
-    TypeError
-        If the table is backed or expression storage is unsupported.
-    KeyError
-        If a declared expression layer is absent.
-    ReaderFormatError
-        If external linkage identifiers or target membership are malformed.
-
-    Notes
-    -----
-    Linkage failures before normalization leave ``adata`` unchanged. A
-    normalization or parser failure can leave the exclusively owned table
-    partially mutated; callers must discard it. The function never
-    copies the complete table, densifies expression data, or computes a spatial
-    element. Its local validation uses linear identifier work and storage;
-    SpatialData may perform additional public model validation.
+        The same table with SpatialData linkage metadata.
     """
     _require_owned_in_memory_anndata(adata)
     if TableModel.ATTRS_KEY in adata.uns:
@@ -473,13 +396,10 @@ def parse_linked_table(  # noqa: PLR0913 - explicit representation and linkage o
             message = f"expected_instance_ids contains regions outside TableLinkage.regions: {unexpected_regions!r}."
             raise ValueError(message)
 
-    observed = _validated_pairs(adata, linkage, context=context, path=path)
-    if expected_instance_ids:
-        _validate_expected_membership(observed, expected_instance_ids, context=context, path=path)
+    _validate_instances(adata, linkage, expected_instance_ids or {}, context=context, path=path)
 
     region: str | list[str] = linkage.regions[0] if len(linkage.regions) == 1 else list(linkage.regions)
     try:
-        normalize_owned_anndata(adata, expression_layers=expression_layers, duplicate_sums=duplicate_sums)
         return TableModel.parse(
             adata,
             region=region,

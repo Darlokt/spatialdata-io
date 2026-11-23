@@ -97,7 +97,7 @@ class TestReadTable:
         counts = "cell,A,Blank-1\n" + "".join(f"c{row},{row % 3},{row % 5 == 0:d}\n" for row in range(rows))
         metadata = "EntityID,center_x,center_y\n" + "".join(f"c{row},{row},1\n" for row in range(rows))
         sources = _sources(tmp_path, counts, metadata)
-        blocks = mocker.spy(merscope_tables, "_count_block")
+        blocks = mocker.spy(merscope_tables, "count_batch_to_csr")
 
         table, _ = read_table(sources)
 

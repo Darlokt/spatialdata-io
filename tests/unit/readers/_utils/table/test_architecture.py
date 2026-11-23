@@ -11,12 +11,12 @@ _FORBIDDEN_ARRAY_IMPORTS = {
     "pandas",
     "scanpy",
     "spatialdata",
-    "spatialdata_io",
 }
-_FORBIDDEN_NORMALIZE_IMPORTS = _FORBIDDEN_ARRAY_IMPORTS - {"anndata", "spatialdata_io"}
+_FORBIDDEN_NORMALIZE_IMPORTS = _FORBIDDEN_ARRAY_IMPORTS - {"anndata"}
 _FORBIDDEN_LINKAGE_IMPORTS = {"dask", "geopandas", "shapely", "xarray"}
 _FORBIDDEN_CALLS = {"compute", "load", "todense", "toarray", "to_memory"}
 _NORMALIZE_INTERNAL_IMPORTS = {
+    "spatialdata_io.readers._utils.errors",
     "spatialdata_io.readers._utils.table._arrays",
     "spatialdata_io.readers._utils.table._duplicates",
 }
@@ -30,6 +30,10 @@ class TestTableArchitecture:
         tree = ast.parse(path.read_text())
         imports = {module.split(".")[0] for node in ast.walk(tree) for module in self._imported_modules(node)}
         assert imports.isdisjoint(_FORBIDDEN_ARRAY_IMPORTS)
+        internal = {
+            m for node in ast.walk(tree) for m in self._imported_modules(node) if m.startswith("spatialdata_io")
+        }
+        assert internal == {"spatialdata_io.readers._utils.table._duplicates"}
 
     def test_normalization_has_only_the_anndata_model_dependency(self) -> None:
         path = Path("src/spatialdata_io/readers/_utils/table/_normalize.py")

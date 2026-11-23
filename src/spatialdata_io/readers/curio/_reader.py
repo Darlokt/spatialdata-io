@@ -9,7 +9,12 @@ from spatialdata import SpatialData
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
+from spatialdata_io.readers._utils.table import (
+    TableLinkage,
+    normalize_owned_anndata,
+    parse_linked_table,
+    prepare_anndata_dataframe,
+)
 from spatialdata_io.readers.curio._geometry import read_shapes
 from spatialdata_io.readers.curio._layout import CLUSTER_FEATURES, COUNTS, discover_layout
 from spatialdata_io.readers.curio._schemas import DEFINING_FEATURES_KEY, STRING_DTYPE
@@ -191,12 +196,14 @@ def curio(path: str | Path, *, path_policy: Literal["strict", "relaxed"] = "stri
     prepare_anndata_dataframe(table.uns[DEFINING_FEATURES_KEY], context=ReaderErrorContext("curio", CLUSTER_FEATURES))
 
     duplicate_sums: list[SparseDuplicateSummary] = []
+    normalize_owned_anndata(
+        table, context=ReaderErrorContext("curio", COUNTS), path=layout.counts, duplicate_sums=duplicate_sums
+    )
     table = parse_linked_table(
         table,
         TableLinkage(("cells",), "region", "instance_id"),
         context=ReaderErrorContext("curio", COUNTS),
         path=layout.counts,
-        duplicate_sums=duplicate_sums,
         expected_instance_ids={"cells": shapes.index},
     )
 

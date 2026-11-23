@@ -20,8 +20,6 @@ if TYPE_CHECKING:
 
     from pytest_mock import MockerFixture
 
-    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
-
 
 _CONTEXT = ReaderErrorContext(reader="test_reader", artifact="cell table", detected_version="1")
 
@@ -100,55 +98,12 @@ class TestTableLinkage:
 class TestParseLinkedTable:
     """Validate linkage, normalization, parser isolation, and ownership."""
 
-    def test_calls_normalization_and_parser_once_in_order(self, mocker: MockerFixture) -> None:
-        adata = _table(x=np.asarray([[1, 0], [0, 2]], dtype=np.int16))
-        events: list[str] = []
-        real_normalize = __import__(
-            "spatialdata_io.readers._utils.table._linkage",
-            fromlist=["normalize_owned_anndata"],
-        ).normalize_owned_anndata
-
-        def normalize(
-            table: ad.AnnData,
-            *,
-            expression_layers: tuple[str, ...] = (),
-            duplicate_sums: list[SparseDuplicateSummary] | None = None,
-        ) -> ad.AnnData:
-            events.append("normalize")
-            return real_normalize(table, expression_layers=expression_layers, duplicate_sums=duplicate_sums)
-
-        def parse(
-            table: ad.AnnData,
-            region: str | list[str] | None = None,
-            region_key: str | None = None,
-            instance_key: str | None = None,
-            *,
-            overwrite_metadata: bool = False,
-        ) -> ad.AnnData:
-            events.append("parse")
-            return _public_parser_stub(
-                table,
-                region=region,
-                region_key=region_key,
-                instance_key=instance_key,
-                overwrite_metadata=overwrite_metadata,
-            )
-
-        normalization = mocker.patch(
-            "spatialdata_io.readers._utils.table._linkage.normalize_owned_anndata",
-            side_effect=normalize,
-        )
-        parser = mocker.patch.object(TableModel, "parse", side_effect=parse)
-
-        result = parse_linked_table(
-            adata,
-            TableLinkage(("cells",), "region", "instance"),
-            context=_CONTEXT,
-        )
-
-        assert result is adata
-        assert events == ["normalize", "parse"]
-        normalization.assert_called_once_with(adata, expression_layers=(), duplicate_sums=None)
+    def test_links_without_touching_final_expression(self, mocker: MockerFixture) -> None:
+        adata = _table()
+        expression = adata.X
+        parser = mocker.patch.object(TableModel, "parse", side_effect=_public_parser_stub)
+        assert parse_linked_table(adata, TableLinkage(("cells",), "region", "instance"), context=_CONTEXT) is adata
+        assert adata.X is expression
         parser.assert_called_once_with(adata, region="cells", region_key="region", instance_key="instance")
 
     def test_passes_ordered_region_list(self, mocker: MockerFixture) -> None:
@@ -165,7 +120,7 @@ class TestParseLinkedTable:
 
     def test_rejects_view_before_linkage_validation(self, mocker: MockerFixture) -> None:
         view = _table()[:1]
-        validation = mocker.patch("spatialdata_io.readers._utils.table._linkage._validated_pairs")
+        validation = mocker.patch("spatialdata_io.readers._utils.table._linkage._validate_instances")
         parser = mocker.patch.object(TableModel, "parse")
 
         with pytest.raises(ValueError, match="not a view"):
@@ -181,7 +136,7 @@ class TestParseLinkedTable:
     def test_rejects_backed_table_before_linkage_validation(self, mocker: MockerFixture) -> None:
         adata = _table()
         mocker.patch.object(ad.AnnData, "isbacked", new_callable=PropertyMock, return_value=True)
-        validation = mocker.patch("spatialdata_io.readers._utils.table._linkage._validated_pairs")
+        validation = mocker.patch("spatialdata_io.readers._utils.table._linkage._validate_instances")
         parser = mocker.patch.object(TableModel, "parse")
 
         with pytest.raises(TypeError, match="not a backed table"):
@@ -241,7 +196,6 @@ class TestParseLinkedTable:
     ) -> None:
         adata = _table(regions=regions, instances=instances, x=np.asarray([[1, 0], [0, 2]], dtype=np.int16))
         expression = adata.X
-        normalization = mocker.patch("spatialdata_io.readers._utils.table._linkage.normalize_owned_anndata")
         parser = mocker.patch.object(TableModel, "parse")
 
         with pytest.raises(ReaderFormatError, match=match):
@@ -253,14 +207,12 @@ class TestParseLinkedTable:
 
         assert adata.X is expression
         assert TableModel.ATTRS_KEY not in adata.uns
-        normalization.assert_not_called()
         parser.assert_not_called()
 
-    def test_rejects_missing_columns_before_normalization(self, mocker: MockerFixture) -> None:
+    def test_rejects_missing_columns(self) -> None:
         adata = _table()
         obs = cast("pd.DataFrame", adata.obs)
         del obs["instance"]
-        normalization = mocker.patch("spatialdata_io.readers._utils.table._linkage.normalize_owned_anndata")
 
         with pytest.raises(ReaderFormatError, match="missing observation columns"):
             parse_linked_table(
@@ -268,8 +220,6 @@ class TestParseLinkedTable:
                 TableLinkage(("cells",), "region", "instance"),
                 context=_CONTEXT,
             )
-
-        normalization.assert_not_called()
 
     @pytest.mark.parametrize("dtype", [np.int16, np.uint16, np.int32, np.uint32, np.int64, np.uint64])
     def test_accepts_parser_compatible_integer_widths(
@@ -337,18 +287,6 @@ class TestParseLinkedTable:
         assert "test_reader" in raised.value.__notes__[0]
         assert isinstance(adata.X, sparse.csr_array)
 
-    def test_normalization_failure_carries_context_and_path(self, tmp_path: Path) -> None:
-        source = tmp_path / "table.h5ad"
-        adata = _table(x=sparse.csr_array(np.asarray([[np.nan, 0.0], [0.0, 1.0]])))
-
-        with pytest.raises(ValueError, match="finite") as raised:
-            parse_linked_table(adata, TableLinkage(("cells",), "region", "instance"), context=_CONTEXT, path=source)
-
-        assert raised.value.__notes__ == [
-            "while normalizing adata.X",
-            f"While handling {_CONTEXT.describe(path=source)}.",
-        ]
-
     def test_linkage_failure_records_path(self, tmp_path: Path) -> None:
         source = tmp_path / "table.h5ad"
 
@@ -356,10 +294,6 @@ class TestParseLinkedTable:
             parse_linked_table(_table(), TableLinkage(("nuclei",), "region", "instance"), context=_CONTEXT, path=source)
 
         assert raised.value.path == source
-
-
-class TestExpectedInstanceIds:
-    """Validate exact target comparison without semantic coercion."""
 
     @pytest.mark.parametrize("dtype", ["int64", "uint64", "object", "string", "string[pyarrow]"])
     def test_preserves_borrowed_readonly_targets(self, mocker: MockerFixture, dtype: str) -> None:
@@ -426,13 +360,12 @@ class TestExpectedInstanceIds:
             expected_instance_ids=targets,
         )
 
-    def test_detects_uint64_adjacent_mismatch(self, mocker: MockerFixture) -> None:
+    def test_detects_uint64_adjacent_mismatch(self) -> None:
         maximum = np.iinfo(np.uint64).max
         adata = _table(
             regions=["a", "b"],
             instances=np.asarray([1, maximum], dtype=np.uint64),
         )
-        normalization = mocker.patch("spatialdata_io.readers._utils.table._linkage.normalize_owned_anndata")
 
         with pytest.raises(ReaderFormatError, match="1 target pairs missing"):
             parse_linked_table(
@@ -444,8 +377,6 @@ class TestExpectedInstanceIds:
                     "b": pd.Index(np.asarray([maximum - 1], dtype=np.uint64)),
                 },
             )
-
-        normalization.assert_not_called()
 
     @pytest.mark.parametrize(
         ("target", "match"),

@@ -74,8 +74,9 @@ def cell_ids(names: pd.Index[str], path: ArtifactFile, *, version: str | None) -
 
 def read_cell_table(path: ArtifactFile, *, make_var_names_unique: bool, version: str | None) -> ad.AnnData:
     """Preserve the chosen raw or filtered cell population and source order."""
-    table = read_counts(path, version=version)
-    table.obs["instance_id"] = cell_ids(table.obs_names, path, version=version)
+    counts, obs, var = read_counts(path, version=version)
+    obs["instance_id"] = cell_ids(obs.index, path, version=version)
+    table = ad.AnnData(counts, obs=obs, var=var)
     if make_var_names_unique:
         table.var_names_make_unique()
 
@@ -128,9 +129,9 @@ def read_nucleus_table(
     """Sum raw 2 µm bins, including out-of-tissue bins, in selected cell order."""
     context = ReaderErrorContext("visium_hd", "nucleus aggregation", version)
     mapping_context = ReaderErrorContext("visium_hd", "barcode mappings", version)
-    raw = read_counts(raw_file, version=version)
+    counts, obs, var = read_counts(raw_file, version=version)
     if any(
-        not np.array_equal(raw.var[column].to_numpy(), population.var[column].to_numpy())
+        not np.array_equal(var[column].to_numpy(), population.var[column].to_numpy())
         for column in ("gene_ids", "genome", "feature_types")
     ):
         raise ReaderFormatError(
@@ -140,24 +141,29 @@ def read_nucleus_table(
             expected="the same features in raw bins and cell counts",
         )
 
-    # read_counts guarantees finite nonnegative integral decoded CSR values.
-    imported = cast("csr_array", raw.X)
     source_rows: list[NDArray[np.int64]] = []
     target_rows: list[NDArray[np.int64]] = []
-    seen = np.zeros(raw.n_obs, dtype=np.bool_)
-    # Use pandas' Arrow-backed string index engine on both sides of alignment;
-    # mixed string backends otherwise recast the entire count index per batch.
-    barcode_dtype = pd.StringDtype(storage="pyarrow", na_value=np.nan)
-    raw_names = raw.obs_names.astype(barcode_dtype, copy=False)
-    population_names = population.obs_names.astype(barcode_dtype, copy=False)
+    seen = np.zeros(len(obs), dtype=np.bool_)
+    raw_names = obs.index
+    population_names = population.obs_names
+    offset = 0
 
     with pq.ParquetFile(mapping_file) as source:
         validate_schema(source.schema_arrow, MAPPINGS_SCHEMA, mapping_file, context=mapping_context)
         for batch in source.iter_batches(batch_size=_BATCH_SIZE, columns=MAPPINGS_SCHEMA.names):
             validate_mappings(batch, mapping_file, context=mapping_context)
-            barcodes: pd.Index[str] = pd.Index(batch.column("square_002um"), dtype=barcode_dtype)
-            indices = raw_names.get_indexer(barcodes)
-            if np.any(indices < 0) or np.unique(indices).size != indices.size or np.any(seen[indices]):
+            barcodes = pd.Index(batch.column("square_002um"), dtype=raw_names.dtype)
+            end = offset + len(barcodes)
+            # Space Ranger commonly writes both populations in the same order.
+            # Verify every literal barcode before using its ordinal row.
+            if raw_names[offset:end].equals(barcodes):
+                indices = np.arange(offset, end, dtype=np.int64)
+                invalid = seen[offset:end].any()
+            else:
+                indices = raw_names.get_indexer(barcodes)
+                invalid = np.any(indices < 0) or np.unique(indices).size != indices.size or np.any(seen[indices])
+            offset = end
+            if invalid:
                 raise ReaderFormatError(
                     context=context,
                     path=mapping_file,
@@ -167,7 +173,7 @@ def read_nucleus_table(
             seen[indices] = True
 
             members = batch.column("in_nucleus").to_numpy(zero_copy_only=False)
-            assigned: pd.Index[str] = pd.Index(batch.column("cell_id"), dtype=barcode_dtype)
+            assigned: pd.Index[str] = pd.Index(batch.column("cell_id"), dtype=population_names.dtype)
             nonnull = assigned.dropna().unique()
             if not pd.Index(cell_ids(nonnull, mapping_file, version=version)).isin(known_cell_ids).all():
                 raise ReaderFormatError(
@@ -193,7 +199,7 @@ def read_nucleus_table(
 
     rows = np.concatenate(target_rows) if target_rows else np.empty(0, dtype=np.int64)
     columns = np.concatenate(source_rows) if source_rows else np.empty(0, dtype=np.int64)
-    aggregated = _aggregate_counts(imported, rows, columns, population.n_obs, raw_file, version=version)
+    aggregated = _aggregate_counts(counts, rows, columns, population.n_obs, raw_file, version=version)
     completed = finalize_count_arrays((aggregated,), context=context, path=raw_file)[0]
     # Both annotations are eager frames from the shared count boundary, never Dataset2D.
     return ad.AnnData(

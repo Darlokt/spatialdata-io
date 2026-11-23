@@ -14,7 +14,7 @@ readers and are not done by Arrow:
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -29,6 +29,31 @@ if TYPE_CHECKING:
     from typing import IO
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
+
+
+_HEADER_READ_BYTES = 64 * 1024
+
+
+def _header_line(source: IO[bytes] | io.BufferedIOBase, path: Path, context: ReaderErrorContext) -> bytes:
+    """Read wide LF/CRLF headers incrementally and stop promptly on CR-delimited files."""
+    pieces: list[bytes] = []
+    while part := source.readline(_HEADER_READ_BYTES):
+        carriage_return = part.find(b"\r")
+        if carriage_return >= 0:
+            if carriage_return == len(part) - 1:
+                # CR and LF may straddle the read boundary.
+                part += source.read(1)
+            if carriage_return != len(part) - 2 or not part.endswith(b"\r\n"):
+                raise ReaderFormatError(
+                    context=context,
+                    path=path,
+                    found="a bare carriage return in the CSV header",
+                    expected="LF or CRLF line endings",
+                )
+        pieces.append(part)
+        if part.endswith(b"\n"):
+            break
+    return b"".join(pieces)
 
 
 def csv_header(
@@ -71,11 +96,8 @@ def csv_header(
         If ``path`` cannot be read. The error gains a note naming ``context``.
     """
     try:
-        if source is None:
-            with path.open("rb") as handle:
-                line = handle.readline()
-        else:
-            line = source.readline()
+        with path.open("rb") if source is None else nullcontext(source) as stream:
+            line = _header_line(stream, path, context)
     except OSError as error:
         add_reader_context(error, context=context, path=path)
         raise

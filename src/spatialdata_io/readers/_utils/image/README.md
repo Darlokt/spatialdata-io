@@ -183,7 +183,9 @@ TIFF and must remain within that file's directory. Absolute references, parent
 traversal, and symlinks resolving outside that directory are rejected before
 linked pixels are opened. A `TiffData` UUID equal to the document's own UUID
 refers to the inspected file, whatever its recorded `FileName`, so renamed
-single-file OME-TIFFs remain readable.
+single-file OME-TIFFs remain readable. Inspection rejects missing image planes.
+Lazy tasks recheck their requested planes when reopening the file so the loss
+of a linked image raises an error during computation.
 
 Baseline TIFF resolution tags are not automatically interpreted as microscopy
 calibration. A supported non-OME format may use them only when its documented

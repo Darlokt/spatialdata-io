@@ -8,7 +8,7 @@ import h5py
 import pytest
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium._layout import H5Counts, MtxCounts, VisiumLayout, _position_format, discover_layout
 from spatialdata_io.readers.visium._metadata import CountMetadata
 
@@ -92,8 +92,8 @@ class TestDiscoverLayout:
         counts = _discover(tmp_path).counts
 
         assert isinstance(counts, MtxCounts)
-        assert counts.prefix == "sample_"
-        assert counts.compressed is compressed
+        assert counts.files.matrix.name == "sample_matrix.mtx" + (".gz" if compressed else "")
+        assert counts.files.compressed is compressed
         assert counts.filename_prefix is None
 
     @pytest.mark.parametrize("prefix", ["", "sample_"])
@@ -131,8 +131,8 @@ class TestDiscoverLayout:
         counts = _discover(tmp_path).counts
 
         assert isinstance(counts, MtxCounts)
-        assert counts.prefix == (prefix or None)
-        assert counts.compressed is compressed
+        assert counts.files.matrix.name == f"{prefix}matrix.mtx" + (".gz" if compressed else "")
+        assert counts.files.compressed is compressed
 
     @pytest.mark.parametrize("kind", ["h5", "mex"])
     def test_legacy_prefixed_count_source_infers_dataset_prefix(self, tmp_path: Path, kind: str) -> None:
@@ -267,9 +267,9 @@ class TestDiscoverLayout:
 
         layout = _discover(tmp_path, counts_source="selected")
 
-        assert layout.counts == MtxCounts(
-            path=ArtifactDirectory(tmp_path / "selected"), prefix=None, compressed=compressed, filename_prefix=None
-        )
+        assert isinstance(layout.counts, MtxCounts)
+        assert layout.counts.files.matrix == tmp_path / "selected" / ("matrix.mtx.gz" if compressed else "matrix.mtx")
+        assert layout.counts.filename_prefix is None
         assert layout.format_version is None
 
     @pytest.mark.parametrize("name", ["counts.H5", "counts.hdf5"])

@@ -160,7 +160,7 @@ def read_boundaries(path: ArtifactFile, *, policy: InvalidGeometryPolicy) -> Cel
     invalid_ids = identifiers[invalid].unique()
     invalid_cells = source_ids.isin(invalid_ids)
     if policy == "raise":
-        raise_invalid_geometries(invalid_cells, source_ids.tolist(), context=_CONTEXT, path=path)
+        raise_invalid_geometries(invalid_cells, source_ids, context=_CONTEXT, path=path)
     retained_ids = source_ids[~invalid_cells] if policy == "drop" else source_ids
     if retained_ids.empty:
         raise ReaderFormatError(

@@ -15,9 +15,9 @@ class TestTablePackage:
             "TableLinkage",
             "as_csr_array",
             "count_accumulation_dtype",
+            "count_batch_to_csr",
             "finalize_count_arrays",
             "normalize_owned_anndata",
-            "normalize_sparse_duplicates",
             "parse_linked_table",
             "prepare_anndata_dataframe",
         ]

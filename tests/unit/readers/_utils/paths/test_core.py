@@ -55,6 +55,17 @@ def _annexed(tmp_path: Path, name: str = "artifact.csv") -> tuple[Path, Path]:
     return root, target
 
 
+@pytest.fixture
+def external_directory_link(tmp_path: Path) -> Path:
+    root = tmp_path / "root"
+    root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    link = root / "linked"
+    link.symlink_to(external, target_is_directory=True)
+    return link
+
+
 def _static_return_contract(path: Path, root: DatasetRoot) -> None:
     """Exercise the complete nominal return contract for strict type checkers."""
     assert_type(normalize_dataset_root(path, context=_CONTEXT, path_policy="strict"), DatasetRoot)
@@ -493,7 +504,8 @@ class TestRequireMetadataDirectory:
         root_path.mkdir()
         external = tmp_path / "external"
         external.mkdir()
-        (external / "member.csv").write_text("member")
+        (external / "nested").mkdir()
+        (external / "nested" / "member.csv").write_text("member")
         (root_path / "outputs").symlink_to(external, target_is_directory=True)
 
         with pytest.raises(ReaderFormatError, match="pass path_policy='relaxed'"):
@@ -501,10 +513,12 @@ class TestRequireMetadataDirectory:
 
         root = _root(root_path, "relaxed")
         directory = require_metadata_directory(root, "outputs", context=_CONTEXT)
-        # Paths joined to a relaxed directory stay lexically inside the root.
-        member = require_metadata_file(root, directory / "member.csv", context=_CONTEXT)
+        nested = require_metadata_directory(root, directory / "nested", context=_CONTEXT)
+        member = require_metadata_file(root, nested / "member.csv", context=_CONTEXT)
 
         assert directory == root_path.resolve() / "outputs"
+        assert nested == directory / "nested"
+        assert member == nested / "member.csv"
         assert member.read_text() == "member"
 
     def test_rejects_external_directory_and_file(self, tmp_path: Path) -> None:
@@ -560,6 +574,14 @@ class TestOptionalMetadataFile:
         with pytest.raises(FileNotFoundError, match="parent directory"):
             optional_metadata_file(_root(tmp_path), "parent/artifact", context=_CONTEXT)
 
+    def test_checks_parent_containment_when_leaf_is_absent(self, external_directory_link: Path) -> None:
+        root = external_directory_link.parent
+        leaf = external_directory_link / "absent"
+        with pytest.raises(ReaderFormatError, match="resolving outside the dataset root") as error:
+            optional_metadata_file(_root(root), leaf, context=_CONTEXT)
+        assert error.value.path == external_directory_link
+        assert optional_metadata_file(_root(root, "relaxed"), leaf, context=_CONTEXT) is None
+
     def test_rejects_dangling_leaf_and_wrong_kind(self, tmp_path: Path) -> None:
         (tmp_path / "dangling").symlink_to(tmp_path / "missing")
         (tmp_path / "directory").mkdir()
@@ -592,6 +614,14 @@ class TestOptionalMetadataDirectory:
         (tmp_path / "alias").symlink_to(target, target_is_directory=True)
 
         assert optional_metadata_directory(_root(tmp_path), "alias", context=_CONTEXT) == target.resolve()
+
+    def test_checks_parent_containment_when_leaf_is_absent(self, external_directory_link: Path) -> None:
+        root = external_directory_link.parent
+        leaf = external_directory_link / "absent"
+        with pytest.raises(ReaderFormatError, match="resolving outside the dataset root") as error:
+            optional_metadata_directory(_root(root), leaf, context=_CONTEXT)
+        assert error.value.path == external_directory_link
+        assert optional_metadata_directory(_root(root, "relaxed"), leaf, context=_CONTEXT) is None
 
     def test_rejects_missing_parent_file_and_dangling_leaf(self, tmp_path: Path) -> None:
         (tmp_path / "file").touch()

@@ -1,8 +1,8 @@
 """Read Xenium counts and cell tables and assemble the one linked expression table.
 
 Counts come from ``cell_feature_matrix.h5`` or its MatrixMarket twin (directory or
-``cell_feature_matrix.tar.gz``); 10x writes identical values to both. Scanpy
-normally returns float32 values, suitable for realistic count magnitudes. Protein
+``cell_feature_matrix.tar.gz``); 10x writes identical values to both. Integer counts retain source precision through
+floating storage selection. Protein
 Expression features (XOA 4.0+) store the mean stain intensity multiplied by the
 integer ``protein_scaling_factor`` of the HDF5 root attributes; the MatrixMarket
 twin lacks that factor. Feature annotations become ``var`` columns; names
@@ -21,7 +21,6 @@ their method names.
 
 from __future__ import annotations
 
-import gzip
 import tarfile
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -37,19 +36,24 @@ import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
-from spatialdata_io.readers._utils.counts import read_10x_h5, read_10x_mtx
+from spatialdata_io.readers._utils.counts import (
+    MtxFiles,
+    read_10x_h5,
+    read_10x_h5_axes,
+    read_10x_mtx,
+    read_10x_mtx_fields,
+)
 from spatialdata_io.readers._utils.csv import csv_errors, csv_header, open_csv_stream
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.metadata import decode_hdf5_text
 from spatialdata_io.readers._utils.names import sanitize_column_names
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory
+from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, require_directory, require_file
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
-    normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
 )
-from spatialdata_io.readers.xenium._layout import H5Counts, MtxDirectory
+from spatialdata_io.readers.xenium._layout import H5Counts
 from spatialdata_io.readers.xenium._schemas import (
     CELL_COLUMNS,
     CELL_FLOATS,
@@ -58,9 +62,7 @@ from spatialdata_io.readers.xenium._schemas import (
     CELL_REQUIRED,
     CELL_REQUIRED_COUNTS,
     READER_OBS,
-    STRING,
     STRING_DTYPE,
-    arrow_series,
     cast_column,
     header_types,
     id_index,
@@ -120,7 +122,7 @@ class FeatureIndex:
 
 
 def _source_path(source: CountSource) -> Path:
-    return source.directory if isinstance(source, MtxDirectory) else source.file
+    return source.matrix if isinstance(source, MtxFiles) else source.file
 
 
 def _extract_archive(
@@ -155,12 +157,21 @@ def _read_matrix(source: CountSource, context: ReaderErrorContext) -> ad.AnnData
     """Read every feature of a count source into an owned canonical CSR table."""
     if isinstance(source, H5Counts):
         return read_10x_h5(source.file, context=context)
-    if isinstance(source, MtxDirectory):
-        return read_10x_mtx(source.directory, context=context, make_unique=False)
+    if isinstance(source, MtxFiles):
+        return read_10x_mtx(source, context=context, make_unique=False)
     # The returned table holds only in-memory copies; the directory is removed.
     with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
         directory = _extract_archive(source.file, Path(temporary), context=context)
-        return read_10x_mtx(directory, context=context, make_unique=False)
+        return read_10x_mtx(
+            MtxFiles(
+                require_file(directory / "matrix.mtx.gz", context=context),
+                require_file(directory / "barcodes.tsv.gz", context=context),
+                require_file(directory / "features.tsv.gz", context=context),
+                compressed=True,
+            ),
+            context=context,
+            make_unique=False,
+        )
 
 
 def _protein_scaling(source: CountSource, context: ReaderErrorContext) -> int:
@@ -280,9 +291,16 @@ def read_counts(
     if is_protein.any():
         factor = _protein_scaling(source, context)
         entries = is_protein[matrix.indices]
-        # Preserve the existing float32 divisor contract. Ordinary float32
-        # tables divide once; exceptional exact counts retain float64 storage.
-        matrix.data[entries] /= np.float32(factor)
+        if int(matrix.dtype.type(factor)) != factor:
+            if int(float(factor)) != factor:
+                raise ReaderFormatError(
+                    context=context,
+                    path=path,
+                    found=f"protein_scaling_factor {factor}",
+                    expected="an integer divisor exactly representable in float64",
+                )
+            matrix.data = matrix.data.astype(np.float64)
+        matrix.data[entries] /= float(factor)
         protein = {"scaling_factor": factor, "metric": _PROTEIN_METRIC}
         if panel is not None:
             _protein_annotations(var, is_protein, panel, path, context)
@@ -291,38 +309,26 @@ def read_counts(
     return Counts(table, source_table.var_names, protein)
 
 
-def _tsv_column(payload: bytes, column: int, path: Path, context: ReaderErrorContext) -> pd.Index:
-    """Return one column of a headerless gzip TSV of the MatrixMarket metadata as text."""
-    name = f"f{column}"
-    with csv_errors(context=context, path=path):
-        table = pacsv.read_csv(
-            pa.py_buffer(gzip.decompress(payload)),
-            read_options=pacsv.ReadOptions(autogenerate_column_names=True),
-            parse_options=pacsv.ParseOptions(delimiter="\t"),
-            convert_options=pacsv.ConvertOptions(
-                column_types={name: STRING}, include_columns=[name], null_values=[], strings_can_be_null=False
-            ),
-        )
-    return pd.Index(arrow_series(table.column(0)), dtype="str")
+def _mtx_feature_index(features: ArtifactFile, barcodes: ArtifactFile, context: ReaderErrorContext) -> FeatureIndex:
+    names = read_10x_mtx_fields(features, {"symbol": 1}, compressed=True, context=context)
+    ids = read_10x_mtx_fields(barcodes, {"barcode": 0}, compressed=True, context=context)
+    return FeatureIndex(pd.Index(names["symbol"].array, dtype="str"), pd.Index(ids["barcode"].array, dtype="str"))
 
 
 def read_feature_index(source: CountSource, *, context: ReaderErrorContext) -> FeatureIndex:
     """Read feature names and barcodes without the matrix values."""
     if isinstance(source, H5Counts):
-        with h5py.File(source.file, "r") as handle:
-            names = np.asarray(handle["matrix/features/name"][...]).astype(np.str_)
-            barcodes = np.asarray(handle["matrix/barcodes"][...]).astype(np.str_)
-        return FeatureIndex(pd.Index(names, dtype="str"), pd.Index(barcodes, dtype="str"))
-    if isinstance(source, MtxDirectory):
-        features = (source.directory / "features.tsv.gz").read_bytes()
-        barcodes_file = (source.directory / "barcodes.tsv.gz").read_bytes()
-    else:
-        with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
-            directory = _extract_archive(source.file, Path(temporary), context=context, metadata_only=True)
-            features = (directory / "features.tsv.gz").read_bytes()
-            barcodes_file = (directory / "barcodes.tsv.gz").read_bytes()
-    path = _source_path(source)
-    return FeatureIndex(_tsv_column(features, 1, path, context), _tsv_column(barcodes_file, 0, path, context))
+        names, barcodes = read_10x_h5_axes(source.file, context=context)
+        return FeatureIndex(names, barcodes)
+    if isinstance(source, MtxFiles):
+        return _mtx_feature_index(source.features, source.barcodes, context)
+    with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
+        directory = _extract_archive(source.file, Path(temporary), context=context, metadata_only=True)
+        return _mtx_feature_index(
+            require_file(directory / "features.tsv.gz", context=context),
+            require_file(directory / "barcodes.tsv.gz", context=context),
+            context,
+        )
 
 
 def read_header(source: TabularSource, *, context: ReaderErrorContext) -> tuple[str, ...]:
@@ -507,7 +513,7 @@ def link_table(
     prepare_anndata_dataframe(obs, context=context)
     prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=context)
     if target is None:
-        return normalize_owned_anndata(table)
+        return table
     return parse_linked_table(
         table,
         TableLinkage((target,), "region", "label_id" if target == "cell_labels" else CELL_ID),

@@ -198,7 +198,7 @@ def _apply_policy(
     if policy == "raise":
         raise_invalid_geometries(
             invalid,
-            geometry.index.tolist(),
+            geometry.index,
             context=ReaderErrorContext("visium_hd", f"{kind} boundaries", version),
             path=path,
         )
@@ -358,7 +358,8 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
     include_nucleus_table
         Add ``nucleus_table``, summing raw 2 µm counts over each nucleus.
         Requires nucleus boundaries, so ``include_nucleus_boundaries`` must not
-        be ``False``. Reading the raw 2 µm matrix can take several GiB.
+        be ``False``. Raw sparse counts and barcodes are eager. Reordered
+        barcode mappings may require an additional lookup index.
     cell_counts_kind
         ``"filtered"`` or ``"raw"`` cell matrix; it also selects the nucleus
         table's population.

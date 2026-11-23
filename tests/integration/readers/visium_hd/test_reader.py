@@ -27,7 +27,7 @@ from xarray import DataArray
 from spatialdata_io import visium_hd
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.visium_hd import _metadata, _reader
-from tests.integration.readers.visium_hd._fixtures import CELL_IDS, write_bundle
+from tests.integration.readers.visium_hd._fixtures import CELL_IDS, _write_png, write_bundle
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -753,6 +753,29 @@ class TestVisiumHDPathPolicy:
 
     Earlier releases accepted these out-of-root symlinks without a policy.
     """
+
+    def test_relaxed_policy_reads_bins_beneath_a_linked_directory(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path / "dataset", sizes=(2, 8), images=True)
+        expected = visium_hd(bundle.root)
+        bins = bundle.root / "binned_outputs"
+        target = bins.rename(tmp_path / "outside_bins")
+        bins.symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            visium_hd(bundle.root)
+        assert_spatial_data_objects_are_identical(visium_hd(bundle.root, path_policy="relaxed"), expected)
+
+    def test_strict_policy_uses_the_discovered_png_suffix(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2,), images=True)
+        microscope = bundle.root / "microscope_image"
+        microscope.mkdir()
+        image = microscope / "scan.PNG"
+        _write_png(image, np.arange(96 * 96 * 3, dtype=np.uint8).reshape(96, 96, 3))
+        expected = visium_hd(bundle.root)
+        target = image.rename(bundle.root / "image-content")
+        image.symlink_to(target)
+
+        assert_spatial_data_objects_are_identical(visium_hd(bundle.root), expected)
 
     def test_out_of_root_symlinks_require_the_relaxed_policy(
         self, tmp_path: Path, link_outside_root: Callable[[Path], Path]

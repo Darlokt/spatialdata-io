@@ -111,6 +111,9 @@ def _level_metadata(
     level_index: int,
 ) -> TiffLevelMetadata:
     """Describe one pyramid level with consistent shape, axes, and native chunks."""
+    if tiff.is_ome and any(page is None for page in level.pages):
+        message = f"OME series {series_index} level {level_index} has a missing image plane."
+        raise RasterFormatError(message)
     shape = tuple(level.shape)
     axes = tuple(level.axes)
     native_chunks = _native_chunks(tiff, series=series_index, level=level_index)
@@ -151,31 +154,25 @@ def _parse_ome_xml(path: Path, ome_xml: str | None) -> OME | None:
         raise RasterFormatError(message) from error
 
 
-def _validate_ome_images(root: Path, ome: OME | None, series_count: int) -> None:
-    """Require one OME image per series, each mapping its own existing TIFF directories.
+def _validate_ome_mappings(root: Path, ome: OME) -> None:
+    """Validate external file references before tifffile discovers the image series.
 
     Every ``TiffData`` block must reference a TIFF file inside the directory
     of the source's real path, and no two images may claim the same file and
     first IFD.
     """
-    if ome is None:
-        return
-    if len(ome.images) != series_count:
-        message = (
-            f"OME metadata declares {len(ome.images)} images, but tifffile discovered {series_count} image series."
-        )
-        raise RasterFormatError(message)
-
+    checked_sources = {root}
     mapped_by_previous_images: set[tuple[Path, int]] = set()
     for image_index, image in enumerate(ome.images):
         image_mappings: set[tuple[Path, int]] = set()
         for block in image.pixels.tiff_data_blocks:
             linked = _tiff_data_path(root, ome, block)
-            if linked != root:
+            if linked not in checked_sources:
                 if not linked.is_file():
                     message = f"OME metadata references a non-file TIFF source: {linked}"
                     raise RasterFormatError(message)
                 _validate_tiff_signature(linked)
+                checked_sources.add(linked)
             image_mappings.add((linked, block.ifd or 0))
         duplicates = image_mappings.intersection(mapped_by_previous_images)
         if duplicates:
@@ -256,7 +253,14 @@ def _inspect(path: ArtifactFile) -> TiffMetadata:
     _validate_tiff_signature(path)
     with tifffile.TiffFile(path) as tiff:
         ome = _parse_ome_xml(path, tiff.ome_metadata)
-        _validate_ome_images(path, ome, len(tiff.series))
+        if ome is not None:
+            _validate_ome_mappings(path, ome)
+            if len(ome.images) != len(tiff.series):
+                message = (
+                    f"OME metadata declares {len(ome.images)} images, "
+                    f"but tifffile discovered {len(tiff.series)} image series."
+                )
+                raise RasterFormatError(message)
         series_metadata: list[TiffSeriesMetadata] = []
         for series_index, series in enumerate(tiff.series):
             levels = tuple(

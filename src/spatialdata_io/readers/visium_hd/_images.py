@@ -84,7 +84,7 @@ if TYPE_CHECKING:
 
     from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers._utils.paths import ArtifactFile
-    from spatialdata_io.readers.visium_hd._layout import ImageLayout
+    from spatialdata_io.readers.visium_hd._layout import FullresImageSource, ImageLayout
     from spatialdata_io.readers.visium_hd._metadata import ScaleFactors, SourceMetadata
     from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 
@@ -136,9 +136,10 @@ def _is_tiff(path: ArtifactFile, *, context: ReaderErrorContext) -> bool:
         raise
 
 
-def _read_fullres(path: ArtifactFile, options: ImageOptions, *, version: str | None) -> _Image:
+def _read_fullres(source: FullresImageSource, options: ImageOptions, *, version: str | None) -> _Image:
     """Read bounded metadata of the full-resolution image and build it without pixel tasks."""
     context = ReaderErrorContext("visium_hd", "full-resolution image", version)
+    path = source.path
     if _is_tiff(path, context=context):
         metadata = inspect_tiff(path, context=context)
         series = select_tiff_series(metadata, options.tiff_series, context=context, option="tiff_series")
@@ -151,7 +152,7 @@ def _read_fullres(path: ArtifactFile, options: ImageOptions, *, version: str | N
             message = "data_axes and tiff_series apply only to TIFF-family full-resolution images."
             raise ValueError(message)
 
-        suffix = path.suffix.lower()
+        suffix = source.suffix
         if suffix == ".png":
             raster = read_png(path, context=context)
         elif suffix in {".jpg", ".jpeg"}:
@@ -234,7 +235,7 @@ def read_images(  # noqa: PLR0913, RUF100 - Explicit layout, registration, calib
         if hires_shape is not None and round(max(extent) * scales.hires) != max(hires_shape):
             raise ReaderFormatError(
                 context=ReaderErrorContext("visium_hd", "full-resolution image", version),
-                path=layout.fullres,
+                path=layout.fullres.path,
                 found=f"shape {extent}, hires shape {hires_shape}, scale {scales.hires}",
                 expected="matching longest sides after the declared hires scale and rounding",
             )

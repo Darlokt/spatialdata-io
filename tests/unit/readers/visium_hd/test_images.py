@@ -34,7 +34,7 @@ from spatialdata_io.readers.visium_hd._images import (
     read_images,
     warp_cytassist,
 )
-from spatialdata_io.readers.visium_hd._layout import ImageLayout, discover_layout
+from spatialdata_io.readers.visium_hd._layout import FullresImageSource, ImageLayout, discover_layout
 from spatialdata_io.readers.visium_hd._metadata import (
     ScaleFactors,
     SourceMetadata,
@@ -82,9 +82,13 @@ def _channels(image: DataArray | DataTree) -> list[object]:
     return array.coords["c"].to_numpy().tolist()
 
 
+def _source(path: Path) -> FullresImageSource:
+    return FullresImageSource(ArtifactFile(path), path.suffix.lower())
+
+
 def _fullres(path: Path, options: ImageOptions | None = None) -> DataArray:
     """Read one full-resolution image through ``read_images`` with an identity registration."""
-    layout = ImageLayout(None, None, None, ArtifactFile(path))
+    layout = ImageLayout(None, None, None, _source(path))
     scales = ScaleFactors(hires=1.0, lowres=1.0, microns_per_pixel=1.0)
     image = read_images(layout, _identity_frame(), scales, None, options or _options(), version=VERSION)["full_image"]
     assert isinstance(image, DataArray)
@@ -133,7 +137,7 @@ class TestReadFullres:
     def test_tiff_content_and_series(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "unexpected.bin")
         tifffile.imwrite(path, np.ones((8, 9), np.uint16), bigtiff=True)
-        image = _read_fullres(path, _options(), version=VERSION)
+        image = _read_fullres(_source(path), _options(), version=VERSION)
         np.testing.assert_array_equal(image.pixels.compute(), np.ones((1, 8, 9), np.uint16))
         assert image.channels is None
 
@@ -143,41 +147,41 @@ class TestReadFullres:
             writer.write(np.ones((8, 9), np.uint16))
             writer.write(np.ones((5, 6), np.uint16))
         with pytest.raises(ReaderFormatError, match="found 2 TIFF series") as error:
-            _read_fullres(path, _options(), version=VERSION)
+            _read_fullres(_source(path), _options(), version=VERSION)
         assert error.value.context == ReaderErrorContext("visium_hd", "full-resolution image", VERSION)
         assert error.value.path == path
         assert error.value.expected == "one TIFF series or an explicit tiff_series selection"
-        assert _read_fullres(path, _options(tiff_series=1), version=VERSION).pixels.shape == (1, 5, 6)
+        assert _read_fullres(_source(path), _options(tiff_series=1), version=VERSION).pixels.shape == (1, 5, 6)
 
     def test_out_of_range_series_has_context(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "image.tif")
         tifffile.imwrite(path, np.ones((8, 9), np.uint16))
         with pytest.raises(IndexError) as error:
-            _read_fullres(path, _options(tiff_series=1), version=VERSION)
+            _read_fullres(_source(path), _options(tiff_series=1), version=VERSION)
         assert any("full-resolution image" in note and VERSION in note for note in error.value.__notes__)
 
     def test_png_and_jpeg(self, tmp_path: Path) -> None:
         png = ArtifactFile(tmp_path / "image.png")
         _write_png(png, np.zeros((8, 9, 3), np.uint8))
-        assert _read_fullres(png, _options(), version=VERSION).pixels.shape == (3, 8, 9)
+        assert _read_fullres(_source(png), _options(), version=VERSION).pixels.shape == (3, 8, 9)
         jpeg = ArtifactFile(tmp_path / "image.jpg")
         jpeg.write_bytes(imagecodecs.jpeg_encode(np.zeros((8, 9, 3), np.uint8)))
-        assert _read_fullres(jpeg, _options(), version=VERSION).pixels.shape == (3, 8, 9)
+        assert _read_fullres(_source(jpeg), _options(), version=VERSION).pixels.shape == (3, 8, 9)
         for options in (_options(tiff_series=0), _options(data_axes="YXC")):
             with pytest.raises(ValueError, match="only to TIFF"):
-                _read_fullres(png, options, version=VERSION)
+                _read_fullres(_source(png), options, version=VERSION)
 
     def test_unknown_content(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "image.xyz")
         path.write_bytes(b"unknown")
         with pytest.raises(ReaderFormatError, match=r"no TIFF signature and suffix '\.xyz'") as error:
-            _read_fullres(path, _options(), version=VERSION)
+            _read_fullres(_source(path), _options(), version=VERSION)
         assert error.value.context.detected_version == VERSION
 
     def test_unreadable_content_has_context(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "missing.tif")
         with pytest.raises(FileNotFoundError) as error:
-            _read_fullres(path, _options(), version=VERSION)
+            _read_fullres(_source(path), _options(), version=VERSION)
         assert any("full-resolution image" in note for note in error.value.__notes__)
 
     def test_pyramid_guard(self, tmp_path: Path) -> None:
@@ -185,14 +189,14 @@ class TestReadFullres:
         tifffile.imwrite(path, np.ones((8, 9), np.uint16))
         options = replace(_options(), raster=make_raster_options((2, 2, 2, 2), (1, 16, 16)))
         with pytest.raises(ValueError, match=r"exceed the spatial extent of the full-resolution image \(8 x 9"):
-            _read_fullres(path, options, version=VERSION)
+            _read_fullres(_source(path), options, version=VERSION)
 
     # The shared CYX normalization tests every axis case; these check the reader's context and path.
     def test_unmappable_declared_axes_are_malformed_content(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "image.tif")
         tifffile.imwrite(path, np.ones((2, 5, 7), np.uint16), photometric="minisblack", metadata={"axes": "ZYX"})
         with pytest.raises(ReaderFormatError, match="Axis 'z' has length 2") as error:
-            _read_fullres(path, _options(), version=VERSION)
+            _read_fullres(_source(path), _options(), version=VERSION)
         assert error.value.context == ReaderErrorContext("visium_hd", "full-resolution image", VERSION)
         assert error.value.path == path
         assert type(error.value.__cause__) is ValueError
@@ -201,7 +205,7 @@ class TestReadFullres:
         path = ArtifactFile(tmp_path / "image.tif")
         tifffile.imwrite(path, np.ones((2, 5, 7), np.uint16), photometric="minisblack", metadata={"axes": "CYX"})
         with pytest.raises(ValueError, match="rank") as error:
-            _read_fullres(path, _options(data_axes="yx"), version=VERSION)
+            _read_fullres(_source(path), _options(data_axes="yx"), version=VERSION)
         assert type(error.value) is ValueError
         context = ReaderErrorContext("visium_hd", "full-resolution image", VERSION)
         assert error.value.__notes__ == [f"While handling {context.describe(path=path)}."]
@@ -345,14 +349,14 @@ class TestReadImages:
     def test_longest_side_mismatch(self, tmp_path: Path) -> None:
         layout, frame, scales, source = _bundle(tmp_path)
         assert layout.fullres is not None
-        tifffile.imwrite(layout.fullres, np.zeros((98, 90, 3), np.uint16), photometric="rgb")
+        tifffile.imwrite(layout.fullres.path, np.zeros((98, 90, 3), np.uint16), photometric="rgb")
         with pytest.raises(ReaderFormatError, match="longest sides"):
             read_images(layout, frame, scales, source, _options(), version=VERSION)
 
     def test_short_side_can_differ_and_fullres_without_hires(self, tmp_path: Path) -> None:
         layout, frame, scales, source = _bundle(tmp_path)
         assert layout.fullres is not None
-        tifffile.imwrite(layout.fullres, np.zeros((96, 89, 3), np.uint16), photometric="rgb")
+        tifffile.imwrite(layout.fullres.path, np.zeros((96, 89, 3), np.uint16), photometric="rgb")
         images = read_images(layout, frame, scales, source, _options(), version=VERSION)
         assert images["full_image"].shape == (3, 96, 89)
         assert "full_image" in read_images(

@@ -22,7 +22,12 @@ from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_pol
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.names import sanitize_element_name, validate_element_name
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table, prepare_anndata_dataframe
+from spatialdata_io.readers._utils.table import (
+    TableLinkage,
+    normalize_owned_anndata,
+    parse_linked_table,
+    prepare_anndata_dataframe,
+)
 from spatialdata_io.readers.dbit._barcodes import read_barcodes
 from spatialdata_io.readers.dbit._geometry import make_grid
 from spatialdata_io.readers.dbit._images import read_image, validate_image_options
@@ -328,14 +333,19 @@ def dbit(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bou
     prepare_anndata_dataframe(var, context=_TABLE_CONTEXT)
 
     duplicate_sums: list[SparseDuplicateSummary] = []
+    normalize_owned_anndata(
+        table,
+        context=_TABLE_CONTEXT,
+        path=layout.table,
+        expression_layers=("counts",) if "counts" in table.layers else (),
+        duplicate_sums=duplicate_sums,
+    )
     table = parse_linked_table(
         table,
         TableLinkage((dataset_id,), "region", "pixel_id"),
         context=_TABLE_CONTEXT,
         path=layout.table,
-        expression_layers=("counts",) if "counts" in table.layers else (),
         expected_instance_ids={dataset_id: grid.index},
-        duplicate_sums=duplicate_sums,
     )
     table = sort_rows(table, order)
 

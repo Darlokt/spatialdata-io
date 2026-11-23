@@ -10,7 +10,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from spatialdata_io.readers._utils.csv import _blocks, read_csv_blocks
+from spatialdata_io.readers._utils.csv import _blocks, csv_header, read_csv_blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -35,6 +35,31 @@ def _partitions(frame: dd.DataFrame) -> list[pd.DataFrame]:
 
 
 class TestReadCsvBlocks:
+    def test_cr_only_source_is_rejected(self, tmp_path: Path) -> None:
+        path = _file(tmp_path, b"id,v\rfirst,1\rsecond,2\r")
+        with pytest.raises(ReaderFormatError, match="line ending"):
+            csv_header(path, context=_CONTEXT)
+
+    def test_rejects_bare_cr_in_data_after_lf_header(self, tmp_path: Path) -> None:
+        path = _file(tmp_path, b"id,v\nfirst,1\rsecond,2\n")
+        blocks = read_csv_blocks(
+            path, header=csv_header(path, context=_CONTEXT), schema=pa.schema({"id": pa.string()}), context=_CONTEXT
+        )
+        with pytest.raises(ReaderFormatError, match="bare carriage return"):
+            blocks.compute()
+
+    @pytest.mark.parametrize("block_bytes", [8, 14, 1024])
+    def test_bom_inside_identifier_is_literal(self, tmp_path: Path, block_bytes: int) -> None:
+        path = _file(tmp_path, "id,v\nfirst,1\n\ufeffsecond,2\n".encode())
+        result = read_csv_blocks(
+            path,
+            header=csv_header(path, context=_CONTEXT),
+            schema=pa.schema({"id": pa.string()}),
+            context=_CONTEXT,
+            block_bytes=block_bytes,
+        ).compute()
+        assert result["id"].tolist() == ["first", "\ufeffsecond"]
+
     # Arrow's typed CSV grammar, the numeric contract every reader documents.
     @pytest.mark.parametrize(
         ("token", "kind", "value"),
@@ -56,7 +81,7 @@ class TestReadCsvBlocks:
         path = _file(tmp_path, b"id,gene,x\n" + token + b",A,0\n")
 
         frame = read_csv_blocks(
-            path, header=_HEADER, columns=("id", "gene"), context=_CONTEXT, column_types={"id": kind}
+            path, header=_HEADER, schema=pa.schema({"id": kind, "gene": pa.string()}), context=_CONTEXT
         )
         result = frame.compute()
 
@@ -80,7 +105,7 @@ class TestReadCsvBlocks:
     )
     def test_arrow_grammar_rejects_only_when_computed(self, tmp_path: Path, token: bytes, kind: pa.DataType) -> None:
         path = _file(tmp_path, b"id,gene,x\n" + token + b",A,0\n")
-        frame = read_csv_blocks(path, header=_HEADER, columns=("id",), context=_CONTEXT, column_types={"id": kind})
+        frame = read_csv_blocks(path, header=_HEADER, schema=pa.schema({"id": kind}), context=_CONTEXT)
 
         with pytest.raises(ReaderFormatError) as caught:
             frame.compute()
@@ -94,7 +119,7 @@ class TestReadCsvBlocks:
         path = _file(tmp_path, payload)
         types = {"id": pa.uint64(), "x": pa.float64()}
 
-        frame = read_csv_blocks(path, header=_HEADER, columns=tuple(types), context=_CONTEXT, column_types=types)
+        frame = read_csv_blocks(path, header=_HEADER, schema=pa.schema(types), context=_CONTEXT)
 
         result = frame.compute()
         assert frame.npartitions == 1
@@ -104,7 +129,9 @@ class TestReadCsvBlocks:
     def test_quoting_line_endings_and_projection_order(self, tmp_path: Path) -> None:
         path = _file(tmp_path, b'\xef\xbb\xbfid,gene,x\r\n001,"say ""hi""",0\r\n002,"A,B",1')
 
-        result = read_csv_blocks(path, header=_HEADER, columns=("gene", "id"), context=_CONTEXT).compute()
+        result = read_csv_blocks(
+            path, header=_HEADER, schema=pa.schema({"gene": pa.string(), "id": pa.string()}), context=_CONTEXT
+        ).compute()
 
         assert list(result.columns) == ["gene", "id"]
         assert result["gene"].tolist() == ['say "hi"', "A,B"]
@@ -122,7 +149,9 @@ class TestReadCsvBlocks:
         path = _file(tmp_path, b"id,gene,x\n" + b"0,A,0\n" * 8 + record + b"3,C,2\n" * 8)
 
         for block_bytes in range(4, path.stat().st_size + 2):
-            frame = read_csv_blocks(path, header=_HEADER, columns=("id",), context=_CONTEXT, block_bytes=block_bytes)
+            frame = read_csv_blocks(
+                path, header=_HEADER, schema=pa.schema({"id": pa.string()}), context=_CONTEXT, block_bytes=block_bytes
+            )
             with pytest.raises(ReaderFormatError, match="odd number of double quotes") as raised:
                 frame.compute(scheduler="synchronous")
             assert raised.value.context == _CONTEXT
@@ -135,14 +164,18 @@ class TestReadCsvBlocks:
         expected = [f'G,{index} "q"' for index in range(12)]
 
         for block_bytes in range(4, path.stat().st_size + 2):
-            frame = read_csv_blocks(path, header=_HEADER, columns=("gene",), context=_CONTEXT, block_bytes=block_bytes)
+            frame = read_csv_blocks(
+                path, header=_HEADER, schema=pa.schema({"gene": pa.string()}), context=_CONTEXT, block_bytes=block_bytes
+            )
             assert frame.compute(scheduler="synchronous")["gene"].tolist() == expected
 
     def test_construction_reads_no_record_and_serializes(self, tmp_path: Path, mocker: MockerFixture) -> None:
         path = _file(tmp_path, b"id,gene,x\n1,A,0.5\n")
         parser = mocker.spy(_blocks, "_read_block")
 
-        frame = read_csv_blocks(path, header=_HEADER, columns=("gene", "x"), context=_CONTEXT)
+        frame = read_csv_blocks(
+            path, header=_HEADER, schema=pa.schema({"gene": pa.string(), "x": pa.string()}), context=_CONTEXT
+        )
 
         parser.assert_not_called()
         cloudpickle.dumps(frame)
@@ -157,10 +190,16 @@ class TestReadCsvBlocks:
         rows = [f"{index:03d},G{index:02d},{index % 7}.5\n".encode() for index in range(100)]
         path = _file(tmp_path, b"id,gene,x\n" + b"".join(rows))
         types = {"x": pa.float64()}
-        whole = read_csv_blocks(path, header=_HEADER, columns=_HEADER, context=_CONTEXT, column_types=types)
+        whole = read_csv_blocks(
+            path, header=_HEADER, schema=pa.schema({"id": pa.string(), "gene": pa.string(), **types}), context=_CONTEXT
+        )
 
         frame = read_csv_blocks(
-            path, header=_HEADER, columns=_HEADER, context=_CONTEXT, column_types=types, block_bytes=block_bytes
+            path,
+            header=_HEADER,
+            schema=pa.schema({"id": pa.string(), "gene": pa.string(), **types}),
+            context=_CONTEXT,
+            block_bytes=block_bytes,
         )
         partitions = _partitions(frame)
 
@@ -174,7 +213,9 @@ class TestReadCsvBlocks:
     def test_record_longer_than_a_block_leaves_empty_partitions(self, tmp_path: Path) -> None:
         path = _file(tmp_path, b"id,gene,x\n1,A,0\n2," + b"G" * 100 + b",1\n3,C,2\n")
 
-        frame = read_csv_blocks(path, header=_HEADER, columns=("id",), context=_CONTEXT, block_bytes=16)
+        frame = read_csv_blocks(
+            path, header=_HEADER, schema=pa.schema({"id": pa.string()}), context=_CONTEXT, block_bytes=16
+        )
         partitions = _partitions(frame)
 
         assert any(partition.empty for partition in partitions)
@@ -183,7 +224,9 @@ class TestReadCsvBlocks:
     @pytest.mark.parametrize(("length", "readable"), [(1024 * 1024 - 8, True), (2 * 1024 * 1024 + 1, False)])
     def test_records_beyond_two_arrow_blocks_fail(self, tmp_path: Path, *, length: int, readable: bool) -> None:
         path = _file(tmp_path, b"id,gene,x\n" + b"0,A,0\n" * 3 + b"1," + b"G" * length + b",1\n")
-        frame = read_csv_blocks(path, header=_HEADER, columns=("id",), context=_CONTEXT, block_bytes=2**30)
+        frame = read_csv_blocks(
+            path, header=_HEADER, schema=pa.schema({"id": pa.string()}), context=_CONTEXT, block_bytes=2**30
+        )
 
         if readable:
             assert frame.compute()["id"].tolist() == ["0", "0", "0", "1"]
@@ -194,7 +237,9 @@ class TestReadCsvBlocks:
     @pytest.mark.parametrize("record", [b"1,A\n", b"1,A,0,extra\n"])
     def test_unprojected_record_width_errors_only_when_its_partition_runs(self, tmp_path: Path, record: bytes) -> None:
         path = _file(tmp_path, b"id,gene,x\n" + b"0,A,0\n" * 4 + record)
-        frame = read_csv_blocks(path, header=_HEADER, columns=("gene",), context=_CONTEXT, block_bytes=16)
+        frame = read_csv_blocks(
+            path, header=_HEADER, schema=pa.schema({"gene": pa.string()}), context=_CONTEXT, block_bytes=16
+        )
 
         first = frame.partitions[0].compute()["gene"].tolist()
         assert first
@@ -210,7 +255,9 @@ class TestReadCsvBlocks:
         directory.mkdir()
         path = _file(directory, b"id,gene,x\n1,A,0\n")
 
-        result = read_csv_blocks(path, header=_HEADER, columns=("gene",), context=_CONTEXT).compute()
+        result = read_csv_blocks(
+            path, header=_HEADER, schema=pa.schema({"gene": pa.string()}), context=_CONTEXT
+        ).compute()
 
         assert result["gene"].tolist() == ["A"]
 

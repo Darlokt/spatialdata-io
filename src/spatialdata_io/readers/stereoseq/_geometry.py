@@ -93,7 +93,7 @@ def make_polygons(  # noqa: PLR0913 - contour arrays, identity, policy and frame
     if policy != "keep":
         invalid = invalid_geometry_mask(polygons)
         if policy == "raise":
-            raise_invalid_geometries(invalid, index.tolist(), context=context, path=path)
+            raise_invalid_geometries(invalid, index, context=context, path=path)
         elif invalid.any():
             polygons, index = polygons[~invalid], index[~invalid]
             if index.empty:

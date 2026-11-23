@@ -14,7 +14,7 @@ from scipy import sparse
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.seqfish import _tables as seqfish_tables
-from spatialdata_io.readers.seqfish._tables import _count_block, finalize_table, read_table, select_cells
+from spatialdata_io.readers.seqfish._tables import finalize_table, read_table, select_cells
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -107,7 +107,7 @@ class TestReadTable:
         counts = ",A\n" + "".join(f"{row + 1},{row % 3}\n" for row in range(rows))
         cells = "label,area,center_x,center_y\n" + "".join(f"{row + 1},1,{row},2\n" for row in range(rows))
         sources = _sources(tmp_path, counts, cells)
-        blocks = mocker.spy(seqfish_tables, "_count_block")
+        blocks = mocker.spy(seqfish_tables, "count_batch_to_csr")
 
         table = read_table(*sources)
 
@@ -202,24 +202,6 @@ class TestReadTable:
         assert result.obs["area"].tolist() == [0]
         assert result.var_names.tolist() == ["Gene,A", "B"]
         np.testing.assert_array_equal(result.obsm["spatial"], [[1.5, 2]])
-
-
-class TestCountBlock:
-    """Convert the typed count columns of one batch, never its cell IDs."""
-
-    def test_counts_of_a_typed_batch(self) -> None:
-        batch = pa.record_batch(
-            [pa.array([7, 9]), pa.array([0, 2**64 - 1], pa.uint64()), pa.array([0, 0], pa.uint64())],
-            names=["", "A", "B"],
-        )
-        result = _count_block(batch)
-        assert isinstance(result, sparse.csr_array)
-        assert result.has_canonical_format
-        assert result.shape == (2, 2)
-        assert result.dtype == np.dtype(np.uint64)
-        np.testing.assert_array_equal(result.data, np.array([2**64 - 1], dtype=np.uint64))
-        np.testing.assert_array_equal(result.indices, [0])
-        np.testing.assert_array_equal(result.indptr, [0, 0, 1])
 
 
 class TestSelectCells:

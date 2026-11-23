@@ -86,7 +86,6 @@ def _table(*, row_frames: bool) -> ad.AnnData:
         table,
         TableLinkage(tuple(expected), "region", "instance"),
         context=ReaderErrorContext(reader="positions_contract", artifact="positions table"),
-        expression_layers=("counts",),
         expected_instance_ids=expected,
     )
 

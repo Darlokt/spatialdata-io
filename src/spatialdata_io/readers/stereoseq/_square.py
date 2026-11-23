@@ -25,7 +25,6 @@ from spatialdata_io.readers._utils.table import (
     as_csr_array,
     count_accumulation_dtype,
     finalize_count_arrays,
-    normalize_sparse_duplicates,
 )
 from spatialdata_io.readers.stereoseq import _schemas
 
@@ -75,7 +74,7 @@ def _aggregate_counts(
     # Exceptional wide inputs retain exact integers until completed coordinate
     # sums are known. The shared fallback never rounds source integers first.
     try:
-        return normalize_sparse_duplicates(csc_array((values, observation_indices, feature_indptr), shape=shape))
+        return as_csr_array(csc_array((values, observation_indices, feature_indptr), shape=shape))
     except ValueError as error:
         raise _schemas.schema_error(
             path, "square count aggregation", found=str(error), expected="lossless completed sums"

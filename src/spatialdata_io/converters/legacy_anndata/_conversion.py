@@ -278,8 +278,10 @@ def from_legacy_anndata(
     frame = selection.description["frame"] if selection.description is not None else f"legacy_{library.name}_pixels"
     images = read_images(table, library, frame=frame, rgb=rgb)
     table.uns.pop(TableModel.ATTRS_KEY, None)
+    context = ReaderErrorContext("from_legacy_anndata", "table")
+    normalize_owned_anndata(table, context=context)
     if not has_positions or not table.n_obs:
-        return SpatialData(tables={"table": normalize_owned_anndata(table)}, images=images)
+        return SpatialData(tables={"table": table}, images=images)
     key = "spatial" if "spatial" in table.obsm else "spatial_pixels"
     coordinates = cast("np.ndarray", table.obsm[key])
     ids = np.arange(table.n_obs, dtype=np.int64) if library.rows is None else library.rows
@@ -292,7 +294,7 @@ def from_legacy_anndata(
     table = parse_linked_table(
         table,
         TableLinkage(("locations",), "spatialdata_region", "spatialdata_instance_id"),
-        context=ReaderErrorContext("from_legacy_anndata", "table"),
+        context=context,
         expected_instance_ids={"locations": pd.Index(ids)},
     )
     return SpatialData(tables={"table": table}, images=images, points={"locations": locations})

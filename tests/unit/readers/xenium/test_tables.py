@@ -18,12 +18,12 @@ import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.readers._utils.counts import read_10x_h5
+from spatialdata_io.readers._utils.counts import MtxFiles, read_10x_h5
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._analysis import Analysis
 from spatialdata_io.readers.xenium._cells import read_cells_store
-from spatialdata_io.readers.xenium._layout import H5Counts, MtxArchive, MtxDirectory, TabularSource
+from spatialdata_io.readers.xenium._layout import H5Counts, MtxArchive, TabularSource
 from spatialdata_io.readers.xenium._metadata import ProteinPanel, ProteinTarget
 from spatialdata_io.readers.xenium._schemas import cell_types
 from spatialdata_io.readers.xenium._tables import (
@@ -55,6 +55,15 @@ PANEL = ProteinPanel(
     {"name": "panel"},
     {"TXP000019": ProteinTarget("PD-1 protein", "n/a", 16), "TXP000023": ProteinTarget("VISTA protein", "c2", 17)},
 )
+
+
+def _mtx(directory: Path) -> MtxFiles:
+    return MtxFiles(
+        ArtifactFile(directory / "matrix.mtx.gz"),
+        ArtifactFile(directory / "barcodes.tsv.gz"),
+        ArtifactFile(directory / "features.tsv.gz"),
+        compressed=True,
+    )
 
 
 def _h5(bundle: fx.XeniumFixture) -> H5Counts:
@@ -111,7 +120,7 @@ class TestReadCounts:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
         source = read_10x_h5(_h5(bundle).file, context=ReaderErrorContext("xenium", "counts"))
         # The reader preserves the owned decoder result, including missing values;
-        # Scanpy currently stringifies nonboolean additional HDF5 feature tags.
+        # Additional nonboolean HDF5 feature tags have textual annotation storage.
         source.var["score"] = np.asarray([0.5, np.nan, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
         expected = cast("pd.DataFrame", source.var).iloc[:3]
         mocker.patch("spatialdata_io.readers.xenium._tables.read_10x_h5", return_value=source)
@@ -150,8 +159,15 @@ class TestReadCounts:
         genes = read_counts(_h5(bundle), ("Gene Expression",), PANEL, context=COUNTS).table
         np.testing.assert_array_equal(genes.var[column], values[:3].astype(np.str_))
 
-    def test_default_selects_gene_expression_and_protein(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    @pytest.mark.parametrize("source_dtype", ["int32", "uint32", "int64", "float64"])
+    def test_default_selects_gene_expression_and_protein(
+        self, tmp_path: Path, mocker: MockerFixture, source_dtype: str
+    ) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        with h5py.File(_h5(bundle).file, "r+") as handle:
+            values = handle["matrix/data"][:].astype(source_dtype)
+            del handle["matrix/data"]
+            handle["matrix/data"] = values
         _forbid_densification(mocker)
 
         counts = read_counts(_h5(bundle), None, PANEL, context=COUNTS)
@@ -178,6 +194,22 @@ class TestReadCounts:
         assert var.loc["VISTA", "codeword_index"] == 17
         assert pd.isna(var.loc["GeneA", "long_name"])
 
+    def test_large_protein_divisor_preserves_its_source_value(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        source = _h5(bundle)
+        factor = 2**24 + 1
+        with h5py.File(source.file, "r+") as handle:
+            handle.attrs["protein_scaling_factor"] = factor
+        table = read_counts(source, ("Protein Expression",), PANEL, context=COUNTS).table
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.dtype == np.float64
+        protein = np.asarray(bundle.feature_types) == "Protein Expression"
+        np.testing.assert_array_equal(_dense(table.X), bundle.counts[:, protein].astype(np.float64) / factor)
+        with h5py.File(source.file, "r+") as handle:
+            handle.attrs["protein_scaling_factor"] = 2**53 + 1
+        with pytest.raises(ReaderFormatError, match="integer divisor exactly representable"):
+            read_counts(source, ("Protein Expression",), PANEL, context=COUNTS)
+
     def test_all_and_explicit_selections(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
 
@@ -195,7 +227,7 @@ class TestReadCounts:
         reference = read_counts(_h5(bundle), "all", None, context=COUNTS).table
 
         for source in (
-            MtxDirectory(ArtifactDirectory(tmp_path / "cell_feature_matrix")),
+            _mtx(tmp_path / "cell_feature_matrix"),
             MtxArchive(ArtifactFile(tmp_path / "cell_feature_matrix.tar.gz")),
         ):
             table = read_counts(source, "all", None, context=COUNTS).table
@@ -210,7 +242,7 @@ class TestReadCounts:
 
     def test_protein_needs_the_h5_factor_and_metric(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0, fx.Options(counts=("h5", "mtx")))
-        mtx = MtxDirectory(ArtifactDirectory(tmp_path / "cell_feature_matrix"))
+        mtx = _mtx(tmp_path / "cell_feature_matrix")
 
         with pytest.raises(ReaderFormatError, match="MatrixMarket matrix without the scaling factor"):
             read_counts(mtx, None, None, context=COUNTS)
@@ -318,7 +350,7 @@ class TestReadFeatureIndex:
 
         for source in (
             _h5(bundle),
-            MtxDirectory(ArtifactDirectory(tmp_path / "cell_feature_matrix")),
+            _mtx(tmp_path / "cell_feature_matrix"),
             MtxArchive(ArtifactFile(tmp_path / "cell_feature_matrix.tar.gz")),
         ):
             index = read_feature_index(source, context=COUNTS)

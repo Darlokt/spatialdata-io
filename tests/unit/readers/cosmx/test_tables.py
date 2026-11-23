@@ -108,7 +108,7 @@ class TestReadCounts:
             for row in range(20_001)
         )
         path = _write(tmp_path, "c.csv", "fov,cell_ID,A,B,C\n" + rows)
-        blocks = mocker.spy(_tables, "as_csr_array")
+        blocks = mocker.spy(_tables, "count_batch_to_csr")
         whole = read_counts(path)
         # The complete source fits the default parser block; smaller native batches keep exact CSR values.
         assert blocks.call_count == 1

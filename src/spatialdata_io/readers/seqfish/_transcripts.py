@@ -49,11 +49,12 @@ def read_transcripts(path: ArtifactFile, *, features: tuple[str, ...], frame: st
     """Return lazy XY points with validated feature categories and raw z annotation."""
     header = csv_header(path, context=TRANSCRIPTS_CONTEXT)
     types = transcript_types(header, path)
-    blocks = read_csv_blocks(path, header=header, columns=tuple(types), context=TRANSCRIPTS_CONTEXT, column_types=types)
+    schema = pa.schema(types)
+    blocks = read_csv_blocks(path, header=header, schema=schema, context=TRANSCRIPTS_CONTEXT)
     vocabulary = pd.Index(features)
     # The empty typed frame gives the partition function the schema of a real
     # task without executing one.
-    empty = pa.schema(list(types.items())).empty_table().to_pandas(types_mapper=pd.ArrowDtype)
+    empty = schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
     meta = normalize_transcript_partition(empty, features=vocabulary, path=path)
     points = blocks.map_partitions(normalize_transcript_partition, features=vocabulary, path=path, meta=meta)
     # Known categories and sort=False keep the model parser from scanning the

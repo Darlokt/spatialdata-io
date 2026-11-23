@@ -29,8 +29,8 @@ The standard HDF5 matrix wins over the standard MEX directory, which wins over
 one prefixed source; a prefixed HDF5 file beside a prefixed MEX directory is
 ambiguous. A MEX directory must hold exactly one complete
 ``[<prefix>]matrix.mtx``/``barcodes.tsv``/``features.tsv`` triplet; a matching
-uncompressed ``[<prefix>]genes.tsv`` would make the 10x MEX reader switch to
-its legacy feature format and is rejected. Other files in ``spatial/`` (QC
+uncompressed ``[<prefix>]genes.tsv`` declares a competing legacy feature
+family and is rejected. Other files in ``spatial/`` (QC
 images, CytAssist images, enrichment tables) are ignored. The full-resolution
 tissue image is not part of the output and is read only from
 ``fullres_image_file``.
@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from spatialdata_io.readers._utils.counts import MtxFiles
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
@@ -66,6 +67,7 @@ from spatialdata_io.readers._utils.paths import (
     optional_unique_path,
     require_caller_directory,
     require_caller_file,
+    require_file,
     require_metadata_directory,
     require_metadata_file,
 )
@@ -100,10 +102,13 @@ class H5Counts:
 class MtxCounts:
     """One complete MEX triplet: its member prefix, compression and any sample-download prefix."""
 
-    path: ArtifactDirectory
-    prefix: str | None
-    compressed: bool
+    files: MtxFiles
     filename_prefix: str | None
+
+    @property
+    def path(self) -> ArtifactFile:
+        """Return the expression artifact for table diagnostics."""
+        return self.files.matrix
 
 
 type CountsLayout = H5Counts | MtxCounts
@@ -132,7 +137,9 @@ def _context(artifact: str, version: str | None = None) -> ReaderErrorContext:
     return ReaderErrorContext("visium", artifact, version)
 
 
-def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | None) -> MtxCounts:
+def _inspect_mtx_directory(
+    path: ArtifactDirectory, *, root: DatasetRoot | None, filename_prefix: str | None
+) -> MtxCounts:
     """Resolve one complete consistently compressed MEX triplet."""
     context = _context("count matrix")
     names = frozenset(entry.name for entry in list_directory(path, context=context))
@@ -160,8 +167,7 @@ def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | No
     prefix, compressed = variants[0]
     legacy_name = f"{prefix or ''}genes.tsv"
     legacy_path = path / legacy_name
-    # Scanpy selects its legacy feature format from this file even beside
-    # features.tsv; no vendor export is known to contain both.
+    # A competing legacy feature table makes the feature annotation source ambiguous.
     if legacy_name in names and legacy_path.is_file():
         raise ReaderFormatError(
             context=context,
@@ -170,17 +176,18 @@ def _inspect_mtx_directory(path: ArtifactDirectory, *, filename_prefix: str | No
             path=legacy_path,
         )
 
-    return MtxCounts(path=path, prefix=prefix, compressed=compressed, filename_prefix=filename_prefix)
+    extension = ".gz" if compressed else ""
 
-
-def _require_mtx_members(root: DatasetRoot, counts: MtxCounts) -> MtxCounts:
-    """Apply the root's path policy to the three discovered files that the MEX reader opens."""
-    extension = ".gz" if counts.compressed else ""
-    for name in _MTX_MEMBERS:
-        require_metadata_file(
-            root, counts.path / f"{counts.prefix or ''}{name}{extension}", context=_context("count matrix")
+    def member(name: str) -> ArtifactFile:
+        candidate = path / f"{prefix or ''}{name}{extension}"
+        return (
+            require_file(candidate, context=context)
+            if root is None
+            else require_metadata_file(root, candidate, context=context)
         )
-    return counts
+
+    files = MtxFiles(member("matrix.mtx"), member("barcodes.tsv"), member("features.tsv"), compressed=compressed)
+    return MtxCounts(files, filename_prefix)
 
 
 def _h5_counts(path: ArtifactFile, *, filename_prefix: str | None = None) -> H5Counts:
@@ -192,7 +199,9 @@ def _explicit_counts(root: DatasetRoot, source: str | Path, *, context: ReaderEr
     """Read the caller's count source as HDF5 by suffix, otherwise as a MEX directory."""
     if Path(source).suffix.lower() in _H5_SUFFIXES:
         return _h5_counts(require_caller_file(root, source, context=context))
-    return _inspect_mtx_directory(require_caller_directory(root, source, context=context), filename_prefix=None)
+    return _inspect_mtx_directory(
+        require_caller_directory(root, source, context=context), root=None, filename_prefix=None
+    )
 
 
 def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayout:
@@ -207,7 +216,7 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
 
     standard_mtx = optional_metadata_directory(root, FILTERED_MTX, context=context)
     if standard_mtx is not None:
-        return _require_mtx_members(root, _inspect_mtx_directory(standard_mtx, filename_prefix=None))
+        return _inspect_mtx_directory(standard_mtx, root=root, filename_prefix=None)
 
     entries = list_directory(root.path, context=context)
     h5_candidate = optional_unique_path(
@@ -235,7 +244,7 @@ def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayo
     if mtx_candidate is not None:
         prefix = mtx_candidate.name.removesuffix(f"_{FILTERED_MTX}")
         directory = require_metadata_directory(root, mtx_candidate, context=context)
-        return _require_mtx_members(root, _inspect_mtx_directory(directory, filename_prefix=prefix))
+        return _inspect_mtx_directory(directory, root=root, filename_prefix=prefix)
 
     # Report the missing standard artifact with a precise FileNotFoundError.
     return _h5_counts(require_metadata_file(root, FILTERED_H5, context=context))

@@ -55,7 +55,7 @@ def _task_chunks(level: TiffLevelMetadata) -> tuple[int, ...]:
 
 
 def _read_contiguous_rows(
-    tiff: tifffile.TiffFile, source: _TiffArray, selection: ChunkSelection
+    tiff: tifffile.TiffFile, level: tifffile.TiffPageSeries, selection: ChunkSelection
 ) -> NDArray[np.generic] | None:
     """Read whole rows of one uncompressed contiguous page with a single bounded read.
 
@@ -66,7 +66,6 @@ def _read_contiguous_rows(
     memory, so whole rows are copied directly, as ``TiffPage.asarray`` does for
     whole pages. Returns None whenever the general path is required.
     """
-    level = tiff.series[source.series].levels[source.level]
     page = level.keyframe
     stored = level.pages[0] if len(level.pages) == 1 else None
     if stored is None or page.dtype is None or not page.is_final:
@@ -100,11 +99,26 @@ def _read_contiguous_rows(
     return data.reshape(rows.stop - rows.start, *page.shape[1:])
 
 
+def _check_ome_selection(level: tifffile.TiffPageSeries, source: _TiffArray, selection: ChunkSelection) -> None:
+    # A missing linked page is a fill chunk to Zarr. Check only the
+    # page range covered by this task, in the series' storage order.
+    first = np.ravel_multi_index(tuple(part.start for part in selection), source.shape)
+    last = np.ravel_multi_index(tuple(part.stop - 1 for part in selection), source.shape)
+    page_size = level.keyframe.size
+    for index in range(int(first) // page_size, int(last) // page_size + 1):
+        if index >= len(level.pages) or level.pages[index] is None:
+            message = f"OME series {source.series} level {source.level} has a missing image plane {index}."
+            raise RasterFormatError(message)
+
+
 def _read_tiff_selection(source: _TiffArray, selection: ChunkSelection) -> NDArray[np.generic]:
     """Decode one bounded selection and close every task-owned resource."""
     try:
         with tifffile.TiffFile(source.path) as tiff:
-            result = _read_contiguous_rows(tiff, source, selection)
+            level = tiff.series[source.series].levels[source.level]
+            if tiff.is_ome:
+                _check_ome_selection(level, source, selection)
+            result = _read_contiguous_rows(tiff, level, selection)
             if result is None:
                 # Use the same singleton-axis policy as metadata inspection.
                 store = tiff.aszarr(series=source.series, level=source.level, squeeze=True)

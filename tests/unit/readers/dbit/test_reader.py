@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from spatialdata import SpatialData
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
-    from spatialdata_io.readers._utils.table import SparseDuplicateSummary
 
 
 class TestValidateOptions:
@@ -228,16 +227,14 @@ class TestDbit:
         source.obs["pixel_id"] = [90, 91]
         mocker.patch("spatialdata_io.readers.dbit._tables.ad.read_h5ad", return_value=source)
 
-        def checked_linkage(  # noqa: PLR0913 - mirrors the keyword-only linkage signature
+        def checked_linkage(
             table: ad.AnnData,
             target: TableLinkage,
             /,
             *,
             context: ReaderErrorContext,
             path: Path,
-            expression_layers: tuple[str, ...],
             expected_instance_ids: Mapping[str, pd.Index],
-            duplicate_sums: list[SparseDuplicateSummary],
         ) -> ad.AnnData:
             """Inspect the pre-link table before the real parser attaches new metadata."""
             assert "spatialdata_attrs" not in table.uns
@@ -249,9 +246,7 @@ class TestDbit:
                 target,
                 context=context,
                 path=path,
-                expression_layers=expression_layers,
                 expected_instance_ids=expected_instance_ids,
-                duplicate_sums=duplicate_sums,
             )
 
         parse = mocker.patch.object(dbit_reader, "parse_linked_table", side_effect=checked_linkage)
@@ -263,7 +258,6 @@ class TestDbit:
         discovery.assert_called_once()
         grid.assert_called_once()
         parse.assert_called_once()
-        assert parse.call_args.kwargs["expression_layers"] == ("counts",)
         expected_ids = parse.call_args.kwargs["expected_instance_ids"]
         assert list(expected_ids) == ["sample"]
         pd.testing.assert_index_equal(expected_ids["sample"], result.shapes["sample"].index)
@@ -279,11 +273,11 @@ class TestDbit:
         original = ad.read_h5ad(source)
         del original.layers["counts"]
         original.write_h5ad(source)
-        parse = mocker.spy(dbit_reader, "parse_linked_table")
+        normalize = mocker.spy(dbit_reader, "normalize_owned_anndata")
 
         result = dbit(tmp_path)
 
-        assert parse.call_args.kwargs["expression_layers"] == ()
+        assert normalize.call_args.kwargs["expression_layers"] == ()
         assert "counts" not in result.tables["table"].layers
 
         quality = result.tables["table"].layers["quality"]

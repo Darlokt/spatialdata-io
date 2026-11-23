@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pyarrow as pa
 import pytest
 from scipy import sparse
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table import count_accumulation_dtype, finalize_count_arrays
+from spatialdata_io.readers._utils.table import count_accumulation_dtype, count_batch_to_csr, finalize_count_arrays
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -173,3 +174,19 @@ class TestFinalizeCountArrays:
         source = sparse.csr_array([[np.finfo(np.longdouble).max]], dtype=np.longdouble)
         with pytest.raises(ReaderFormatError, match=r"above 2\*\*53"):
             finalize_count_arrays((source,), context=_CONTEXT)
+
+
+class TestCountBatchToCsr:
+    def test_rejects_integer_outside_exact_storage(self, tmp_path: Path) -> None:
+        batch = pa.record_batch({"A": pa.array([2**53 + 1], pa.uint64())})
+        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53"):
+            count_batch_to_csr(batch, context=ReaderErrorContext("test", "counts"), path=tmp_path)
+
+    @pytest.mark.parametrize(("value", "dtype"), [(0, "float32"), (2**24, "float32"), (2**24 + 1, "float64")])
+    def test_exact_projected_counts(self, value: int, dtype: str, tmp_path: Path) -> None:
+        batch = pa.record_batch({"B": pa.array([0, value], pa.uint64()), "A": pa.array([1, 0], pa.uint64())})
+        result = count_batch_to_csr(batch, context=ReaderErrorContext("test", "counts"), path=tmp_path)
+        assert result.dtype == np.dtype(dtype)
+        assert result.has_canonical_format
+        assert result[0, 1] == 1
+        assert int(result[1, 0]) == value

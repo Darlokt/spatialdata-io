@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal
 
+from spatialdata_io.readers._utils.counts import MtxFiles
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     ArtifactDirectory,
@@ -64,7 +65,6 @@ _ALIGNED_SUFFIXES: tuple[tuple[str, Literal["he", "if"]], ...] = (
     ("he_image.ome.tif", "he"),
     ("if_image.ome.tif", "if"),
 )
-_MTX_MEMBERS = ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,20 +102,13 @@ class H5Counts:
 
 
 @dataclass(frozen=True, slots=True)
-class MtxDirectory:
-    """An extracted ``cell_feature_matrix/`` MatrixMarket directory."""
-
-    directory: ArtifactDirectory
-
-
-@dataclass(frozen=True, slots=True)
 class MtxArchive:
     """A ``cell_feature_matrix.tar.gz`` MatrixMarket archive."""
 
     file: ArtifactFile
 
 
-type CountSource = H5Counts | MtxDirectory | MtxArchive
+type CountSource = H5Counts | MtxFiles | MtxArchive
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,9 +227,12 @@ def _counts(root: DatasetRoot, context: ReaderErrorContext) -> CountSource:
         return H5Counts(h5)
     directory = optional_metadata_directory(root, "cell_feature_matrix", context=context)
     if directory is not None:
-        for member in _MTX_MEMBERS:
-            require_metadata_file(root, directory / member, context=context)
-        return MtxDirectory(directory)
+        return MtxFiles(
+            matrix=require_metadata_file(root, directory / "matrix.mtx.gz", context=context),
+            barcodes=require_metadata_file(root, directory / "barcodes.tsv.gz", context=context),
+            features=require_metadata_file(root, directory / "features.tsv.gz", context=context),
+            compressed=True,
+        )
     archive = optional_metadata_file(root, "cell_feature_matrix.tar.gz", context=context)
     if archive is not None:
         return MtxArchive(archive)

@@ -36,6 +36,10 @@ def _identity_dense(values: np.ndarray) -> np.ndarray:
     return values
 
 
+def _duplicate_row(values: tuple[int, int], dtype: str) -> sparse.csr_array:
+    return sparse.csr_array((np.array(values, dtype=dtype), [0, 0], [0, 2]), shape=(1, 2))
+
+
 class TestNormalizeOwnedAnndata:
     """Validate eager normalization, ownership, and selected-layer behavior."""
 
@@ -94,13 +98,6 @@ class TestNormalizeOwnedAnndata:
         assert table.X is source
         np.testing.assert_array_equal(source.data, [2**63 - 1, 2])
         assert reports is None or reports == []
-
-    @pytest.mark.parametrize("collect", [False, True])
-    def test_rejects_noncompressed_sparse_storage_independently_of_diagnostics(self, *, collect: bool) -> None:
-        with pytest.raises(TypeError, match="CSR or CSC") as error:
-            _normalized_expression(sparse.coo_array([[1]]), location="adata.X", duplicate_sums=[] if collect else None)
-
-        assert error.value.__notes__ == ["while normalizing adata.X"]
 
     @pytest.mark.parametrize(
         "factory",
@@ -337,3 +334,41 @@ class TestNormalizeOwnedAnndata:
         _assert_canonical_csr(adata.X)
         assert isinstance(adata.layers["invalid"], np.ma.MaskedArray)
         assert exception.value.__notes__ == ["while normalizing adata.layers['invalid']"]
+
+    def test_promoted_expression_supports_in_place_fractional_normalization(self) -> None:
+        source = _duplicate_row((100, 100), "int8")
+        table = ad.AnnData(source)
+        normalize_owned_anndata(table, duplicate_sums=[])
+        assert isinstance(table.X, sparse.csr_array)
+        table.X.data /= np.float32(3)
+        assert table.X.dtype == np.dtype(np.float32)
+        np.testing.assert_array_equal(table.X.data, [np.float32(200) / np.float32(3)])
+        np.testing.assert_array_equal(source.data, [100, 100])
+
+    def test_collects_multiple_slots_without_emitting_warning(self, recwarn: pytest.WarningsRecorder) -> None:
+        table = ad.AnnData(_duplicate_row((100, 100), "int8"))
+        table.layers["counts"] = _duplicate_row((150, 150), "uint8")
+        reports: list[SparseDuplicateSummary] = []
+        assert normalize_owned_anndata(table, expression_layers=("counts",), duplicate_sums=reports) is table
+        assert [report.slot for report in reports] == ["X", "layers['counts']"]
+        assert isinstance(table.X, sparse.csr_array)
+        assert table.X.dtype == np.dtype(np.float32)
+        assert table.layers["counts"].dtype == np.dtype(np.float32)
+        assert len(recwarn) == 0
+        normalize_owned_anndata(table, expression_layers=("counts",), duplicate_sums=reports)
+        assert len(reports) == 2
+
+    def test_does_not_report_sorting_only(self) -> None:
+        source = sparse.csr_array((np.array([2, 1]), np.array([1, 0]), np.array([0, 2])), shape=(1, 2))
+        reports: list[SparseDuplicateSummary] = []
+        normalize_owned_anndata(ad.AnnData(source), duplicate_sums=reports)
+        assert reports == []
+
+
+class TestNormalizedExpression:
+    @pytest.mark.parametrize("collect", [False, True])
+    def test_rejects_noncompressed_sparse_storage_independently_of_diagnostics(self, *, collect: bool) -> None:
+        with pytest.raises(TypeError, match="CSR or CSC") as error:
+            _normalized_expression(sparse.coo_array([[1]]), location="adata.X", duplicate_sums=[] if collect else None)
+
+        assert error.value.__notes__ == ["while normalizing adata.X"]

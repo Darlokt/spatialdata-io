@@ -8,11 +8,16 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 from scipy import sparse
 
+from spatialdata_io.readers._utils.errors import add_reader_context
 from spatialdata_io.readers._utils.table._arrays import as_csr_array
-from spatialdata_io.readers._utils.table._duplicates import SparseDuplicateSummary, normalize_sparse_duplicates
+from spatialdata_io.readers._utils.table._duplicates import SparseDuplicateSummary
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from anndata import AnnData
+
+    from spatialdata_io.readers._utils.errors import ReaderErrorContext
 
 type _ExpressionData = np.ndarray[tuple[int, ...], np.dtype[np.generic]] | sparse.sparray | sparse.spmatrix
 
@@ -34,24 +39,25 @@ def _normalized_expression(
 
     Combined duplicate entries of sparse input are recorded in ``duplicate_sums`` when given.
     """
-    if sparse.issparse(data) and not isinstance(
-        data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)
-    ):
+    compressed = (
+        data if isinstance(data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)) else None
+    )
+    if compressed is None and sparse.issparse(data):
         error = TypeError("Owned sparse expression must use CSR or CSC storage.")
         error.add_note(f"while normalizing {location}")
         raise error
     try:
-        if isinstance(data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
-            result = normalize_sparse_duplicates(data)
-            if duplicate_sums is not None and (combined := int(data.indptr[-1]) - result.nnz):
-                duplicate_sums.append(
-                    SparseDuplicateSummary(location.removeprefix("adata."), combined, data.dtype, result.dtype)
-                )
-            return result
-        return as_csr_array(cast("_ExpressionData", data))
+        # AnnData's slot types include backed and lazy containers. as_csr_array
+        # validates the actual storage before invoking any conversion.
+        result = as_csr_array(cast("_ExpressionData", data))
     except (TypeError, ValueError) as error:
         error.add_note(f"while normalizing {location}")
         raise
+    if duplicate_sums is not None and compressed is not None and (combined := compressed.nnz - result.nnz):
+        duplicate_sums.append(
+            SparseDuplicateSummary(location.removeprefix("adata."), combined, compressed.dtype, result.dtype)
+        )
+    return result
 
 
 def _validate_expression_layers(adata: AnnData, expression_layers: tuple[str, ...]) -> None:
@@ -71,6 +77,8 @@ def normalize_owned_anndata(
     adata: AnnData,
     /,
     *,
+    context: ReaderErrorContext | None = None,
+    path: Path | None = None,
     expression_layers: tuple[str, ...] = (),
     duplicate_sums: list[SparseDuplicateSummary] | None = None,
 ) -> AnnData:
@@ -92,6 +100,8 @@ def normalize_owned_anndata(
     ----------
     adata
         A reader-created or freshly read, exclusively owned in-memory table.
+    context, path
+        Optional reader and source identity for normalization failures.
     expression_layers
         Names of layers whose documented meaning is expression or counts.
         Unnamed layers and ``raw.X`` are deliberately not normalized.
@@ -128,16 +138,21 @@ def normalize_owned_anndata(
     This is an eager representation boundary. It never computes or loads lazy
     or backed storage and never copies the complete :class:`~anndata.AnnData`.
     """
-    _require_owned_in_memory_anndata(adata)
-    _validate_expression_layers(adata, expression_layers)
+    try:
+        _require_owned_in_memory_anndata(adata)
+        _validate_expression_layers(adata, expression_layers)
 
-    expression = adata.X
-    if expression is not None:
-        adata.X = _normalized_expression(expression, location="adata.X", duplicate_sums=duplicate_sums)
-    for name in expression_layers:
-        adata.layers[name] = _normalized_expression(
-            adata.layers[name],
-            location=f"adata.layers[{name!r}]",
-            duplicate_sums=duplicate_sums,
-        )
+        expression = adata.X
+        if expression is not None:
+            adata.X = _normalized_expression(expression, location="adata.X", duplicate_sums=duplicate_sums)
+        for name in expression_layers:
+            adata.layers[name] = _normalized_expression(
+                adata.layers[name],
+                location=f"adata.layers[{name!r}]",
+                duplicate_sums=duplicate_sums,
+            )
+    except (KeyError, TypeError, ValueError) as error:
+        if context is not None:
+            add_reader_context(error, context=context, path=path)
+        raise
     return adata

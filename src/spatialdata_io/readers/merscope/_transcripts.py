@@ -57,11 +57,11 @@ def read_transcripts(
     path = source.path
     names = csv_header(path, context=_CONTEXT)
     types = transcript_types(names, path)
-    columns = tuple(types)
-    dataframe = read_csv_blocks(path, header=names, columns=columns, column_types=types, context=_CONTEXT)
+    schema = pa.schema(types)
+    dataframe = read_csv_blocks(path, header=names, schema=schema, context=_CONTEXT)
 
     population = None if cell_population is None else pd.Index(cell_population, dtype=STRING_DTYPE)
-    empty = pa.schema(list(types.items())).empty_table().to_pandas(types_mapper=pd.ArrowDtype)
+    empty = schema.empty_table().to_pandas(types_mapper=pd.ArrowDtype)
     meta = normalize_transcript_partition(
         empty, features=features, path=path, assignment=source.assignment, cell_population=population
     )
@@ -84,7 +84,7 @@ def read_transcripts(
             normalized,
             coordinates={"x": "x", "y": "y"},
             feature_key="gene",
-            instance_key="cell_id" if source.assignment == "current" and "cell_id" in columns else None,
+            instance_key="cell_id" if source.assignment == "current" and "cell_id" in types else None,
             transformations={"global": Identity()},
             sort=False,
         )

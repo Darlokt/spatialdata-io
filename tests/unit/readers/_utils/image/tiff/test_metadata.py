@@ -48,7 +48,7 @@ class TestLevelMetadata:
         level.shape = (1, 1, 8, 1)
         level.axes = "TCYX"
         level.dtype = np.dtype(np.uint16)
-        tiff = mocker.Mock(spec=tifffile.TiffFile)
+        tiff = mocker.Mock(spec=tifffile.TiffFile, is_ome=False)
         mocker.patch("spatialdata_io.readers._utils.image.tiff._metadata._native_chunks", return_value=(8, 1))
         metadata = _level_metadata(tiff, level, series_index=0, level_index=0)
         assert metadata.shape == (8, 1)
@@ -69,7 +69,7 @@ class TestLevelMetadata:
         mocker.patch("spatialdata_io.readers._utils.image.tiff._metadata._native_chunks", return_value=chunks)
 
         with pytest.raises(RasterFormatError, match=match):
-            _level_metadata(mocker.Mock(spec=tifffile.TiffFile), level, series_index=0, level_index=0)
+            _level_metadata(mocker.Mock(spec=tifffile.TiffFile, is_ome=False), level, series_index=0, level_index=0)
 
 
 class TestSampleColor:

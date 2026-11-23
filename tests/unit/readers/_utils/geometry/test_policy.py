@@ -64,11 +64,6 @@ class TestInvalidGeometryMask:
         mask = invalid_geometry_mask(np.array([], dtype=object))
         assert mask.shape == (0,)
 
-    @pytest.mark.parametrize("bad", [None, Polygon()])
-    def test_missing_or_empty_geometry_is_a_reader_error(self, bad: Polygon | None) -> None:
-        with pytest.raises(ValueError, match="missing or empty"):
-            invalid_geometry_mask(np.array([SQUARE, bad], dtype=object))
-
     def test_requires_one_dimension(self) -> None:
         with pytest.raises(ValueError, match="one-dimensional"):
             invalid_geometry_mask(np.array([[SQUARE, LineString([(0, 0), (1, 1)])]], dtype=object))

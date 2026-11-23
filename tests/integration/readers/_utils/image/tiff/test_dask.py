@@ -46,6 +46,25 @@ class _FinalPage(NamedTuple):
 class TestReadTiff:
     """Read explicit series and levels through serializable native-chunk tasks."""
 
+    def test_missing_linked_plane_at_compute(self, linked_ome_tiff: tuple[Path, NDArray[np.uint16]]) -> None:
+        path, _ = linked_ome_tiff
+        image = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
+        path.with_name("second.ome.tif").unlink()
+        with pytest.raises(RasterFormatError, match=r"missing.*plane"):
+            image.data[1].compute(scheduler="synchronous")
+
+    def test_incomplete_plane_mapping_at_inspection(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "incomplete.ome.tif")
+        xml = """<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">
+        <Image ID="Image:0"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" Type="uint16"
+        SizeX="5" SizeY="4" SizeZ="1" SizeC="2" SizeT="1"><Channel ID="Channel:0"/>
+        <Channel ID="Channel:1"/><TiffData IFD="0" PlaneCount="1"/></Pixels></Image></OME>"""
+        tifffile.imwrite(path, np.ones((4, 5), dtype=np.uint16), description=xml, metadata=None)
+        with pytest.raises(RasterFormatError, match=r"missing.*plane"):
+            inspect_tiff(path, context=_RASTER_CONTEXT)
+
     @pytest.mark.parametrize("dtype", ["int64", "uint64", ">i8", ">u8"])
     def test_64bit_dtype_is_interoperable_without_pixel_conversion(self, tmp_path: Path, dtype: str) -> None:
         path = tmp_path / "labels.tif"

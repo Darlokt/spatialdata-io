@@ -35,9 +35,8 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 from spatialdata_io.readers._utils.names import sanitize_column_names
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
-    as_csr_array,
+    count_batch_to_csr,
     finalize_count_arrays,
-    normalize_owned_anndata,
     parse_linked_table,
     prepare_anndata_dataframe,
 )
@@ -80,12 +79,6 @@ def read_feature_names(path: ArtifactFile) -> tuple[str, ...]:
     return count_columns(csv_header(path, context=_COUNTS_CONTEXT), path)
 
 
-def _count_block(batch: pa.RecordBatch) -> sparse.csr_array:
-    """Convert one bounded typed count batch to canonical CSR."""
-    counts = batch.select(range(1, batch.num_columns)).to_tensor(row_major=True)
-    return as_csr_array(np.asarray(counts))
-
-
 def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[str, ...]]:
     """Stream typed counts, retaining only sparse blocks and exact Arrow identities."""
     types = count_types(csv_header(path, context=_COUNTS_CONTEXT), path)
@@ -108,7 +101,9 @@ def _read_counts(path: ArtifactFile) -> tuple[sparse.csr_array, pd.Index, tuple[
                 identifiers.append(batch.column(0))
                 # Counts are complete at ingestion. Immediate finalization retains
                 # float storage; stacking promotes blocks exactly when needed.
-                blocks.extend(finalize_count_arrays((_count_block(batch),), context=_COUNTS_CONTEXT, path=path))
+                blocks.append(
+                    count_batch_to_csr(batch.select(range(1, batch.num_columns)), context=_COUNTS_CONTEXT, path=path)
+                )
     except OSError as error:
         add_reader_context(error, context=_COUNTS_CONTEXT, path=path)
         raise
@@ -231,5 +226,4 @@ def finalize_table(table: ad.AnnData, *, names: Names, boundaries: CellBoundarie
             context=_TABLE_CONTEXT,
         )
 
-    normalize_owned_anndata(table)
     return table

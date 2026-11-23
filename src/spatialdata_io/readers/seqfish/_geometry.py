@@ -65,7 +65,7 @@ def read_boundaries(
     if policy != "keep":
         invalid = invalid_geometry_mask(shapes.geometry.to_numpy())
         if policy == "raise":
-            raise_invalid_geometries(invalid, shapes.index.tolist(), context=BOUNDARIES_CONTEXT, path=path)
+            raise_invalid_geometries(invalid, shapes.index, context=BOUNDARIES_CONTEXT, path=path)
         elif invalid.any():
             shapes = shapes.loc[~invalid]
             if shapes.empty:

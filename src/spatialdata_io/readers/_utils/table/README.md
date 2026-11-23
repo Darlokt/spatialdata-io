@@ -44,7 +44,7 @@ A vendor reader owns:
 - `_compat.py` prepares explicitly selected owned annotation frames for AnnData
   storage without inspecting expression or recursively walking annotations.
 - `_linkage.py` validates reader-created linkage and optional exact target
-  membership, normalizes expression storage, and calls the public
+  membership and calls the public
   `TableModel.parse()` API exactly once.
 
 Only intentional reader-facing functions are re-exported from `table.__init__`.
@@ -101,30 +101,21 @@ assert isinstance(x, sparse.csr_array)
 assert sparse.issparse(x) and x.format == "csr"
 ```
 
-CSR and CSC arrays and matrices have their compressed buffers validated before
-conversion or canonicality shortcuts. The package-internal
-`validate_compressed_sparse()` performs this check before compressed spans are
-used. Final linkage also normalizes expression storage and repeats this
-structural check.
-
-Validation delegates to SciPy's `check_format(full_check=True)` on a fresh
-CSR/CSC wrapper of the borrowed buffers. SciPy can prune inactive capacity and
-normalize index dtypes on that wrapper; the source buffers and cached flags
-are unchanged. A small additional check rejects decreasing pointers when no
-entries are active, which SciPy otherwise skips. Unsorted indices and duplicate
-coordinates are valid. Equal unused data/index capacity after the terminal
-pointer is valid and inactive indices are not inspected. The wrapper never
-copies expression values or densifies data. Count and aggregation semantics
-remain reader-owned.
+CSR and CSC inputs have their compressed structure validated before conversion
+or duplicate reduction. A fresh SciPy wrapper checks buffer lengths and pointer
+endpoints and trims unused capacity on the wrapper. The reader compares adjacent
+pointers directly and checks active indices against the minor dimension.
+Unsorted indices and repeated coordinates are valid. The caller retains its
+buffers and cached flags. Count and aggregation semantics remain reader-owned.
 
 Owned-AnnData normalization always combines compressed integer duplicates
 losslessly, with floating promotion when the source dtype is insufficient.
-Generic `as_csr_array()` retains its dtype-preserving arithmetic contract;
+Generic `as_csr_array()` applies the same lossless integer reduction;
 see [imported sparse duplicates](#imported-sparse-duplicates).
 
 ## Owned AnnData normalization
 
-Third-party readers such as `read_h5ad()` and Scanpy can return an in-memory
+A third-party reader such as `read_h5ad()` can return an in-memory
 `AnnData` containing dense values or legacy sparse matrices. Once the reader
 owns that table, normalize its primary expression and any explicitly documented
 count layers in place:
@@ -227,7 +218,6 @@ table = parse_linked_table(
     table,
     TableLinkage(("cell_shapes",), "region", "cell_id"),
     context=ReaderErrorContext(reader="example", artifact="cell table"),
-    expression_layers=("counts",),
     expected_instance_ids={"cell_shapes": shapes.index},
 )
 ```
@@ -265,7 +255,7 @@ the table's integer dtype. Temporary comparison arrays use that validated
 dtype, avoiding pandas' lossy mixed signed/unsigned promotion. Borrowed target
 indexes are never mutated.
 
-Linkage validation precedes expression mutation. Missing or malformed linkage,
+Readers finish expression normalization before linkage. Missing or malformed linkage,
 duplicate pairs, and target mismatches therefore leave the table unchanged.
 Normalization and public parsing are deliberately non-transactional: a failure
 at either boundary can leave the owned table partially mutated and the reader
@@ -346,15 +336,10 @@ support `float16` sparse storage, so `float16` is rejected rather than silently
 promoted. Each reader must select a value dtype capable of representing valid
 aggregates.
 
-Linkage validation constructs one in-memory pair index and performs a constant
-number of linear scans over observation and supplied target identifiers. It
-allocates no expression-sized validation array and performs no dataframe
-`groupby`; the public SpatialData parser may perform its own model validation.
-Canonical integer CSR arrays are reused. Canonical floating CSR arrays are also
-reused, but their mutable stored values are rescanned for finiteness because no
-trustworthy normalization marker is retained.
-Compressed structure is similarly revalidated on each public conversion call,
-including calls from owned-AnnData normalization and final linkage.
+Linkage checks the instance index directly for a single region. For multiple
+regions it groups the observed identifiers by region. Each supplied target
+index is checked against its region using a lossless comparison dtype.
+Linkage does not revisit expression values or buffers.
 
 ## Extending the package
 
@@ -408,7 +393,7 @@ duplicates nor recovers upstream loss.
 
 ## Imported sparse duplicates
 
-`normalize_owned_anndata()` and `parse_linked_table()` always use lossless
+`normalize_owned_anndata()` and `as_csr_array()` use lossless
 integer duplicate normalization for CSR/CSC expression. An optional reader-owned
 `duplicate_sums=[]` collector records summaries without choosing arithmetic or
 accepted representations. Owned expression supports dense NumPy and CSR/CSC
@@ -425,18 +410,12 @@ normalization does not impose nonnegative count semantics.
 Storage is validated before canonicality is recomputed on a fresh compressed
 wrapper. Bounds use the largest contribution and longest compressed span,
 with bounded pointer scans. Potential source-dtype overflow triggers int64 or
-uint64 arithmetic before any floating conversion; a bound exceeding that
-64-bit dtype raises. This conservative refusal can include inputs whose exact
-completed totals would fit. There is no arbitrary-precision fallback,
-densification or object-valued expression result. Unsorted unique indices are
+uint64 arithmetic before any floating conversion. If the coarse bound exceeds
+64 bits, only repeated coordinates need a tighter bound. Each group's positive
+and negative contributions must separately fit the accumulator. Unsorted unique indices are
 merely sorted and need no addition bound. Combined entries append typed
 `SparseDuplicateSummary` values identifying the slot, number combined and
 source/result dtypes.
-
-`normalize_sparse_duplicates()` exposes the same numerical reduction without
-AnnData slot selection or warning collection. Readers can reuse it for expected
-format aggregation when their ordinary arithmetic bound cannot prove safety;
-it does not itself emit warnings or infer nonnegative count semantics.
 
 The reader owns reporting: emit one `UserWarning` from accumulated summaries
 only after successful result assembly, with affected artifacts/tables/slots.

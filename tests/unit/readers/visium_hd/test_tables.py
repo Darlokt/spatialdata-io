@@ -4,19 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import h5py
+import anndata as ad
 import numpy as np
 import pandas as pd
 import pytest
-from numpy.testing import assert_array_equal
-from scipy.sparse import csr_array, spmatrix
+from scipy.sparse import csr_array
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium_hd import _tables as tables
-from spatialdata_io.readers.visium_hd._layout import BinLayout
-from spatialdata_io.readers.visium_hd._transforms import SlideFrame
-from tests.integration.readers.visium_hd._fixtures import HOMOGRAPHY, VERSION, write_bundle, write_counts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,85 +20,49 @@ if TYPE_CHECKING:
     from pytest_mock import MockerFixture
 
 
-def _source(tmp_path: Path) -> ArtifactFile:
-    path = ArtifactFile(tmp_path / "matrix.h5")
-    write_counts(path, np.array([[0, 1, 2], [3, 0, 4]], dtype=np.int32), ["first", "second"], "4.1.0")
-    return path
-
-
-def _replace(path: ArtifactFile, name: str, values: object) -> None:
-    with h5py.File(path, "r+") as handle:
-        del handle[f"matrix/{name}"]
-        handle.create_dataset(f"matrix/{name}", data=values)
-
-
 class TestReadCounts:
-    """Preserve source populations through shared sparse count ingestion."""
+    """HD requires populated axes and a unique barcode per observation."""
 
-    def test_values_dtype_and_order(self, tmp_path: Path) -> None:
-        result = tables.read_counts(_source(tmp_path), version=VERSION)
-        assert isinstance(result.X, csr_array)
-        assert result.X.dtype == np.float32
-        assert_array_equal(result.X.toarray(), [[0, 1, 2], [3, 0, 4]])
-        assert_array_equal(result.obs_names, ["first", "second"])
+    @pytest.mark.parametrize("barcodes", [["007", "NA"], ["NA", "007"]])
+    def test_keeps_literal_order_and_owned_buffers(
+        self, tmp_path: Path, mocker: MockerFixture, barcodes: list[str]
+    ) -> None:
+        counts = csr_array([[1], [3]], dtype=np.float32)
+        obs = pd.DataFrame(index=pd.Index(barcodes))
+        var = pd.DataFrame(index=["Gene"])
+        mocker.patch.object(tables, "read_10x_h5_components", return_value=(counts, obs, var))
 
-    def test_zero_counts(self, tmp_path: Path) -> None:
-        path = _source(tmp_path)
-        for name, values in (
-            ("data", np.array([], dtype=np.int32)),
-            ("indices", np.array([], dtype=np.int32)),
-            ("indptr", np.array([0, 0, 0], dtype=np.int64)),
-        ):
-            _replace(path, name, values)
-        zero = tables.read_counts(path, version=VERSION)
-        assert isinstance(zero.X, csr_array)
-        assert zero.X.nnz == 0
+        result, rows, features = tables.read_counts(ArtifactFile(tmp_path / "counts.h5"), version="4.1.0")
 
-    def test_normalized_source_coordinates(self, tmp_path: Path) -> None:
-        path = _source(tmp_path)
-        _replace(path, "indices", np.array([2, 1, 0, 2], dtype=np.int32))
-        result = tables.read_counts(path, version=VERSION)
-        assert isinstance(result.X, csr_array)
-        assert result.X.has_canonical_format
-        assert_array_equal(result.X.toarray(), [[0, 2, 1], [3, 0, 4]])
+        assert result is counts
+        assert rows is obs
+        assert features is var
+        assert rows.index.tolist() == barcodes
 
-    def test_repeated_source_coordinates_rejected(self, tmp_path: Path) -> None:
-        path = _source(tmp_path)
-        _replace(path, "indices", np.array([1, 1, 0, 2], dtype=np.int32))
-        with pytest.raises(ReaderFormatError, match=r"repeated \(barcode, feature\)") as caught:
-            tables.read_counts(path, version=VERSION)
-        assert caught.value.path == path
-
-    def test_count_precision_error_identifies_source(self, tmp_path: Path) -> None:
-        path = _source(tmp_path)
-        _replace(path, "data", np.array([2**53 + 1, 2, 3, 4], dtype=np.int64))
-        with pytest.raises(ReaderFormatError, match=r"above 2\*\*53") as caught:
-            tables.read_counts(path, version=VERSION)
-        assert caught.value.path == path
-
-    @pytest.mark.parametrize("value", [-1.0, 0.5, np.nan, np.inf])
-    def test_invalid_count_values(self, tmp_path: Path, value: float) -> None:
-        path = _source(tmp_path)
-        _replace(path, "data", np.array([value, 2, 3, 4], dtype=np.float64))
-        with pytest.raises((ReaderFormatError, ValueError)):
-            tables.read_counts(path, version=VERSION)
-
-    def test_duplicate_barcodes(self, tmp_path: Path) -> None:
-        path = _source(tmp_path)
-        _replace(path, "barcodes", np.array([b"same", b"same"]))
-        with pytest.raises(ReaderFormatError, match="duplicate barcodes"):
-            tables.read_counts(path, version=VERSION)
-
-    def test_missing_source(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError):
-            tables.read_counts(ArtifactFile(tmp_path / "absent.h5"), version=VERSION)
+    @pytest.mark.parametrize(
+        ("names", "features", "reason"),
+        [
+            (["same", "same"], ["Gene"], "duplicate barcodes"),
+            ([], ["Gene"], "positive observation and feature dimensions"),
+            (["spot"], [], "positive observation and feature dimensions"),
+        ],
+    )
+    def test_rejects_invalid_population(
+        self, tmp_path: Path, mocker: MockerFixture, names: list[str], features: list[str], reason: str
+    ) -> None:
+        path = ArtifactFile(tmp_path / "counts.h5")
+        components = csr_array((len(names), len(features))), pd.DataFrame(index=names), pd.DataFrame(index=features)
+        mocker.patch.object(tables, "read_10x_h5_components", return_value=components)
+        with pytest.raises(ReaderFormatError, match=reason) as error:
+            tables.read_counts(path, version="4.1.0")
+        assert error.value.path == path
 
 
 class TestLinkTable:
     """Link only against the independent materialized target IDs."""
 
     def test_linkage_and_serializable_categories(self, tmp_path: Path) -> None:
-        result = tables.read_counts(_source(tmp_path), version=VERSION)
+        result = ad.AnnData(csr_array([[1], [2]]), obs=pd.DataFrame(index=["first", "second"]))
         result.obs["instance_id"] = pd.Series([2, 5], index=result.obs_names, dtype="int64[pyarrow]")
         result = tables.link_table(
             result,
@@ -110,14 +70,14 @@ class TestLinkTable:
             pd.Index([2, 5]),
             position="vendor cell centroid",
             counts_path=ArtifactFile(tmp_path / "matrix.h5"),
-            version=VERSION,
+            version="4.1.0",
         )
         assert result.uns["spatialdata_attrs"]["region"] == "boundaries"
         assert result.obs["region"].cat.categories.tolist() == ["boundaries"]
         result.write_h5ad(tmp_path / "roundtrip.h5ad")
 
     def test_membership(self, tmp_path: Path) -> None:
-        result = tables.read_counts(_source(tmp_path), version=VERSION)
+        result = ad.AnnData(csr_array([[1], [2]]), obs=pd.DataFrame(index=["first", "second"]))
         result.obs["instance_id"] = [2, 5]
         with pytest.raises(ReaderFormatError):
             tables.link_table(
@@ -126,62 +86,5 @@ class TestLinkTable:
                 pd.Index([2, 3]),
                 position="vendor cell centroid",
                 counts_path=ArtifactFile(tmp_path / "matrix.h5"),
-                version=VERSION,
+                version="4.1.0",
             )
-
-
-class TestReadBinTable:
-    """Calibrated sparse bin matrices without densification."""
-
-    @pytest.mark.parametrize("kind", ["raw", "filtered"])
-    @pytest.mark.parametrize("unique", [False, True])
-    def test_sparse_values_and_physical_centres(self, tmp_path: Path, kind: str, *, unique: bool) -> None:
-        bundle = write_bundle(tmp_path, sizes=(2,), segmented=False)
-        directory = tmp_path / "binned_outputs/square_002um"
-        layout = BinLayout(
-            2,
-            ArtifactFile(directory / f"{kind}_feature_bc_matrix.h5"),
-            ArtifactFile(directory / "spatial/tissue_positions.parquet"),
-            ArtifactFile(directory / "spatial/scalefactors_json.json"),
-        )
-        frame = SlideFrame(HOMOGRAPHY, np.eye(3), np.eye(3), 0.0, 0.0)
-        table = tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=unique, version=VERSION)
-        assert isinstance(table.X, csr_array)
-        assert not isinstance(table.X, spmatrix)
-        expected = bundle.raw[2] if kind == "raw" else bundle.raw[2][bundle.filtered_rows[2]]
-        assert_array_equal(table.X.toarray(), expected)
-        assert table.var_names.tolist() == (["Gene", "Gene-1", "Other"] if unique else ["Gene", "Gene", "Other"])
-        assert_array_equal(
-            table.obsm["spatial"],
-            np.column_stack((table.obs["array_col"].to_numpy() * 2 + 1, table.obs["array_row"].to_numpy() * 2 + 1)),
-        )
-
-    def test_expression_stays_sparse(self, tmp_path: Path, mocker: MockerFixture) -> None:
-        write_bundle(tmp_path, sizes=(2,), segmented=False)
-        directory = tmp_path / "binned_outputs/square_002um"
-        layout = BinLayout(
-            2,
-            ArtifactFile(directory / "raw_feature_bc_matrix.h5"),
-            ArtifactFile(directory / "spatial/tissue_positions.parquet"),
-            ArtifactFile(directory / "spatial/scalefactors_json.json"),
-        )
-        mocker.patch.object(csr_array, "toarray", side_effect=AssertionError("expression densification"))
-        frame = SlideFrame(HOMOGRAPHY, np.eye(3), np.eye(3), 0.0, 0.0)
-        table = tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=True, version=VERSION)
-        assert isinstance(table.X, csr_array)
-        assert table.X.nnz == 6
-
-    def test_empty_matrix_rejected(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, sizes=(2,), segmented=False)
-        directory = tmp_path / "binned_outputs/square_002um"
-        count_path = directory / "filtered_feature_bc_matrix.h5"
-        write_counts(count_path, np.zeros((0, 3), dtype=np.int32), [], "4.1.0")
-        layout = BinLayout(
-            2,
-            ArtifactFile(count_path),
-            ArtifactFile(directory / "spatial/tissue_positions.parquet"),
-            ArtifactFile(directory / "spatial/scalefactors_json.json"),
-        )
-        frame = SlideFrame(HOMOGRAPHY, np.eye(3), np.eye(3), 0.0, 0.0)
-        with pytest.raises(ReaderFormatError, match="positive observation and feature dimensions"):
-            tables.read_bin_table(layout, (17, 17), frame, make_var_names_unique=True, version=VERSION)

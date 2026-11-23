@@ -5,11 +5,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-_SOURCE = Path("src/spatialdata_io/readers/_utils/counts/_10x.py")
+import pytest
+
+_SOURCES = tuple(Path("src/spatialdata_io/readers/_utils/counts") / name for name in ("_10x_h5.py", "_10x_mtx.py"))
 _FORBIDDEN_IMPORT_ROOTS = {
     "dask",
     "geopandas",
-    "h5py",
+    "scanpy",
     "shapely",
     "spatialdata",
     "xarray",
@@ -29,19 +31,20 @@ _FORBIDDEN_CALLS = {
 
 
 class TestCountsArchitecture:
-    def test_source_has_only_direct_source_representation_and_error_dependencies(self) -> None:
-        tree = ast.parse(_SOURCE.read_text())
+    @pytest.mark.parametrize("source", _SOURCES)
+    def test_source_has_only_direct_source_representation_and_error_dependencies(self, source: Path) -> None:
+        tree = ast.parse(source.read_text())
         imported_modules = {module for node in ast.walk(tree) for module in self._imported_modules(node)}
         roots = {module.split(".")[0] for module in imported_modules}
 
         assert roots.isdisjoint(_FORBIDDEN_IMPORT_ROOTS)
-        assert "scanpy.readwrite" not in imported_modules
         assert "anndata.io" not in imported_modules
         assert not any("spatialdata_io.readers." in module and "._utils." not in module for module in imported_modules)
         assert "spatialdata_io.readers._utils.table._linkage" not in imported_modules
 
-    def test_implementation_has_no_revalidation_computation_or_densification(self) -> None:
-        tree = ast.parse(_SOURCE.read_text())
+    @pytest.mark.parametrize("source", _SOURCES)
+    def test_implementation_has_no_revalidation_computation_or_densification(self, source: Path) -> None:
+        tree = ast.parse(source.read_text())
         calls = {
             node.func.attr
             for node in ast.walk(tree)

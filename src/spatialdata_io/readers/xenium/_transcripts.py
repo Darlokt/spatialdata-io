@@ -201,9 +201,8 @@ def read_transcripts(
     blocks = read_csv_blocks(
         path,
         header=names,
-        columns=tuple(types),
+        schema=pa.schema(types | {CELL_ID: STRING}),
         context=context,
-        column_types=types | {CELL_ID: STRING},
         block_bytes=_BLOCK_BYTES,
     )
     return _parse(blocks.map_partitions(_normalize_block, shared, meta=meta), known_divisions=False)

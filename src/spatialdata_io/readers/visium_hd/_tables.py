@@ -1,7 +1,7 @@
 """Read Visium HD count matrices and link the final tables to their elements.
 
 Bin and cell matrices are 10x HDF5 feature-barcode matrices read through the
-shared Scanpy boundary, in source observation and feature order. A bin table
+shared 10x HDF5 reader, in source observation and feature order. A bin table
 holds::
 
     X                  canonical float32 or float64 CSR sparse array of counts
@@ -24,9 +24,10 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pandas as pd
+from anndata import AnnData
 
 from spatialdata_io._positions import POSITIONS_KEY, PositionsMetadata
-from spatialdata_io.readers._utils.counts import read_10x_h5
+from spatialdata_io.readers._utils.counts import read_10x_h5_components
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.table import (
     TableLinkage,
@@ -37,38 +38,41 @@ from spatialdata_io.readers.visium_hd._positions import read_positions
 from spatialdata_io.readers.visium_hd._transforms import bin_centers
 
 if TYPE_CHECKING:
-    from anndata import AnnData
     from numpy.typing import NDArray
+    from scipy.sparse import csr_array
 
     from spatialdata_io.readers._utils.paths import ArtifactFile
     from spatialdata_io.readers.visium_hd._layout import BinLayout
     from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 
 
-def read_counts(path: ArtifactFile, *, version: str | None) -> AnnData:
+def read_counts(path: ArtifactFile, *, version: str | None) -> tuple[csr_array, pd.DataFrame, pd.DataFrame]:
     """Read shared sparse counts and validate the selected HD population."""
     context = ReaderErrorContext("visium_hd", "count matrix", version)
-    table = read_10x_h5(path, context=context)
-    if not table.n_obs or not table.n_vars:
+    counts, obs, var = read_10x_h5_components(path, context=context)
+    if not len(obs) or not len(var):
         raise ReaderFormatError(
             context=context,
             path=path,
-            found=f"matrix dimensions {table.shape}",
+            found=f"matrix dimensions {counts.shape}",
             expected="positive observation and feature dimensions",
         )
-    if not table.obs_names.is_unique:
+    # Strict bytewise order proves uniqueness on raw grids without a Python
+    # string hash table. Unordered populations still get exact duplicate checks.
+    names = obs.index
+    if not (names[1:] > names[:-1]).all() and not names.is_unique:
         raise ReaderFormatError(context=context, path=path, found="duplicate barcodes", expected="unique barcodes")
 
-    return table
+    return counts, obs, var
 
 
 def read_bin_table(
     layout: BinLayout, shape: tuple[int, int], frame: SlideFrame, *, make_var_names_unique: bool, version: str | None
 ) -> AnnData:
     """Align sparse counts and nominal centres after source calibration is validated."""
-    table = read_counts(layout.counts, version=version)
-    positions = read_positions(layout.positions, shape, table.obs_names, layout.size_um, frame, version=version)
-    table.obs = positions
+    counts, obs, var = read_counts(layout.counts, version=version)
+    positions = read_positions(layout.positions, shape, obs.index, layout.size_um, frame, version=version)
+    table = AnnData(counts, obs=positions, var=var)
 
     rows: NDArray[np.uint32] = positions["array_row"].to_numpy(dtype=np.uint32)
     cols: NDArray[np.uint32] = positions["array_col"].to_numpy(dtype=np.uint32)

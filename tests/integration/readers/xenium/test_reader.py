@@ -885,6 +885,17 @@ class TestXeniumPathPolicy:
 
         assert_spatial_data_objects_are_identical(xenium(bundle.root, path_policy="relaxed"), expected)
 
+    def test_relaxed_policy_reads_a_linked_focus_directory(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path / "dataset", fx.XOA_4_0)
+        expected = xenium(bundle.root)
+        focus = bundle.root / "morphology_focus"
+        target = focus.rename(tmp_path / "outside_focus")
+        focus.symlink_to(target, target_is_directory=True)
+
+        with pytest.raises(ReaderFormatError, match="path_policy='relaxed'"):
+            xenium(bundle.root)
+        assert_spatial_data_objects_are_identical(xenium(bundle.root, path_policy="relaxed"), expected)
+
     def test_relaxed_policy_rejects_a_scattered_multi_file_focus_set(
         self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
     ) -> None:

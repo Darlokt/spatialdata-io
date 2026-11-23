@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import numpy as np
 import shapely
@@ -10,7 +10,6 @@ import shapely
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
     from pathlib import Path
 
     from numpy.typing import NDArray
@@ -70,21 +69,22 @@ def invalid_geometry_mask(geometries: NDArray[np.object_], /) -> NDArray[np.bool
     Raises
     ------
     ValueError
-        If the array is not one-dimensional or contains missing or empty
-        geometries, which are malformed input rather than invalid geometry.
+        If the array is not one-dimensional.
     """
     if geometries.ndim != 1:
         message = f"geometries must be one-dimensional; found shape {geometries.shape}."
         raise ValueError(message)
-    if shapely.is_missing(geometries).any() or shapely.is_empty(geometries).any():
-        message = "geometries must not contain missing or empty values; readers reject them as malformed input."
-        raise ValueError(message)
     return np.logical_not(shapely.is_valid(geometries))
+
+
+class _PositionalIdentifiers(Protocol):
+    def __len__(self) -> int: ...
+    def __getitem__(self, index: int, /) -> object: ...
 
 
 def raise_invalid_geometries(
     mask: NDArray[np.bool_],
-    identifiers: Sequence[object],
+    identifiers: _PositionalIdentifiers,
     /,
     *,
     context: ReaderErrorContext,
@@ -114,13 +114,19 @@ def raise_invalid_geometries(
     if len(mask) != len(identifiers):
         message = f"mask and identifiers must have equal lengths; found {len(mask)} and {len(identifiers)}."
         raise ValueError(message)
-    invalid = np.flatnonzero(mask)
-    if invalid.size == 0:
+    invalid_count = np.count_nonzero(mask)
+    if not invalid_count:
         return
-    examples = [identifiers[int(position)] for position in invalid[:_EXAMPLES]]
+    examples: list[object] = []
+    start = 0
+    for _ in range(min(invalid_count, _EXAMPLES)):
+        index = start + int(mask[start:].argmax())
+        identifier = identifiers[index]
+        examples.append(identifier.item() if isinstance(identifier, np.generic) else identifier)
+        start = index + 1
     raise ReaderFormatError(
         context=context,
         path=path,
-        found=f"{invalid.size} invalid geometries (not shapely.is_valid), e.g. {examples!r}",
+        found=f"{invalid_count} invalid geometries (not shapely.is_valid), e.g. {examples!r}",
         expected="valid geometries; invalid_geometries='keep' preserves them and 'drop' removes them",
     )

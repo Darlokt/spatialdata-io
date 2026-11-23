@@ -34,6 +34,8 @@ Rules that hold in both modes:
   are named by content hashes (DVC cache entries have no suffix), so names that
   identify samples, channels or file formats always come from the dataset or
   from you, never from the target.
+- In `"strict"` mode, an optional artifact's parent must resolve inside the
+  dataset directory, even if the artifact is absent.
 - Missing files, dangling symlinks and files of the wrong kind fail as before.
 - Every reader ignores macOS AppleDouble files, whose names start with `._`
   (for example `._Roi1_CellxGene.csv`). macOS writes one beside each file it
@@ -54,10 +56,11 @@ looks for the other files of the set beside that real file. When the members
 are symlinks to separate targets, as git-annex and DVC create, the other files
 are not beside the target. The read then fails with `RasterFormatError`
 ("OME metadata references a non-file TIFF source") instead of returning
-zero-filled channels. Such sets are not supported with `"relaxed"`; unlock or
-check out the set as regular files (for example `git annex unlock` or a DVC
-copy link type) to read it. Single-file TIFF, OME-TIFF, PNG and JPEG images are
-not affected.
+zero-filled channels. To read a scattered set, unlock or check out its members
+as regular files (for example `git annex unlock` or a DVC copy link type).
+With `"relaxed"`, a directory symlink can point to the complete set as long as
+the members stay together. Single-file TIFF, OME-TIFF, PNG and JPEG images are
+unaffected.
 
 Compared with earlier releases, `visium`, `visium_hd`, `xenium` and `macsima`
 now also reject out-of-root symlinks by default; they previously accepted them.

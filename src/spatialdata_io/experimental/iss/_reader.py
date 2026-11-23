@@ -15,7 +15,7 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, warn_user
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.names import validate_element_name
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
+from spatialdata_io.readers._utils.table import TableLinkage, normalize_owned_anndata, parse_linked_table
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -192,13 +192,19 @@ def iss(  # noqa: PLR0913, RUF100 - explicit format choices keep the public boun
     table = read_table(layout.table, region=region, instance_key=instance_key, label_dtype=rasters.label_dtype)
 
     duplicate_sums: list[SparseDuplicateSummary] = []
-    table = parse_linked_table(
+    context = ReaderErrorContext("iss", "linked table")
+    normalize_owned_anndata(
         table,
-        TableLinkage((region,), REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY),
-        context=ReaderErrorContext("iss", "linked table"),
+        context=context,
         path=layout.table,
         duplicate_sums=duplicate_sums,
         expression_layers=("counts",) if "counts" in table.layers else (),
+    )
+    table = parse_linked_table(
+        table,
+        TableLinkage((region,), REGION_KEY, instance_key or DEFAULT_INSTANCE_KEY),
+        context=context,
+        path=layout.table,
     )
 
     result = SpatialData(

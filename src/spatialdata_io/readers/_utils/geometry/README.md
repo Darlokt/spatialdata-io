@@ -24,7 +24,7 @@ from spatialdata_io.readers._utils.geometry import (
   self-intersecting ring or a bow-tie. `invalid_geometry_mask()` computes this
   for a one-dimensional geometry array. Missing and empty geometries are
   malformed input, not invalid geometry; readers reject them before
-  classification and the mask raises `ValueError` if they reach it.
+  classification.
 - `raise_invalid_geometries()` raises one `ReaderFormatError` naming the
   invalid count and at most ten reader-owned identifiers.
 

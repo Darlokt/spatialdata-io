@@ -15,7 +15,7 @@ from spatialdata import SpatialData
 from spatialdata.models import ShapesModel, TableModel
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
-from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
+from spatialdata_io.readers._utils.table import TableLinkage, normalize_owned_anndata, parse_linked_table
 
 _CONTEXT = ReaderErrorContext(reader="integration", artifact="linked table")
 
@@ -31,7 +31,7 @@ def _adata(
     if observation_only:
         return ad.AnnData(obs=obs, shape=(len(obs), 0))
     if expression is None:
-        expression = sparse.csr_matrix(np.eye(len(obs), dtype=np.int16))
+        expression = sparse.csr_array(np.eye(len(obs), dtype=np.int16))
     return ad.AnnData(expression, obs=obs)
 
 
@@ -53,12 +53,7 @@ class TestParseLinkedTable:
         expression.indices[0] = 2
 
         with pytest.raises(ValueError, match="indices must be <") as error:
-            parse_linked_table(
-                adata,
-                TableLinkage(("cells",), "region", "instance"),
-                context=_CONTEXT,
-                expected_instance_ids={"cells": pd.Index([1, 2])},
-            )
+            normalize_owned_anndata(adata)
 
         assert adata.X is expression
         assert expression.indices[0] == 2
@@ -72,13 +67,13 @@ class TestParseLinkedTable:
             expression=np.asarray([[1, 0], [0, 2]], dtype=np.int16),
         )
         adata.layers["counts"] = sparse.csc_matrix([[3, 0], [0, 4]], dtype=np.int32)
+        normalize_owned_anndata(adata, expression_layers=("counts",))
 
         with pytest.warns(UserWarning, match="categorical"):
             result = parse_linked_table(
                 adata,
                 TableLinkage(("cells",), "region", "instance"),
                 context=_CONTEXT,
-                expression_layers=("counts",),
                 expected_instance_ids={"cells": pd.Index([2, 1])},
             )
 
@@ -196,7 +191,6 @@ class TestParseLinkedTable:
                 adata,
                 TableLinkage(("cells",), "region", "instance"),
                 context=_CONTEXT,
-                expression_layers=("counts",),
                 expected_instance_ids={"cells": target_index},
             )
         sdata = SpatialData(shapes={"cells": shapes}, tables={"table": table})

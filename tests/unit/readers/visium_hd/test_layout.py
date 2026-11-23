@@ -216,6 +216,8 @@ class TestDiscoverLayout:
         assert layout.images is not None
         assert layout.images.fullres is not None
         assert layout.images.fullres.suffix == ".tif"
+        expected = "tissue_image.tif" if fullres == "root" else "microscope_image/image.tif"
+        assert layout.images.fullres.path == tmp_path / expected
 
     def test_fullres_ambiguity_override_and_root_images(self, tmp_path: Path) -> None:
         write_bundle(tmp_path, fullres="root")
@@ -229,6 +231,8 @@ class TestDiscoverLayout:
             layout = discover_layout(tmp_path, fullres_image_file=source, include_cytassist_image=True)
             assert layout.images is not None
             assert layout.images.fullres is not None
+            assert layout.images.fullres.path == tmp_path / "tissue_image.tif"
+            assert layout.images.fullres.suffix == ".tif"
             assert layout.images.cytassist == spatial / "cytassist_image.tiff"
 
     def test_bins_without_feature_slice(self, tmp_path: Path) -> None:

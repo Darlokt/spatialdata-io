@@ -189,8 +189,7 @@ def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
         blocks = read_csv_blocks(
             path,
             header=projection.names,
-            columns=projection.types.names,
-            column_types={field.name: field.type for field in projection.types},
+            schema=projection.types,
             context=context,
         )
         return blocks.map_partitions(_normalize, features=projection.features, path=path, meta=meta)

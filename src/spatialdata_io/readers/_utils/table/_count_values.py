@@ -12,6 +12,8 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderForma
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pyarrow as pa
+
 _VALIDATION_BATCH_SIZE = 1_048_576
 _FLOAT32_EXACT_INTEGERS = 2**24
 _FLOAT64_EXACT_INTEGERS = 2**53
@@ -47,6 +49,9 @@ def count_accumulation_dtype(maximum_sum: int, /) -> np.dtype[np.float32 | np.fl
 
 def _maximum_count(array: csr_array, context: ReaderErrorContext, path: Path | None) -> int:
     """Return the largest stored count after rejecting nonfinite, negative or fractional values."""
+    data = array.data[: array.nnz]
+    if data.dtype.kind in "bu" or (data.dtype.kind == "i" and data.min(initial=0) >= 0):
+        return int(data.max(initial=0))
     maximum = 0
     for start in range(0, array.nnz, _VALIDATION_BATCH_SIZE):
         values = array.data[start : start + _VALIDATION_BATCH_SIZE]
@@ -130,3 +135,22 @@ def finalize_count_arrays(
         else csr_array((array.data.astype(dtype), array.indices, array.indptr), shape=array.shape, copy=False)
         for array in arrays
     )
+
+
+def count_batch_to_csr(batch: pa.RecordBatch, /, *, context: ReaderErrorContext, path: Path) -> csr_array:
+    """Convert one projected batch of nonnullable uint64 count columns to exact floating CSR.
+
+    Readers supply all features in output order, with a bounded batch size.
+    The unsigned schema establishes integral, nonnegative values. The largest
+    count determines the required floating width before the dense tensor is released.
+    """
+    counts = csr_array(np.asarray(batch.to_tensor(row_major=True)))
+    dtype = count_accumulation_dtype(int(counts.data.max(initial=0)))
+    if dtype is None:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="counts above 2**53 in integer storage",
+            expected="integer counts at most 2**53",
+        )
+    return csr_array((counts.data.astype(dtype), counts.indices, counts.indptr), shape=counts.shape)

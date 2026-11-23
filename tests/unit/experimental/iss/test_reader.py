@@ -101,7 +101,6 @@ class TestIss:
         pixels.assert_not_called()
         parse.assert_called_once()
         assert "expected_instance_ids" not in parse.call_args.kwargs
-        assert parse.call_args.kwargs["expression_layers"] == ("counts",)
         assert isinstance(result.tables["table"].layers["metadata"], np.ndarray)
         assert "region" not in ad.read_h5ad(source_file).obs
 

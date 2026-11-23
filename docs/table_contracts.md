@@ -116,7 +116,7 @@ matrix coordinates are additive contributions and are summed, never dropped.
 Sufficient source integer dtypes are retained; otherwise they promote directly
 to float32 when every completed value is exact, or float64 if needed. When the
 source dtype cannot safely accumulate contributions, reduction uses int64 or
-uint64; an unproved 64-bit partial-sum bound raises. If neither float preserves the
+uint64. If the global bound exceeds that range, each repeated coordinate is checked separately. If neither float preserves the
 completed values, including unaffected entries, promotion raises.
 An unsupported exact result raises before lossy conversion. Floating and boolean
 expression retain their existing numerical semantics. One UserWarning per
@@ -127,8 +127,7 @@ not warn. Mathematical values and source files are preserved.
 Owned CSR/CSC normalization uses the same integer reduction whether or not a
 duplicate-summary collector is supplied. The collector controls reporting
 only. Dense NumPy expression is also supported; the owned AnnData boundary
-rejects other sparse formats consistently. Generic sparse-format conversion
-remains a separate operation whose caller chooses sufficient arithmetic.
+rejects other sparse formats consistently. Generic sparse-format conversion applies the same lossless integer reduction.
 
 ## Expression and linkage
 
@@ -245,8 +244,7 @@ and nonnegative. Required numeric fields cannot be empty.
 Image scale factors and the display diameter must be positive JSON numbers.
 
 `X` contains decoded counts under the completed-count dtype policy above.
-Duplicate HDF5 entries for one barcode and feature fail. Standard int32 HDF5
-and MTX inputs already return float32 through the accepted Scanpy decoder. `obs` adds uint8 `in_tissue`,
+Duplicate HDF5 entries for one barcode and feature fail. Integer HDF5 and MTX counts retain source precision through dtype selection. `obs` adds uint8 `in_tissue`,
 uint64 `array_row` and `array_col`, textual `spot_id` and categorical `region` in that
 order. `spot_id` repeats the barcode and links to the generated spot circles
 indexed by barcode, using `region` as the region key. Float64
@@ -637,9 +635,9 @@ controls, and a sequence selects explicit feature types.
 
 Gene/control entries are transcript counts. Protein entries are rescaled
 per-cell mean stain intensities and may legitimately be fractional after one
-division. Official int32 HDF5 counts become float32 through Scanpy.
+division.
 Selected completed counts use exact float32/float64 storage before protein
-division; the accepted source decoder remains unchanged. Required textual `var` fields are `gene_ids`, `feature_types`;
+division. Required textual `var` fields are `gene_ids`, `feature_types`;
 modern source feature metadata are retained. Protein annotation adds nullable
 text `long_name`/`clone` and nullable uint64 `codeword_index`.
 When a protein panel enriches selected protein features, pre-existing source
@@ -708,12 +706,9 @@ categorical text with pandas' NaN string sentinel rather than `pd.NA`; category
 values, codes and ordering remain. Neither behavior changes the reader-return
 contract.
 
-Float32 cannot exactly represent every integer above 2²⁴. Scanpy's conversion
-may round large counts before the reader sees them; a later cast cannot recover
-them. Reader-owned completed integer counts use float32 through 2²⁴ and
-float64 through 2⁵³; larger counts raise. Uniform floating storage is never
-widened solely because of the maximum. This does not
-recover source information already rounded by Scanpy. HD nuclei accumulate in
+Integer 10x counts are decoded before selecting float32 through 2²⁴ or
+float64 through 2⁵³. Larger integer counts raise. Existing floating HDF5
+storage is validated at its source precision. HD nuclei accumulate in
 checked float32/f64 and adapt their output dtype after summation. Imported integer
 expression in Curio, DBiT, ISS, Steinbock and Stereo-seq analysis combines
 repeated matrix coordinates safely, retaining sufficient source dtype or
@@ -724,9 +719,6 @@ automatically reinterpreted as nonnegative molecule counts.
 
 Shared HDF5 validation rejects repeated barcode/feature entries and checks
 nonnegative/integral decoded counts before reader-owned feature filtering.
-No extra source scan is performed. MTX has a separate upstream limitation:
-the installed parser can truncate malformed integer-header tokens and reduce
-duplicates before returning. Header checks and finite/integer result checks
-cannot prove validity of every original MTX record. Valid integer records
-retain the documented count behavior; strict malformed-record rejection needs
-a separate shared parser decision.
+Matrix Market records must contain in-range one-based coordinates and
+nonnegative decimal integers. Repeated coordinates add exactly. Barcodes,
+feature IDs and symbols retain their source spelling, including leading zeros.

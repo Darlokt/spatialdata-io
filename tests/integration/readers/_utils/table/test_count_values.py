@@ -15,6 +15,7 @@ from spatialdata_io.readers._utils.table import (
     SparseDuplicateSummary,
     TableLinkage,
     finalize_count_arrays,
+    normalize_owned_anndata,
     parse_linked_table,
 )
 
@@ -56,12 +57,12 @@ class TestCountPersistence:
             var=pd.DataFrame(index=["gene1"]),
         )
         reports: list[SparseDuplicateSummary] = []
+        normalize_owned_anndata(table, duplicate_sums=reports)
         parse_linked_table(
             table,
             TableLinkage(("cells",), "region", "id"),
             context=ReaderErrorContext("test", "imported table"),
             expected_instance_ids={"cells": pd.Index([1])},
-            duplicate_sums=reports,
         )
         assert len(reports) == 1
         assert reports[0].combined_entries == 1

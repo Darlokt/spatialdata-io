@@ -176,9 +176,9 @@ class TestIss:
         "case",
         [
             ("uint64", [2**63, 2**63]),
-            ("int64", [2**63 - 2, 1]),
-            ("uint64", [2**64 - 2, 1]),
-            ("int64", [2**63 - 1, -(2**63 - 1)]),
+            ("int64", [2**63 - 1, 1]),
+            ("int64", [-(2**63), -1]),
+            ("int64", [2**63 - 1, 1, -1]),
         ],
     )
     def test_h5ad_duplicate_partial_sum_bounds_reject_without_mutating_source(

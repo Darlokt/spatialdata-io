@@ -12,7 +12,7 @@ from dask import delayed
 from scipy import sparse
 
 from spatialdata_io.readers._utils.table import as_csr_array
-from spatialdata_io.readers._utils.table._arrays import validate_compressed_sparse
+from spatialdata_io.readers._utils.table._arrays import _validate_compressed_sparse
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -86,8 +86,23 @@ class TestAsCsrArray:
         assert result.dtype == expected.dtype
         np.testing.assert_array_equal(result.toarray(), expected)
 
-    def test_reuses_canonical_csr_array(self) -> None:
-        source = sparse.csr_array([[1, 0], [0, 2]], dtype=np.int32)
+    def test_cached_canonicality_cannot_hide_unsigned_duplicate_sum(self) -> None:
+        source = sparse.csr_array(np.array([[200, 100]], dtype=np.uint8))
+        assert source.has_canonical_format
+        source.indices[1] = 0
+        result = as_csr_array(source)
+        assert result.nnz == 1
+        assert int(result.data[0]) == 300
+        np.testing.assert_array_equal(source.data, [200, 100])
+
+    def test_unrelated_extremum_and_duplicate_group(self) -> None:
+        maximum = np.iinfo(np.int64).max
+        source = sparse.csr_array((np.array([maximum, 1, 2]), [0, 1, 1], [0, 1, 3]), shape=(2, 2))
+        np.testing.assert_array_equal(as_csr_array(source).data, [maximum, 3])
+
+    @pytest.mark.parametrize("dtype", ["bool", "int8", "int32", "int64", "uint64", "float32", "float64"])
+    def test_reuses_canonical_csr_array(self, dtype: str) -> None:
+        source = sparse.csr_array([[1, 0], [0, 2]], dtype=dtype)
 
         assert as_csr_array(source) is source
 
@@ -146,6 +161,15 @@ class TestAsCsrArray:
         np.testing.assert_array_equal(source.indices, indices_before)
         np.testing.assert_array_equal(source.indptr, indptr_before)
         assert not source.has_canonical_format
+
+    def test_interleaved_coo_rows_promote_integer_duplicates_exactly(self) -> None:
+        source = sparse.coo_array((np.array([200, 4, 100], dtype=np.uint8), ([1, 0, 1], [0, 1, 0])), shape=(2, 2))
+        result = as_csr_array(source)
+        assert result.has_canonical_format
+        assert result.nnz == 2
+        assert result[0, 1] == 4
+        assert result[1, 0] == 300
+        np.testing.assert_array_equal(source.data, [200, 4, 100])
 
     def test_sums_coo_duplicates_without_mutating_input(self) -> None:
         source = sparse.coo_array(
@@ -328,6 +352,13 @@ class TestAsCsrArray:
 class TestValidateCompressedSparse:
     """Check borrowed compressed structure through SciPy without changing the source."""
 
+    @pytest.mark.parametrize("buffer", ["indices", "indptr"])
+    def test_rejects_fractional_structural_buffers(self, buffer: str) -> None:
+        source = sparse.csr_array([[1, 2]])
+        setattr(source, buffer, getattr(source, buffer).astype(np.float64) + 0.5)
+        with pytest.raises(ValueError, match="integer dtypes"):
+            _validate_compressed_sparse(source)
+
     @pytest.mark.parametrize("factory", [sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix])
     @pytest.mark.parametrize("dtype", [np.int16, np.float32])
     def test_accepts_borrowed_noncanonical_buffers_without_changes(
@@ -345,7 +376,8 @@ class TestValidateCompressedSparse:
         mocker.patch.object(source, "check_format", side_effect=AssertionError("mutating format check"))
         mocker.patch.object(source, "copy", side_effect=AssertionError("sparse copy"))
 
-        assert validate_compressed_sparse(source) is None
+        validated = _validate_compressed_sparse(source)
+        np.testing.assert_array_equal(validated.indices, source.indices)
 
         for name, value in before.items():
             assert source.__dict__[name] is value
@@ -359,7 +391,7 @@ class TestValidateCompressedSparse:
         factory: Callable[[np.ndarray], sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix],
         shape: tuple[int, int],
     ) -> None:
-        validate_compressed_sparse(factory(np.zeros(shape, dtype=np.int32)))
+        _validate_compressed_sparse(factory(np.zeros(shape, dtype=np.int32)))
 
     @pytest.mark.parametrize("dtype", ["int32", "int64", "uint32", ">i4", ">i8"])
     def test_accepts_integer_index_storage_without_casting(self, dtype: str) -> None:
@@ -368,7 +400,7 @@ class TestValidateCompressedSparse:
         source.indptr = source.indptr.astype(dtype)
         before = (source.indices, source.indptr)
 
-        validate_compressed_sparse(source)
+        _validate_compressed_sparse(source)
 
         assert source.indices is before[0]
         assert source.indptr is before[1]
@@ -379,7 +411,7 @@ class TestValidateCompressedSparse:
         source.indices = np.asarray([0, -1, 100], dtype=np.int32)
         before = (source.data, source.indices, source.indptr)
 
-        validate_compressed_sparse(source)
+        _validate_compressed_sparse(source)
 
         assert source.data is before[0]
         assert source.indices is before[1]
@@ -408,7 +440,7 @@ class TestValidateCompressedSparse:
         setattr(source, name, buffer)
 
         with pytest.raises(ValueError, match=match):
-            validate_compressed_sparse(source)
+            _validate_compressed_sparse(source)
 
         assert getattr(source, name) is buffer
         assert source.__dict__["_has_canonical_format"] is True
@@ -420,13 +452,24 @@ class TestValidateCompressedSparse:
         source.__dict__["indptr"] = np.asarray(indptr, dtype=np.int64)
 
         with pytest.raises(ValueError, match=r"non-?decreasing"):
-            validate_compressed_sparse(source)
+            _validate_compressed_sparse(source)
 
         np.testing.assert_array_equal(source.indptr, indptr)
 
+    @pytest.mark.parametrize("dtype", [np.int32, np.int64])
+    def test_nonmonotonic_pointers_at_signed_extrema(self, dtype: type[np.int32 | np.int64]) -> None:
+        source = sparse.csr_array(
+            (np.array([1], dtype=np.int8), np.array([0], dtype=dtype), np.array([0, 0, 0, 1], dtype=dtype)),
+            shape=(3, 1),
+        )
+        assert source.indptr.dtype == dtype
+        source.indptr[1:-1] = [np.iinfo(dtype).max, -2]
+        with pytest.raises(ValueError, match="nondecreasing"):
+            _validate_compressed_sparse(source)
+
     def test_rejects_one_dimensional_sparse_input(self) -> None:
         with pytest.raises(ValueError, match="two-dimensional"):
-            validate_compressed_sparse(sparse.csr_array([1, 0]))
+            _validate_compressed_sparse(sparse.csr_array([1, 0]))
 
     @pytest.mark.parametrize("factory", [sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix])
     def test_checks_minor_dimension_for_rectangular_storage(
@@ -434,18 +477,18 @@ class TestValidateCompressedSparse:
         factory: Callable[[np.ndarray], sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix],
     ) -> None:
         source = factory(np.asarray([[0, 0, 1], [0, 1, 0]], dtype=np.int16))
-        validate_compressed_sparse(source)
+        _validate_compressed_sparse(source)
         bound = 3 if isinstance(source, (sparse.csr_array, sparse.csr_matrix)) else 2
         source.indices[0] = bound
         with pytest.raises(ValueError, match=f"indices must be < {bound}"):
-            validate_compressed_sparse(source)
+            _validate_compressed_sparse(source)
 
     def test_accepts_all_unused_capacity_with_zero_terminal_pointer(self) -> None:
         source = sparse.csr_array((1, 0), dtype=np.int16)
         source.data = np.asarray([4], dtype=np.int16)
         source.indices = np.asarray([-1], dtype=np.int32)
 
-        validate_compressed_sparse(source)
+        _validate_compressed_sparse(source)
 
         assert source.data.size == 1
         np.testing.assert_array_equal(source.indptr, [0, 0])

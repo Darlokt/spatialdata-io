@@ -30,7 +30,9 @@ not bound the allocation of an oversized record.
 
 from __future__ import annotations
 
+import codecs
 import glob
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -46,7 +48,7 @@ from spatialdata_io.readers._utils.csv._arrow import csv_errors
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     from dask.delayed import Delayed
 
@@ -104,6 +106,17 @@ def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
         block = block[newline + 1 :] if newline >= 0 else b""
     if not block:
         return _empty(spec)
+    if b"\r" in block and re.search(rb"\r(?!\n)", block):
+        raise ReaderFormatError(
+            context=spec.context,
+            path=spec.path,
+            found="a bare carriage return in CSV records",
+            expected="LF or CRLF line endings",
+        )
+    # Arrow treats the first bytes of every input as a possible BOM. An
+    # ignored empty line keeps a literal U+FEFF in the first field intact.
+    if block.startswith(codecs.BOM_UTF8):
+        block = b"\n" + block
     if not _paired_quotes(block):
         line = next(line for line in block.split(b"\n") if line.count(b'"') % 2)
         raise ReaderFormatError(
@@ -132,9 +145,8 @@ def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error ori
     /,
     *,
     header: Sequence[str],
-    columns: Sequence[str],
+    schema: pa.Schema,
     context: ReaderErrorContext,
-    column_types: Mapping[str, pa.DataType] | None = None,
     block_bytes: int = CSV_BLOCK_BYTES,
 ) -> dd.DataFrame:
     """Return projected CSV columns as lazy partitions of newline-aligned blocks.
@@ -145,13 +157,11 @@ def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error ori
         Validated uncompressed CSV file whose first physical line is ``header``.
     header
         All header names in source order, as validated by the reader.
-    columns
-        Header names to return, in output order.
+    schema
+        Projected header names and their Arrow types in output order.
     context
         Reader and artifact identity for malformed records, raised when a
         partition is computed.
-    column_types
-        Arrow types of some returned columns; others are strings.
     block_bytes
         Target block size in bytes. Like the other arguments it is trusted: a
         positive reader constant, not a public option. Larger blocks give
@@ -170,11 +180,10 @@ def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error ori
     -----
     Construction lists the file size only; no record is read. Every task opens
     its byte range by path and closes it. Computing a partition raises
-    :class:`ReaderFormatError` for a line with an odd number of double quotes
-    and for malformed records.
+    :class:`ReaderFormatError` for unpaired quotes, bare carriage returns or
+    malformed records. LF and CRLF delimit physical lines. Only a BOM in the
+    file header is an encoding marker.
     """
-    types = column_types or {}
-    schema = pa.schema([(name, types.get(name, pa.string())) for name in columns])
     spec = _BlockSpec(path, tuple(header), schema, context)
     # read_bytes has no typed signature; this is its documented result without
     # paths. Escaping keeps one literal path even with glob metacharacters.

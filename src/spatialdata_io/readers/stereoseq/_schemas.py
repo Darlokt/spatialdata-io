@@ -343,8 +343,7 @@ def validate_analysis_table(table: AnnData, path: ArtifactFile) -> AnalysisSchem
     values = matrix if isinstance(matrix, np.ndarray) else matrix.data
     if values.dtype.kind not in "iuf":
         raise schema_error(path, "X", found="nonnumerical values", expected="numerical analysis expression")
-    # Expression stays untouched until final linkage, which validates sparse
-    # storage and finiteness of X and every declared expression layer.
+    # The reader validates sparse storage and finiteness during final expression normalization.
 
     coordinates = _analysis_coordinates(table, obs, path)
     bin_type, bin_size, resolution = _analysis_metadata(table, path)

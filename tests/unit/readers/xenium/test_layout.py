@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from spatialdata_io.readers._utils.counts import MtxFiles
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._layout import (
@@ -16,7 +17,6 @@ from spatialdata_io.readers.xenium._layout import (
     H5Counts,
     MorphologyImage,
     MtxArchive,
-    MtxDirectory,
     Selection,
     discover_layout,
 )
@@ -174,7 +174,7 @@ class TestDiscoverLayout:
 
         assert isinstance(discover_layout(tmp_path, selection).counts, H5Counts)
         (tmp_path / "cell_feature_matrix.h5").unlink()
-        assert isinstance(discover_layout(tmp_path, selection).counts, MtxDirectory)
+        assert isinstance(discover_layout(tmp_path, selection).counts, MtxFiles)
         (tmp_path / "cell_feature_matrix" / "matrix.mtx.gz").unlink()
         with pytest.raises(FileNotFoundError, match=r"matrix\.mtx\.gz"):
             discover_layout(tmp_path, selection)

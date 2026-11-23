@@ -13,19 +13,17 @@ The table gains the grid fields as ``obs`` columns, the spot centre as
 ``obsm["spatial_pixels"]`` in ``x, y`` order (``pxl_col_in_fullres``,
 ``pxl_row_in_fullres``), the barcode again as the instance key ``spot_id``,
 and ``region``. ``uns["spatial"][<dataset_id>]`` keeps the scale-factor JSON
-and the HDF5 identity text as Scanpy's Visium reader stores them, without
-images.
+and the optional HDF5 chemistry description and software version. Images are
+separate SpatialData elements.
 
 Positions are parsed with their declared Arrow types, projected to the six fields, with
 quoted newlines allowed. Arrow checks every record's field count but not
 strict quoting, so a malformed quote after the first record (which discovery
 parses strictly) may be read as a different value.
 
-Counts are decoded by the shared 10x readers (Scanpy) with every feature type
-and the source feature order. An HDF5 matrix that stores a (barcode, feature)
-pair twice is rejected; Scanpy sums repeated MatrixMarket records. Counts are
-float32 when Scanpy decodes them as float32 or every count is at most 2**24,
-otherwise float64.
+The shared 10x readers preserve every feature type in source order. Repeated
+barcode/feature coordinates raise for HDF5 and add for Matrix Market. Integer
+counts use float32 through 2**24 and float64 through 2**53.
 """
 
 from __future__ import annotations
@@ -116,13 +114,7 @@ def _read_counts(layout: VisiumLayout, *, make_var_names_unique: bool) -> AnnDat
             adata.var_names_make_unique()
         return adata
 
-    return read_10x_mtx(
-        counts.path,
-        context=context,
-        make_unique=make_var_names_unique,
-        prefix=counts.prefix,
-        compressed=counts.compressed,
-    )
+    return read_10x_mtx(counts.files, context=context, make_unique=make_var_names_unique)
 
 
 def _spatial_metadata(layout: VisiumLayout) -> dict[str, str]:

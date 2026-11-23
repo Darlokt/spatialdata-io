@@ -34,7 +34,7 @@ V1_Adult_Mouse_Brain/
 Discovery looks only at the dataset root and `spatial/`:
 
 - The standard HDF5 matrix wins over the standard MEX directory, which wins over one prefixed source. A prefixed HDF5 matrix beside a prefixed MEX directory is ambiguous and raises.
-- A MEX directory must hold exactly one complete `[<prefix>]matrix.mtx`, `barcodes.tsv`, `features.tsv` triplet, all gzip-compressed or all plain. A matching uncompressed `[<prefix>]genes.tsv` raises, because it would switch the 10x MEX reader to its legacy feature format.
+- A MEX directory must hold exactly one complete `[<prefix>]matrix.mtx`, `barcodes.tsv`, `features.tsv` triplet, all gzip-compressed or all plain. A matching uncompressed `[<prefix>]genes.tsv` raises, because it introduces an ambiguous feature annotation source.
 - Other files in `spatial/` (QC images, CytAssist images, enrichment tables) are ignored.
 - The full-resolution tissue image is an input of Space Ranger, not part of `outs/`; pass it as `fullres_image_file`.
 - `counts_source`, `positions_file`, `scale_factors_file` and `fullres_image_file` replace the discovered artifacts. Relative paths resolve against the dataset root; absolute paths may point elsewhere. `counts_source` is read as HDF5 when its suffix is `.h5` or `.hdf5`, otherwise as a MEX directory, for example `counts_source="raw_feature_bc_matrix.h5"` to keep spots outside the tissue.
@@ -77,11 +77,11 @@ The circle radius is the display size Space Ranger draws, not a measured capture
 
 The table has one row per count-matrix barcode in matrix order, including spots outside the tissue when raw counts are read, and every feature type (gene expression, antibody capture, ...) in matrix order:
 
-- `X` is a canonical finite CSR sparse array under the [completed-count dtype policy](table_contracts.md#completed-raw-counts), normally float32 from Scanpy. Duplicate HDF5 entries for one barcode and feature fail; Scanpy sums repeated MatrixMarket records before validation.
+- `X` is a canonical finite CSR sparse array under the [completed-count dtype policy](table_contracts.md#completed-raw-counts). Integer counts retain their source precision through conversion. Duplicate HDF5 entries for one barcode and feature fail. Repeated Matrix Market records add exactly.
 - `var` holds `gene_ids`, `feature_types` and, when present, `genome`; `var_names` are the feature names, made unique with `-1`, `-2`, ... unless `make_var_names_unique=False`.
 - `obs` holds uint8 `in_tissue` and uint64 `array_row`/`array_col`, the barcode again as `spot_id` (string) and categorical `region` (`dataset_id`); `spot_id` and `region` link the table to the circles.
 - `obsm["spatial_pixels"]` holds float64 spot centres `x, y` in full-resolution pixels, declared in `uns["spatialdata_io_positions"]`. There is no physical `obsm["spatial"]`.
-- `uns["spatial"][dataset_id]` holds `scalefactors` and `metadata` (`chemistry_description`, `software_version` of an HDF5 matrix) as Scanpy stores them, without images.
+- `uns["spatial"][dataset_id]` holds `scalefactors` and `metadata` (the HDF5 `chemistry_description` and `software_version` attributes when present).
 
 See also the [table contract](table_contracts.md#visium).
 

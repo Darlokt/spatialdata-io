@@ -9,7 +9,8 @@ import pytest
 
 import spatialdata_io
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile
+from spatialdata_io.readers._utils.counts import MtxFiles
+from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium import visium
 from spatialdata_io.readers.visium._layout import H5Counts, MtxCounts
 from spatialdata_io.readers.visium._metadata import CountMetadata
@@ -127,7 +128,15 @@ class TestDerivedDatasetId:
     @pytest.mark.parametrize("metadata", [CountMetadata(None, None, None), None])
     def test_falls_back_to_the_filename_prefix(self, tmp_path: Path, metadata: CountMetadata | None) -> None:
         counts = (
-            MtxCounts(ArtifactDirectory(tmp_path), None, compressed=True, filename_prefix="prefix")
+            MtxCounts(
+                MtxFiles(
+                    ArtifactFile(tmp_path / "matrix.mtx"),
+                    ArtifactFile(tmp_path / "barcodes.tsv"),
+                    ArtifactFile(tmp_path / "features.tsv"),
+                    compressed=False,
+                ),
+                filename_prefix="prefix",
+            )
             if metadata is None
             else H5Counts(ArtifactFile(tmp_path / "x.h5"), "prefix", metadata)
         )
@@ -153,7 +162,15 @@ class TestDerivedDatasetId:
         assert len(caught) == 1
 
     def test_requires_dataset_id_without_a_source_name(self, tmp_path: Path) -> None:
-        counts = MtxCounts(ArtifactDirectory(tmp_path), None, compressed=True, filename_prefix=None)
+        counts = MtxCounts(
+            MtxFiles(
+                ArtifactFile(tmp_path / "matrix.mtx"),
+                ArtifactFile(tmp_path / "barcodes.tsv"),
+                ArtifactFile(tmp_path / "features.tsv"),
+                compressed=False,
+            ),
+            filename_prefix=None,
+        )
 
         with pytest.raises(ValueError, match="dataset_id is required"):
             _derived_dataset_id(counts)

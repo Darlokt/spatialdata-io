@@ -17,8 +17,7 @@ from spatialdata_io.readers._utils.paths import (
 )
 
 if TYPE_CHECKING:
-    import scanpy as sc
-
+    from spatialdata_io.readers._utils.counts import read_10x_h5
     from spatialdata_io.readers._utils.image import inspect_tiff, read_jpeg, read_png
     from spatialdata_io.readers._utils.paths import ArtifactDirectory, ArtifactFile, DatasetRoot, PathPolicy
 
@@ -28,9 +27,9 @@ if TYPE_CHECKING:
         root: DatasetRoot,
     ) -> None:
         """Prove that validated paths compose with current ecosystem boundaries."""
-        _ = sc.read_10x_h5(file_path)
-        _ = sc.read_10x_mtx(directory)
-        _ = sc.read_10x_mtx(root.path)
+        _ = read_10x_h5(file_path, context=_CONTEXT)
+        _ = directory.iterdir()
+        _ = root.path.iterdir()
         _ = inspect_tiff(file_path, context=_RASTER_CONTEXT)
         _ = read_png(file_path, context=_RASTER_CONTEXT)
         _ = read_jpeg(file_path, context=_RASTER_CONTEXT)

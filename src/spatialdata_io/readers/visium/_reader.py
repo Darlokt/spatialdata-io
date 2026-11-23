@@ -160,7 +160,7 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
             - ``X``: canonical finite CSR sparse array of counts, float32
               through 2**24, else float64 through 2**53; counts already
               decoded to float32 retain that dtype above 2**24. Duplicate
-              HDF5 entries fail; Scanpy sums repeated MatrixMarket records.
+              HDF5 entries fail. Repeated Matrix Market records add exactly.
             - ``var``: ``gene_ids``, ``feature_types`` and, when present,
               ``genome``; ``var_names`` are the feature names.
             - ``obs``: uint8 ``in_tissue`` and uint64 ``array_row``/``array_col``;
@@ -173,8 +173,7 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
               ``obsm["spatial"]``.
             - ``uns["spatial"][dataset_id]``: ``scalefactors`` (the complete
               JSON object) and ``metadata`` (HDF5 ``chemistry_description``
-              and ``software_version`` when present), as Scanpy stores them,
-              without images.
+              and ``software_version`` when present).
 
         ``shapes[dataset_id]``
             One circle per table row, indexed by barcode (``spot_id``), centred

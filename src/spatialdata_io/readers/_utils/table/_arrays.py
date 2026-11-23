@@ -7,6 +7,8 @@ from typing import Any, Protocol, cast
 import numpy as np
 from scipy import sparse
 
+from spatialdata_io.readers._utils.table._duplicates import reduce_duplicates
+
 _SUPPORTED_VALUE_DTYPES = frozenset(
     np.dtype(dtype)
     for dtype in (
@@ -76,36 +78,10 @@ def _validate_two_dimensions(data: _ShapedArray) -> None:
         raise ValueError(message)
 
 
-def _canonicalize_csr(data: sparse.csr_array, *, owns_data: bool) -> sparse.csr_array:
-    """Return ``data`` with duplicates summed and indices sorted.
-
-    The input is mutated only when ``owns_data`` is true; otherwise a noncanonical input is copied first.
-    """
-    if data.has_canonical_format:
-        return data
-    result = data if owns_data else data.copy()
-    result.sum_duplicates()
-    return result
-
-
-def _compressed_to_csr(
-    data: sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix, *, owns_data: bool
-) -> sparse.csr_array:
-    """Canonicalize validated supported compressed storage and check finite results."""
-    if isinstance(data, sparse.csr_array):
-        result = _canonicalize_csr(data, owns_data=owns_data)
-    else:
-        copy = isinstance(data, sparse.csr_matrix) and not owns_data and not data.has_canonical_format
-        result = sparse.csr_array(data, copy=copy)
-        result = _canonicalize_csr(result, owns_data=True)
-    _validate_finite_values(result.data, parameter="data")
-    return result
-
-
-def validate_compressed_sparse(
+def _validate_compressed_sparse(
     data: sparse.csr_array | sparse.csc_array | sparse.csr_matrix | sparse.csc_matrix,
     /,
-) -> None:
+) -> sparse.csr_array | sparse.csc_array:
     """Validate borrowed two-dimensional CSR or CSC structure without mutation.
 
     Parameters
@@ -121,21 +97,68 @@ def validate_compressed_sparse(
 
     Notes
     -----
-    SciPy's ``check_format(full_check=True)`` runs on a fresh wrapper of the
-    borrowed buffers, so its pruning and index-dtype normalization never
-    change ``data`` and cached sorting or canonicality flags are not trusted.
+    The SciPy constructor checks the buffer shapes, endpoints and capacities
+    on a fresh wrapper. Compare adjacent pointers and check the active indices
+    before any numerical operation. The caller retains its original buffers.
     Unsorted indices and duplicates are valid. Data and index capacity beyond
     the terminal pointer is permitted and not inspected.
     """
     _validate_two_dimensions(data)
+    if data.indices.dtype.kind not in "iu" or data.indptr.dtype.kind not in "iu":
+        message = "Compressed sparse indices and pointers must have integer dtypes."
+        raise ValueError(message)
     wrapper = sparse.csr_array if data.format == "csr" else sparse.csc_array
     view = wrapper((data.data, data.indices, data.indptr), shape=data.shape, copy=False)
-    view.check_format(full_check=True)
-    # SciPy skips its pointer-order check without active entries; a terminal
-    # pointer of at most zero is then only well formed when every pointer is zero.
-    if int(view.indptr[-1]) <= 0 and view.indptr.any():
+    # Comparing adjacent pointers directly works at signed integer extrema and
+    # also detects invalid intervals when the terminal pointer is zero.
+    if np.any(view.indptr[1:] < view.indptr[:-1]):
         message = "indptr must be nondecreasing from zero."
         raise ValueError(message)
+    minor_size = view.shape[1] if data.format == "csr" else view.shape[0]
+    if view.indices.size:
+        if view.indices.min() < 0:
+            message = "indices must be >= 0"
+            raise ValueError(message)
+        if view.indices.max() >= minor_size:
+            message = f"indices must be < {minor_size}"
+            raise ValueError(message)
+    return view
+
+
+def _sparse_expression(data: sparse.sparray | sparse.spmatrix) -> sparse.csr_array:
+    """Validate borrowed storage before any conversion can combine coordinates."""
+    # scipy-stubs omits shape, ndim and dtype from the abstract sparse bases.
+    metadata = cast("_ShapedArray", data)
+    _validate_value_dtype(metadata.dtype, parameter="data")
+    if isinstance(data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
+        compressed = _validate_compressed_sparse(data)
+        if compressed.has_canonical_format:
+            if (
+                isinstance(data, sparse.csr_array)
+                and data.has_canonical_format
+                and data.data.size == compressed.data.size
+                and data.indices.dtype == compressed.indices.dtype
+                and data.indptr.dtype == compressed.indptr.dtype
+            ):
+                return data
+            return sparse.csr_array(compressed)
+    else:
+        _validate_two_dimensions(metadata)
+        # Coordinate-form construction of CSR would sum duplicates in the input dtype.
+        # Group by row without arithmetic, preserving entries for the exact reducer.
+        # scipy-stubs omits the constructor overload for the abstract sparse bases.
+        coo = sparse.coo_array(data)  # pyrefly: ignore[no-matching-overload]
+        values, indices = coo.data, coo.col
+        if np.any(coo.row[1:] < coo.row[:-1]):
+            order = np.argsort(coo.row, kind="stable")
+            values, indices = values[order], indices[order]
+        pointers = np.empty(coo.shape[0] + 1, dtype=np.intp)
+        pointers[0] = 0
+        np.cumsum(np.bincount(coo.row, minlength=coo.shape[0]), out=pointers[1:])
+        compressed = sparse.csr_array((values, indices, pointers), shape=coo.shape)
+        if compressed.has_canonical_format:
+            return compressed
+    return reduce_duplicates(compressed)
 
 
 def as_csr_array(
@@ -148,15 +171,15 @@ def as_csr_array(
     sparse array or sparse matrix. It deliberately rejects generic array-like,
     masked, backed, pandas, and lazy inputs so conversion cannot trigger hidden
     computation. SciPy-supported boolean, integer, and real floating dtypes are
-    preserved; float16, complex, object, structured, string, and non-finite
-    values are rejected.
+    preserved when duplicate sums fit. Integer overflow requires exact promotion.
+    Float16, complex, object, structured, string, and non-finite values are rejected.
 
     A canonical :class:`scipy.sparse.csr_array` is returned unchanged. A
     canonical CSR matrix can be wrapped without copying its storage. Other
     formats allocate CSR storage as required, and noncanonical CSR inputs are
     copied before their duplicate or index structures are changed. The return
-    value can therefore share buffers with a canonical CSR input; callers that
-    require independent mutable ownership must copy explicitly.
+    value can share buffers with canonical CSR or row-ordered COO input.
+    Callers requiring independent mutable ownership must copy explicitly.
 
     Parameters
     ----------
@@ -167,7 +190,7 @@ def as_csr_array(
     Returns
     -------
     scipy.sparse.csr_array
-        Canonical CSR sparse-array data with the input shape and dtype.
+        Canonical CSR sparse-array data with the input shape and a lossless dtype for integer sums.
 
     Raises
     ------
@@ -184,22 +207,7 @@ def as_csr_array(
     stored zeros follow SciPy's canonical CSR semantics and are not removed.
     """
     if sparse.issparse(data):
-        # scipy-stubs does not narrow issparse() to its concrete base classes
-        # and omits metadata attributes from the sparray/spmatrix bases. Every
-        # object accepted by scipy.sparse.issparse has this runtime contract.
-        sparse_data = cast("sparse.sparray | sparse.spmatrix", data)
-        sparse_metadata = cast("_ShapedArray", sparse_data)
-        if isinstance(sparse_data, (sparse.csr_array, sparse.csc_array, sparse.csr_matrix, sparse.csc_matrix)):
-            _validate_value_dtype(sparse_metadata.dtype, parameter="data")
-            validate_compressed_sparse(sparse_data)
-            return _compressed_to_csr(sparse_data, owns_data=False)
-        _validate_two_dimensions(sparse_metadata)
-        _validate_value_dtype(sparse_metadata.dtype, parameter="data")
-
-        # scipy-stubs does not model the public sparse base classes as
-        # accepted by csr_array, although SciPy supports this conversion.
-        result = sparse.csr_array(sparse_data, copy=False)  # pyrefly: ignore[no-matching-overload]
-        result = _canonicalize_csr(result, owns_data=True)
+        result = _sparse_expression(cast("sparse.sparray | sparse.spmatrix", data))
     elif type(data) is np.ndarray:
         _validate_two_dimensions(data)
         _validate_value_dtype(data.dtype, parameter="data")

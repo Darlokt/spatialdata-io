@@ -334,7 +334,7 @@ class TestReadSquareAggregation:
             ([2**53 - 1, 1], None),
             ([2**32, 1], None),
             ([2**53, 1], r"above 2\*\*53"),
-            ([2**64 - 4096, 2048], "lossless"),
+            ([2**64 - 4096, 2048], r"above 2\*\*53"),
             ([2**64 - 1, 1], "lossless"),
             ([2**64 - 1, 2**64 - 1], "lossless"),
         ],
@@ -403,6 +403,7 @@ class TestAggregateCounts:
             ([2**24, 1, 1], "u4", "float64"),
             ([2**53, 1, 1], "u8", "uint64"),
             ([2**53 + 1, 1], "u8", "uint64"),
+            ([2**64 - 4096, 2048], "u8", "uint64"),
         ],
     )
     def test_exact_sums_and_source_ownership(
@@ -420,7 +421,7 @@ class TestAggregateCounts:
         assert_array_equal(rows, np.zeros(len(source), dtype=np.int64))
         assert_array_equal(indptr, [0, len(source)])
 
-    @pytest.mark.parametrize("values", [[2**64 - 4096, 2048], [2**64 - 1, 1], [2**64 - 1, 2**64 - 1]])
+    @pytest.mark.parametrize("values", [[2**64 - 1, 1], [2**64 - 1, 2**64 - 1]])
     def test_rejects_duplicate_sums_outside_uint64_arithmetic_bound(self, tmp_path: Path, values: list[int]) -> None:
         source = np.array(values, dtype=np.uint64)
         rows = np.zeros(2, dtype=np.int64)

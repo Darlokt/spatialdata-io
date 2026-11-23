@@ -18,11 +18,10 @@ Paths have three origins:
   except that ``~`` is expanded first.
 - Absolute caller paths may point anywhere under both policies.
 
-Caller paths keep the final name the caller gave under both policies, and
-every path of a relaxed root keeps its own final name: the validator returns
-the resolved parent directory joined with that name. Names and suffixes that
-identify samples or formats therefore come from the dataset or the caller,
-never from a hash-named target.
+Caller paths and relaxed dataset paths keep their final name. The validator
+joins that name to the resolved parent. If that would put a relaxed dataset
+path outside the root, it keeps the original spelling under the root so
+readers can continue resolving related paths.
 """
 
 from __future__ import annotations
@@ -172,6 +171,20 @@ def _contained_lexical(root: DatasetRoot, supplied: Path, *, context: ReaderErro
     return lexical
 
 
+def _require_contained_target(root: DatasetRoot, lexical: Path, target: Path, *, context: ReaderErrorContext) -> None:
+    """Require a resolved dataset target to stay inside a strict root."""
+    if root.path_policy == "strict" and not target.is_relative_to(root.path):
+        raise ReaderFormatError(
+            context=context,
+            found=f"a path resolving outside the dataset root to {str(target)!r}",
+            expected=(
+                f"a path contained by dataset root {str(root.path)!r} "
+                "(pass path_policy='relaxed' to accept symlinks to targets stored elsewhere)"
+            ),
+            path=lexical,
+        )
+
+
 def _require_origin_kind(
     root: DatasetRoot,
     path: str | Path,
@@ -195,22 +208,16 @@ def _require_origin_kind(
     )
 
     target = _resolve_existing(lexical, context=context, expected=_EXPECTED_KIND[kind])
-    relaxed = root.path_policy == "relaxed"
-    if must_be_contained and not relaxed and not target.is_relative_to(root.path):
-        raise ReaderFormatError(
-            context=context,
-            found=f"a path resolving outside the dataset root to {str(target)!r}",
-            expected=(
-                f"a path contained by dataset root {str(root.path)!r} "
-                "(pass path_policy='relaxed' to accept symlinks to targets stored elsewhere)"
-            ),
-            path=lexical,
-        )
+    if must_be_contained:
+        _require_contained_target(root, lexical, target, context=context)
     _require_resolved_kind(lexical, target, context=context, kind=kind)
-    if origin == "metadata" and not relaxed:
+    if origin == "metadata" and root.path_policy == "strict":
         return target
     # Annex and DVC targets are named by content hashes: keep the given name and suffix.
     parent = _resolve_existing(lexical.parent, context=context, expected="an existing parent directory")
+    if origin == "metadata" and not parent.is_relative_to(root.path):
+        # Related paths must still be expressible under the dataset root.
+        return lexical
     return parent / lexical.name
 
 
@@ -223,7 +230,8 @@ def _optional_metadata_kind(
 ) -> Path | None:
     """Return a validated metadata path, or ``None`` when only its final component is absent.
 
-    The parent directory must exist. A dangling symlink is not absent and raises.
+    The parent directory must exist and satisfy the path policy. A dangling
+    symlink is not absent and raises.
     """
     lexical = _contained_lexical(root, Path(path), context=context)
     try:
@@ -235,6 +243,7 @@ def _optional_metadata_kind(
             context=context,
             expected="an existing parent directory for an optional artifact",
         )
+        _require_contained_target(root, parent, parent_target, context=context)
         _require_resolved_kind(parent, parent_target, context=context, kind="directory")
         return None
     except OSError as error:
@@ -492,8 +501,8 @@ def require_metadata_file(
     -------
     ArtifactFile
         For a strict root, the canonical target inside ``root``. For a relaxed
-        root, the canonical parent directory joined with the artifact's own
-        name, whose symlink target may lie anywhere.
+        root, the resolved parent joined with the artifact's own name, or the
+        original path under ``root`` if the parent resolves outside it.
 
     Raises
     ------
@@ -525,7 +534,8 @@ def optional_metadata_file(
         Dataset root returned by :func:`normalize_dataset_root`.
     path
         Path accepted by :func:`require_metadata_file`. Only the final path
-        component is optional; its parent must be an existing directory.
+        component is optional; its parent must be an existing directory that
+        satisfies the root's path policy.
     context
         Reader context included in failures.
 
@@ -545,7 +555,8 @@ def optional_metadata_file(
     IsADirectoryError
         If the leaf resolves to a directory.
     ReaderFormatError
-        Under the conditions of :func:`require_metadata_file`.
+        Under the conditions of :func:`require_metadata_file`, or if an
+        absent leaf's parent resolves outside a strict root.
     OSError
         If another filesystem operation fails.
     """
@@ -577,9 +588,9 @@ def require_metadata_directory(
     -------
     ArtifactDirectory
         For a strict root, the canonical target inside ``root``. For a relaxed
-        root, the canonical parent directory joined with the directory's own
-        name. Paths joined to the result stay lexically inside ``root`` in both
-        modes. Its contents are not scanned.
+        root, the resolved parent joined with the directory's own name, or
+        the original path under ``root`` if the parent resolves outside it.
+        Its contents are not scanned.
 
     Raises
     ------
@@ -611,7 +622,8 @@ def optional_metadata_directory(
         Dataset root returned by :func:`normalize_dataset_root`.
     path
         Path accepted by :func:`require_metadata_directory`. Only the final
-        path component is optional; its parent must be an existing directory.
+        path component is optional; its parent must be an existing directory
+        that satisfies the root's path policy.
     context
         Reader context included in failures.
 
@@ -629,7 +641,8 @@ def optional_metadata_directory(
     NotADirectoryError
         If the leaf or its parent resolves to a regular file.
     ReaderFormatError
-        Under the conditions of :func:`require_metadata_directory`.
+        Under the conditions of :func:`require_metadata_directory`, or if an
+        absent leaf's parent resolves outside a strict root.
     OSError
         If another filesystem operation fails.
     """

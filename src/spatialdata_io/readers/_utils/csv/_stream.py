@@ -67,7 +67,9 @@ class _GzipStream(io.RawIOBase):
 
 
 @contextmanager
-def open_csv_stream(path: Path, /, *, context: ReaderErrorContext, compressed: bool) -> Generator[io.BufferedIOBase]:
+def open_csv_stream(
+    path: Path, /, *, context: ReaderErrorContext, compressed: bool
+) -> Generator[io.BufferedReader | io.BufferedReader[_GzipStream]]:
     """Open a binary CSV stream that closes on success or failure.
 
     The reader selects compression during artifact interpretation. Gzip input

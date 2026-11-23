@@ -29,6 +29,18 @@ def _file(tmp_path: Path, payload: bytes) -> ArtifactFile:
 
 
 class TestCsvHeader:
+    def test_malformed_cr_only_file_has_bounded_header_read(self, tmp_path: Path) -> None:
+        with io.BytesIO(b"a,b\r" + b"1,2\r" * 1_000_000) as source:
+            with pytest.raises(ReaderFormatError, match="LF or CRLF"):
+                csv_header(tmp_path / "table.csv", source=source, context=_CONTEXT)
+            assert source.tell() <= 64 * 1024 + 1
+
+    def test_crlf_across_header_read_boundary(self, tmp_path: Path) -> None:
+        name = "a" * (64 * 1024 - 1)
+        with io.BytesIO(name.encode() + b"\r\nvalue\r\n") as source:
+            assert csv_header(tmp_path / "table.csv", source=source, context=_CONTEXT) == (name,)
+            assert source.readline() == b"value\r\n"
+
     @pytest.mark.parametrize(
         ("payload", "expected"),
         [
