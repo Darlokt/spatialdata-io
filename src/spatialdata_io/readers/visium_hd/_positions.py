@@ -170,7 +170,9 @@ def _verified_batches(
             )
 
         indices = rows.astype(np.int64) * shape[1] + cols
-        if np.any(seen[indices]) or np.unique(indices).size != indices.size:
+        # Strict row-major order proves uniqueness within this batch only.
+        increasing = np.all(indices[1:] > indices[:-1])
+        if np.any(seen[indices]) or (not increasing and np.unique(indices).size != indices.size):
             raise ReaderFormatError(
                 context=context, path=positions, found="duplicate grid indices", expected="one row per grid site"
             )

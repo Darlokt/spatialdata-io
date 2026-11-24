@@ -125,13 +125,16 @@ class TestIterPositionBatches:
         with pytest.raises(ReaderFormatError):
             list(iter_position_batches(path, (17, 17), version=VERSION))
 
-    def test_projected_batches_close_on_grid_failure(self, tmp_path: Path, mocker: MockerFixture) -> None:
+    @pytest.mark.parametrize(("row", "repeated_site"), [(37, 36), (40, 0)], ids=["ordered", "unordered"])
+    def test_projected_batches_close_on_grid_failure(
+        self, tmp_path: Path, mocker: MockerFixture, row: int, repeated_site: int
+    ) -> None:
         write_bundle(tmp_path, sizes=(2,), segmented=False)
         path = _positions(tmp_path)
         table = pq.read_table(path)
-        # Duplicate lies in a later decoded batch, exercising cross-batch coverage.
+        # The second batch repeats a site from the first, even in the ordered case.
         indices = list(range(289))
-        indices[40] = 0
+        indices[row] = repeated_site
         pq.write_table(table.take(pa.array(indices)), path)
         source = pq.ParquetFile(path)
         mocker.patch("spatialdata_io.readers.visium_hd._positions.POSITION_BATCH_SIZE", 37)

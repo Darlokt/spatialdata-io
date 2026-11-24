@@ -32,8 +32,7 @@ and several spatial tiles. Assert axes, dtype, channel order and the transform
 before computing a selection. Count executed pixel tasks during construction,
 then compare one off-origin crop with independently known pixels. Test the
 full array on a small fixture to catch swapped axes that a single crop can
-miss. For a published example that measures both selections, see the
-[generic TIFF benchmarks](performance.md).
+miss.
 
 For polygons, include a valid object and an invalid object with distinct
 source IDs. Exercise the three policy settings and check the surviving IDs in

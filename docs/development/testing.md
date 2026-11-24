@@ -59,8 +59,7 @@ time, peak memory, and task count or bytes read where available.
 
 Use the [test dataset guide](datasets.md) to find a registered fixture, install
 it locally, and run a data-backed test. The guide also covers registering a new
-source and verifying the layout from a clean download. For end-to-end timing
-and memory examples, see [Reader benchmarks](performance.md).
+source and verifying the layout from a clean download.
 
 ## Run the broader checks
 

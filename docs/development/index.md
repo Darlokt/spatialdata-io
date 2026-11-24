@@ -36,15 +36,11 @@ tables
 ## Check your change
 
 [Download or register test data](datasets.md) for a public workflow, then use
-[the testing guide](testing.md) to check the format contract. The
-[reader benchmarks](performance.md) show how to compare construction,
-partial reads and Zarr writes on identical inputs.
+[the testing guide](testing.md) to check the format contract.
 
 ```{toctree}
 :hidden:
 
 datasets
 testing
-performance
-performance-diagnostics
 ```

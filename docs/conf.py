@@ -171,6 +171,10 @@ html_theme_options = {
     "use_repository_button": True,
     "path_to_docs": "docs/",
     "navigation_with_keys": False,
+    "logo": {
+        "image_light": "_static/img/spatialdata_icon.svg",
+        "image_dark": "_static/img/spatialdata_icon.svg",
+    },
 }
 
 pygments_style = "default"

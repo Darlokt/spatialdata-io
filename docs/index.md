@@ -1,6 +1,9 @@
 # spatialdata-io
 
-![SpatialData](_static/img/spatialdata_horizontal.svg)
+```{image} _static/img/spatialdata_horizontal.svg
+:alt: SpatialData
+:class: dark-light
+```
 
 Load spatial omics data into a SpatialData object or write it to a Zarr store.
 Choose the reader for your instrument or pipeline to keep images, segmentations,

@@ -38,24 +38,33 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
   using the same checksum-verified manifest. Unit and integration tests run
   offline when optional data are excluded. Contributors can register a public dataset,
   download it and run its integration test locally. [Test datasets](docs/development/datasets.md)
-- Published wall time and peak process memory for sixteen reader workflows compared
-  with upstream main, including Zarr writes and partial TIFF reads. [Reader benchmarks](docs/development/performance.md)
 
 ### Changed
 
+- **Visium HD calibration.** Visium HD uses the manufactured 2 µm grid to place
+  bins, segmented cells and registered images in slide micrometres. It reports
+  the maximum and RMS registration error for the microscope image’s affine
+  transform. Calibration is faster on position files stored in grid order.
+  Shuffled rows remain supported, and duplicate sites are checked across the
+  entire grid. [Visium HD coordinates](docs/readers/visium_hd.md#physical-coordinates)
 - **Raster options.** Use `chunks` and `scale_factors` to control lazy rasters. The
   default is a single scale, one channel per image chunk, and 1024 × 1024 spatial tiles.
   Generic 3D images also use one Z plane per chunk. Pass `data_axes` as a string such as
   `"CYX"` where supported. TIFF reads follow native tiles or strips. PNG and JPEG decode
   an entire frame when computed. [Raster options](docs/user/rasters.md)
-- **Coordinates and tables.** Calibrated readers place a registered group in `global`
-  in micrometres. Independent acquisitions retain separate frames and uncalibrated vendor
-  data use the pixel or grid frames listed in each format guide. Where available,
-  `obsm["spatial"]` holds physical XY positions, with the units and frame recorded in
-  `uns["spatialdata_io_positions"]`. Check frame names, position keys, linkage columns,
-  and identifier dtypes before combining new results with existing stores. Expression
-  uses SciPy CSR arrays. The calibrated frames address the physical-coordinate part of
-  [#441](https://github.com/scverse/spatialdata-io/issues/441). [Calibration](docs/user/coordinates.md), [Tables](docs/user/tables.md)
+- **Standardized spatial calibration.** Readers with verified calibration express
+  registered elements in micrometres, typically in `global`. Independent samples,
+  cores and ROIs retain their own frames. For example, Xenium morphology pixels
+  map into the same physical frame as cell centroids and transcripts. Classic
+  Visium retains its full-resolution pixel frame. [Calibration](docs/user/coordinates.md),
+  [#441](https://github.com/scverse/spatialdata-io/issues/441)
+- **AnnData positions and counts.** Reader-produced `obsm["spatial"]` holds
+  float64 `(x, y)` coordinates in micrometres. Where available, native positions
+  are identified separately, for example in `obsm["spatial_pixels"]` or
+  `obsm["spatial_grid"]`. For tables with declared positions,
+  `uns["spatialdata_io_positions"]` records their axes, units, frame and meaning.
+  Check position keys, linkage columns and identifier dtypes when combining new
+  results with existing stores. Expression uses SciPy CSR arrays. [Tables](docs/user/tables.md)
 - **CSV inputs.** Readers parse numeric fields using declared types and validate the full record width,
   including ignored columns. Integer fields such as the Visium spot grid reject decimal
   and exponent spellings. Undeclared annotations in CODEX CSVs and Curio cluster labels,
