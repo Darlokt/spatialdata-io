@@ -1,4 +1,16 @@
-"""Construct storage-aligned TIFF chunk graphs with task-owned file and store lifetimes."""
+"""Build lazy TIFF arrays with source tasks aligned to tiles or whole rows.
+
+Each task holds a path and either a series/level selection or a physical page
+index. It opens the TIFF when computed, reads the requested block and closes
+the file and any Zarr store before returning a NumPy array.
+
+Whole-width strips are grouped into bands targeting 16 MiB of decoded data.
+Where inspection verified contiguous uncompressed rows, one file read can
+span many short strips or cover part of a single large strip. Elsewhere the
+decoder works in complete storage chunks, so a compressed strip can exceed
+the band target. Narrow tiles retain their native geometry. Caller-requested
+output chunks can be applied to the resulting Dask array.
+"""
 
 from __future__ import annotations
 
@@ -14,12 +26,14 @@ from dask.base import tokenize
 
 from spatialdata_io.readers._utils.errors import RasterFormatError, add_reader_context
 from spatialdata_io.readers._utils.image._types import LazyRaster
+from spatialdata_io.readers._utils.image.tiff._rows import physical_page, read_contiguous_rows
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+    from tifffile.zarr import ZarrTiffStore
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
-    from spatialdata_io.readers._utils.image.tiff._types import TiffLevelMetadata, TiffMetadata
+    from spatialdata_io.readers._utils.image.tiff._types import TiffLevelMetadata, TiffMetadata, _TiffRasterMetadata
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 type ChunkSelection = tuple[slice, ...]
@@ -31,113 +45,84 @@ type ChunkSelection = tuple[slice, ...]
 STRIP_BAND_BYTES = 16 * 2**20
 
 
-def _task_chunks(level: TiffLevelMetadata) -> tuple[int, ...]:
+def _task_chunks(level: _TiffRasterMetadata) -> tuple[int, ...]:
     """Return the chunk geometry of one source task for a TIFF level.
 
     Levels whose native chunks span every axis after ``Y`` store whole rows:
     strips, or tiles as wide as the image. Consecutive chunks of such levels
     are grouped into row bands of at most ``STRIP_BAND_BYTES`` decoded bytes
     that start at chunk boundaries; a chunk larger than a band stays alone.
-    Other tiled levels keep their native chunks.
+    Contiguous uncompressed rows can split a strip into smaller bands. Other
+    tiled levels keep their native chunks.
     """
     chunks = level.native_chunks
-    if "Y" not in level.axes:
-        return chunks
-
-    row_axis = level.axes.index("Y")
+    row_axis = level.direct_row_axis
+    if row_axis is None:
+        if "Y" not in level.axes:
+            return chunks
+        row_axis = level.axes.index("Y")
     trailing = range(row_axis + 1, len(chunks))
     if row_axis == len(chunks) - 1 or any(chunks[axis] != level.shape[axis] for axis in trailing):
         return chunks
 
-    chunk_bytes = prod(chunks) * level.dtype.itemsize
-    rows = min(level.shape[row_axis], chunks[row_axis] * max(1, STRIP_BAND_BYTES // chunk_bytes))
+    native_rows = chunks[row_axis]
+    rows_per_read = 1 if level.direct_row_axis is not None else native_rows
+    row_bytes = prod(chunks) // native_rows * level.dtype.itemsize
+    band_rows = rows_per_read * max(1, STRIP_BAND_BYTES // (row_bytes * rows_per_read))
+    rows = min(level.shape[row_axis], band_rows)
     return (*chunks[:row_axis], rows, *chunks[row_axis + 1 :])
 
 
-def _read_contiguous_rows(
-    tiff: tifffile.TiffFile, level: tifffile.TiffPageSeries, selection: ChunkSelection
-) -> NDArray[np.generic] | None:
-    """Read whole rows of one uncompressed contiguous page with a single bounded read.
-
-    tifffile's Zarr store decodes one strip per chunk, and Zarr's per-chunk
-    overhead is about ten times the cost of reading a one-row strip. A page
-    that tifffile marks final (uncompressed and contiguous, no predictor,
-    default fill order, no subsampling) stores the array exactly as laid out in
-    memory, so whole rows are copied directly, as ``TiffPage.asarray`` does for
-    whole pages. Returns None whenever the general path is required.
-    """
-    page = level.keyframe
-    stored = level.pages[0] if len(level.pages) == 1 else None
-    if stored is None or page.dtype is None or not page.is_final:
-        return None
-
-    # The page must be stored in this file (OME series can link other files),
-    # and its segments must hold exactly the page: tifffile also reports a
-    # single empty or truncated strip as contiguous.
-    stored_exactly = stored.parent is tiff and stored.dataoffsets[0] > 0 and sum(stored.databytecounts) == page.nbytes
-    separate_samples, depth, _, width, samples = page.shaped
-    # A series transform (such as MD Gel scaling) changes values and dtype.
-    plain_layout = (
-        (separate_samples, depth) == (1, 1)
-        and level.transform is None
-        and level.dtype == page.dtype
-        and tuple(level.shape) == page.shape
-    )
-    whole_rows = all(
-        (part.start, part.stop) == (0, size) for part, size in zip(selection[1:], page.shape[1:], strict=True)
-    )
-    if not (stored_exactly and plain_layout and whole_rows):
-        return None
-
-    rows = selection[0]
-    row_items = width * samples
-    # Interpret the bytes in file byte order; read_array returns native order,
-    # which matches the dtype recorded at inspection.
-    dtype = np.dtype(tiff.byteorder + page.dtype.char)
-    tiff.filehandle.seek(stored.dataoffsets[0] + rows.start * row_items * dtype.itemsize)
-    data = tiff.filehandle.read_array(dtype, count=(rows.stop - rows.start) * row_items)
-    return data.reshape(rows.stop - rows.start, *page.shape[1:])
-
-
-def _check_ome_selection(level: tifffile.TiffPageSeries, source: _TiffArray, selection: ChunkSelection) -> None:
+def _check_ome_selection(
+    level: tifffile.TiffPageSeries, shape: tuple[int, ...], location: str, selection: ChunkSelection
+) -> None:
     # A missing linked page is a fill chunk to Zarr. Check only the
     # page range covered by this task, in the series' storage order.
-    first = np.ravel_multi_index(tuple(part.start for part in selection), source.shape)
-    last = np.ravel_multi_index(tuple(part.stop - 1 for part in selection), source.shape)
+    first = np.ravel_multi_index(tuple(part.start for part in selection), shape)
+    last = np.ravel_multi_index(tuple(part.stop - 1 for part in selection), shape)
     page_size = level.keyframe.size
     for index in range(int(first) // page_size, int(last) // page_size + 1):
         if index >= len(level.pages) or level.pages[index] is None:
-            message = f"OME series {source.series} level {source.level} has a missing image plane {index}."
+            message = f"OME TIFF {location} has a missing image plane {index}."
             raise RasterFormatError(message)
+
+
+def _read_store(store: ZarrTiffStore, selection: ChunkSelection) -> NDArray[np.generic]:
+    try:
+        return np.asarray(zarr.open_array(store=store, mode="r")[selection])
+    finally:
+        store.close()
 
 
 def _read_tiff_selection(source: _TiffArray, selection: ChunkSelection) -> NDArray[np.generic]:
     """Decode one bounded selection and close every task-owned resource."""
+    index = source.index
+    location = f"page={index}" if isinstance(index, int) else f"series={index[0]}, level={index[1]}"
     try:
         with tifffile.TiffFile(source.path) as tiff:
-            level = tiff.series[source.series].levels[source.level]
-            if tiff.is_ome:
-                _check_ome_selection(level, source, selection)
-            result = _read_contiguous_rows(tiff, level, selection)
-            if result is None:
-                # Use the same singleton-axis policy as metadata inspection.
-                store = tiff.aszarr(series=source.series, level=source.level, squeeze=True)
-                try:
-                    result = np.asarray(zarr.open_array(store=store, mode="r")[selection])
-                finally:
-                    store.close()
+            if isinstance(index, int):
+                page = physical_page(tiff.pages[index])
+                result = read_contiguous_rows(tiff, page, source.shape, selection) if source.direct_rows else None
+                if result is None:
+                    result = _read_store(page.aszarr(), selection)
+            else:
+                series, level_index = index
+                level = tiff.series[series].levels[level_index]
+                if tiff.is_ome:
+                    _check_ome_selection(level, source.shape, location, selection)
+                result = read_contiguous_rows(tiff, level, source.shape, selection) if source.direct_rows else None
+                if result is None:
+                    # Use the same singleton-axis policy as metadata inspection.
+                    result = _read_store(tiff.aszarr(series=series, level=level_index, squeeze=True), selection)
     except Exception as error:
-        error.add_note(
-            f"Failed TIFF selection path={source.path}, series={source.series}, level={source.level}, "
-            f"selection={selection}."
-        )
+        error.add_note(f"Failed TIFF selection path={source.path}, {location}, selection={selection}.")
         raise
 
     expected_shape = tuple(part.stop - part.start for part in selection)
     if result.shape != expected_shape or result.dtype != source.dtype:
         message = (
             f"TIFF selection result does not match inspected metadata for {source.path}: "
-            f"series={source.series}, level={source.level}, selection={selection}, "
+            f"{location}, selection={selection}, "
             f"expected shape={expected_shape}, dtype={source.dtype}; "
             f"got shape={result.shape}, dtype={result.dtype}."
         )
@@ -154,10 +139,11 @@ class _TiffArray:
     """
 
     path: ArtifactFile
-    series: int
-    level: int
+    # A physical page index or a (series, level) pair.
+    index: int | tuple[int, int]
     shape: tuple[int, ...]
     dtype: np.dtype[np.generic]
+    direct_rows: bool = False
 
     @property
     def ndim(self) -> int:
@@ -187,14 +173,35 @@ def _select_level(metadata: TiffMetadata, *, series: int, level: int) -> TiffLev
     return selected_series.levels[level]
 
 
+def _select_raster(
+    metadata: TiffMetadata, *, series: int | None, level: int | None, page: int | None
+) -> tuple[int | tuple[int, int], _TiffRasterMetadata]:
+    if page is None:
+        if series is None or level is None:
+            message = "Select a TIFF page or provide both series and level."
+            raise ValueError(message)
+        return (series, level), _select_level(metadata, series=series, level=level)
+    if series is not None or level is not None:
+        message = "A TIFF page selection cannot be combined with series or level."
+        raise ValueError(message)
+    if metadata.pages is None:
+        message = "A TIFF page selection needs metadata inspected with include_pages=True."
+        raise ValueError(message)
+    if page < 0 or page >= len(metadata.pages):
+        message = f"TIFF page index {page} is outside [0, {len(metadata.pages)})."
+        raise IndexError(message)
+    return page, metadata.pages[page]
+
+
 def read_tiff(
     metadata: TiffMetadata,
     *,
-    series: int,
-    level: int,
+    series: int | None = None,
+    level: int | None = None,
+    page: int | None = None,
     context: ReaderErrorContext,
 ) -> LazyRaster:
-    """Construct a storage-aligned lazy TIFF array for an explicit series and level.
+    """Construct a storage-aligned lazy TIFF array for a series level or physical page.
 
     The returned Dask graph stores paths and immutable scalar metadata only.
     Computing a slice executes only the source tasks that intersect it; every
@@ -208,6 +215,10 @@ def read_tiff(
         Explicit zero-based TIFF series index.
     level
         Explicit zero-based pyramid level within ``series``.
+    page
+        Zero-based top-level IFD index in file order. Requires metadata
+        inspected with ``include_pages=True``. Select this alone or pass
+        both ``series`` and ``level``.
     context
         Reader and artifact identity added to out-of-range selection errors.
 
@@ -216,34 +227,38 @@ def read_tiff(
     LazyRaster
         A Dask array in the selected level's declared axis order. Strips (and
         tiles as wide as the image) are grouped into row bands of at most
-        ``STRIP_BAND_BYTES`` decoded bytes; a larger strip stays one chunk.
+        ``STRIP_BAND_BYTES`` decoded bytes. Contiguous uncompressed storage
+        can be read as individual rows or row bands. An encoded strip larger
+        than a band or a single row larger than a band stays one chunk.
         Other tiled levels keep their native tiles. ``color`` is the level's
         declared samples colour model.
 
     Raises
     ------
     IndexError
-        If ``series`` or ``level`` is outside the inspected range.
+        If ``series``, ``level`` or ``page`` is outside the inspected range.
+    ValueError
+        If the selection is ambiguous, missing, or calls for uninspected pages.
     RasterFormatError
         If a task result disagrees with the inspected shape or dtype.
 
     Notes
     -----
     Rechunking the result is lazy and does not change the source layer. Each
-    source task opens the TIFF and reads its selection either directly (one
-    uncompressed contiguous page) or through a short-lived ``tifffile`` Zarr
+    source task opens the TIFF and reads its selection either directly
+    (uncompressed contiguous rows) or through a short-lived ``tifffile`` Zarr
     store, and closes every resource before returning. A computed selection
     decodes every tile or row band it intersects. An out-of-range selection
     keeps its ``IndexError`` type and gains a note naming ``context`` and the
     TIFF path.
     """
     try:
-        selected_level = _select_level(metadata, series=series, level=level)
-    except IndexError as error:
+        index, selected = _select_raster(metadata, series=series, level=level, page=page)
+    except (IndexError, ValueError) as error:
         add_reader_context(error, context=context, path=metadata.path)
         raise
-    source = _TiffArray(metadata.path, series, level, selected_level.shape, selected_level.dtype)
-    chunks = _task_chunks(selected_level)
+    source = _TiffArray(metadata.path, index, selected.shape, selected.dtype, selected.direct_row_axis is not None)
+    chunks = _task_chunks(selected)
     name = f"spatialdata-io-tiff-{tokenize(source, chunks)}"
     data = da.from_array(
         source,
@@ -253,4 +268,4 @@ def read_tiff(
         asarray=False,
         fancy=False,
     )
-    return LazyRaster(data=data, axes=selected_level.axes, color=selected_level.color)
+    return LazyRaster(data=data, axes=selected.axes, color=selected.color)

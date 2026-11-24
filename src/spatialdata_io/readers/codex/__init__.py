@@ -1,4 +1,8 @@
-"""Reader for processor-style CODEX region exports."""
+"""Read CODEX regional images and cell tables.
+
+The public entry point :func:`codex` accepts flat regional exports, Processor
+marker images, Uploader montages and CODEX Instrument Manager QPI scans.
+"""
 
 from __future__ import annotations
 

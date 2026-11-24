@@ -28,6 +28,8 @@ class TestCodex:
             "path",
             "cell_table_file",
             "image_file",
+            "regions",
+            "read_tables",
             "pixel_size_um",
             "experiment_file",
             "image_to_table",

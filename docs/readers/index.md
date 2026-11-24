@@ -10,13 +10,14 @@ Use the instrument or pipeline that produced your files to choose a reader.
 
 | Technology or pipeline | Input to look for |
 | --- | --- |
-| [CODEX / PhenoCycler](codex.md) | One regional processor CSV or FCS cell table and an optional stitched image |
+| [CODEX](codex.md) | Processor cell tables and stitched marker TIFFs, or processed CODEX QPTIFF scans |
 | [CosMx](cosmx.md) | Flat-file export with expression and cell metadata CSVs |
 | [Curio Seeker](curio.md) | Primary pipeline H5AD with cluster, metric and feature files |
 | [DBiT-seq](dbit.md) | H5AD and two-axis barcode map |
 | [MACSima](macsima.md) | MACS iQ View processed channel TIFFs |
 | [MCMICRO](mcmicro.md) | Whole-slide or tissue-microarray run with `qc/params.yml` |
 | [MERSCOPE](merscope.md) | Vizgen region directory, optionally with a VPT analysis |
+| [PhenoCycler](phenocycler.md) | Fusion whole-slide QPTIFF or inForm component image |
 | [seqFISH](seqfish.md) | Spatial Genomics per-ROI tables and images |
 | [Steinbock](steinbock.md) | Matched OME images, segmentation masks and an H5AD table |
 | [Stereo-seq](stereoseq.md) | SAW or flat exports with selected GEF, H5AD or image products |
@@ -35,6 +36,7 @@ dbit
 macsima
 mcmicro
 merscope
+phenocycler
 seqfish
 steinbock
 stereoseq

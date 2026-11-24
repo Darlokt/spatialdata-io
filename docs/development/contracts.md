@@ -40,6 +40,13 @@ utility's tests and verify those tests before changing the readers to use it.
 This keeps a format-specific workaround from becoming a dependency for other
 formats.
 
+When two vendor entry points read the same on-disk format, give its metadata
+parser and image builder one owner. For example, CODEX Instrument Manager and
+PhenoCycler both use the Akoya QPI format. They can call the same private QPI
+implementation with validated paths and normalized raster options. TIFF IFD
+access and resource lifetimes belong in `image`. The meanings of
+`FullResolution`, `Biomarker` and vendor intensity units belong with QPI.
+
 ## Artifact paths, errors and provenance
 
 | Boundary | Contract |

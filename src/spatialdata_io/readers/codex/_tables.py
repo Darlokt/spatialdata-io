@@ -8,19 +8,18 @@ described in :mod:`spatialdata_io.readers.codex._schemas`.
 CSV
     Arrow reads uint64 cell IDs, float64 XY and intensities, and literal
     region/annotation strings in batches with a 1 MiB source target. Each batch
-    is checked for finite intensities and becomes CSR immediately; expression
-    is never dense as a whole. Records of
-    at most one source block are supported reliably; larger aligned records
-    may parse, but a record crossing two block boundaries fails.
+    is checked for finite intensities and converted to CSR before reading the
+    next batch. Each record must fit in one source block for reliable parsing.
 FCS
     Decoded eagerly by readfcs. ``$PnN`` keywords are the field names and
     available ``$PnS`` keywords the marker labels of expression channels
     (https://help.codex.bio/codex/processor/technical-notes/fcs-format).
 
-Observation names are zero-based source row positions; ``x`` and ``y`` stay in
-native region pixels. Metadata column names that a SpatialData table does not
-accept (``tile num``) are sanitized with one warning (``tile_num``). With a calibration, :func:`set_positions` adds
-``obsm["spatial"]`` in micrometres.
+Observation names are zero-based source row positions. The cell IDs that link
+the table to shapes come from the source ``cell_id`` field. The ``x`` and ``y``
+columns stay in native region pixels. With a calibration, :func:`set_positions`
+adds ``obsm["spatial"]`` in micrometres. Unsupported annotation names are
+sanitized with a warning, for example ``tile num`` becomes ``tile_num``.
 """
 
 from __future__ import annotations
@@ -191,7 +190,7 @@ def _read_fcs(path: ArtifactFile) -> ad.AnnData:
     return table
 
 
-def read_cell_table(source: CellTableSource) -> CellTable:
+def read_cell_table(source: CellTableSource, *, expected_region: str | None = None) -> CellTable:
     """Read one nonempty cell population and normalize its IDs, region and positions."""
     path = source.path
     fcs = source.kind == "fcs"
@@ -203,7 +202,7 @@ def read_cell_table(source: CellTableSource) -> CellTable:
     coordinates = validate_observations(obs, path)
     # ShapesModel requires a native instance index; obs keeps the Arrow column.
     identifiers = obs["cell_id"].to_numpy(dtype=np.uint64, copy=False)
-    region = region_name(obs["region"], path)
+    region = region_name(obs["region"], path, expected_region=expected_region)
     obs["region"] = pd.Categorical([region] * table.n_obs)
     obs.columns = sanitize_column_names(
         list(obs.columns), source="codex: the cell table header", reserved=REQUIRED_COLUMNS
@@ -212,7 +211,12 @@ def read_cell_table(source: CellTableSource) -> CellTable:
 
 
 def set_positions(
-    table: ad.AnnData, coordinates: npt.NDArray[np.number], *, pixel_size_um: float, calibration: str
+    table: ad.AnnData,
+    coordinates: npt.NDArray[np.number],
+    *,
+    pixel_size_um: float,
+    calibration: str,
+    frame: str = "global",
 ) -> None:
     """Add micrometre ``obsm["spatial"]`` and its description to the owned table."""
     physical = np.multiply(coordinates, pixel_size_um, dtype=np.float64)
@@ -229,8 +233,8 @@ def set_positions(
                 "axes": ["x", "y"],
                 "units": "micrometer",
                 "position": "source cell position",
-                "frame": "global",
-                "calibration": {"global": f"{calibration} Resolved pixel size: {pixel_size_um} micrometres."},
+                "frame": frame,
+                "calibration": {frame: f"{calibration} Resolved pixel size: {pixel_size_um} micrometres."},
             }
         },
     }

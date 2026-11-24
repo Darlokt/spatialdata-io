@@ -9,6 +9,7 @@ python -m spatialdata_io xenium --help
 ```
 
 Dataset commands take an input directory and write a SpatialData Zarr store.
+CODEX and PhenoCycler also accept an individual scan as input.
 The `generic` command takes a single file and can also append an element to a
 store. For the expected input layout and interpretation of the output, see the
 [reader guides](readers/index.md). For datasets stored with git-annex or DVC,

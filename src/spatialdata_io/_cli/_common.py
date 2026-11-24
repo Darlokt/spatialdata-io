@@ -17,6 +17,15 @@ _IMAGE_RANK = 3
 
 def dataset_io_options[**P](function: Callable[P, None]) -> Callable[P, None]:
     """Add the common dataset-root and output-store options."""
+    return _io_options(function, allow_file=False)
+
+
+def scan_io_options[**P](function: Callable[P, None]) -> Callable[P, None]:
+    """Accept an individual scan or a dataset directory and an output store."""
+    return _io_options(function, allow_file=True)
+
+
+def _io_options[**P](function: Callable[P, None], *, allow_file: bool) -> Callable[P, None]:
     with_output = click.option(
         "--output",
         "output_path",
@@ -29,8 +38,8 @@ def dataset_io_options[**P](function: Callable[P, None]) -> Callable[P, None]:
         "--input",
         "input_path",
         "-i",
-        type=click.Path(path_type=Path, exists=True, file_okay=False, dir_okay=True),
-        help="Path to the input dataset directory.",
+        type=click.Path(path_type=Path, exists=True, file_okay=allow_file, dir_okay=True),
+        help="Input dataset directory or individual file." if allow_file else "Path to the input dataset directory.",
         required=True,
     )(with_output)
 

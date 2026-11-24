@@ -520,3 +520,28 @@ source = "Human thymus A03994E6 Stereo-CITE RNA only, study SAW 7.1.2, Zenodo 12
 url = "https://zenodo.org/records/12595241/files/A03994E6.tissue.gef?download=1"
 known_hash = "sha256:ad8fec06f396c1f5bca0e1f6b9a4c45eb6b27a77f63f2ff6ae44da875d7677f6"
 target = "A03994E6.tissue.gef"
+
+# Real inForm quantitative component TIFF, including its RGB thumbnail.
+# https://github.com/akoyabio/phenoptr/blob/7d5dceaacdc1af3e2ff595bf0aeb09172fd546c2/LICENSE
+[[datasets]]
+key = "phenocycler_inform"
+group = "phenocycler"
+extracted_dir = "phenoptr_inform_field"
+source = "Akoya Biosciences phenoptr test data, commit 7d5dcea (package licence: Zlib)"
+
+[[datasets.assets]]
+url = "https://raw.githubusercontent.com/akoyabio/phenoptr/7d5dceaacdc1af3e2ff595bf0aeb09172fd546c2/tests/testthat/test_data/FIHC4__0929309_HP_IM3_2_component_data.tif"
+known_hash = "sha256:c3e6b38fc9547eb9cabab77f5a5a9d479e2759f0ae395656978a65574552daf1"
+target = "FIHC4__0929309_HP_IM3_2_component_data.tif"
+
+# https://github.com/igordot/phenomenalist/tree/c35f531d0035ac6ea879bfe1b0340c6b5cc6b09e/inst/extdata
+[[datasets]]
+key = "codex_tonsil"
+group = "codex"
+extracted_dir = "phenomenalist_tonsil"
+source = "Akoya tonsil table distributed with phenomenalist, commit c35f531 (package licence: MIT)"
+
+[[datasets.assets]]
+url = "https://raw.githubusercontent.com/igordot/phenomenalist/c35f531d0035ac6ea879bfe1b0340c6b5cc6b09e/inst/extdata/tonsil-akoya-2018-500.csv"
+known_hash = "sha256:c96623f3cefc4943a1c4cc1e93e069b690e3f554eedf726ffbaa94bc9046b80e"
+target = "tonsil-akoya-2018-500.csv"

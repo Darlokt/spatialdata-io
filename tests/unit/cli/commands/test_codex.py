@@ -58,6 +58,8 @@ class TestCodexCommand:
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
+            regions=None,
+            read_tables=True,
             cell_table_file=Path("cells.fcs"),
             image_file=Path("stitched.tif"),
             pixel_size_um=None,
@@ -79,6 +81,8 @@ class TestCodexCommand:
         assert result.exit_code == 0, result.output
         reader.assert_called_once_with(
             tmp_path,
+            regions=None,
+            read_tables=True,
             cell_table_file=None,
             image_file=None,
             pixel_size_um=None,
@@ -90,6 +94,28 @@ class TestCodexCommand:
             chunks=DEFAULT_CHUNKS,
             path_policy="strict",
         )
+
+    def test_selects_regions_without_cell_tables(
+        self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture
+    ) -> None:
+        reader = mocker.patch("spatialdata_io.readers.codex.codex")
+        result = runner.invoke(
+            codex_command,
+            [
+                "-i",
+                str(tmp_path),
+                "-o",
+                str(tmp_path / "out"),
+                "--regions",
+                "reg002",
+                "--regions",
+                "reg001",
+                "--no-read-tables",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert reader.call_args.kwargs["regions"] == ("reg002", "reg001")
+        assert reader.call_args.kwargs["read_tables"] is False
 
     def test_scalar_chunks(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
         reader = mocker.patch("spatialdata_io.readers.codex.codex")
@@ -128,6 +154,8 @@ class TestCodexCommand:
         assert list(options) == [
             "input_path",
             "output_path",
+            "regions",
+            "read_tables",
             "cell_table_file",
             "image_file",
             "pixel_size_um",

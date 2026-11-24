@@ -3,7 +3,8 @@
 Use the [reader guides](readers/index.md) to identify a supported input layout,
 then select a function below for its parameters and return values. Dataset
 readers take a local input directory as `path` and return a SpatialData
-object. Relative file options use that directory as their base. See
+object. CODEX and PhenoCycler also accept individual files and resolve
+relative file options against the selected file's parent directory. See
 [dataset paths](user/paths.md), [raster options](user/rasters.md) and
 [AnnData table conventions](user/tables.md) for behavior shared across readers.
 
@@ -24,6 +25,7 @@ object. Relative file options use that directory as their base. See
     macsima
     mcmicro
     merscope
+    phenocycler
     seqfish
     steinbock
     stereoseq

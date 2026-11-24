@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 import tifffile
-from spatialdata.transformations import Identity
+from spatialdata.transformations import BaseTransformation, Identity, get_transformation
 from xarray import DataArray, DataTree
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -16,7 +16,8 @@ from spatialdata_io.readers._utils.image import inspect_tiff, make_raster_option
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.codex import codex
 from spatialdata_io.readers.codex._images import read_image, validate_image_options
-from tests.integration.readers.codex._fixtures import write_csv, write_image
+from spatialdata_io.readers.codex._layout import MarkerImage, MarkerSet, Montage
+from tests.integration.readers.codex._fixtures import write_csv, write_image, write_uploader_montage
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -92,6 +93,154 @@ class TestValidateImageOptions:
 
 class TestReadImage:
     """Keep explicit channel semantics, TIFF axes, and small images lazy."""
+
+    @pytest.mark.parametrize(("dtype", "shape"), [("uint16", (2, 16, 20)), ("uint8", (16, 20)), ("uint16", (18, 20))])
+    def test_marker_planes_have_one_plane_and_a_common_shape_and_dtype(
+        self, tmp_path: Path, dtype: str, shape: tuple[int, ...]
+    ) -> None:
+        first = ArtifactFile(tmp_path / "first.tif")
+        second = ArtifactFile(tmp_path / "second.tif")
+        tifffile.imwrite(first, np.zeros((16, 20), dtype=np.uint16))
+        tifffile.imwrite(
+            second,
+            np.zeros(shape, dtype=dtype),
+            photometric="minisblack",
+            metadata={
+                "axes": "CYX" if len(shape) == 3 else "YX",
+            },
+        )
+
+        with pytest.raises(ReaderFormatError, match="one plane per marker, all sharing"):
+            read_image(
+                MarkerSet((MarkerImage(first, 1, 1, "A"), MarkerImage(second, 1, 2, "B"))),
+                data_axes=None,
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
+
+    @pytest.mark.parametrize("labels", [None, ["A", "", "C", "D", "E", "F"]])
+    def test_montage_without_complete_names_uses_acquisition_indices(
+        self, tmp_path: Path, labels: list[str] | None
+    ) -> None:
+        path, pixels = write_uploader_montage(tmp_path, "reg001", labels=labels)
+        image = read_image(
+            Montage(ArtifactFile(path), None),
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
+        assert isinstance(image, DataArray)
+        assert image.c.values.tolist() == [
+            "cyc001_ch001",
+            "cyc001_ch002",
+            "cyc001_ch003",
+            "cyc002_ch001",
+            "cyc002_ch002",
+            "cyc002_ch003",
+        ]
+        np.testing.assert_array_equal(image.data.compute(), pixels)
+
+    @pytest.mark.parametrize(
+        ("data", "match"),
+        [
+            pytest.param(b"A\n", "6 nonblank channel names", id="incorrect-count"),
+            pytest.param(b"\xff", "UTF-8 or BOM-marked", id="invalid-encoding"),
+            pytest.param(b"x" * (1024**2 + 1), "at most 1 MiB", id="bounded-read"),
+        ],
+    )
+    def test_invalid_montage_sidecar(self, tmp_path: Path, data: bytes, match: str) -> None:
+        path, _ = write_uploader_montage(tmp_path, "reg001")
+        sidecar = ArtifactFile(path.parent / "channelNames.txt")
+        sidecar.write_bytes(data)
+        with pytest.raises(ReaderFormatError, match=match):
+            read_image(
+                Montage(ArtifactFile(path), sidecar),
+                data_axes=None,
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
+
+    def test_montage_rejects_nonsingleton_z_axis(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "reg001_montage.tif")
+        tifffile.imwrite(path, np.zeros((3, 16, 20), dtype=np.uint16), imagej=True, metadata={"axes": "ZYX"})
+        source = Montage(path, None)
+        with pytest.raises(ReaderFormatError, match="an Uploader montage with declared cycle"):
+            read_image(
+                source,
+                data_axes=None,
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
+        with pytest.raises(ValueError, match="rank") as caught:
+            read_image(
+                source,
+                data_axes="YX",
+                tiff_series=None,
+                raster=DEFAULT_OPTIONS,
+                frame="image_pixels",
+                transformation=Identity(),
+            )
+        assert any("reg001_montage.tif" in note for note in caught.value.__notes__)
+
+    def test_montage_names_follow_explicit_axis_reinterpretation(self, tmp_path: Path) -> None:
+        labels = ["A", "B", "C", "D", "E", "F"]
+        path, source_pixels = write_uploader_montage(tmp_path, "reg001", labels=labels)
+        image = read_image(
+            Montage(ArtifactFile(path), None),
+            data_axes="CTYX",
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+        )
+        assert isinstance(image, DataArray)
+        assert image.c.values.tolist() == ["A", "D", "B", "E", "C", "F"]
+        np.testing.assert_array_equal(image.data.compute(), source_pixels[[0, 3, 1, 4, 2, 5]])
+
+    def test_ome_independent_xy_calibration(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "image.ome.tif")
+        tifffile.imwrite(
+            path,
+            np.zeros((16, 20), dtype=np.uint16),
+            ome=True,
+            metadata={
+                "PhysicalSizeX": 800,
+                "PhysicalSizeXUnit": "nm",
+                "PhysicalSizeY": 0.4,
+                "PhysicalSizeYUnit": "µm",
+            },
+        )
+        image = read_image(
+            path,
+            data_axes=None,
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+            physical_frame="global",
+        )
+        transform = get_transformation(image, to_coordinate_system="global")
+        assert isinstance(transform, BaseTransformation)
+        np.testing.assert_allclose(transform.to_affine_matrix(("x", "y"), ("x", "y")), np.diag([0.8, 0.4, 1]))
+
+        swapped = read_image(
+            path,
+            data_axes="XY",
+            tiff_series=None,
+            raster=DEFAULT_OPTIONS,
+            frame="image_pixels",
+            transformation=Identity(),
+            physical_frame="global",
+        )
+        assert isinstance(get_transformation(swapped, to_coordinate_system="image_pixels"), Identity)
 
     def test_malformed_tiff_has_reader_context(self, tmp_path: Path) -> None:
         path = tmp_path / "image.tif"

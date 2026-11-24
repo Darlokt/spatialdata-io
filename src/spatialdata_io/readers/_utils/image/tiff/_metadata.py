@@ -17,12 +17,17 @@ The JPEG codec converts interleaved YCbCr to RGB on decoding (TIFF Technical
 Note 2), and ``tifffile`` itself stores JPEG-compressed RGB data as YCbCr, so
 that combination declares RGB samples too. Other YCbCr data decodes to luma and
 chroma samples.
+
+Readers that assign meaning to physical pages can request the ordered
+top-level IFD tags, including the original resolution and position rationals.
+ImageJ plane labels can be requested independently. Inspection closes the
+TIFF and its temporary stores before returning either selection.
 """
 
 from __future__ import annotations
 
 from functools import cache
-from operator import itemgetter
+from operator import index, itemgetter
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -31,9 +36,11 @@ import zarr
 from ome_types import from_xml
 
 from spatialdata_io.readers._utils.errors import RasterFormatError, add_reader_context
+from spatialdata_io.readers._utils.image.tiff._rows import direct_row_axis, physical_page
 from spatialdata_io.readers._utils.image.tiff._types import (
     TiffLevelMetadata,
     TiffMetadata,
+    TiffPageMetadata,
     TiffSeriesMetadata,
 )
 
@@ -42,9 +49,11 @@ if TYPE_CHECKING:
 
     from ome_types import OME
     from ome_types.model import Pixels, TiffData
+    from tifffile.zarr import ZarrTiffStore
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers._utils.image._types import SampleColor
+    from spatialdata_io.readers._utils.image.tiff._rows import TiffImage
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 _TIFF_SIGNATURES = frozenset({b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"})
@@ -52,6 +61,8 @@ _TIFF_SIGNATURES = frozenset({b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"})
 # YCbCr data tifffile decodes to RGB.
 _JPEG_COMPRESSIONS = frozenset({6, 7, 33007, 34892})
 _ALPHA_SAMPLES = frozenset({tifffile.EXTRASAMPLE.ASSOCALPHA, tifffile.EXTRASAMPLE.UNASSALPHA})
+_MAX_PAGE_TEXT_BYTES = 2**20
+_MAX_IMAGEJ_METADATA_BYTES = 16 * 2**20
 
 
 def _has_tiff_signature(path: Path) -> bool:
@@ -68,7 +79,10 @@ def _native_chunks(
     """Read native chunk sizes from a short-lived store without decoding pixels."""
     # Use the same explicit singleton policy as semantic metadata. Shaped TIFF
     # series retain extra singleton axes in some supported tifffile versions.
-    store = tiff.aszarr(series=series, level=level, squeeze=True)
+    return _store_chunks(tiff.aszarr(series=series, level=level, squeeze=True))
+
+
+def _store_chunks(store: ZarrTiffStore) -> tuple[int, ...]:
     try:
         array = zarr.open_array(store=store, mode="r")
         return tuple(array.chunks)
@@ -76,11 +90,11 @@ def _native_chunks(
         store.close()
 
 
-def _sample_color(level: tifffile.TiffPageSeries, axes: tuple[str, ...], shape: tuple[int, ...]) -> SampleColor | None:
-    """Return the colour model the first page of ``level`` declares for its samples axis ``S``."""
+def _sample_color(image: TiffImage, axes: tuple[str, ...], shape: tuple[int, ...]) -> SampleColor | None:
+    """Return the colour model the first page of ``image`` declares for its samples axis ``S``."""
     if "S" not in axes:
         return None
-    page = level.keyframe
+    page = image.keyframe
     extras = tuple(page.extrasamples)
     color: SampleColor | None = None
     if page.photometric == tifffile.PHOTOMETRIC.RGB:
@@ -138,7 +152,108 @@ def _level_metadata(
         axes=axes,
         native_chunks=native_chunks,
         color=_sample_color(level, axes, shape),
+        direct_row_axis=direct_row_axis(tiff, level, shape),
     )
+
+
+def _page_text(page: tifffile.TiffPage, code: int) -> str:
+    tag = page.tags.get(code)
+    if tag is None:
+        return ""
+    if tag.count <= _MAX_PAGE_TEXT_BYTES and isinstance(value := tag.value, str):
+        return value
+    message = f"TIFF IFD {page.index} needs {tag.name} as text of at most {_MAX_PAGE_TEXT_BYTES} bytes."
+    raise RasterFormatError(message)
+
+
+def _rational_tag(page: tifffile.TiffPage, code: int) -> tuple[int, int] | None:
+    tag = page.tags.get(code)
+    if tag is None:
+        return None
+    value: object = tag.value
+    match value:
+        case (int() as numerator, int() as denominator):
+            return numerator, denominator
+    message = f"TIFF IFD {page.index} needs a rational {tag.name} tag."
+    raise RasterFormatError(message)
+
+
+def _integer_tag(page: tifffile.TiffPage, code: int) -> int | None:
+    tag = page.tags.get(code)
+    if tag is None:
+        return None
+    value: object = tag.value
+    if isinstance(value, int):
+        return index(value)
+    message = f"TIFF IFD {page.index} needs an integer {tag.name} tag."
+    raise RasterFormatError(message)
+
+
+def _sample_tag(page: tifffile.TiffPage, code: int) -> int | float | tuple[int | float, ...] | None:
+    tag = page.tags.get(code)
+    if tag is None:
+        return None
+    value: object = tag.value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, bytes):
+        return value[0] if len(value) == 1 else tuple(value)
+    if isinstance(value, tuple) and all(isinstance(item, (int, float)) for item in value):
+        return value
+    message = f"TIFF IFD {page.index} needs numeric {tag.name} values."
+    raise RasterFormatError(message)
+
+
+def _page_metadata(tiff: tifffile.TiffFile, page: tifffile.TiffPage) -> TiffPageMetadata:
+    shape, axes, dtype = page.shape, tuple(page.axes), page.dtype
+    if not shape or any(size <= 0 for size in shape) or len(axes) != len(shape) or dtype is None:
+        message = f"TIFF IFD {page.index} has invalid raster metadata (shape {shape}, axes {axes}, dtype {dtype})."
+        raise RasterFormatError(message)
+    native_chunks = _store_chunks(page.aszarr())
+    if len(native_chunks) != len(shape) or any(size <= 0 for size in native_chunks):
+        message = f"TIFF IFD {page.index} has invalid native chunks {native_chunks} for shape {shape}."
+        raise RasterFormatError(message)
+    return TiffPageMetadata(
+        shape=shape,
+        dtype=np.dtype(dtype.str),
+        axes=axes,
+        native_chunks=native_chunks,
+        color=_sample_color(page, axes, shape),
+        direct_row_axis=direct_row_axis(tiff, page, shape),
+        index=page.index,
+        description=_page_text(page, 270),
+        software=_page_text(page, 305),
+        x_resolution=_rational_tag(page, 282),
+        y_resolution=_rational_tag(page, 283),
+        resolution_unit=_integer_tag(page, 296),
+        x_position=_rational_tag(page, 286),
+        y_position=_rational_tag(page, 287),
+        orientation=_integer_tag(page, 274),
+        photometric=index(page.photometric),
+        samples_per_pixel=page.samplesperpixel,
+        min_sample_value=_sample_tag(page, 340),
+        max_sample_value=_sample_tag(page, 341),
+    )
+
+
+def _imagej_labels(tiff: tifffile.TiffFile) -> tuple[str, ...] | None:
+    if not tiff.is_imagej or (tag := tiff.pages.first.tags.get(50839)) is None:
+        return None
+    # tifffile decodes IJMetadata when it reads the IFD, including overlays
+    # and LUTs. This limit applies to the tag accepted for label inspection.
+    metadata: object = tag.value
+    if tag.count > _MAX_IMAGEJ_METADATA_BYTES or not isinstance(metadata, dict):
+        message = f"ImageJ Labels need a decoded IJMetadata tag of at most {_MAX_IMAGEJ_METADATA_BYTES} bytes."
+        raise RasterFormatError(message)
+    labels: object = metadata.get("Labels")
+    if labels is None:
+        return None
+    if isinstance(labels, str):
+        return (labels,)
+    if isinstance(labels, (list, tuple)) and all(isinstance(label, str) for label in labels):
+        return tuple(labels)
+    message = "ImageJ Labels must contain text entries."
+    raise RasterFormatError(message)
 
 
 def _parse_ome_xml(path: Path, ome_xml: str | None) -> OME | None:
@@ -287,7 +402,14 @@ def _tiff_data_path(root: Path, ome: OME, block: TiffData, paths_by_uuid: dict[s
     return linked
 
 
-def inspect_tiff(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffMetadata:
+def inspect_tiff(
+    path: ArtifactFile,
+    /,
+    *,
+    context: ReaderErrorContext,
+    include_pages: bool = False,
+    include_imagej_labels: bool = False,
+) -> TiffMetadata:
     """Inspect all TIFF series and levels without decoding raster pixels.
 
     Parameters
@@ -298,6 +420,12 @@ def inspect_tiff(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffM
         whether the source is a TIFF.
     context
         Reader and artifact identity added to inspection failures.
+    include_pages
+        Inspect physical top-level IFDs and their selected standard tags in
+        file order. Their indices select individual pages in :func:`read_tiff`.
+    include_imagej_labels
+        Preserve optional ImageJ Labels from an IJMetadata tag of at most
+        16 MiB as a tuple in storage order.
 
     Returns
     -------
@@ -317,11 +445,15 @@ def inspect_tiff(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffM
     -----
     Inspection opens short-lived Zarr stores only to obtain native chunk
     geometry. It never requests a pixel selection or decodes a TIFF segment.
+    TIFF page parsing and series discovery can decode metadata in tifffile
+    before the opt-in page and ImageJ tag limits are applied.
     Nonspatial singleton axes are omitted explicitly; X and Y remain present
     even when their length is one, independently of TIFF metadata defaults.
     Failures keep their type and gain a note naming ``context`` and ``path``.
     """
-    metadata = inspect_tiff_if_recognized(path, context=context)
+    metadata = inspect_tiff_if_recognized(
+        path, context=context, include_pages=include_pages, include_imagej_labels=include_imagej_labels
+    )
     if metadata is None:
         message = f"File does not contain a classic TIFF or BigTIFF signature: {path}"
         error = RasterFormatError(message)
@@ -330,16 +462,25 @@ def inspect_tiff(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffM
     return metadata
 
 
-def inspect_tiff_if_recognized(path: ArtifactFile, /, *, context: ReaderErrorContext) -> TiffMetadata | None:
+def inspect_tiff_if_recognized(
+    path: ArtifactFile,
+    /,
+    *,
+    context: ReaderErrorContext,
+    include_pages: bool = False,
+    include_imagej_labels: bool = False,
+) -> TiffMetadata | None:
     """Inspect a TIFF by content. Return None for other signatures and propagate failures of recognized TIFFs."""
     try:
-        return _inspect(path) if _has_tiff_signature(path) else None
+        if not _has_tiff_signature(path):
+            return None
+        return _inspect(path, include_pages=include_pages, include_imagej_labels=include_imagej_labels)
     except (OSError, ValueError) as error:
         add_reader_context(error, context=context, path=path)
         raise
 
 
-def _inspect(path: ArtifactFile) -> TiffMetadata:
+def _inspect(path: ArtifactFile, *, include_pages: bool, include_imagej_labels: bool) -> TiffMetadata:
     """Open the TIFF once and describe every series and level without reading pixels."""
     with tifffile.TiffFile(path) as tiff:
         ome = _parse_ome_xml(path, tiff.ome_metadata)
@@ -363,8 +504,12 @@ def _inspect(path: ArtifactFile) -> TiffMetadata:
                 for level_index, level in enumerate(series.levels)
             )
             series_metadata.append(TiffSeriesMetadata(levels=levels))
+        pages = tuple(_page_metadata(tiff, physical_page(page)) for page in tiff.pages) if include_pages else None
+        imagej_labels = _imagej_labels(tiff) if include_imagej_labels else None
     return TiffMetadata(
         path=path,
         series=tuple(series_metadata),
         ome=ome,
+        pages=pages,
+        imagej_labels=imagej_labels,
     )

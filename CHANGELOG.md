@@ -6,6 +6,11 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 
 ### Added
 
+- PhenoCycler reads processed Akoya QPTIFF scans and inForm component images
+  with per-channel metadata and physical coordinates when calibrated. CODEX
+  also reads native Processor marker sets and selected regions.
+  [PhenoCycler](docs/readers/phenocycler.md), [CODEX](docs/readers/codex.md)
+
 - Generic GeoJSON imports can use top-level Feature IDs as shape indexes.
   [Generic GeoJSON](docs/readers/generic.md#geojson), [#249](https://github.com/scverse/spatialdata-io/issues/249)
 - The reader guides show how to locate Xenium cells in H&E pixels and query

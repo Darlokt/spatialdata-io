@@ -14,6 +14,10 @@ Only complete ``cyc<digits>_ch<digits>`` names denote expression; a name such as
 Akoya CSV exports may qualify every header as ``short_name:long_label``; the
 short names identify fields and the expression long labels become markers.
 
+In a named Processor layout the table's region must agree with the artifact.
+For example, a numeric region of 1 and the CSV text ``001`` both identify
+``reg001`` there. In a flat CSV the region keeps its source spelling.
+
 Cell IDs are uint64 (zero allowed) in both containers, so CSV and FCS tables
 concatenate. CSV coordinates and expression are float64, and regions and
 unknown annotations remain literal text. CSV numeric fields follow Arrow's
@@ -120,7 +124,7 @@ def fcs_cell_ids(values: pd.Series, path: ArtifactFile) -> pd.Series:
     return pd.Series(identifiers, index=values.index, dtype=pd.ArrowDtype(pa.uint64()))
 
 
-def region_name(regions: pd.Series, path: ArtifactFile) -> str:
+def region_name(regions: pd.Series, path: ArtifactFile, *, expected_region: str | None = None) -> str:
     """Require one region and return it as the shapes element name.
 
     Positive integral values become decimal strings; names must be valid
@@ -133,12 +137,24 @@ def region_name(regions: pd.Series, path: ArtifactFile) -> str:
     if isinstance(region, (int, float, np.integer, np.floating)):
         if isinstance(region, bool) or not np.isfinite(region) or region <= 0 or region != int(region):
             raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED)
-        return str(int(region))
+        name = str(int(region))
+    else:
+        try:
+            name = validate_element_name(region, parameter="region", reserved=_RESERVED_REGIONS)
+        except (TypeError, ValueError) as error:
+            raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED) from error
 
-    try:
-        return validate_element_name(region, parameter="region", reserved=_RESERVED_REGIONS)
-    except (TypeError, ValueError) as error:
-        raise schema_error(path, found=f"region {region!r}", expected=_REGION_EXPECTED) from error
+    if expected_region is None or name == expected_region:
+        return name
+    source_number = re.fullmatch(r"(?:reg)?([0-9]+)", name, re.IGNORECASE)
+    expected_number = re.fullmatch(r"reg([0-9]+)", expected_region)
+    if (
+        source_number is not None
+        and expected_number is not None
+        and source_number[1].lstrip("0") == expected_number[1].lstrip("0")
+    ):
+        return expected_region
+    raise schema_error(path, found=f"region {name!r}", expected=f"the selected artifact region {expected_region!r}")
 
 
 def csv_types(columns: list[str], features: list[str]) -> pa.Schema:

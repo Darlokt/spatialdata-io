@@ -1,7 +1,8 @@
 """Lazy, model-independent raster I/O for SpatialData readers.
 
-TIFF-family sources use task-local ``tifffile`` Zarr stores and native storage
-chunks, enabling Dask to cull reads outside a computed selection. PNG and JPEG
+TIFF-family sources use native tiles and bounded row bands, enabling Dask to
+cull reads outside a computed selection. Each task owns its TIFF file and any
+Zarr store needed for decoding. PNG and JPEG
 sources use delayed whole-frame decoding because those codecs do not expose a
 bounded spatial-selection interface here. Vendor layout, axes semantics,
 stacking, transformations, and SpatialData model construction remain reader
@@ -29,6 +30,7 @@ from spatialdata_io.readers._utils.image._png import read_png
 from spatialdata_io.readers._utils.image._types import LazyRaster
 from spatialdata_io.readers._utils.image.tiff import (
     TiffMetadata,
+    TiffPageMetadata,
     inspect_tiff,
     inspect_tiff_if_recognized,
     read_tiff,
@@ -40,6 +42,7 @@ __all__ = [
     "LazyRaster",
     "RasterOptions",
     "TiffMetadata",
+    "TiffPageMetadata",
     "channel_source",
     "inspect_tiff",
     "inspect_tiff_if_recognized",

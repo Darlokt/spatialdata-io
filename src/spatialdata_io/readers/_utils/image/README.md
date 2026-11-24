@@ -108,9 +108,8 @@ semantics compose the lower-level helpers themselves: the generic image reader
 (caller permutations, 3D), ISS (`S` is not a channel), and readers whose
 channel names come from panels, plans or stains.
 
-`series` and `level` are intentionally required by `read_tiff`. The utility
-must not silently choose the first image in a scientific file that contains
-several images. `select_tiff_series(metadata, series, context=..., option=...)`
+`read_tiff()` requires an explicit series and level or an explicit physical
+page. `select_tiff_series(metadata, series, context=..., option=...)`
 returns a caller's selection unchanged, or `0` for a file with exactly one
 series; several series without a selection raise `ReaderFormatError`
 (found `"<n> TIFF series"`, expected `"one TIFF series"`, followed by
@@ -163,6 +162,19 @@ applies this rule; other readers apply it locally.
 level records its actual `shape`, `dtype`, declared `axes`, `native_chunks` and
 samples `color`. These are storage facts and may differ between pyramid levels.
 
+`inspect_tiff(..., include_pages=True)` also records top-level image file
+directories (IFDs) in physical order. Each `TiffPageMetadata` includes the same
+raster description, its index, and standard tags for description, software,
+resolution, position, orientation, photometric interpretation, and sample
+counts and bounds. Descriptions and software tags are limited to 1 MiB each.
+Resolutions and positions retain their source numerators and denominators.
+`read_tiff(metadata, page=index, context=...)` selects the physical page.
+Readers interpret the tags and assign page roles.
+`inspect_tiff(..., include_imagej_labels=True)` exposes ImageJ Labels in storage
+order when present and accepts IJMetadata tags up to 16 MiB. Tifffile can read
+tag values, including ImageJ overlays and look-up tables, during IFD parsing and
+series discovery before these opt-in limits are applied.
+
 For OME-TIFF, `TiffMetadata.ome` contains the complete parsed `ome_types` model.
 It provides logical XYZCT dimensions, physical sizes and units (including Z),
 channels, planes, timing, acquisition metadata, and structured annotations:
@@ -210,19 +222,19 @@ contract establishes their scientific meaning.
 
 TIFF tiles are native chunks. Strips, and tiles as wide as the image, store
 whole rows; consecutive ones are grouped into row bands of at most
-`STRIP_BAND_BYTES` (16 MiB) decoded bytes, aligned to their boundaries, and a
-larger strip is one chunk. Every task opens the TIFF, so one task per small
-strip (vendor exports often store one row per strip) would dominate read time.
+`STRIP_BAND_BYTES` (16 MiB) decoded bytes. Storage that requires a segment
+decoder keeps each band aligned to segment boundaries, and a larger segment
+stays whole. Final contiguous storage reads rows directly and can split a
+strip. If a single row exceeds the band limit, one row is the smallest task.
 
 Dask stores one private path-backed source in a compact blockwise layer. Each
 computed selection opens the TIFF, reads only the intersecting tiles or row
 bands, and closes every resource before returning. Most layouts are read
-through a short-lived tifffile Zarr store. A single page stored in the
-inspected file that tifffile marks final (uncompressed, contiguous, no
-predictor, default fill order, no subsampling) and whose segments hold exactly
-the page is read directly, one bounded row band per task, because Zarr's
-per-strip overhead exceeds the read itself. No `TiffFile`, Zarr store, file
-handle, or parsed OME model is stored in the graph.
+through a short-lived tifffile Zarr store. Direct row reads use final
+contiguous pixels (uncompressed, default fill order, no predictor or
+subsampling) when the page stores its exact decoded byte count. This includes
+single-strip planes and contiguous ImageJ stacks where a single IFD describes
+several planes. The graph stores paths and immutable selection metadata.
 
 PNG and JPEG do not provide equivalent random tile access here. Their headers
 are inspected eagerly with a fixed byte bound, but pixels are decoded in one

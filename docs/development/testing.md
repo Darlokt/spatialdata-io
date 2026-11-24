@@ -35,6 +35,10 @@ affected CLI workflows. Pytest includes branch-aware coverage and missing-line
 output by default. A rewritten reader requires at least 90% targeted
 branch-aware coverage.
 
+Review the [module docstrings](readers.md#write-module-docstrings) alongside
+their tests. Trace a representative source artifact to the documented output
+and check that the fixtures cover the stated interpretation and failure cases.
+
 Test invalid inputs at the boundary that owns them. A discovery test can
 exercise absent, ambiguous, wrong-kind and escaping paths. Schema tests can
 cover reordered, duplicate, missing, null, nonfinite and overflowing fields.

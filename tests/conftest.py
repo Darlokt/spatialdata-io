@@ -41,6 +41,7 @@ _READER_MARKS = {
     "macsima",
     "mcmicro",
     "merscope",
+    "phenocycler",
     "seqfish",
     "steinbock",
     "stereoseq",

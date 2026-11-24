@@ -13,6 +13,7 @@ class TestImagePackage:
             "LazyRaster",
             "RasterOptions",
             "TiffMetadata",
+            "TiffPageMetadata",
             "channel_source",
             "inspect_tiff",
             "inspect_tiff_if_recognized",

@@ -249,6 +249,7 @@ markers = [
   "macsima: tests for the macsima reader",
   "mcmicro: tests for the mcmicro reader",
   "merscope: tests for the merscope reader",
+  "phenocycler: tests for the PhenoCycler reader",
   "seqfish: tests for the seqfish reader",
   "skip_with_pyarrow_strings",
   "slow: tests with comparatively high runtime",

@@ -104,3 +104,37 @@ def write_image(path: Path, *, compressed: bool = False) -> NDArray[np.uint16]:
         tile=(16, 16),
     )
     return image
+
+
+def write_processor_markers(root: Path, region: str) -> NDArray[np.uint16]:
+    """Write Akoya's two documented per-marker spellings in non-acquisition order."""
+    directory = root / "processed_2019-05-01" / "stitched" / region
+    directory.mkdir(parents=True)
+    pixels = np.arange(3 * 32 * 40, dtype=np.uint16).reshape(3, 32, 40)
+    for filename, plane in zip(
+        ("cyc002_cha001_CD3", "cyc001_ch002_CD45", "cyc001_cha001_DAPI"), pixels[::-1], strict=True
+    ):
+        tifffile.imwrite(directory / f"{region}_{filename}.tif", plane, compression="deflate", tile=(16, 16))
+    return pixels
+
+
+def write_uploader_montage(
+    root: Path, region: str, *, labels: list[str] | None = None
+) -> tuple[Path, NDArray[np.uint16]]:
+    """Write a Nolan ImageJ montage in cycle-major, channel-minor order."""
+    directory = root / "bestFocus" / "stitched"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{region}_montage.tif"
+    pixels = np.arange(2 * 3 * 16 * 20, dtype=np.uint16).reshape(2, 3, 16, 20)
+    metadata = {"axes": "TCYX", **({"Labels": labels} if labels is not None else {})}
+    tifffile.imwrite(path, pixels, imagej=True, metadata=metadata, photometric="minisblack")
+    return path, pixels.reshape(6, 16, 20)
+
+
+def write_processor_table(root: Path, number: int, *, compensation: str = "compensated") -> Path:
+    """Place an Akoya CSV in the documented segmentation subtree."""
+    directory = root / "processed_2019-05-01" / "segm" / "segm-1" / "fcs" / compensation
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"reg{number:03}_{compensation}.csv"
+    write_csv(path, cell_frame().assign(region=number))
+    return path

@@ -23,6 +23,7 @@ _COMMANDS = {
     "macsima",
     "mcmicro",
     "merscope",
+    "phenocycler",
     "seqfish",
     "steinbock",
     "stereoseq",
@@ -52,7 +53,7 @@ class TestCliPackage:
                 assert input_type.file_okay is True
                 assert input_type.dir_okay is False
             else:
-                assert input_type.file_okay is False
+                assert input_type.file_okay == (name in {"codex", "phenocycler"})
                 assert input_type.dir_okay is True
 
     def test_command_modules_do_not_import_readers_at_module_scope(self) -> None:

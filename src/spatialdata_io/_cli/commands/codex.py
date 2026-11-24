@@ -1,4 +1,9 @@
-"""CODEX command."""
+"""Write selected CODEX regions to a SpatialData Zarr store.
+
+The command accepts a processed dataset or a CIM scan. An explicit XY affine
+maps image pixels into a selected table's native coordinates. Region order
+and raster options pass through to the public CODEX reader.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from spatialdata_io._cli._common import chunks_option, dataset_io_options, path_policy_option, scale_factors_option
+from spatialdata_io._cli._common import chunks_option, path_policy_option, scale_factors_option, scan_io_options
 
 if TYPE_CHECKING:
     from typing import Literal, TypedDict, Unpack
@@ -18,6 +23,8 @@ if TYPE_CHECKING:
     class _CodexOptions(TypedDict):
         """Describe the values normalized by Click."""
 
+        regions: tuple[str, ...]
+        read_tables: bool
         cell_table_file: Path | None
         image_file: Path | None
         experiment_file: Path | None
@@ -65,7 +72,9 @@ def _image_to_table(_context: click.Context, _parameter: click.Parameter, value:
 
 
 @click.command(name="codex")
-@dataset_io_options
+@scan_io_options
+@click.option("--regions", multiple=True, default=(), help="Repeat to select native region IDs in order.")
+@click.option("--read-tables/--no-read-tables", default=True, show_default=True, help="Read regional cell tables.")
 @click.option(
     "--cell-table-file",
     type=click.Path(path_type=Path, file_okay=True, dir_okay=False),
@@ -100,11 +109,13 @@ def _image_to_table(_context: click.Context, _parameter: click.Parameter, value:
 @chunks_option
 @path_policy_option
 def codex_command(input_path: Path, output_path: Path, **options: Unpack[_CodexOptions]) -> None:
-    """Read a CODEX region and write it to a SpatialData store."""
+    """Read CODEX regional tables, stitched images or Instrument Manager scans."""
     from spatialdata_io.readers.codex import codex  # noqa: PLC0415, RUF100 - Keep CLI help lightweight.
 
     result = codex(
         input_path,
+        regions=options["regions"] or None,
+        read_tables=options["read_tables"],
         cell_table_file=options["cell_table_file"],
         image_file=options["image_file"],
         experiment_file=options["experiment_file"],

@@ -21,8 +21,12 @@ Every dataset reader takes `path` (a local `str` or `Path`) as its first argumen
 and returns a `SpatialData` object. Put optional selections in keyword
 arguments. For example, `visium("outs", fullres_image_file="slide.tif")` resolves
 the image relative to `outs`, regardless of the process's working directory.
-On the CLI, `--input` supplies the same directory and `--output` names the Zarr
-store to write. Python callers choose whether and where to call `sdata.write()`.
+A scan reader can also accept an individual file. Define which adjacent
+artifacts participate in that case, which directory anchors relative overrides,
+and how an explicit scan choice interacts with directory discovery. The CLI
+must accept the same input kinds (`scan_io_options` for file or directory,
+`dataset_io_options` for a directory) and write to `--output`. Python callers
+choose whether and where to call `sdata.write()`.
 
 | Option | Where it applies | Convention |
 | --- | --- | --- |
@@ -73,6 +77,36 @@ and GeoJSON entry points build a single element directly and need no dataset
 layout object.
 
 For a complete example with real filenames and expected output, see [How the Visium reader works](visium-walkthrough.md).
+
+## Write module docstrings
+
+Every new or substantially changed reader implementation module, including
+private modules and shared reader utilities, must have a NumPy-style module
+docstring. Start with a one-line summary. Follow it with enough detail for a
+maintainer to trace the input through the decisions the module owns to its
+output. A package initializer that only re-exports an entry point can name
+that entry point and its scope.
+
+Document the facts a maintainer would need to preserve when changing the code.
+The relevant details depend on the module's responsibility.
+
+- **Layout and schema.** Name the actual artifacts, fields or version markers.
+  Explain how the reader identifies alternatives and handles ambiguity. Use a
+  short file tree or an example record when the distinction depends on names.
+- **Scientific meaning.** State how source axes, units, identifiers and order
+  map to the result. Explain the evidence for a coordinate transform or table
+  linkage. For example, QPI channels follow physical TIFF page order after
+  filtering on the XML image type. A thumbnail can match a measurement's
+  dimensions.
+- **Execution and ownership.** Identify what is read eagerly, what is deferred,
+  which selections bound a read, and who owns any resource needed later.
+  For example, the TIFF task reopens its file and can read several contiguous
+  one-row strips in one operation.
+
+The public reader function documents the complete caller-facing contract.
+Keep each module docstring focused on that module's decisions. When those
+decisions change, update the docstring in the same change and verify its
+claims against the implementation and the fixtures for the affected formats.
 
 ## Expose, document and verify the reader
 

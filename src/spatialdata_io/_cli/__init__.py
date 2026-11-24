@@ -12,6 +12,7 @@ from spatialdata_io._cli.commands.iss import iss_command
 from spatialdata_io._cli.commands.macsima import macsima_command
 from spatialdata_io._cli.commands.mcmicro import mcmicro_command
 from spatialdata_io._cli.commands.merscope import merscope_command
+from spatialdata_io._cli.commands.phenocycler import phenocycler_command
 from spatialdata_io._cli.commands.seqfish import seqfish_command
 from spatialdata_io._cli.commands.steinbock import steinbock_command
 from spatialdata_io._cli.commands.stereoseq import stereoseq_command
@@ -28,6 +29,7 @@ cli.add_command(iss_command)
 cli.add_command(macsima_command)
 cli.add_command(mcmicro_command)
 cli.add_command(merscope_command)
+cli.add_command(phenocycler_command)
 cli.add_command(seqfish_command)
 cli.add_command(steinbock_command)
 cli.add_command(stereoseq_command)

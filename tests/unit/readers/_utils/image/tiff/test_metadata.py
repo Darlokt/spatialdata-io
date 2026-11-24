@@ -73,6 +73,7 @@ class TestLevelMetadata:
         level.shape = (1, 1, 8, 1)
         level.axes = "TCYX"
         level.dtype = np.dtype(np.uint16)
+        level.keyframe = mocker.Mock(axes="YX", is_final=False)
         tiff = mocker.Mock(spec=tifffile.TiffFile, is_ome=False)
         mocker.patch("spatialdata_io.readers._utils.image.tiff._metadata._native_chunks", return_value=(8, 1))
         metadata = _level_metadata(tiff, level, series_index=0, level_index=0)

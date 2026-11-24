@@ -40,6 +40,7 @@ the reader and frame. [SpatialData unit support](https://github.com/scverse/spat
 | [Curio Seeker](../readers/curio.md) | Supported primary exports use the manufacturer's approximate 0.647 µm/pixel scale. |
 | [DBiT](../readers/dbit.md) | Barcode positions use the barcode grid. Image spacing alone cannot establish barcode pitch or orientation. |
 | [Stereo-seq](../readers/stereoseq.md) | Chip pitch maps native grid references to micrometres. Image-only reads without a matching pitch use pixels. |
+| [PhenoCycler](../readers/phenocycler.md) | Calibrated QPTIFF pixels map to micrometres. A shared slide frame also requires matching slide identity and stage positions. |
 | [CODEX](../readers/codex.md) | The table's pixel scale and the image-to-table mapping are separate inputs. |
 | [CosMx](../readers/cosmx.md) | FOV placement establishes global pixels. An explicit pixel size gives the assembled sample physical units. |
 | [MERSCOPE](../readers/merscope.md) | Transcripts and boundaries use micrometres. Registering the mosaic also requires its micron-to-mosaic transform. |

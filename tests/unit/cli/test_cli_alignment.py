@@ -30,7 +30,7 @@ class _ReaderCase:
 
 
 _READER_CASES = (
-    _ReaderCase("spatialdata_io.readers.codex", "codex", "codex"),
+    pytest.param(_ReaderCase("spatialdata_io.readers.codex", "codex", "codex"), marks=pytest.mark.codex),
     pytest.param(_ReaderCase("spatialdata_io.readers.cosmx", "cosmx", "cosmx"), marks=pytest.mark.cosmx),
     pytest.param(_ReaderCase("spatialdata_io.readers.curio", "curio", "curio"), marks=pytest.mark.curio),
     pytest.param(_ReaderCase("spatialdata_io.readers.dbit", "dbit", "dbit"), marks=pytest.mark.dbit),
@@ -38,6 +38,9 @@ _READER_CASES = (
     pytest.param(_ReaderCase("spatialdata_io.readers.macsima", "macsima", "macsima"), marks=pytest.mark.macsima),
     _ReaderCase("spatialdata_io.readers.mcmicro", "mcmicro", "mcmicro"),
     pytest.param(_ReaderCase("spatialdata_io.readers.merscope", "merscope", "merscope"), marks=pytest.mark.merscope),
+    pytest.param(
+        _ReaderCase("spatialdata_io.readers.phenocycler", "phenocycler", "phenocycler"), marks=pytest.mark.phenocycler
+    ),
     pytest.param(_ReaderCase("spatialdata_io.readers.seqfish", "seqfish", "seqfish"), marks=pytest.mark.seqfish),
     pytest.param(
         _ReaderCase("spatialdata_io.readers.steinbock", "steinbock", "steinbock"), marks=pytest.mark.steinbock

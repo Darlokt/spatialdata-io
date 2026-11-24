@@ -11,6 +11,7 @@ class TestTiffPackage:
     def test_exports_the_entry_points(self) -> None:
         assert tiff.__all__ == [
             "TiffMetadata",
+            "TiffPageMetadata",
             "inspect_tiff",
             "inspect_tiff_if_recognized",
             "read_tiff",

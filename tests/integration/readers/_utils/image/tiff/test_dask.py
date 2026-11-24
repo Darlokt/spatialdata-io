@@ -46,6 +46,120 @@ class _FinalPage(NamedTuple):
 class TestReadTiff:
     """Read explicit series and levels through serializable native-chunk tasks."""
 
+    @pytest.mark.parametrize("storage", ["single", "stack", "shaped-axes", "virtual-imagej", "imagej"])
+    def test_single_uncompressed_strips_split_into_bounded_bands(
+        self, tmp_path: Path, mocker: MockerFixture, storage: str
+    ) -> None:
+        path = ArtifactFile(tmp_path / "single-strip.tif")
+        plane_shape = (15, 9)
+        shape = plane_shape if storage == "single" else (3, *plane_shape)
+        source = (np.arange(prod(shape), dtype=np.uint16) * 3 + 1).reshape(shape)
+        tifffile.imwrite(
+            path,
+            source,
+            photometric="minisblack",
+            imagej=storage.endswith("imagej"),
+            truncate=storage == "virtual-imagej",
+            metadata={"axes": "YXC"} if storage == "shaped-axes" else {},
+            rowsperstrip=plane_shape[0],
+            byteorder=">",
+        )
+        row_items = plane_shape[1]
+        mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 4 * row_items * source.itemsize)
+        with tifffile.TiffFile(path) as tiff:
+            assert tiff.pages.first.databytecounts == (prod(plane_shape) * source.itemsize,)
+            assert len(tiff.pages) == (1 if storage in {"single", "virtual-imagej"} else 3)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
+        read_array = mocker.spy(tifffile.FileHandle, "read_array")
+        zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
+        raster = read_tiff(metadata, series=0, level=0, context=_RASTER_CONTEXT)
+        if storage == "shaped-axes":
+            assert raster.axes == ("Y", "X", "C")
+        result = raster.data
+        read_array.assert_not_called()
+        assert result.chunks[-2] == (4, 4, 4, 3)
+
+        crop = (slice(5, 7), slice(2, 5))
+        if storage != "single":
+            crop = (slice(1, 2), *crop)
+        np.testing.assert_array_equal(result[crop].compute(scheduler="synchronous"), source[crop])
+        assert [call.kwargs["count"] for call in read_array.call_args_list] == [4 * row_items]
+        zarr_open.assert_not_called()
+        np.testing.assert_array_equal(result.compute(scheduler="synchronous"), source)
+
+    def test_physical_page_uses_its_own_axes_dtype_and_tiles(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = ArtifactFile(tmp_path / "pages.qptiff")
+        source = np.arange(32 * 35 * 3, dtype=np.uint8).reshape(32, 35, 3)
+        late_plane = np.arange(7 * 9, dtype=np.float32).reshape(7, 9)
+        with tifffile.TiffWriter(path) as writer:
+            writer.write(np.ones((7, 9), dtype=np.float32), software="PerkinElmer-QPI test fixture", metadata=None)
+            writer.write(source, tile=(16, 16), photometric="rgb", compression="deflate", metadata=None)
+            writer.write(late_plane, metadata=None)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT, include_pages=True)
+        selection_spy = mocker.spy(tiff_dask, "_read_tiff_selection")
+        result = read_tiff(metadata, page=1, context=_RASTER_CONTEXT)
+        selection_spy.assert_not_called()
+        assert result.axes == ("Y", "X", "S")
+        assert result.color == "rgb"
+        assert result.data.dtype == source.dtype
+        assert result.data.chunks == ((16, 16), (16, 16, 3), (3,))
+        restored = cloudpickle.loads(cloudpickle.dumps(result.data))
+        np.testing.assert_array_equal(restored[17:20, 18:24].compute(scheduler="synchronous"), source[17:20, 18:24])
+        selection_spy.assert_called_once()
+        np.testing.assert_array_equal(result.data.compute(), source)
+        np.testing.assert_array_equal(read_tiff(metadata, page=2, context=_RASTER_CONTEXT).data.compute(), late_plane)
+
+    def test_physical_page_splits_uncompressed_strips(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = ArtifactFile(tmp_path / "pages.tif")
+        source = np.arange(15 * 9, dtype=np.float32).reshape(15, 9)
+        with tifffile.TiffWriter(path) as writer:
+            writer.write(np.ones((7, 9), dtype=np.uint16), metadata=None)
+            writer.write(source, rowsperstrip=15, metadata=None)
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT, include_pages=True)
+        mocker.patch.object(tiff_dask, "STRIP_BAND_BYTES", 4 * 9 * source.itemsize)
+        read_array = mocker.spy(tifffile.FileHandle, "read_array")
+        result = read_tiff(metadata, page=1, context=_RASTER_CONTEXT).data
+
+        read_array.assert_not_called()
+        assert result.chunks == ((4, 4, 4, 3), (9,))
+        np.testing.assert_array_equal(result[13:, 1:3].compute(scheduler="synchronous"), source[13:, 1:3])
+        assert [call.kwargs["count"] for call in read_array.call_args_list] == [3 * 9]
+
+    @pytest.mark.parametrize(
+        ("selection", "error", "message"),
+        [
+            ((-1, None, None), IndexError, "page index"),
+            ((1, None, None), IndexError, "page index"),
+            ((0, 0, None), ValueError, "cannot be combined"),
+            ((0, None, 0), ValueError, "cannot be combined"),
+            ((None, 0, None), ValueError, "both series and level"),
+        ],
+    )
+    def test_requires_one_inspected_selection(
+        self,
+        tmp_path: Path,
+        selection: tuple[int | None, int | None, int | None],
+        error: type[ValueError | IndexError],
+        message: str,
+    ) -> None:
+        path = ArtifactFile(tmp_path / "page.tif")
+        tifffile.imwrite(path, np.ones((8, 8), dtype=np.uint16))
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT, include_pages=True)
+        page, series, level = selection
+
+        with pytest.raises(error, match=message) as caught:
+            read_tiff(metadata, page=page, series=series, level=level, context=_RASTER_CONTEXT)
+
+        assert caught.value.__notes__ == [f"While handling {_RASTER_CONTEXT.describe(path=path)}."]
+
+    def test_requires_page_inspection(self, tmp_path: Path) -> None:
+        path = ArtifactFile(tmp_path / "page.tif")
+        tifffile.imwrite(path, np.ones((8, 8), dtype=np.uint16))
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
+
+        with pytest.raises(ValueError, match="include_pages=True"):
+            read_tiff(metadata, page=0, context=_RASTER_CONTEXT)
+
     def test_missing_linked_plane_at_compute(self, linked_ome_tiff: tuple[Path, NDArray[np.uint16]]) -> None:
         path, _ = linked_ome_tiff
         image = read_tiff(
@@ -160,7 +274,7 @@ class TestReadTiff:
         path = write_tiff(cyx_data, TiffOptions(compression="deflate", tile=(16, 16)))
         metadata = inspect_tiff(path, context=_RASTER_CONTEXT)
         level = metadata.series[0].levels[0]
-        spec = _TiffArray(metadata.path, 0, 0, level.shape, level.dtype)
+        spec = _TiffArray(metadata.path, (0, 0), level.shape, level.dtype, level.direct_row_axis is not None)
 
         result = _read_tiff_selection(
             spec,
@@ -321,7 +435,7 @@ class TestReadTiff:
         tifffile.imwrite(path, source, photometric="minisblack", rowsperstrip=1)
         metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
         level = metadata.series[0].levels[0]
-        spec = _TiffArray(metadata.path, 0, 0, level.shape, level.dtype)
+        spec = _TiffArray(metadata.path, (0, 0), level.shape, level.dtype, level.direct_row_axis is not None)
         zarr_open = mocker.spy(tiff_dask.zarr, "open_array")
 
         result = _read_tiff_selection(spec, (slice(2, 6), slice(1, 4)))

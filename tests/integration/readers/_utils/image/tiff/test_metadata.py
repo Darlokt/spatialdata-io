@@ -29,6 +29,109 @@ _RASTER_CONTEXT = ReaderErrorContext("test", "raster")
 class TestInspectTiff:
     """Inspect complete deterministic TIFF structure without decoding segments."""
 
+    def test_records_opt_in_physical_pages_and_logical_order(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = ArtifactFile(tmp_path / "interleaved.qptiff")
+        data = np.ones((32, 32), dtype=np.float32)
+        with tifffile.TiffWriter(path, bigtiff=True) as writer:
+            writer.write(
+                data,
+                description="<Description>first</Description>",
+                metadata=None,
+                software="PerkinElmer-QPI test fixture",
+                tile=(16, 16),
+                resolution=((7, 2), (11, 3)),
+                resolutionunit="CENTIMETER",
+                extratags=[(274, "H", 1, 1, False), (286, "2I", 1, (9, 7), False), (340, "f", 1, -0.5, False)],
+            )
+            writer.write(
+                data + 1,
+                description="second",
+                metadata=None,
+                tile=(16, 16),
+                extratags=[(340, "B", 1, b"\x0a", False)],
+            )
+            writer.write(
+                np.ones((4, 5, 3), dtype=np.uint8),
+                photometric="rgb",
+                description="thumbnail",
+                metadata=None,
+                extratags=[(341, "B", 3, b"\x18\x12\x02", False)],
+            )
+        segment_spy = mocker.spy(tifffile.FileHandle, "read_segments")
+
+        default = inspect_tiff(path, context=_RASTER_CONTEXT)
+        assert default.pages is None
+        metadata = inspect_tiff(path, context=_RASTER_CONTEXT, include_pages=True)
+
+        segment_spy.assert_not_called()
+        assert metadata.pages is not None
+        first, second, thumbnail = metadata.pages
+        assert (first.index, second.index, thumbnail.index) == (0, 1, 2)
+        assert first.description == "<Description>first</Description>"
+        assert first.software == "PerkinElmer-QPI test fixture"
+        assert first.axes == ("Y", "X")
+        assert first.shape == (32, 32)
+        assert first.native_chunks == (16, 16)
+        assert first.dtype == np.dtype(np.float32)
+        assert first.x_resolution == (7, 2)
+        assert first.y_resolution == (11, 3)
+        assert first.resolution_unit == 3
+        assert first.x_position == (9, 7)
+        assert first.y_position is None
+        assert first.orientation == 1
+        assert first.photometric == 1
+        assert first.samples_per_pixel == 1
+        assert first.min_sample_value == -0.5
+        assert first.max_sample_value is None
+        assert second.min_sample_value == 10
+        assert thumbnail.color == "rgb"
+        assert thumbnail.max_sample_value == (24, 18, 2)
+
+    @pytest.mark.parametrize("labels", [["one"], ["one", "two"]])
+    def test_records_opt_in_imagej_labels_in_stored_order(self, tmp_path: Path, labels: list[str]) -> None:
+        path = ArtifactFile(tmp_path / "montage.tif")
+        data = np.ones((len(labels), 6, 8), dtype=np.uint16)
+        tifffile.imwrite(path, data, imagej=True, metadata={"axes": "CYX", "Labels": labels})
+
+        assert inspect_tiff(path, context=_RASTER_CONTEXT).imagej_labels is None
+        assert inspect_tiff(path, context=_RASTER_CONTEXT, include_imagej_labels=True).imagej_labels == tuple(labels)
+
+    @pytest.mark.parametrize("imagej", [True, False])
+    def test_preserves_absent_imagej_labels(self, tmp_path: Path, *, imagej: bool) -> None:
+        path = ArtifactFile(tmp_path / "unnamed.tif")
+        tifffile.imwrite(path, np.ones((6, 8), dtype=np.uint16), imagej=imagej)
+
+        assert inspect_tiff(path, context=_RASTER_CONTEXT, include_imagej_labels=True).imagej_labels is None
+
+    def test_rejects_oversized_metadata_only_for_opt_in_imagej_labels(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        path = ArtifactFile(tmp_path / "large-imagej-metadata.tif")
+        tifffile.imwrite(
+            path,
+            np.ones((6, 8), dtype=np.uint16),
+            imagej=True,
+            metadata={"Labels": ["one"], "Overlays": [b"." * 64]},
+        )
+        mocker.patch("spatialdata_io.readers._utils.image.tiff._metadata._MAX_IMAGEJ_METADATA_BYTES", 48)
+
+        assert inspect_tiff(path, context=_RASTER_CONTEXT).imagej_labels is None
+        with pytest.raises(RasterFormatError, match=r"ImageJ Labels.*IJMetadata.*48 bytes") as caught:
+            inspect_tiff(path, context=_RASTER_CONTEXT, include_imagej_labels=True)
+
+        assert caught.value.__notes__ == [f"While handling {_RASTER_CONTEXT.describe(path=path)}."]
+
+    def test_rejects_oversized_description_only_for_opt_in_pages(self, tmp_path: Path, mocker: MockerFixture) -> None:
+        path = ArtifactFile(tmp_path / "large-description.tif")
+        tifffile.imwrite(path, np.ones((6, 8), dtype=np.uint8), description="some text longer than sixteen bytes")
+        mocker.patch("spatialdata_io.readers._utils.image.tiff._metadata._MAX_PAGE_TEXT_BYTES", 16)
+
+        assert inspect_tiff(path, context=_RASTER_CONTEXT).pages is None
+        with pytest.raises(RasterFormatError, match=r"IFD 0.*ImageDescription.*16 bytes") as caught:
+            inspect_tiff(path, context=_RASTER_CONTEXT, include_pages=True)
+
+        assert caught.value.__notes__ == [f"While handling {_RASTER_CONTEXT.describe(path=path)}."]
+
     @pytest.mark.parametrize(
         "storage",
         [
@@ -145,12 +248,14 @@ class TestInspectTiff:
             )
             writer.write(reduced, tile=(16, 16), subfiletype=1, photometric="minisblack")
 
-        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT)
+        metadata = inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT, include_pages=True)
 
         assert tuple(level.shape for level in metadata.series[0].levels) == (
             base.shape,
             reduced.shape,
         )
+        assert metadata.pages is not None
+        assert len(metadata.pages) == 1
 
     def test_discovers_linked_ome_paths(self, linked_ome_tiff: tuple[Path, NDArray[np.uint16]]) -> None:
         path, data = linked_ome_tiff
