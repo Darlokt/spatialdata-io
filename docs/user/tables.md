@@ -19,10 +19,9 @@ table, its measured population, feature order, annotations and spatial targets.
 | `uns["spatial"]` | May hold legacy library metadata such as Visium scale factors. Use the position declaration to determine coordinate units. |
 
 For example, a Xenium table stores vendor centroids in `obsm["spatial"]`.
-Classic Visium stores spot centres in `obsm["spatial_pixels"]` because the
-Space Ranger scale factors give relative image resolutions. Both tables have
-positions that can be used with their own images. Only the Xenium coordinates
-in this example directly support micrometre distances.
+Classic Visium always stores spot centres in `obsm["spatial_pixels"]`. When
+the original image supplies isotropic OME spacing on the Space Ranger grid,
+the table also stores those centres in micrometres in `obsm["spatial"]`.
 [Coordinate systems and calibration](coordinates.md)
 
 ## Expression and counts

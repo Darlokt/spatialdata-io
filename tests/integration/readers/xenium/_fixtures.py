@@ -726,7 +726,19 @@ def _write_metadata(root: Path, profile: Profile) -> None:
             },
             "spec_version": "0.1.0",
             "targets": [
-                {"type": {"data": {"id": gene_id, "name": name}, "descriptor": "gene"}} for gene_id, name in GENES
+                {
+                    "type": {"data": {"id": gene_id, "name": name}, "descriptor": "gene"},
+                    "source": {"category": "current"},
+                    "info": {"gene_coverage": index + 5},
+                }
+                for index, (gene_id, name) in enumerate(GENES)
+            ]
+            + [
+                {
+                    "type": {"data": {"id": GENES[0][0], "name": GENES[0][1]}, "descriptor": "gene"},
+                    "source": {"category": "base"},
+                    "info": {"gene_coverage": 2},
+                }
             ],
         },
     }

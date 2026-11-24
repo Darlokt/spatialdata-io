@@ -34,14 +34,8 @@ class TestMakeFrames:
             "sample_hires_pixels",
             "sample_lowres_pixels",
         )
-        np.testing.assert_array_equal(
-            frames.hires_scale.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")),
-            np.diag([0.5, 0.5, 1.0]),
-        )
-        np.testing.assert_array_equal(
-            frames.lowres_scale.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")),
-            np.diag([0.25, 0.25, 1.0]),
-        )
+        assert frames.hires_scale == 0.5
+        assert frames.lowres_scale == 0.25
 
     @pytest.mark.parametrize(
         "dataset_id", ["sample", "a", "Table_", "x_hires", "x_pixels", "S_lowres", "unnamed", "V1_Mouse_Brain", "a.b-c"]

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 def _selection() -> Selection:
     """Keep valid public defaults together for isolated path tests."""
-    return Selection(images=True, boundaries=True, table=True, transcripts=True, z_layers=None)
+    return Selection(images=True, boundaries=True, table=True, transcripts=True, z_layers=None, stains=None)
 
 
 def _files(root: Path, *names: str) -> None:
@@ -55,6 +55,7 @@ def _options(**overrides: object) -> Selection:
     options: dict[str, object] = {
         "vpt_directory": None,
         "z_layers": None,
+        "stains": None,
         "region_name": None,
         "slide_name": None,
         "include_transcripts": True,
@@ -75,7 +76,9 @@ class TestValidateOptions:
             z_layers=supplied, include_cell_boundaries=False, include_table=False, include_transcripts=False
         )
         supplied.reverse()
-        assert selection == Selection(images=True, boundaries=False, table=False, transcripts=False, z_layers=(2, 0))
+        assert selection == Selection(
+            images=True, boundaries=False, table=False, transcripts=False, z_layers=(2, 0), stains=None
+        )
         assert _selection().z_layers is None
 
     @pytest.mark.parametrize("vpt_directory", ["vpt", Path("vpt"), None])
@@ -111,6 +114,16 @@ class TestValidateOptions:
     def test_invalid_plane_values(self, indexes: list[int]) -> None:
         with pytest.raises(ValueError, match="z_layers"):
             _options(z_layers=indexes)
+
+    @pytest.mark.parametrize("stains", ["DAPI", 2, [1]])
+    def test_invalid_stain_types(self, stains: object) -> None:
+        with pytest.raises(TypeError, match="stains"):
+            _options(stains=stains)
+
+    @pytest.mark.parametrize("stains", [[], [""], ["DAPI", "DAPI"]])
+    def test_invalid_stain_names(self, stains: list[str]) -> None:
+        with pytest.raises(ValueError, match="stains"):
+            _options(stains=stains)
 
     @pytest.mark.parametrize("parameter", ["region_name", "slide_name"])
     @pytest.mark.parametrize("name", ["", " ", ".", "..", "a/b", "a\\b", "a\x00b", "a b", "__a", "a:b"])
@@ -165,6 +178,17 @@ class TestDiscoverLayout:
         assert selected.images is not None
         assert [layer.z for layer in selected.images.layers] == [2, 0]
         assert selected.names.dataset_id == "slide_ROI"
+
+    def test_stains_must_cover_every_selected_layer(self, tmp_path: Path) -> None:
+        _standard(tmp_path)
+        (tmp_path / "images/mosaic_DAPI_z2.tif").unlink()
+        with pytest.raises(ReaderFormatError, match=r"missing stain/z pairs .*'DAPI', 2"):
+            discover_layout(tmp_path, _options(stains=["DAPI"]))
+        with pytest.raises(ReaderFormatError, match=r"missing stain/z pairs .*'unknown', 0"):
+            discover_layout(tmp_path, _options(stains=["unknown"]))
+        layout = discover_layout(tmp_path, _options(z_layers=[0], stains=["DAPI", "Cyto"]))
+        assert layout.images is not None
+        assert [channel.stain for channel in layout.images.layers[0].channels] == ["Cyto", "DAPI"]
 
     @pytest.mark.parametrize("profile", ["cellpose", "watershed"])
     @pytest.mark.parametrize("current", [False, True])

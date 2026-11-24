@@ -26,9 +26,10 @@ when available. Selecting no products returns an empty SpatialData object with
 provenance.
 
 `z_layers=None` reads every mosaic layer in ascending order. A sequence such
-as `(2, 0)` selects layers in that order. Each selected layer must contain one
-grayscale plane per stain, and all planes must share shape and dtype. Channels
-are ordered by stain name.
+as `(2, 0)` selects layers in that order. Use `stains=("DAPI",)` to read just
+the DAPI channel. Each selected layer must have a grayscale plane for every
+requested stain. These planes share shape and dtype, and channels are ordered
+by stain name.
 
 Output names start with `<slide>_<region>`, taken from the region directory
 and its parent. Use `slide_name` and `region_name` to override them. Invalid

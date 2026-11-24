@@ -15,7 +15,9 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
   explicit TIFF series and stored pyramid levels, and calibration from complete OME spatial
   sizes. [Generic images and GeoJSON](docs/readers/generic.md)
 - Xenium can import secondary analysis on request. Run metadata, panel identities
-  and selected protein feature annotations are available for supported bundles. When
+  and selected protein feature annotations are available for supported bundles.
+  Gene features retain base and current panel coverage separately. Explorer
+  selections can be read from annotated CSV or registered image-space GeoJSON. When
   an H&E alignment matrix is missing, matching exported keypoints can supply the
   transformation. XOA 3.0 Prime layouts have also been verified with public bundles.
   [Xenium](docs/readers/xenium.md), [#180](https://github.com/scverse/spatialdata-io/issues/180)
@@ -24,7 +26,8 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
   [Stereo-seq](docs/readers/stereoseq.md), [#161](https://github.com/scverse/spatialdata-io/issues/161), [#322](https://github.com/scverse/spatialdata-io/issues/322), [#355](https://github.com/scverse/spatialdata-io/issues/355)
 - Visium HD selects raw or filtered cell counts independently of bin counts, can
   return bins without segmentation elements, and lets callers select the derived
-  nucleus table independently of bin counts.
+  nucleus table independently of bin counts. Probe-based assays can also
+  return the native 2 µm probe matrix with probe IDs and filtering flags.
   [Visium HD](docs/readers/visium_hd.md), [#359](https://github.com/scverse/spatialdata-io/issues/359), [#390](https://github.com/scverse/spatialdata-io/issues/390)
 - Readers that accept polygon geometry expose `invalid_geometries`. The default
   `"keep"` preserves source geometry. Use `"raise"` to reject invalid topology or
@@ -61,7 +64,8 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
   registered elements in micrometres, typically in `global`. Independent samples,
   cores and ROIs retain their own frames. For example, Xenium morphology pixels
   map into the same physical frame as cell centroids and transcripts. Classic
-  Visium retains its full-resolution pixel frame. [Calibration](docs/user/coordinates.md),
+  Visium adds micrometre coordinates when the original OME-TIFF declares
+  equal X and Y pixel sizes. [Calibration](docs/user/coordinates.md),
   [#441](https://github.com/scverse/spatialdata-io/issues/441)
 - **AnnData positions and counts.** Reader-produced `obsm["spatial"]` holds
   float64 `(x, y)` coordinates in micrometres. Where available, native positions
@@ -101,8 +105,8 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
   [CODEX](docs/readers/codex.md), [ISS](docs/readers/iss.md), [Steinbock](docs/readers/steinbock.md)
 - **seqFISH and MERSCOPE.** Use `include_*` options and seqFISH's
   `shape_geometry` to select products. In MERSCOPE, replace `vpt_outputs` with
-  `vpt_directory`. The default reads all mosaic planes. Select a subset with
-  `z_layers` or omit the mosaics with `include_images=False`.
+  `vpt_directory`. Select mosaic planes with `z_layers` and channels with `stains`.
+  The default reads all planes and stains.
   [seqFISH](docs/readers/seqfish.md), [MERSCOPE](docs/readers/merscope.md)
 - **MCMICRO, CosMx and MACSima.** MCMICRO returns one linked table and keeps
   independent core and tissue-mask frames. It reads pipeline results and omits raw
@@ -146,6 +150,8 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 
 ### Fixed
 
+- Classic Visium preserves off-image spot centres in CytAssist runs, including
+  negative microscope coordinates. [Visium](docs/readers/visium.md)
 - Classic Visium accepts MEX directories with any combination of plain and
   gzipped matrix, barcode and feature files. Duplicate spellings of the same
   member raise an ambiguity error. [Visium](docs/readers/visium.md), [#408](https://github.com/scverse/spatialdata-io/issues/408)

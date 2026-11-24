@@ -61,18 +61,26 @@ class _Options:
 
 
 def _calibrate_bins(
-    layout: VisiumHDLayout, shape: tuple[int, int], *, make_var_names_unique: bool, version: str | None
+    layout: VisiumHDLayout,
+    shape: tuple[int, int],
+    *,
+    probe_counts: bool,
+    make_var_names_unique: bool,
+    version: str | None,
 ) -> tuple[SlideFrame, AnnData | None]:
     """Align any selected 2 µm observations as part of the native calibration scan."""
     base = next((source for source in layout.bins if source.size_um == SPOT_PITCH_UM), None)
     if base is None:
         return fit_slide_frame(layout.base_positions, shape, version=version), None
 
-    counts, obs, var = read_counts(base.counts, version=version)
+    counts, obs, var = read_counts(base.counts, probe_counts=probe_counts, version=version)
     selection = PositionSelection(base.positions, shape, obs.index, base.size_um, version=version)
     frame = fit_slide_frame(layout.base_positions, shape, version=version, selected=selection)
+    positions = selection.to_frame()
+    if probe_counts:
+        positions["filtered_barcodes"] = obs["filtered_barcodes"]
     return frame, make_bin_table(
-        counts, selection.to_frame(), var, base.size_um, frame, make_var_names_unique=make_var_names_unique
+        counts, positions, var, base.size_um, frame, make_var_names_unique=make_var_names_unique
     )
 
 
@@ -125,7 +133,7 @@ def _validate_options(  # noqa: PLR0913, RUF100 - Validate every public option t
     *,
     bin_sizes: Sequence[int] | Literal["all"],
     bin_geometry: Literal["squares", "labels"],
-    bin_counts_kind: Literal["filtered", "raw"],
+    bin_counts_kind: Literal["filtered", "raw", "raw_probe"],
     include_cell_boundaries: bool | None,
     include_nucleus_boundaries: bool | None,
     include_nucleus_table: bool,
@@ -147,7 +155,7 @@ def _validate_options(  # noqa: PLR0913, RUF100 - Validate every public option t
     """
     sizes = _bin_sizes(bin_sizes)
     _choice(bin_geometry, parameter="bin_geometry", choices=("squares", "labels"))
-    _choice(bin_counts_kind, parameter="bin_counts_kind", choices=("filtered", "raw"))
+    _choice(bin_counts_kind, parameter="bin_counts_kind", choices=("filtered", "raw", "raw_probe"))
     _flag(include_cell_boundaries, parameter="include_cell_boundaries", optional=True)
     _flag(include_nucleus_boundaries, parameter="include_nucleus_boundaries", optional=True)
     _flag(include_nucleus_table, parameter="include_nucleus_table")
@@ -163,6 +171,9 @@ def _validate_options(  # noqa: PLR0913, RUF100 - Validate every public option t
         data_axes=data_axes, tiff_series=tiff_series, scale_factors=scale_factors, chunks=chunks
     )
 
+    if bin_counts_kind == "raw_probe" and sizes != (2,):
+        message = "bin_counts_kind='raw_probe' requires bin_sizes=(2,) for the native probe matrix."
+        raise ValueError(message)
     if include_nucleus_table and include_nucleus_boundaries is False:
         message = "include_nucleus_table requires nucleus boundaries; do not pass include_nucleus_boundaries=False."
         raise ValueError(message)
@@ -318,7 +329,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
     *,
     bin_sizes: Sequence[int] | Literal["all"] = "all",
     bin_geometry: Literal["squares", "labels"] = "squares",
-    bin_counts_kind: Literal["filtered", "raw"] = "filtered",
+    bin_counts_kind: Literal["filtered", "raw", "raw_probe"] = "filtered",
     include_cell_boundaries: bool | None = None,
     include_nucleus_boundaries: bool | None = None,
     include_nucleus_table: bool = False,
@@ -345,6 +356,7 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         │   ├── square_002um/                  # always required: calibrates every read
         │   │   ├── filtered_feature_bc_matrix.h5
         │   │   ├── raw_feature_bc_matrix.h5
+        │   │   ├── raw_probe_bc_matrix.h5     # probe-based assays, 2 µm only
         │   │   └── spatial/
         │   │       ├── tissue_positions.parquet
         │   │       ├── scalefactors_json.json
@@ -381,7 +393,10 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         ``"labels"`` as one ``uint32`` label image with one pixel per bin,
         which is far smaller for the 2 µm grid.
     bin_counts_kind
-        ``"filtered"`` (in-tissue bins) or ``"raw"`` (every bin) count matrices.
+        ``"filtered"`` (in-tissue bins) or ``"raw"`` (every bin) feature matrices.
+        ``"raw_probe"`` reads the probe counts of observed barcodes from
+        ``raw_probe_bc_matrix.h5``. Requires a probe-based assay and
+        ``bin_sizes=(2,)``.
     include_cell_boundaries, include_nucleus_boundaries
         ``None`` reads the segmentation when present, ``True`` requires it,
         ``False`` skips it. Cell boundaries come with ``cell_table``; nucleus
@@ -396,7 +411,8 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         table's population.
     make_var_names_unique
         Make duplicate feature names unique by appending ``-1``, ``-2``, ...
-        in every table.
+        in the feature count tables. The raw probe table always uses unique
+        probe IDs.
     invalid_geometries
         ``"keep"`` returns source polygons unchanged, ``"drop"`` removes
         invalid ones (an invalid cell also removes its nucleus and both table
@@ -452,7 +468,12 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
             follow the matrix order; ``obs`` has ``in_tissue``, ``array_row``,
             ``array_col`` and the source pixel positions ``pxl_row_in_fullres``
             and ``pxl_col_in_fullres``; ``obsm["spatial"]`` holds the nominal
-            bin centres.
+            bin centres. In probe mode, the rows are the observed barcodes
+            from the probe matrix and ``obs["filtered_barcodes"]`` retains the
+            vendor barcode flags. Columns follow the vendor's probe order,
+            indexed by unique probe ID. ``var`` retains ``probe_ids``,
+            ``probe_name``, ``gene_ids``, and ``filtered_probes`` along with
+            other available flat annotations.
         ``shapes["cell_boundaries"]``, ``tables["cell_table"]``
             Cell polygons indexed by uint32 ``cell_id`` and the selected cell
             matrix, linked by uint32 ``instance_id``; ``obsm["spatial"]`` holds the
@@ -566,7 +587,11 @@ def visium_hd(  # noqa: PLR0913, RUF100 - Explicit supported products and format
         else (metadata.nrows, metadata.ncols)
     )
     frame, base_table = _calibrate_bins(
-        layout, shape, make_var_names_unique=options.make_var_names_unique, version=version
+        layout,
+        shape,
+        probe_counts=options.selection.bin_counts_kind == "raw_probe",
+        make_var_names_unique=options.make_var_names_unique,
+        version=version,
     )
 
     shapes, tables = _segmentations(

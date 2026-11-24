@@ -16,6 +16,7 @@ outs/
 │   ├── square_002um/
 │   │   ├── filtered_feature_bc_matrix.h5
 │   │   ├── raw_feature_bc_matrix.h5
+│   │   ├── raw_probe_bc_matrix.h5      # probe-based assays, 2 µm only
 │   │   └── spatial/
 │   │       ├── tissue_positions.parquet
 │   │       ├── scalefactors_json.json
@@ -89,8 +90,8 @@ keys such as `sample_id` and `hd_layout_json` are ignored.
 A null microscope matrix pair is supported by fitting registration directly
 from 2 µm positions. CytAssist placement
 requires the feature slice and its non-null CytAssist matrix pair. Analysis,
-probe-level matrices, molecule information and 4.1 cell-type annotations are
-outside this reader's contract.
+molecule information and 4.1 cell-type annotations are outside this reader's
+contract.
 
 ## Products and counts
 
@@ -99,6 +100,9 @@ from spatialdata_io import visium_hd
 
 # Compact exact grid representation; default otherwise builds every bin polygon.
 sdata = visium_hd("outs", bin_geometry="labels")
+
+# Probe UMI counts and linked 2 µm labels for a probe-based assay.
+probes = visium_hd("outs", bin_sizes=(2,), bin_counts_kind="raw_probe", bin_geometry="labels")
 
 # Cells and derived nucleus counts, without bin elements or images.
 sdata = visium_hd(
@@ -130,6 +134,21 @@ populations cannot form a linked SpatialData table and raise a contextual error.
 spatially unsorted filtered barcodes. Feature annotations retain `gene_ids`,
 `feature_types` and other available fields such as `genome`. Duplicate symbols are made unique consistently
 unless `make_var_names_unique=False`.
+
+For a probe-based assay, `bin_counts_kind="raw_probe"` and `bin_sizes=(2,)`
+select `binned_outputs/square_002um/raw_probe_bc_matrix.h5`.
+`square_002um_table` contains one column per probe and one row per observed
+barcode in the matrix, including barcodes outside tissue. Its shapes or labels
+cover those same barcodes. Probe IDs are unique and index `var`. The table
+preserves `probe_ids`, `probe_name`, `gene_ids`, `gene_name`, `genome`,
+`probe_region` and the vendor's boolean `filtered_probes` annotations.
+`obs["filtered_barcodes"]` preserves the matrix's boolean barcode flags, while
+`in_tissue` comes from the positions file. Counts retain probes and barcodes
+with either flag value. Nucleus reconstruction still uses the raw 2 µm
+feature matrix. Probe matrices may omit software version and library
+attributes, in which case any other consumed sources establish the dataset
+identity. The nested target-set membership is available in the source file.
+[Space Ranger output guide](https://www.10xgenomics.com/support/software/space-ranger/latest/analysis/outputs/output-overview)
 
 Cell and nucleus polygon indexes and their linked table `instance_id` columns
 use uint32 IDs from 1 through 999999999. These equal the positive nine-digit

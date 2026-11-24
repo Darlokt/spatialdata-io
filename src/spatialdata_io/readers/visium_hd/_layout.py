@@ -8,6 +8,7 @@ Space Ranger 3.0 and 3.1 write binned outputs::
     │   ├── square_002um/                      # native grid; always required
     │   │   ├── filtered_feature_bc_matrix.h5
     │   │   ├── raw_feature_bc_matrix.h5
+    │   │   ├── raw_probe_bc_matrix.h5         # probe-based assays, 2 µm only
     │   │   └── spatial/
     │   │       ├── tissue_positions.parquet
     │   │       ├── scalefactors_json.json
@@ -38,8 +39,8 @@ lists the root, ``binned_outputs/`` and ``microscope_image/`` once each and neve
 searches recursively. Only the selected products are resolved:
 
 - the 2 µm positions and scale factors always (they calibrate every read);
-- each selected bin size's ``filtered``/``raw`` matrix, positions and scale
-  factors;
+- each selected bin size's feature or native probe matrix, positions and
+  scale factors;
 - cell boundaries and the selected cell matrix, nucleus boundaries, and for
   nucleus counts the raw 2 µm matrix plus the barcode mappings;
 - the feature slice when CytAssist is requested or no count matrix is
@@ -98,7 +99,7 @@ class Selection:
     """Validated choices that determine which artifacts discovery resolves."""
 
     bin_sizes: tuple[int, ...] | Literal["all"]
-    bin_counts_kind: Literal["filtered", "raw"]
+    bin_counts_kind: Literal["filtered", "raw", "raw_probe"]
     include_cell_boundaries: bool | None
     include_nucleus_boundaries: bool | None
     include_nucleus_table: bool
@@ -320,12 +321,17 @@ def discover_layout(path: str | Path, selection: Selection, *, path_policy: Path
     )
     base_scale = require_metadata_file(root, base / "spatial/scalefactors_json.json", context=_context("scale factors"))
 
+    bin_matrix = (
+        "raw_probe_bc_matrix.h5"
+        if selection.bin_counts_kind == "raw_probe"
+        else f"{selection.bin_counts_kind}_feature_bc_matrix.h5"
+    )
     bins = tuple(
         BinLayout(
             size,
             require_metadata_file(
                 root,
-                directories[size] / f"{selection.bin_counts_kind}_feature_bc_matrix.h5",
+                directories[size] / bin_matrix,
                 context=_context("bin counts"),
             ),
             require_metadata_file(

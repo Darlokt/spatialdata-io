@@ -27,9 +27,14 @@ another dataset. Several samples can each start at (0, 0). Separate samples,
 cores, ROIs or image stacks retain independent frames unless there is evidence
 for their registration.
 
+A SpatialData 0.8 Zarr store preserves the numeric image transformation.
+Its multiscale axis metadata alone does not identify which frames use
+micrometres. For physical measurements, use the calibration documented for
+the reader and frame. [SpatialData unit support](https://github.com/scverse/spatialdata/issues/120)
+
 | Source | Interpretation |
 | --- | --- |
-| [Classic Visium](../readers/visium.md) | Spots and images are registered to full-resolution pixels. Hires/lowres scale factors register image levels. Nominal spot diameter does not establish physical pixel size. |
+| [Classic Visium](../readers/visium.md) | Spots and images share the full-resolution pixel frame. A matching original OME-TIFF with equal X and Y pixel sizes adds a micrometre frame for the spots and images. |
 | [Visium HD](../readers/visium_hd.md) | The manufactured 2 µm grid establishes the slide's physical frame. |
 | [Xenium](../readers/xenium.md) | Vendor cell centroids and transcripts use micrometres. Morphology pixels map into the same frame. |
 | [Curio Seeker](../readers/curio.md) | Supported primary exports use the manufacturer's approximate 0.647 µm/pixel scale. |

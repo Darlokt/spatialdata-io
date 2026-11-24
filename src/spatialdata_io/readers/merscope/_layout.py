@@ -83,6 +83,7 @@ class Selection:
     table: bool
     transcripts: bool
     z_layers: tuple[int, ...] | None
+    stains: frozenset[str] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +175,7 @@ def validate_options(  # noqa: PLR0913, RUF100 - mirrors the public reader optio
     *,
     vpt_directory: str | Path | None,
     z_layers: Sequence[int] | None,
+    stains: Sequence[str] | None,
     region_name: str | None,
     slide_name: str | None,
     include_transcripts: bool,
@@ -187,6 +189,18 @@ def validate_options(  # noqa: PLR0913, RUF100 - mirrors the public reader optio
         raise TypeError(message)
 
     planes = _validate_z_layers(z_layers)
+    selected_stains = None
+    if stains is not None:
+        if isinstance(stains, str | bytes) or not isinstance(stains, Sequence):
+            message = "stains must be a sequence of stain names or None."
+            raise TypeError(message)
+        if any(not isinstance(stain, str) for stain in stains):
+            message = "stains must contain strings."
+            raise TypeError(message)
+        selected_stains = frozenset(stains)
+        if not selected_stains or "" in selected_stains or len(selected_stains) != len(stains):
+            message = "stains must contain one or more unique, nonempty names."
+            raise ValueError(message)
 
     for name, parameter in ((region_name, "region_name"), (slide_name, "slide_name")):
         if name is not None:
@@ -201,7 +215,9 @@ def validate_options(  # noqa: PLR0913, RUF100 - mirrors the public reader optio
         if not isinstance(value, bool):
             message = f"{parameter} must be a boolean."
             raise TypeError(message)
-    return Selection(include_images, include_cell_boundaries, include_table, include_transcripts, planes)
+    return Selection(
+        include_images, include_cell_boundaries, include_table, include_transcripts, planes, selected_stains
+    )
 
 
 def _names(root: DatasetRoot, region_name: str | None, slide_name: str | None) -> Names:
@@ -240,15 +256,20 @@ def _vpt_boundaries(analysis: DatasetRoot) -> ArtifactFile:
     return candidates[0]
 
 
-def _mosaics(root: DatasetRoot, z_layers: tuple[int, ...] | None) -> Mosaics:
+def _mosaics(root: DatasetRoot, z_layers: tuple[int, ...] | None, stains: frozenset[str] | None) -> Mosaics:
     """Pair every stain with every selected plane; missing or aliased pairs fail."""
     directory = require_metadata_directory(root, "images", context=ReaderErrorContext("merscope", "images"))
     files: dict[tuple[str, int], ArtifactFile] = {}
+    available_layers: set[int] = set()
     for entry in list_directory(directory, context=_MOSAIC_CONTEXT):
         match = _MOSAIC_NAME.fullmatch(entry.name)
         if match is None:
             continue
-        key = (match["stain"], int(match["z"]))
+        stain, z = match["stain"], int(match["z"])
+        available_layers.add(z)
+        if stains is not None and stain not in stains:
+            continue
+        key = (stain, z)
         if key in files:
             raise ReaderFormatError(
                 context=_MOSAIC_CONTEXT,
@@ -257,7 +278,7 @@ def _mosaics(root: DatasetRoot, z_layers: tuple[int, ...] | None) -> Mosaics:
                 expected="one file per stain/z pair",
             )
         files[key] = _file(root, f"images/{entry.name}", "mosaic channel")
-    if not files:
+    if not available_layers:
         raise ReaderFormatError(
             context=_MOSAIC_CONTEXT,
             path=directory,
@@ -265,9 +286,9 @@ def _mosaics(root: DatasetRoot, z_layers: tuple[int, ...] | None) -> Mosaics:
             expected="mosaic_<stain>_z<index>.tif files",
         )
 
-    stains = sorted({stain for stain, _ in files})
-    selected = tuple(sorted({z for _, z in files})) if z_layers is None else z_layers
-    missing = [(stain, z) for z in selected for stain in stains if (stain, z) not in files]
+    channels = sorted({stain for stain, _ in files} if stains is None else stains)
+    selected = tuple(sorted(available_layers)) if z_layers is None else z_layers
+    missing = [(stain, z) for z in selected for stain in channels if (stain, z) not in files]
     if missing:
         raise ReaderFormatError(
             context=_MOSAIC_CONTEXT,
@@ -275,7 +296,7 @@ def _mosaics(root: DatasetRoot, z_layers: tuple[int, ...] | None) -> Mosaics:
             found=f"missing stain/z pairs {missing!r}",
             expected="every requested plane for every stain",
         )
-    layers = tuple(MosaicLayer(z, tuple(MosaicChannel(stain, files[stain, z]) for stain in stains)) for z in selected)
+    layers = tuple(MosaicLayer(z, tuple(MosaicChannel(stain, files[stain, z]) for stain in channels)) for z in selected)
     transform = optional_metadata_file(
         root, _TRANSFORM_FILE, context=ReaderErrorContext("merscope", "micron-to-mosaic transform")
     )
@@ -329,5 +350,5 @@ def discover_layout(  # noqa: PLR0913, RUF100 - mirrors the public artifact sele
             vocabulary = tables.counts if tables is not None else _file(analysis, "cell_by_gene.csv", COUNTS)
             transcripts = TranscriptSource(current, vocabulary, "current")
 
-    images = _mosaics(root, selection.z_layers) if selection.images else None
+    images = _mosaics(root, selection.z_layers, selection.stains) if selection.images else None
     return MerscopeLayout(names, tables, images, boundaries, transcripts)

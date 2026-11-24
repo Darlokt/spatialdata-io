@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,7 +11,7 @@ import pyarrow.csv as pacsv
 import pytest
 import shapely
 from spatialdata.models import ShapesModel
-from spatialdata.transformations import Identity, get_transformation
+from spatialdata.transformations import Identity, Scale, get_transformation
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.xenium import xenium_explorer_selection
@@ -29,11 +30,41 @@ MULTI = (
     "Cell aaaaficg-1,10,10\nCell aaaaficg-1,12,10\nCell aaaaficg-1,11,12\n"
 )
 BOWTIE = "Selection 2,20,20\nSelection 2,24,24\nSelection 2,24,20\nSelection 2,20,24\n"
+ANNOTATED = (
+    "#Selection names: Region A, Region B\n#Areas (µm^2): 2,2\nSelection,X,Y,Class,Color\n"
+    'Region A,0,0,"A, B",#010203\nRegion A,2,0,"A, B",#010203\nRegion A,0,2,"A, B",#010203\n'
+    "Region B,0,3,Unclassified,#c2c2c2\nRegion B,2,3,Unclassified,#c2c2c2\nRegion B,0,5,Unclassified,#c2c2c2\n"
+)
 
 
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _feature(
+    name: str = "Region A",
+    *,
+    color: object = (194, 194, 194),
+    coordinates: object = (((0, 0), (1, 0), (0, 1), (0, 0)),),
+    classification: dict[str, object] | None = None,
+    plane: dict[str, object] | None = None,
+) -> dict[str, object]:
+    properties: dict[str, object] = {"name": name, "objectType": "annotation", "color": color}
+    if classification is not None:
+        properties["classification"] = classification
+    geometry: dict[str, object] = {"type": "Polygon", "coordinates": coordinates}
+    if plane is not None:
+        geometry["plane"] = plane
+    return {
+        "type": "Feature",
+        "properties": properties,
+        "geometry": geometry,
+    }
+
+
+def _geojson(path: Path, *features: object) -> Path:
+    return _write(path, json.dumps({"type": "FeatureCollection", "features": features}))
 
 
 class TestXeniumExplorerSelection:
@@ -58,6 +89,107 @@ class TestXeniumExplorerSelection:
         np.testing.assert_array_equal(
             shapely.get_coordinates(shapes.geometry.iloc[1]), [(10, 10), (12, 10), (11, 12), (10, 10)]
         )
+
+    def test_annotated_csv(self, tmp_path: Path) -> None:
+        path = _write(tmp_path / "annotated.csv", ANNOTATED)
+        shapes = xenium_explorer_selection(path)
+
+        assert shapes.index.tolist() == ["Region A", "Region B"]
+        assert shapes["annotation_class"].tolist() == ["A, B", "Unclassified"]
+        assert shapes["color"].tolist() == ["#010203", "#c2c2c2"]
+        assert shapes.geometry.area.tolist() == [2.0, 2.0]
+
+    def test_csv_annotation_must_be_constant(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path / "annotated.csv", ANNOTATED.replace("Region B,2,3,Unclassified", "Region B,2,3,Changed")
+        )
+        with pytest.raises(ReaderFormatError, match=r"selection 'Region B' with inconsistent Class"):
+            xenium_explorer_selection(path)
+
+    def test_geojson_names_colors_and_classes(self, tmp_path: Path) -> None:
+        file = _geojson(
+            tmp_path / "annotations.GeoJSON",
+            _feature(
+                "ROI 2", color=[1, 8, 255], classification={"name": "Tissue, A", "color": [10, 20, 30]}, plane={"z": 3}
+            ),
+            _feature("ROI 1"),
+        )
+        shapes = xenium_explorer_selection(file, image_to_global=Scale([0.5, 0.5], axes=("x", "y")))
+
+        assert shapes.index.tolist() == ["ROI 2", "ROI 1"]
+        assert shapes["color"].tolist() == ["#0108ff", "#c2c2c2"]
+        assert shapes["annotation_class"].iloc[0] == "Tissue, A"
+        assert shapes["annotation_class_color"].iloc[0] == "#0a141e"
+        assert shapes["annotation_class"].isna().tolist() == [False, True]
+        assert shapes["annotation_class_color"].isna().tolist() == [False, True]
+        assert shapes["z_plane"].iloc[0] == 3
+        assert shapes["z_plane"].isna().tolist() == [False, True]
+
+    def test_geojson_rejects_duplicate_selection_names(self, tmp_path: Path) -> None:
+        path = _geojson(tmp_path / "duplicate.geojson", _feature("ROI"), _feature("ROI", color=[1, 2, 3]))
+        with pytest.raises(ReaderFormatError, match="duplicate selection name 'ROI'"):
+            xenium_explorer_selection(path, image_to_global=Identity())
+
+    def test_geojson_drop_keeps_valid_shapes(self, tmp_path: Path) -> None:
+        path = _geojson(tmp_path / "valid.geojson", _feature("ROI"))
+        result = xenium_explorer_selection(path, image_to_global=Identity(), invalid_geometries="drop")
+        assert result.index.tolist() == ["ROI"]
+
+    def test_geojson_invalid_geometry_policy_preserves_annotations(self, tmp_path: Path) -> None:
+        path = _geojson(
+            tmp_path / "annotations.geojson",
+            _feature("Bowtie", coordinates=[[(0, 0), (1, 1), (1, 0), (0, 1), (0, 0)]]),
+            _feature("Valid", color=[0, 1, 2]),
+        )
+        kept = xenium_explorer_selection(path, image_to_global=Identity())
+        assert kept.geometry.is_valid.tolist() == [False, True]
+        dropped = xenium_explorer_selection(path, image_to_global=Identity(), invalid_geometries="drop")
+        assert dropped.index.tolist() == ["Valid"]
+        assert dropped["color"].tolist() == ["#000102"]
+        with pytest.raises(ReaderFormatError, match=r"1 invalid geometries .*Bowtie"):
+            xenium_explorer_selection(path, image_to_global=Identity(), invalid_geometries="raise")
+
+    @pytest.mark.parametrize(
+        ("feature", "match"),
+        [
+            ([], "feature 0 without an object"),
+            ({}, "feature 0 geometry without an object"),
+            ({"geometry": {}}, "feature 0 properties without an object"),
+            (_feature(""), "malformed feature 0"),
+            (_feature("\ud800"), "an invalid Unicode name"),
+            (_feature(color=[0, 0]), "invalid feature 0 RGB color"),
+            (_feature(color=[0, False, 0]), "invalid feature 0 RGB color"),
+            (_feature(color=[0, 0, 256]), "invalid feature 0 RGB color"),
+            (_feature(classification={"name": ""}), "without a class name"),
+            (_feature(classification={"name": "Class"}), "invalid feature 0 class RGB color"),
+            (_feature(coordinates=[]), "empty or malformed coordinates"),
+            (_feature(coordinates=[[(0, 0), (1, 0), (0, 1)]]), "unclosed, short or malformed ring"),
+            (_feature(coordinates=[[(0, 0), (1, 0), (0, "1"), (0, 0)]]), "nonnumeric coordinate"),
+            (_feature(coordinates=[[(0, 0), (1, 0), (0, 1), (1, 1)]]), "unclosed, short or malformed ring"),
+            (_feature(coordinates=[[[0, 0]] * 4] * 2), "with interior rings"),
+            (_feature(coordinates=[[(0, 0), (1, 0), (0, 10**400), (0, 0)]]), "outside the finite float range"),
+            (_feature(plane={"z": -1}), "unsupported geometry plane"),
+            (_feature(plane={"z": 0, "t": 1}), "unsupported geometry plane"),
+        ],
+    )
+    def test_geojson_rejects_malformed_features(self, tmp_path: Path, feature: object, match: str) -> None:
+        with pytest.raises(ReaderFormatError, match=match):
+            xenium_explorer_selection(_geojson(tmp_path / "malformed.geojson", feature), image_to_global=Identity())
+
+    def test_geojson_requires_features_and_registration(self, tmp_path: Path) -> None:
+        path = _geojson(tmp_path / "empty.geojson")
+        with pytest.raises(ValueError, match="image_to_global is required"):
+            xenium_explorer_selection(path)
+        with pytest.raises(ValueError, match="finite, invertible XY affine"):
+            xenium_explorer_selection(path, image_to_global=Scale([0, 1], axes=("x", "y")))
+        with pytest.raises(TypeError, match="SpatialData transformation"):
+            xenium_explorer_selection(path, image_to_global="global")  # pyrefly: ignore[bad-argument-type] - Invalid runtime input.
+        with pytest.raises(ReaderFormatError, match="no nonempty FeatureCollection"):
+            xenium_explorer_selection(path, image_to_global=Identity())
+
+    def test_csv_rejects_reregistering_micrometre_coordinates(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="already in micrometres"):
+            xenium_explorer_selection(_write(tmp_path / "selections.csv", MULTI), image_to_global=Identity())
 
     def test_invalid_geometry_policy(self, tmp_path: Path) -> None:
         path = _write(tmp_path / "coordinates.csv", MULTI + BOWTIE)

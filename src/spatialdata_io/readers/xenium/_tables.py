@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.xenium._analysis import Analysis
     from spatialdata_io.readers.xenium._cells import CellStore
     from spatialdata_io.readers.xenium._layout import CountSource, TableTarget, TabularSource
-    from spatialdata_io.readers.xenium._metadata import ProteinPanel
+    from spatialdata_io.readers.xenium._metadata import GenePanel, ProteinPanel
 
 type FeatureSelection = tuple[str, ...] | Literal["all"] | None
 
@@ -86,6 +86,7 @@ _PROTEIN_EXPRESSION = "Protein Expression"
 _PROTEIN_METRIC = "MEAN_PER_CELL_STAIN"
 # var columns the reader relies on or adds by name.
 _PANEL_COLUMNS = ("long_name", "clone", "codeword_index")
+_GENE_COVERAGE_COLUMNS = ("gene_coverage_base", "gene_coverage_current")
 _VAR_COLUMNS = ("gene_ids", "feature_types", *_PANEL_COLUMNS)
 _MTX_MEMBERS = frozenset({"barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz"})
 
@@ -247,8 +248,36 @@ def _protein_annotations(
     )
 
 
+def _gene_annotations(var: pd.DataFrame, panel: GenePanel, path: Path, context: ReaderErrorContext) -> None:
+    """Add vendor coverage for the exact gene-feature ID and name, in matrix order."""
+    conflicts = [name for name in _GENE_COVERAGE_COLUMNS if name in var]
+    if conflicts:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found=f"reserved gene coverage columns {conflicts!r}",
+            expected="no source columns named gene_coverage_base or gene_coverage_current when adding gene coverage",
+        )
+    coverage = [
+        panel.coverage.get((str(identifier), str(name))) if kind == _GENE_EXPRESSION else None
+        for identifier, name, kind in zip(var["gene_ids"], var.index, var["feature_types"], strict=True)
+    ]
+    dtype = pd.ArrowDtype(pa.uint64())
+    var["gene_coverage_base"] = pd.Series(
+        [entry.base if entry is not None else None for entry in coverage], index=var.index, dtype=dtype
+    )
+    var["gene_coverage_current"] = pd.Series(
+        [entry.current if entry is not None else None for entry in coverage], index=var.index, dtype=dtype
+    )
+
+
 def read_counts(
-    source: CountSource, feature_types: FeatureSelection, panel: ProteinPanel | None, *, context: ReaderErrorContext
+    source: CountSource,
+    feature_types: FeatureSelection,
+    panel: ProteinPanel | None,
+    *,
+    context: ReaderErrorContext,
+    gene_panel: GenePanel | None = None,
 ) -> Counts:
     """Read, select and scale expression; source feature and barcode order are kept.
 
@@ -258,7 +287,7 @@ def read_counts(
         If feature names or barcodes repeat, count values are malformed,
         an explicit feature type is absent, protein is selected
         without a valid HDF5 factor and metric, a protein lacks a panel entry,
-        or source columns conflict with the protein panel annotations.
+        or source columns conflict with the added panel annotations.
     """
     source_table = _read_matrix(source, context)
     path = _source_path(source)
@@ -278,13 +307,23 @@ def read_counts(
     if not selected.all():
         matrix = matrix[:, selected]
     var = source_var.loc[selected]
+    selected_types = types[selected]
+    coverage_panel = (
+        gene_panel
+        if gene_panel is not None and gene_panel.coverage and (selected_types == _GENE_EXPRESSION).any()
+        else None
+    )
     # Additional HDF5 feature datasets become var columns under their stored names.
     var.columns = sanitize_column_names(
-        list(var.columns), source="xenium: the cell-feature matrix features", reserved=_VAR_COLUMNS
+        list(var.columns),
+        source="xenium: the cell-feature matrix features",
+        reserved=(*_VAR_COLUMNS, *_GENE_COVERAGE_COLUMNS) if coverage_panel is not None else _VAR_COLUMNS,
     )
+    if coverage_panel is not None:
+        _gene_annotations(var, coverage_panel, path, context)
 
     protein: dict[str, object] | None = None
-    is_protein = types[selected] == _PROTEIN_EXPRESSION
+    is_protein = selected_types == _PROTEIN_EXPRESSION
     if is_protein.any():
         factor = _protein_scaling(source, context)
         entries = is_protein[matrix.indices]

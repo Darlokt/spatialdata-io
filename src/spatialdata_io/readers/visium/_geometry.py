@@ -21,8 +21,8 @@ The three names differ in their suffix, so they are distinct for every
 ``dataset_id`` (also ignoring case) and never equal an element name, which
 ends in ``_image`` or is ``dataset_id`` itself. Circles carry all three
 transformations; each PNG carries the identity into its own frame and the
-inverse scale into the full-resolution frame. No frame is in micrometres (see
-the reader documentation).
+inverse scale into the full-resolution frame. A calibrated original adds a
+uniform scale from the full-resolution pixel frame to micrometres.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 import geopandas as gpd
 import numpy as np
 from spatialdata.models import ShapesModel
-from spatialdata.transformations import Identity, Scale
+from spatialdata.transformations import BaseTransformation, Identity, Scale
 
 from spatialdata_io.readers.visium._schemas import INSTANCE_KEY
 
@@ -50,8 +50,13 @@ class VisiumFrames:
     fullres: str
     hires: str
     lowres: str
-    hires_scale: Scale
-    lowres_scale: Scale
+    hires_scale: float
+    lowres_scale: float
+
+
+def isotropic_scale(factor: float) -> Scale:
+    """Apply one factor to both spatial axes."""
+    return Scale([factor, factor], axes=("x", "y"))
 
 
 def make_frames(dataset_id: str, scale_factors: ScaleFactors) -> VisiumFrames:
@@ -60,8 +65,8 @@ def make_frames(dataset_id: str, scale_factors: ScaleFactors) -> VisiumFrames:
         fullres=f"{dataset_id}_pixels",
         hires=f"{dataset_id}_hires_pixels",
         lowres=f"{dataset_id}_lowres_pixels",
-        hires_scale=Scale(np.asarray([scale_factors.hires, scale_factors.hires]), axes=("x", "y")),
-        lowres_scale=Scale(np.asarray([scale_factors.lowres, scale_factors.lowres]), axes=("x", "y")),
+        hires_scale=scale_factors.hires,
+        lowres_scale=scale_factors.lowres,
     )
 
 
@@ -70,6 +75,7 @@ def make_circles(
     *,
     radius: float,
     frames: VisiumFrames,
+    microns_per_pixel: float | None = None,
 ) -> gpd.GeoDataFrame:
     """Construct barcode-indexed circles in full-resolution pixel coordinates."""
     circles = gpd.GeoDataFrame(
@@ -80,11 +86,11 @@ def make_circles(
         index=positions.index.rename(INSTANCE_KEY),
     )
 
-    return ShapesModel.parse(
-        circles,
-        transformations={
-            frames.fullres: Identity(),
-            frames.hires: frames.hires_scale,
-            frames.lowres: frames.lowres_scale,
-        },
-    )
+    transformations: dict[str, BaseTransformation] = {
+        frames.fullres: Identity(),
+        frames.hires: isotropic_scale(frames.hires_scale),
+        frames.lowres: isotropic_scale(frames.lowres_scale),
+    }
+    if microns_per_pixel is not None:
+        transformations["global"] = isotropic_scale(microns_per_pixel)
+    return ShapesModel.parse(circles, transformations=transformations)

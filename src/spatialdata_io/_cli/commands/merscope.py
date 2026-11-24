@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
         vpt_directory: Path | None
         z_layers: tuple[int, ...]
+        stains: tuple[str, ...]
         region_name: str | None
         slide_name: str | None
         include_transcripts: bool
@@ -43,6 +44,9 @@ if TYPE_CHECKING:
     multiple=True,
     default=(),
     help="Repeat z indices in desired order; omitted selects all discovered layers.",
+)
+@click.option(
+    "--stains", multiple=True, default=(), help="Repeat to select mosaic stains by name. Defaults to all stains."
 )
 @click.option(
     "--region-name", type=str, default=None, help="Region part of the element names; default: the input directory name."
@@ -81,6 +85,7 @@ def merscope_command(input_path: Path, output_path: Path, **options: Unpack[_Mer
         input_path,
         vpt_directory=options["vpt_directory"],
         z_layers=options["z_layers"] or None,
+        stains=options["stains"] or None,
         region_name=options["region_name"],
         slide_name=options["slide_name"],
         include_transcripts=options["include_transcripts"],

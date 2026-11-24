@@ -1,6 +1,6 @@
 # Visium
 
-{func}`spatialdata_io.visium` reads one single-library classic Visium output of 10x Genomics Space Ranger (`spaceranger count`, 55 µm capture spots). It returns one sparse count table, one circle per spot and the tissue images, all in image pixels. Visium HD output is read by {func}`spatialdata_io.visium_hd` ([Visium HD](visium_hd.md)).
+{func}`spatialdata_io.visium` reads one single-library classic Visium output of 10x Genomics Space Ranger (`spaceranger count`, 55 µm capture spots). It returns one sparse count table, one circle per spot and the tissue images in their pixel frames. An isotropically calibrated original OME-TIFF also registers them in micrometres. Visium HD output is read by {func}`spatialdata_io.visium_hd` ([Visium HD](visium_hd.md)).
 
 ## Supported layouts
 
@@ -56,11 +56,13 @@ ACGCCTGACACGCGCT-1,0,0,0,1234.5,2345.6
 | `barcode` | spot barcode | nonempty, unique, no NUL; quoted values may contain commas and newlines |
 | `in_tissue` | `1` under tissue, `0` otherwise | uint8, restricted to `0` or `1` |
 | `array_row`, `array_col` | spot row and column on the capture array | uint64, including zero through `2**64 - 1` |
-| `pxl_row_in_fullres`, `pxl_col_in_fullres` | spot centre `y` and `x` in full-resolution pixels | finite, nonnegative float64; may be fractional |
+| `pxl_row_in_fullres`, `pxl_col_in_fullres` | spot centre `y` and `x` in full-resolution pixels | finite float64; may be fractional or negative |
 
 A header names the fields, so they may come in any order and extra columns are ignored. Empty or duplicate names raise. A quoted extra header name may contain a newline. A headerless file has exactly these six fields. The first record is parsed with strict CSV quoting to recognize the header. When a six-field first record uses a header name only in its first field, the reader treats that value as a literal barcode. Arrow parses the remaining fields in the positional order shown above. An error names the position file and gives the expected field order. Later records must have the same number of fields, but a malformed quote there may be accepted and read as a different value. Every count barcode needs one position row. Position rows without counts are omitted from the result.
 
-The six fields are parsed directly with their Arrow types. Barcode strings remain literal, including leading zeros, whitespace, `NA` and `NULL`; empty or NUL-containing barcodes fail. Numeric fields cannot be empty and have no implicit missing-value spellings. Spaces and tabs around numbers are accepted. Unsigned integers accept hexadecimal (`0x10`) and reject negative values, a leading plus sign, decimal/exponent spellings (`2.0`, `2e0`) and digit separators. Tissue values outside zero and one fail even when they fit uint8. Values outside the declared unsigned width fail conversion. Floats are rounded directly to float64: `9007199254740993` rounds to `9007199254740992` and `1e-400` to zero; negative zero is preserved. Parsed `nan`/`inf` and negative pixel coordinates fail semantic validation.
+The six fields are parsed directly with their Arrow types. Barcode strings remain literal, including leading zeros, whitespace, `NA` and `NULL`; empty or NUL-containing barcodes fail. Numeric fields cannot be empty and have no implicit missing-value spellings. Spaces and tabs around numbers are accepted. Unsigned integers accept hexadecimal (`0x10`) and reject negative values, a leading plus sign, decimal/exponent spellings (`2.0`, `2e0`) and digit separators. Tissue values outside zero and one fail even when they fit uint8. Values outside the declared unsigned width fail conversion. Floats are rounded directly to float64: `9007199254740993` rounds to `9007199254740992` and `1e-400` to zero; negative zero is preserved. Parsed `nan` and `inf` fail semantic validation.
+
+The reader preserves spot centres outside the microscope image, including negative coordinates. This can occur when the microscope field covers less of the capture area than the CytAssist image. [10x Genomics spatial outputs](https://www.10xgenomics.com/support/software/space-ranger/3.1/analysis/spatial-outputs)
 
 `scalefactors_json.json` must be strict JSON (no `NaN` or `Infinity`) and give positive numeric `tissue_hires_scalef`, `tissue_lowres_scalef` and `spot_diameter_fullres`. The whole object, including `fiducial_diameter_fullres` and any other key, is kept in `uns["spatial"]`.
 
@@ -73,14 +75,14 @@ The six fields are parsed directly with their Arrow types. Barcode strings remai
 | `<dataset_id>_hires_image`, `<dataset_id>_lowres_image` | image | the Space Ranger PNGs that are present, lazy, single-scale |
 | `table` | table | counts linked to the circles |
 
-The circle radius is the display size Space Ranger draws, not a measured capture area.
+The circles retain the Space Ranger display size, which can differ from the nominal capture-spot size. [10x Genomics spatial outputs](https://www.10xgenomics.com/support/software/space-ranger/latest/analysis/spatial-outputs)
 
 The table has one row per count-matrix barcode in matrix order, including spots outside the tissue when raw counts are read, and every feature type (gene expression, antibody capture, ...) in matrix order:
 
 - `X` is a canonical finite CSR sparse array under the [completed-count dtype policy](../user/tables.md#raw-count-precision). Integer counts retain their source precision through conversion. Duplicate HDF5 entries for one barcode and feature fail. Repeated Matrix Market records add exactly.
 - `var` holds `gene_ids`; modern sources also provide `feature_types` and available feature annotations such as `genome`. Legacy HDF5 leaves unavailable annotations absent. Feature names are made unique with `-1`, `-2`, … unless `make_var_names_unique=False`.
 - `obs` contains, in order, uint8 `in_tissue`, uint64 `array_row` and `array_col`, string `spot_id` (the barcode), and categorical `region` (`dataset_id`). `spot_id` and `region` link the table to the circles.
-- `obsm["spatial_pixels"]` holds float64 spot centres `x, y` in full-resolution pixels, declared in `uns["spatialdata_io_positions"]`. There is no physical `obsm["spatial"]`.
+- `obsm["spatial_pixels"]` holds float64 spot centres `x, y` in full-resolution pixels. With calibration, `obsm["spatial"]` also holds the float64 centres in micrometres. Both use the count-matrix row order and are declared in `uns["spatialdata_io_positions"]`.
 - `uns["spatial"][dataset_id]` holds `scalefactors` and `metadata` (the HDF5 `chemistry_description` and `software_version` attributes when present).
 
 ## Images and channels
@@ -111,8 +113,11 @@ A four-channel fluorescence image (for example DAPI, CD3, CD8, PanCK) therefore 
 | `<dataset_id>_pixels` | full-resolution pixel | circles, full-resolution image | PNGs by `Scale(1 / tissue_*_scalef)` |
 | `<dataset_id>_hires_pixels` | hires pixel | hires image | circles by `Scale(tissue_hires_scalef)` |
 | `<dataset_id>_lowres_pixels` | lowres pixel | lowres image | circles by `Scale(tissue_lowres_scalef)` |
+| `global` with calibration | micrometre | | Circles and full-resolution image by the OME pixel size, PNGs by that size divided by their Space Ranger scale factors |
 
-The PNGs are scaled copies of the full-resolution image with aligned corners, so a pure scale relates the frames. The three names differ in their suffix, so they never collide with each other or with an element name, also after `dataset_id` is repaired. `obsm["spatial_pixels"]` is declared in the `<dataset_id>_pixels` frame. No element uses `global`, which means micrometres in spatialdata-io. Space Ranger estimates `spot_diameter_fullres` from the fiducial registration and a nominal spot size, not from the image's pixel size, and classic Visium output declares no pixel size, so no verifiable micrometre calibration exists. A caller who trusts a pixel size can add a `Scale` into `global` with `spatialdata.transformations.set_transformation`:
+The PNGs are scaled copies of the full-resolution image with aligned corners, so a pure scale relates the frames. Pass the original Space Ranger image and select the TIFF series with the same level-zero grid and orientation. When `PhysicalSizeX` and `PhysicalSizeY` describe the selected spatial axes and agree within a relative tolerance of `1e-12` after conversion from µm, nm or mm, the reader adds `global`. Each available PNG must match the scaled width and height within one pixel for rounding. Calibrated spot centres must be finite. The transforms and the table's micrometre positions persist when written and reopened as SpatialData Zarr.
+
+Ordinary Space Ranger outputs, missing or unequal OME spacings, and reassignments of the OME spatial axes use the pixel frames. Anisotropic spacing would turn the pixel circles into ellipses. Space Ranger's estimated display diameter supplies the circle radii and OME supplies physical calibration. You can attach a known isotropic calibration to a pixel-frame dataset with `spatialdata.transformations.set_transformation` as follows.
 
 ```python
 from spatialdata.transformations import Scale, get_transformation, set_transformation

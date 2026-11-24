@@ -63,6 +63,22 @@ class ProteinPanel:
     targets: Mapping[str, ProteinTarget]
 
 
+@dataclass(frozen=True, slots=True)
+class GeneCoverage:
+    """Vendor gene coverage by the two source categories of a panel."""
+
+    base: int | None = None
+    current: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GenePanel:
+    """Gene panel identity and coverage keyed by exact (ID, name) pairs."""
+
+    identity: Mapping[str, object]
+    coverage: Mapping[tuple[str, str], GeneCoverage]
+
+
 def _positive(value: object, name: str, path: ArtifactFile, context: ReaderErrorContext) -> float:
     # JSON booleans are ints in Python but never a size; strict JSON numbers are finite.
     if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
@@ -179,13 +195,66 @@ def _panel_identity(panel: dict[str, object], path: ArtifactFile, context: Reade
     return values | {key: panel[key] for key in _PANEL_KEYS if isinstance(panel.get(key), (str, int, float))}
 
 
-def read_gene_panel(path: ArtifactFile, *, context: ReaderErrorContext) -> dict[str, object]:
-    """Return the identity of ``gene_panel.json``: name, design ID, version, species, tissue, targets, spec."""
+def _gene_coverage(
+    values: object, path: ArtifactFile, context: ReaderErrorContext
+) -> dict[tuple[str, str], GeneCoverage]:
+    if type(values) is not list:
+        raise ReaderFormatError(
+            context=context, path=path, found="no targets list", expected="payload.targets as a list"
+        )
+    coverage: dict[tuple[str, str], GeneCoverage] = {}
+    for item in values:
+        target = _object(item, "target", path, context)
+        kind = _object(target.get("type"), "target.type", path, context)
+        if kind.get("descriptor") != "gene":
+            continue
+        data = _object(kind.get("data"), "gene target.type.data", path, context)
+        source = _object(target.get("source"), "gene target.source", path, context)
+        info = _object(target.get("info"), "gene target.info", path, context)
+        identifier, name = data.get("id"), data.get("name")
+        category, count = source.get("category"), info.get("gene_coverage")
+        if not (
+            isinstance(identifier, str)
+            and identifier
+            and isinstance(name, str)
+            and name
+            and category in ("base", "current")
+            and type(count) is int
+            and 0 <= count < 2**64
+        ):
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found=f"gene target {name!r}, ID {identifier!r}, source {category!r}, coverage {count!r}",
+                expected="nonempty gene ID and name, a base or current source, and uint64 gene_coverage",
+            )
+        key = identifier, name
+        previous = coverage.get(key, GeneCoverage())
+        if (previous.base if category == "base" else previous.current) is not None:
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found=f"duplicate {category} coverage for gene {name!r} ({identifier})",
+                expected="one gene target per ID, name and source category",
+            )
+        coverage[key] = replace(previous, base=count) if category == "base" else replace(previous, current=count)
+    return coverage
+
+
+def read_gene_panel(path: ArtifactFile, *, include_coverage: bool, context: ReaderErrorContext) -> GenePanel:
+    """Read scalar panel identity and optionally the spec 0.1.0 gene coverage entries."""
     payload, panel = _payload(path, context)
     identity = _panel_identity(panel, path, context)
     # Gene panels record their specification version beside the panel.
     spec = payload.get("spec_version")
-    return identity | {"spec_version": spec} if isinstance(spec, str) else identity
+    if isinstance(spec, str):
+        identity["spec_version"] = spec
+    coverage = (
+        _gene_coverage(payload["targets"], path, context)
+        if include_coverage and spec == "0.1.0" and "targets" in payload
+        else {}
+    )
+    return GenePanel(identity, coverage)
 
 
 def read_protein_panel(path: ArtifactFile, *, context: ReaderErrorContext) -> ProteinPanel:

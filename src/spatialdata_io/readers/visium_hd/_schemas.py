@@ -78,6 +78,37 @@ def validate_nucleus_feature_columns(frame: pd.DataFrame, path: Path, *, context
         )
 
 
+def validate_probe_annotations(
+    obs: pd.DataFrame, var: pd.DataFrame, path: Path, *, context: ReaderErrorContext
+) -> None:
+    """Require aligned boolean flags and an unambiguous identity for every probe."""
+    for frame, field in ((obs, "filtered_barcodes"), (var, "filtered_probes")):
+        if field not in frame or not pd.api.types.is_bool_dtype(frame[field].dtype) or frame[field].isna().any():
+            raise ReaderFormatError(
+                context=context,
+                path=path,
+                found=f"missing, null or non-boolean {field}",
+                expected=f"nonnull boolean {field} flags",
+            )
+
+    if "probe_ids" not in var or "gene_ids" not in var:
+        raise ReaderFormatError(
+            context=context, path=path, found="missing probe or gene IDs", expected="separate probe IDs and gene IDs"
+        )
+    probes = var["probe_ids"]
+    if probes.isna().any() or probes.eq("").any() or probes.duplicated().any():
+        raise ReaderFormatError(
+            context=context, path=path, found="null, empty or duplicate probe IDs", expected="nonempty unique probe IDs"
+        )
+    if "probe_name" in var:
+        raise ReaderFormatError(
+            context=context,
+            path=path,
+            found="feature annotation 'probe_name' conflicts with the stored probe names",
+            expected="probe names in matrix/features/name",
+        )
+
+
 def bin_instance_ids(count: int) -> NDArray[np.uint32]:
     """Generate one uint32 row ID per selected bin, reserving zero for label background."""
     if count > np.iinfo(np.uint32).max:

@@ -35,6 +35,7 @@ from spatialdata_io.readers._utils.table import (
     prepare_anndata_dataframe,
 )
 from spatialdata_io.readers.visium_hd._positions import read_positions
+from spatialdata_io.readers.visium_hd._schemas import validate_probe_annotations
 from spatialdata_io.readers.visium_hd._transforms import bin_centers
 
 if TYPE_CHECKING:
@@ -47,9 +48,11 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.visium_hd._transforms import SlideFrame
 
 
-def read_counts(path: ArtifactFile, *, version: str | None) -> tuple[csr_array, pd.DataFrame, pd.DataFrame]:
+def read_counts(
+    path: ArtifactFile, *, version: str | None, probe_counts: bool = False
+) -> tuple[csr_array, pd.DataFrame, pd.DataFrame]:
     """Read shared sparse counts and validate the selected HD population."""
-    context = ReaderErrorContext("visium_hd", "count matrix", version)
+    context = ReaderErrorContext("visium_hd", "raw probe count matrix" if probe_counts else "count matrix", version)
     counts, obs, var = read_10x_h5_components(path, context=context)
     if not len(obs) or not len(var):
         raise ReaderFormatError(
@@ -63,6 +66,11 @@ def read_counts(path: ArtifactFile, *, version: str | None) -> tuple[csr_array, 
     names = obs.index
     if not (names[1:] > names[:-1]).all() and not names.is_unique:
         raise ReaderFormatError(context=context, path=path, found="duplicate barcodes", expected="unique barcodes")
+
+    if probe_counts:
+        validate_probe_annotations(obs, var, path, context=context)
+        var["probe_name"] = var.index
+        var.index = pd.Index(var["probe_ids"].array)
 
     return counts, obs, var
 

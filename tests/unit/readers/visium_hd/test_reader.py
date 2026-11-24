@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 
@@ -69,6 +69,11 @@ class TestBinSizes:
 
 class TestVisiumHD:
     """Inputs fail before I/O, in signature order."""
+
+    @pytest.mark.parametrize("sizes", [(), (8,), (2, 8), "all"])
+    def test_raw_probe_counts_require_native_bin(self, tmp_path: Path, sizes: tuple[int, ...] | Literal["all"]) -> None:
+        with pytest.raises(ValueError, match=r"raw_probe.*requires.*bin_sizes"):
+            visium_hd(tmp_path / "missing", bin_sizes=sizes, bin_counts_kind="raw_probe")
 
     def test_signature(self) -> None:
         parameters = inspect.signature(visium_hd).parameters

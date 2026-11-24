@@ -66,7 +66,7 @@ def _options(
 
 
 def _read(root: Path, fullres: Path, options: ImageOptions | None = None) -> DataArray | DataTree:
-    images = read_images(
+    images, _ = read_images(
         _layout(root, fullres=fullres),
         dataset_id="sample",
         frames=_frames(),
@@ -216,7 +216,7 @@ class TestReadImages:
         tifffile.imwrite(fullres, expected, metadata={"axes": "CYX"}, photometric="minisblack", tile=(16, 16))
         hires.write_bytes(imagecodecs.png_encode(np.zeros((8, 10, 3), dtype=np.uint8)))
 
-        images = read_images(
+        images, _ = read_images(
             _layout(tmp_path, fullres=fullres, hires=hires),
             dataset_id="sample",
             frames=_frames(),
@@ -252,7 +252,7 @@ class TestReadImages:
         hires.write_bytes(imagecodecs.png_encode(np.zeros((5, 7, 3), dtype=np.uint8)))
         lowres.write_bytes(imagecodecs.png_encode(np.zeros((2, 4, 3), dtype=np.uint8)))
 
-        images = read_images(
+        images, _ = read_images(
             _layout(tmp_path, fullres=None, hires=hires, lowres=lowres),
             dataset_id="sample",
             frames=_frames(),
@@ -284,7 +284,7 @@ class TestReadImages:
         hires = tmp_path / "hires.png"
         hires.write_bytes(imagecodecs.png_encode(np.zeros(shape, dtype=np.uint8)))
 
-        images = read_images(
+        images, _ = read_images(
             _layout(tmp_path, fullres=None, hires=hires),
             dataset_id="sample",
             frames=_frames(),

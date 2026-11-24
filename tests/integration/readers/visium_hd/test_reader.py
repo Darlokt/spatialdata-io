@@ -27,7 +27,17 @@ from xarray import DataArray
 from spatialdata_io import visium_hd
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers.visium_hd import _metadata, _reader
-from tests.integration.readers.visium_hd._fixtures import CELL_IDS, _write_png, write_bundle
+from tests.integration.readers.visium_hd._fixtures import (
+    CELL_IDS,
+    PROBE_COUNTS,
+    PROBE_IDS,
+    PROBE_NAMES,
+    PROBE_ROWS,
+    _write_png,
+    barcode,
+    write_bundle,
+    write_probe_counts,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -338,6 +348,91 @@ class TestVisiumHD:
         assert_array_equal(table.X.toarray(), bundle.raw[8])
         # Edge squares retain the nominal full bin width.
         assert_allclose(result.shapes["square_008um"].geometry.iloc[-1].area, 64.0, rtol=1e-10)
+
+    @pytest.mark.parametrize("kind", ["filtered", "raw"])
+    def test_gene_counts_with_probe_matrix_present(self, tmp_path: Path, kind: Literal["filtered", "raw"]) -> None:
+        bundle = write_bundle(tmp_path, sizes=(2,), segmented=False)
+        write_probe_counts(bundle.root)
+
+        result = visium_hd(bundle.root, bin_sizes=(2,), bin_counts_kind=kind, include_images=False)
+
+        table = result.tables["square_002um_table"]
+        expected = bundle.raw[2] if kind == "raw" else bundle.raw[2][bundle.filtered_rows[2]]
+        assert table.var_names.tolist() == ["Gene", "Gene-1", "Other"]
+        assert isinstance(table.X, csr_array)
+        assert_array_equal(table.X.toarray(), expected)
+
+    @pytest.mark.parametrize(("version", "geometry"), [("3.0.0", "squares"), ("4.1.0", "labels")])
+    def test_native_probe_product(self, tmp_path: Path, version: str, geometry: Literal["squares", "labels"]) -> None:
+        segmented = version == "4.1.0"
+        bundle = write_bundle(tmp_path, version=version, sizes=(2, 8), segmented=segmented)
+        write_probe_counts(bundle.root)
+
+        result = visium_hd(
+            bundle.root,
+            bin_sizes=(2,),
+            bin_counts_kind="raw_probe",
+            bin_geometry=geometry,
+            include_images=False,
+            include_nucleus_table=segmented,
+            make_var_names_unique=False,
+        )
+
+        assert result.attrs["spatialdata_io_format_version"] == version
+        assert result.coordinate_systems == ["global"]
+        assert set(result.tables) == {"square_002um_table"} | ({"cell_table", "nucleus_table"} if segmented else set())
+        table = result.tables["square_002um_table"]
+        assert isinstance(table.X, csr_array)
+        assert table.X.has_canonical_format
+        assert table.X.dtype == np.float32
+        assert_array_equal(table.X.toarray(), PROBE_COUNTS)
+        assert table.var_names.tolist() == list(PROBE_IDS)
+        assert table.var["probe_ids"].tolist() == list(PROBE_IDS)
+        assert table.var["probe_name"].tolist() == list(PROBE_NAMES)
+        assert table.var["gene_ids"].tolist() == ["gene-a", "gene-a", "gene-b"]
+        assert table.var["gene_name"].tolist() == ["Gene", "Gene", "Other"]
+        assert table.var["probe_region"].tolist() == ["spliced", "unspliced", "none"]
+        assert table.var["filtered_probes"].tolist() == [True, False, True]
+        assert table.obs["filtered_barcodes"].tolist() == [False, True, True]
+        assert table.obs["in_tissue"].tolist() == [0, 1, 1]
+        assert table.obs_names.tolist() == [barcode(2, *divmod(row, 17)) for row in PROBE_ROWS]
+        assert table.obs["region"].tolist() == ["square_002um"] * len(PROBE_ROWS)
+        assert table.obs["instance_id"].tolist() == [1, 2, 3]
+
+        if segmented:
+            cell_counts = result.tables["cell_table"].X
+            nucleus_counts = result.tables["nucleus_table"].X
+            assert isinstance(cell_counts, csr_array)
+            assert isinstance(nucleus_counts, csr_array)
+            assert_array_equal(cell_counts.toarray(), bundle.cells[[1, 0]])
+            assert_array_equal(nucleus_counts.toarray(), bundle.nuclei[[1, 0]])
+
+        if geometry == "squares":
+            shapes = result.shapes["square_002um"]
+            assert shapes.index.tolist() == [1, 2, 3]
+            assert_allclose(shapes.geometry.area, [4, 4, 4])
+            centroids = shapes.geometry.centroid
+            coordinates = table.obsm["spatial"]
+            assert isinstance(coordinates, np.ndarray)
+            assert_allclose(coordinates, np.column_stack((centroids.x, centroids.y)))
+        else:
+            labels = result.labels["square_002um"]
+            assert isinstance(labels, DataArray)
+            expected_grid = np.zeros((17, 17), dtype=np.uint32)
+            expected_grid.flat[list(PROBE_ROWS)] = [1, 2, 3]
+            assert_array_equal(labels.data.compute(), expected_grid)
+
+    def test_raw_probe_name_annotation_collision(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path, version="3.0.0", sizes=(2,), segmented=False)
+        path = write_probe_counts(bundle.root)
+        with h5py.File(path, "r+") as handle:
+            handle.create_dataset("matrix/features/probe_name", data=[b"A", b"B", b"C"])
+
+        with pytest.raises(ReaderFormatError, match="conflicts with the stored probe names") as error:
+            visium_hd(bundle.root, bin_sizes=(2,), bin_counts_kind="raw_probe", include_images=False)
+
+        assert error.value.path == path
+        assert error.value.context == ReaderErrorContext("visium_hd", "raw probe count matrix", "3.0.0")
 
     @pytest.mark.parametrize("kind", ["filtered", "raw"])
     @pytest.mark.parametrize("size", [6, 8, 16])

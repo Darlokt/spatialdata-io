@@ -11,7 +11,8 @@ filtered by ``in_tissue``, so raw counts keep spots outside the tissue::
 
 The table gains the grid fields as ``obs`` columns, the spot centre as
 ``obsm["spatial_pixels"]`` in ``x, y`` order (``pxl_col_in_fullres``,
-``pxl_row_in_fullres``), the barcode again as the instance key ``spot_id``,
+``pxl_row_in_fullres``), the calibrated centre as ``obsm["spatial"]`` when
+the original image declares a usable physical grid, the barcode again as the instance key ``spot_id``,
 and ``region``. ``uns["spatial"][<dataset_id>]`` keeps the scale-factor JSON
 and the optional HDF5 chemistry description and software version. Images are
 separate SpatialData elements.
@@ -145,6 +146,7 @@ def prepare_table(  # noqa: PLR0913 - explicit reader-owned table construction i
     pixel_frame: str,
     scale_factors: ScaleFactors,
     make_var_names_unique: bool,
+    microns_per_pixel: float | None = None,
 ) -> PreparedTable:
     """Read sparse counts and align position metadata without filtering spots."""
     adata = _read_counts(layout, make_var_names_unique=make_var_names_unique)
@@ -174,12 +176,13 @@ def prepare_table(  # noqa: PLR0913 - explicit reader-owned table construction i
     obs[REGION_KEY] = pd.Categorical(np.repeat(dataset_id, adata.n_obs), categories=[dataset_id])
 
     # Vendor CSV coordinates are row/column, while SpatialData uses x/y.
-    adata.obsm["spatial_pixels"] = np.column_stack(
+    pixel_centres = np.column_stack(
         (
             aligned["pxl_col_in_fullres"].to_numpy(dtype=np.float64, copy=False),
             aligned["pxl_row_in_fullres"].to_numpy(dtype=np.float64, copy=False),
         )
     )
+    adata.obsm["spatial_pixels"] = pixel_centres
     description: PositionsMetadata = {
         "schema_version": 1,
         "coordinates": {
@@ -191,6 +194,24 @@ def prepare_table(  # noqa: PLR0913 - explicit reader-owned table construction i
             }
         },
     }
+    if microns_per_pixel is not None:
+        with np.errstate(over="ignore"):
+            physical_centres = pixel_centres * microns_per_pixel
+        if not np.isfinite(physical_centres).all():
+            raise ReaderFormatError(
+                context=ReaderErrorContext("visium", "tissue positions", layout.format_version),
+                path=layout.positions,
+                found=f"spot centre overflow at {microns_per_pixel:g} µm per pixel",
+                expected="finite spot centres in micrometres",
+            )
+        adata.obsm["spatial"] = physical_centres
+        description["coordinates"]["spatial"] = {
+            "axes": ["x", "y"],
+            "units": "micrometer",
+            "frame": "global",
+            "position": "spot centre",
+            "calibration": {"global": "Full-resolution TIFF OME PhysicalSizeX and PhysicalSizeY"},
+        }
     adata.uns[POSITIONS_KEY] = description
     adata.uns["spatial"] = {
         dataset_id: {

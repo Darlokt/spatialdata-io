@@ -114,6 +114,15 @@ class TestNormalizePositions:
         assert int(result["array_row"].iloc[0]) == value
         assert int(result["array_row"].iloc[1]) == 1
 
+    @pytest.mark.parametrize("column", ["pxl_row_in_fullres", "pxl_col_in_fullres"])
+    def test_preserves_signed_microscope_pixel_positions(self, column: str) -> None:
+        frame = _frame()
+        frame.loc[0, column] = -0.25
+
+        result = normalize_positions(frame, path=_PATH, context=_CONTEXT)
+
+        assert result[column].iloc[0] == -0.25
+
     @pytest.mark.parametrize(
         ("column", "value", "message"),
         [
@@ -125,8 +134,6 @@ class TestNormalizePositions:
             ("in_tissue", 2, "binary"),
             ("in_tissue", 255, "binary"),
             ("in_tissue", None, "binary"),
-            ("pxl_row_in_fullres", -1, "nonnegative pixel"),
-            ("pxl_col_in_fullres", -0.25, "nonnegative pixel"),
         ],
     )
     def test_rejects_invalid_values(self, column: str, value: str | float | None, message: str) -> None:

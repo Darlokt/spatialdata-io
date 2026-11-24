@@ -17,8 +17,10 @@ are ignored; empty or duplicate names are rejected before a CSV parser could
 rename them. A headerless file has exactly these six fields in this order.
 Arrow reads barcodes literally, tissue state as uint8, grid positions as
 uint64 and image-pixel positions directly as float64. Tissue state is binary;
-pixel positions must be finite and nonnegative. Numeric token grammar and
-rounding follow Arrow's declared types, without a second text decoder.
+pixel positions must be finite and can extend beyond the image when the
+CytAssist field covers more of the capture area than the microscope image.
+Numeric token grammar and rounding follow Arrow's declared types, without a
+second text decoder.
 """
 
 from __future__ import annotations
@@ -94,8 +96,8 @@ def normalize_positions(frame: pd.DataFrame, *, path: Path, context: ReaderError
     """Normalize owned projected source fields; preserve barcode and row order.
 
     Source fields have their declared Arrow types and no nulls. Barcodes must
-    be nonempty and unique, pixel coordinates finite and nonnegative, and
-    in_tissue binary. No source rows are filtered.
+    be nonempty and unique, pixel coordinates finite, and in_tissue binary.
+    No source rows are filtered.
     """
     if frame.empty:
         raise ReaderFormatError(context=context, path=path, found="zero rows", expected="at least one spot row")
@@ -125,12 +127,4 @@ def normalize_positions(frame: pd.DataFrame, *, path: Path, context: ReaderError
             raise ReaderFormatError(
                 context=context, path=path, found=f"nonfinite values in {column!r}", expected="finite numeric values"
             )
-        if (frame[column] < 0).any():
-            raise ReaderFormatError(
-                context=context,
-                path=path,
-                found=f"negative values in {column!r}",
-                expected="nonnegative pixel coordinates",
-            )
-
     return frame.set_index("barcode")

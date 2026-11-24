@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
         bin_sizes: tuple[int, ...] | Literal["all"]
         bin_geometry: Literal["squares", "labels"]
-        bin_counts_kind: Literal["filtered", "raw"]
+        bin_counts_kind: Literal["filtered", "raw", "raw_probe"]
         include_cell_boundaries: bool | None
         include_nucleus_boundaries: bool | None
         include_nucleus_table: bool
@@ -74,10 +74,10 @@ def _bin_sizes(
 )
 @click.option(
     "--bin-counts-kind",
-    type=click.Choice(["filtered", "raw"]),
+    type=click.Choice(["filtered", "raw", "raw_probe"]),
     default="filtered",
     show_default=True,
-    help="Select the bin matrix population.",
+    help="Select bin feature counts or raw_probe counts with --bin-sizes 2.",
 )
 @click.option(
     "--include-cell-boundaries/--no-include-cell-boundaries", default=None, help="Default: read when present."
@@ -102,7 +102,7 @@ def _bin_sizes(
     "--make-var-names-unique/--no-make-var-names-unique",
     default=True,
     show_default=True,
-    help="Make duplicate feature symbols unique in all tables.",
+    help="Make duplicate names unique in feature count tables.",
 )
 @click.option(
     "--invalid-geometries",

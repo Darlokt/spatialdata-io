@@ -82,7 +82,8 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
     Positions have one row per capture spot: the barcode, ``in_tissue``
     (``0`` or ``1``), ``array_row`` and ``array_col`` (nonnegative integers),
     and the spot centre ``pxl_row_in_fullres`` (``y``) and
-    ``pxl_col_in_fullres`` (``x``) in full-resolution image pixels. A header
+    ``pxl_col_in_fullres`` (``x``) in full-resolution image pixels. Spot
+    centres can lie outside the microscope field. A header
     names these fields in any order and may add columns; a headerless file has
     exactly these six. ``scalefactors_json.json`` must give finite positive
     ``tissue_hires_scalef``, ``tissue_lowres_scalef`` and
@@ -113,7 +114,8 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
         Full-resolution tissue image given to Space Ranger: TIFF, OME-TIFF,
         BigTIFF (``.tif``, ``.tiff``, ``.btf``), PNG or JPEG (``.jpg``,
         ``.jpeg``), resolved like ``counts_source``. The suffix is checked
-        before any I/O. The positions must refer to this image's pixels.
+        before any I/O. The selected level-zero image must have the pixel grid
+        and orientation Space Ranger used to report the spot positions.
     positions_file, scale_factors_file
         Position CSV or scale-factor JSON to read instead of the discovered
         one, resolved like ``counts_source``.
@@ -170,16 +172,18 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
             - ``obsm["spatial_pixels"]``: float64 spot centres ``x, y`` in
               full-resolution pixels, declared in
               ``uns["spatialdata_io_positions"]`` with frame
-              ``dataset_id + "_pixels"``; there is no physical
-              ``obsm["spatial"]``.
+              ``dataset_id + "_pixels"``.
+            - ``obsm["spatial"]`` with calibration: float64 spot centres
+              ``x, y`` in micrometres, declared in the same metadata with
+              frame ``global``.
             - ``uns["spatial"][dataset_id]``: ``scalefactors`` (the complete
               JSON object) and ``metadata`` (HDF5 ``chemistry_description``
               and ``software_version`` when present).
 
         ``shapes[dataset_id]``
             One circle per table row, indexed by barcode (``spot_id``), centred
-            on the spot with radius ``spot_diameter_fullres / 2``. This is the
-            display size Space Ranger draws, not a measured capture area.
+            on the spot with radius ``spot_diameter_fullres / 2``. The radius
+            uses the Space Ranger display size.
         ``images[dataset_id + "_full_image"]`` (only with ``fullres_image_file``)
             Lazy CYX image of the selected TIFF series, or of the PNG or JPEG
             file, with the source dtype and channel order; a pyramid only when
@@ -196,17 +200,19 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
         positions. A four-channel fluorescence image is therefore never
         labelled RGB(A).
 
-        Coordinate systems: Space Ranger estimates the spot diameter in
-        pixels from the fiducial registration and a nominal spot size, which
-        does not calibrate the image, so no element uses ``global``
-        (micrometres).
-
         - ``dataset_id + "_pixels"``, full-resolution pixels: the circles and
           the full-resolution image by identity, each PNG by
           ``Scale(1 / tissue_*_scalef)``;
         - ``dataset_id + "_hires_pixels"`` and
           ``dataset_id + "_lowres_pixels"``, PNG pixels: that PNG by identity
           and the circles by ``Scale(tissue_*_scalef)``.
+        - ``global``, micrometres: available when both OME physical sizes
+          describe the selected spatial axes and agree after conversion from
+          µm, nm or mm. The circles and full-resolution image use the common
+          pixel size. Each PNG uses that size divided by its Space Ranger scale
+          factor. The reader checks the dimensions of available PNGs against
+          the calibrated full-resolution grid. Partial or unequal
+          OME sizes and reassigned spatial axes retain the pixel frames.
 
         Earlier releases named these frames ``dataset_id``,
         ``dataset_id + "_downscaled_hires"`` and
@@ -244,7 +250,9 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
         triplet, invalid position fields or scale factors, a count barcode
         without a position row, several HDF5 library IDs, a multi-series
         TIFF without ``tiff_series``, or image axes declared by the file that
-        cannot be mapped to CYX.
+        cannot be mapped to CYX. A malformed OME physical size, a nonfinite
+        calibrated spot centre or a PNG size inconsistent with the
+        calibrated grid also raises.
     """
     if dataset_id is not None:
         validate_element_name(dataset_id, parameter="dataset_id", reserved=_RESERVED_NAMES)
@@ -269,7 +277,7 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
 
     vendor_scales = read_scale_factors(layout.scale_factors, version=layout.format_version)
     frames = make_frames(dataset_id, vendor_scales)
-    images = read_images(layout, dataset_id=dataset_id, frames=frames, options=image_options)
+    images, microns_per_pixel = read_images(layout, dataset_id=dataset_id, frames=frames, options=image_options)
 
     positions = read_positions(layout)
     prepared = prepare_table(
@@ -279,9 +287,15 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
         pixel_frame=frames.fullres,
         scale_factors=vendor_scales,
         make_var_names_unique=make_var_names_unique,
+        microns_per_pixel=microns_per_pixel,
     )
     # Space Ranger reports a spot diameter; ShapesModel stores the radius.
-    circles = make_circles(prepared.positions, radius=vendor_scales.spot_diameter / 2.0, frames=frames)
+    circles = make_circles(
+        prepared.positions,
+        radius=vendor_scales.spot_diameter / 2.0,
+        frames=frames,
+        microns_per_pixel=microns_per_pixel,
+    )
     table = link_table(prepared.adata, dataset_id=dataset_id, shape_index=circles.index, layout=layout)
 
     result = SpatialData(images=images, shapes={dataset_id: circles}, tables={"table": table})

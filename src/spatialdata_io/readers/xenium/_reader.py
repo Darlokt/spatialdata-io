@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.xenium._cells import CellStore, MaskRole
     from spatialdata_io.readers.xenium._labels import MaskSource
     from spatialdata_io.readers.xenium._layout import TableTarget, XeniumLayout
-    from spatialdata_io.readers.xenium._metadata import Experiment, ProteinPanel
+    from spatialdata_io.readers.xenium._metadata import Experiment, GenePanel, ProteinPanel
     from spatialdata_io.readers.xenium._tables import Cells, Counts, FeatureSelection
 
 type CellGeometry = Literal["polygons", "circles", "both"]
@@ -312,15 +312,17 @@ def _table(  # noqa: PLR0913, RUF100 - The table combines every table-side produ
     return link_table(table, target, expected, context=layout.experiment.context("table"))
 
 
-def _attrs(layout: XeniumLayout, panel: ProteinPanel | None, counts: Counts | None) -> dict[str, object]:
+def _attrs(
+    layout: XeniumLayout, gene_panel: GenePanel | None, panel: ProteinPanel | None, counts: Counts | None
+) -> dict[str, object]:
     """Collect JSON-serializable dataset metadata; local paths are never stored."""
     attrs: dict[str, object] = {"experiment": dict(layout.experiment.attrs)}
     if layout.metrics is not None:
         attrs["metrics_summary"] = read_metrics(
             layout.metrics, context=layout.experiment.context("metrics_summary.csv")
         )
-    if layout.gene_panel is not None:
-        attrs["gene_panel"] = read_gene_panel(layout.gene_panel, context=layout.experiment.context("gene_panel.json"))
+    if gene_panel is not None:
+        attrs["gene_panel"] = dict(gene_panel.identity)
     if panel is not None:
         attrs["protein_panel"] = dict(panel.identity)
     if counts is not None and counts.protein is not None:
@@ -475,7 +477,9 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
           be unique; unusable annotation names are renamed with a warning.
           Selected protein features add ``long_name``, ``clone``
           and ``codeword_index`` from ``protein_panel.json``; source columns
-          with those names raise instead of being overwritten.
+          with those names raise instead of being overwritten. A supported
+          ``gene_panel.json`` adds ``gene_coverage_base`` and
+          ``gene_coverage_current`` for gene features, matched by ID and name.
 
         ``attrs["xenium"]`` holds the ``experiment``, ``metrics_summary``,
         ``gene_panel``, ``protein_panel`` and ``protein`` metadata, and the
@@ -545,6 +549,14 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
                 layout.cells_store, experiment.family, pixel_size=experiment.pixel_size, context=context
             )
     cells = None if layout.cells is None else read_cells(layout.cells, context=experiment.context("cells table"))
+    gene_panel = None
+    if layout.gene_panel is not None:
+        gene_panel = read_gene_panel(
+            layout.gene_panel,
+            context=experiment.context("gene_panel.json"),
+            include_coverage=selection.table
+            and (options.feature_types in (None, "all") or "Gene Expression" in options.feature_types),
+        )
     panel = None
     if layout.protein_panel is not None:
         panel = read_protein_panel(layout.protein_panel, context=experiment.context("protein_panel.json"))
@@ -553,7 +565,7 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     if count_inputs is not None and selection.table:
         matrix = count_inputs.vocabulary if isinstance(count_inputs, TranscriptInputs) else count_inputs
         context = experiment.context("cell-feature matrix")
-        counts = read_counts(matrix, options.feature_types, panel, context=context)
+        counts = read_counts(matrix, options.feature_types, panel, context=context, gene_panel=gene_panel)
 
     shapes = _shapes(layout, store, cells, circles=selection.cell_circles, policy=options.invalid_geometries)
     labels = _labels(layout, masks, selection, options.raster)
@@ -570,6 +582,6 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         tables["table"] = _table(layout, counts, cells, store=store, shapes=shapes, target=selection.table_target)
 
     result = SpatialData(images=images, labels=labels, points=points, shapes=shapes.elements, tables=tables)
-    result.attrs["xenium"] = _attrs(layout, panel, counts)
+    result.attrs["xenium"] = _attrs(layout, gene_panel, panel, counts)
     set_reader_provenance(result.attrs, reader="xenium", format_version=experiment.version)
     return result

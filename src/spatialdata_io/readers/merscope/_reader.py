@@ -39,6 +39,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     *,
     vpt_directory: str | Path | None = None,
     z_layers: Sequence[int] | None = None,
+    stains: Sequence[str] | None = None,
     region_name: str | None = None,
     slide_name: str | None = None,
     include_transcripts: bool = True,
@@ -80,6 +81,9 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     z_layers
         Mosaic z indices in output order: unique nonnegative integers. ``None``
         reads every plane in ascending order. A scalar is not accepted.
+    stains
+        Mosaic stain names to include on every selected plane, in lexical
+        channel order. By default all stains are included.
     region_name, slide_name
         Parts of the element-name prefix ``<slide_name>_<region_name>``. They
         must be valid SpatialData element names. By default they are the
@@ -188,6 +192,7 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
     selection = validate_options(
         vpt_directory=vpt_directory,
         z_layers=z_layers,
+        stains=stains,
         region_name=region_name,
         slide_name=slide_name,
         include_transcripts=include_transcripts,

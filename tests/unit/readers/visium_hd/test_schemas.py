@@ -20,6 +20,7 @@ from spatialdata_io.readers.visium_hd._schemas import (
     parse_cell_barcodes,
     validate_mappings,
     validate_position_batch,
+    validate_probe_annotations,
     validate_schema,
 )
 from tests.integration.readers.visium_hd._fixtures import VERSION
@@ -27,7 +28,46 @@ from tests.integration.readers.visium_hd._fixtures import VERSION
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pandas.api.extensions import ExtensionArray
+
 _CONTEXT = ReaderErrorContext("visium_hd", "test artifact", VERSION)
+
+
+class TestValidateProbeAnnotations:
+    """Probe identity stays unique even when a gene has multiple probes."""
+
+    @pytest.mark.parametrize(
+        ("column", "values", "expected"),
+        [
+            ("filtered_barcodes", None, "filtered_barcodes flags"),
+            ("filtered_barcodes", ["True", "False"], "filtered_barcodes flags"),
+            ("filtered_barcodes", pd.array([True, None], dtype="boolean"), "filtered_barcodes flags"),
+            ("filtered_probes", None, "filtered_probes flags"),
+            ("filtered_probes", [0, 1], "filtered_probes flags"),
+            ("filtered_probes", pd.array([True, None], dtype="boolean"), "filtered_probes flags"),
+            ("probe_ids", None, "separate probe IDs and gene IDs"),
+            ("gene_ids", None, "separate probe IDs and gene IDs"),
+            ("probe_ids", ["probe", "probe"], "nonempty unique probe IDs"),
+            ("probe_ids", ["probe", ""], "nonempty unique probe IDs"),
+            ("probe_ids", ["probe", None], "nonempty unique probe IDs"),
+            ("probe_name", ["other", "fields"], "conflicts with the stored probe names"),
+        ],
+    )
+    def test_invalid(
+        self, tmp_path: Path, column: str, values: list[str | int | None] | ExtensionArray | None, expected: str
+    ) -> None:
+        obs = pd.DataFrame({"filtered_barcodes": [True, False]})
+        var = pd.DataFrame(
+            {"probe_ids": ["probe-a", "probe-b"], "gene_ids": ["gene-a", "gene-a"], "filtered_probes": [False, True]}
+        )
+        frame = obs if column == "filtered_barcodes" else var
+        if values is None:
+            del frame[column]
+        else:
+            frame[column] = values
+
+        with pytest.raises(ReaderFormatError, match=expected):
+            validate_probe_annotations(obs, var, tmp_path, context=_CONTEXT)
 
 
 class TestValidateSchema:

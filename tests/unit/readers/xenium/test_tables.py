@@ -24,7 +24,7 @@ from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._analysis import Analysis
 from spatialdata_io.readers.xenium._cells import read_cells_store
 from spatialdata_io.readers.xenium._layout import H5Counts, MtxArchive, TabularSource
-from spatialdata_io.readers.xenium._metadata import ProteinPanel, ProteinTarget
+from spatialdata_io.readers.xenium._metadata import GeneCoverage, GenePanel, ProteinPanel, ProteinTarget
 from spatialdata_io.readers.xenium._schemas import cell_types
 from spatialdata_io.readers.xenium._tables import (
     Cells,
@@ -156,6 +156,39 @@ class TestReadCounts:
         )
         genes = read_counts(_h5(bundle), ("Gene Expression",), PANEL, context=COUNTS).table
         np.testing.assert_array_equal(genes.var[column], values[:3].astype(np.str_))
+
+    def test_gene_coverage_matches_id_and_name_only(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        panel = GenePanel(
+            {},
+            {
+                fx.GENES[0]: GeneCoverage(current=2**64 - 1),
+                (fx.GENES[1][0], "wrong-name"): GeneCoverage(base=2),
+                ("wrong-id", fx.GENES[2][1]): GeneCoverage(base=3),
+                fx.PROTEINS[0]: GeneCoverage(base=4),
+            },
+        )
+
+        table = read_counts(_h5(bundle), None, None, context=COUNTS, gene_panel=panel).table
+        var = cast("pd.DataFrame", table.var)
+
+        assert var["gene_coverage_base"].isna().all()
+        assert var["gene_coverage_current"].iloc[0] == 2**64 - 1
+        assert var["gene_coverage_current"].iloc[1:].isna().all()
+
+    def test_gene_coverage_never_overwrites_source_columns(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        panel = GenePanel({}, {fx.GENES[0]: GeneCoverage(base=2)})
+        with h5py.File(_h5(bundle).file, "r+") as handle:
+            handle["matrix/features"].create_dataset(
+                "gene_coverage_base", data=np.asarray([b"source"] * len(bundle.features))
+            )
+
+        with pytest.raises(ReaderFormatError, match=r"reserved gene coverage columns.*gene_coverage_base"):
+            read_counts(_h5(bundle), None, None, context=COUNTS, gene_panel=panel)
+
+        proteins = read_counts(_h5(bundle), ("Protein Expression",), None, context=COUNTS, gene_panel=panel)
+        assert proteins.table.var["gene_coverage_base"].tolist() == ["source", "source"]
 
     @pytest.mark.parametrize("source_dtype", ["int32", "uint32", "int64", "float64"])
     def test_default_selects_gene_expression_and_protein(

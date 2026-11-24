@@ -18,9 +18,10 @@ import pytest
 import tifffile
 from anndata import read_h5ad
 from anndata.tests.helpers import assert_equal
+from dask.callbacks import Callback
 from scipy import sparse
 from scipy.io import mmwrite
-from spatialdata import SpatialData
+from spatialdata import SpatialData, transform
 from spatialdata.models import get_table_keys
 from spatialdata.testing import assert_spatial_data_objects_are_identical
 from spatialdata.transformations import BaseTransformation, get_transformation
@@ -33,6 +34,8 @@ from spatialdata_io.readers.visium import visium
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from geopandas import GeoDataFrame
 
 
 _MEX_MEMBERS = ("matrix.mtx", "barcodes.tsv", "features.tsv")
@@ -127,12 +130,21 @@ def _write_spatial(
     (spatial / "tissue_lowres_image.png").write_bytes(imagecodecs.png_encode(lowres))
 
 
-def _affine_matrix(element: DataArray, coordinate_system: str) -> np.ndarray:
+def _affine_matrix(element: DataArray | DataTree | GeoDataFrame, coordinate_system: str) -> np.ndarray:
     transformation = cast(
         "BaseTransformation",
         get_transformation(element, to_coordinate_system=coordinate_system),
     )
     return np.asarray(transformation.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y")))
+
+
+def _write_calibrated_grid(root: Path, source_pixels: np.ndarray) -> None:
+    _write_h5(root / "filtered_feature_bc_matrix.h5")
+    _write_spatial(root, version="v2")
+    for name, step in (("hires", 2), ("lowres", 4)):
+        (root / "spatial" / f"tissue_{name}_image.png").write_bytes(
+            imagecodecs.png_encode(np.ascontiguousarray(source_pixels[::step, ::step]))
+        )
 
 
 def _assert_table_contract(result: SpatialData) -> None:
@@ -555,6 +567,147 @@ class TestVisiumSyntheticWorkflow:
 
 class TestVisiumImagesAndNames:
     """Channel names follow declared colour models and derived names are repaired."""
+
+    def test_isotropic_original_registered_to_all_elements_and_persisted(self, tmp_path: Path) -> None:
+        source_pixels = np.arange(80 * 96, dtype=np.uint8).reshape(80, 96)
+        _write_calibrated_grid(tmp_path, source_pixels)
+        original = tmp_path / "original.ome.tif"
+        with tifffile.TiffWriter(original, ome=True) as writer:
+            writer.write(np.zeros((40, 48), dtype=np.uint8), metadata={"PhysicalSizeX": 1.0, "PhysicalSizeY": 1.0})
+            writer.write(
+                source_pixels,
+                tile=(16, 16),
+                metadata={"PhysicalSizeX": 500, "PhysicalSizeXUnit": "nm", "PhysicalSizeY": 0.5},
+            )
+        pixel_tasks: list[object] = []
+        with Callback(pretask=lambda key, *_: pixel_tasks.append(key)):
+            result = visium(tmp_path, fullres_image_file=original, tiff_series=1, scale_factors=(2,))
+        assert not pixel_tasks
+        _assert_table_contract(result)
+        store = tmp_path / "calibrated.zarr"
+        result.write(store)
+        restored = SpatialData.read(store)
+        expected_um = np.asarray([[10.0, 5.0], [20.0, 15.0], [30.0, 25.0]])
+
+        for actual in (result, restored):
+            assert set(actual.coordinate_systems) == {
+                "global",
+                "sample_pixels",
+                "sample_hires_pixels",
+                "sample_lowres_pixels",
+            }
+            table = actual.tables["table"]
+            np.testing.assert_array_equal(table.obsm["spatial"], expected_um)
+            np.testing.assert_array_equal(table.obsm["spatial_pixels"], [[20, 10], [40, 30], [60, 50]])
+            assert get_table_keys(table) == ("sample", "region", "spot_id")
+            description = table.uns["spatialdata_io_positions"]["coordinates"]["spatial"]
+            assert description["frame"] == "global"
+            assert description["units"] == "micrometer"
+            np.testing.assert_array_equal(description["axes"], ["x", "y"])
+
+            circles = actual.shapes["sample"]
+            assert table.obs["spot_id"].tolist() == circles.index.tolist()
+            np.testing.assert_array_equal(_affine_matrix(circles, "global"), np.diag([0.5, 0.5, 1.0]))
+            np.testing.assert_array_equal(circles.radius, [3.0, 3.0, 3.0])
+            in_um = transform(circles, to_coordinate_system="global")
+            np.testing.assert_array_equal(np.column_stack((in_um.geometry.x, in_um.geometry.y)), expected_um)
+            np.testing.assert_array_equal(in_um.radius, [1.5, 1.5, 1.5])
+
+            fullres = actual.images["sample_full_image"]
+            assert isinstance(fullres, DataTree)
+            base = fullres["scale0"]["image"]
+            np.testing.assert_array_equal(base.data[0, :4, :8].compute(), source_pixels[:4, :8])
+            np.testing.assert_array_equal(_affine_matrix(base, "global"), np.diag([0.5, 0.5, 1.0]))
+            np.testing.assert_array_equal(_affine_matrix(fullres["scale1"]["image"], "global"), np.eye(3))
+            for name, step in (("hires", 2), ("lowres", 4)):
+                image = actual.images[f"sample_{name}_image"]
+                assert isinstance(image, DataArray)
+                np.testing.assert_array_equal(image.data.compute()[0], source_pixels[::step, ::step])
+                np.testing.assert_array_equal(_affine_matrix(image, "sample_pixels"), np.diag([step, step, 1.0]))
+                global_transform = _affine_matrix(image, "global")
+                np.testing.assert_array_equal(global_transform, np.diag([step / 2, step / 2, 1.0]))
+                png_centres = table.obsm["spatial_pixels"] / step
+                np.testing.assert_array_equal(png_centres @ global_transform[:2, :2].T, expected_um)
+
+    @pytest.mark.parametrize(
+        ("metadata", "data_axes"),
+        [
+            ({"PhysicalSizeX": 0.5}, None),
+            ({"PhysicalSizeX": 0.5, "PhysicalSizeY": 0.75}, None),
+            ({"PhysicalSizeX": 0.5, "PhysicalSizeY": 0.5}, "XY"),
+        ],
+        ids=["partial", "anisotropic", "reassigned-axes"],
+    )
+    def test_pixel_frames_without_usable_ome_spacing(
+        self, tmp_path: Path, metadata: dict[str, float], data_axes: str | None
+    ) -> None:
+        source_pixels = np.zeros((80, 96), dtype=np.uint8)
+        _write_calibrated_grid(tmp_path, source_pixels)
+        original = tmp_path / "original.ome.tif"
+        tifffile.imwrite(original, source_pixels, ome=True, metadata=metadata)
+
+        result = visium(tmp_path, fullres_image_file=original, data_axes=data_axes)
+
+        assert "global" not in result.coordinate_systems
+        assert set(result.tables["table"].obsm) == {"spatial_pixels"}
+        _assert_table_contract(result)
+
+    @pytest.mark.parametrize("name", ["hires", "lowres"])
+    def test_isotropic_original_rejects_incompatible_png_grid(self, tmp_path: Path, name: str) -> None:
+        source_pixels = np.zeros((80, 96), dtype=np.uint8)
+        _write_calibrated_grid(tmp_path, source_pixels)
+        original = tmp_path / "original.ome.tif"
+        tifffile.imwrite(original, source_pixels, ome=True, metadata={"PhysicalSizeX": 0.5, "PhysicalSizeY": 0.5})
+        path = tmp_path / "spatial" / f"tissue_{name}_image.png"
+        path.write_bytes(imagecodecs.png_encode(np.zeros((8, 8), dtype=np.uint8)))
+
+        with pytest.raises(ReaderFormatError, match="full-resolution") as caught:
+            visium(tmp_path, fullres_image_file=original)
+
+        assert caught.value.context.artifact == f"{name} image"
+        assert caught.value.path == path
+
+    @pytest.mark.parametrize("calibrated", [False, True])
+    def test_preserves_spot_centres_outside_the_microscope_grid(self, tmp_path: Path, *, calibrated: bool) -> None:
+        pixels = np.zeros((80, 96), dtype=np.uint8)
+        _write_calibrated_grid(tmp_path, pixels)
+        positions_path = tmp_path / "spatial" / "tissue_positions.csv"
+        positions_path.write_text(
+            positions_path.read_text().replace(",10,20", ",90.25,-0.5").replace(",30,40", ",-2,99")
+        )
+        original = tmp_path / "original.tif"
+        metadata = {"PhysicalSizeX": 0.5, "PhysicalSizeY": 0.5} if calibrated else None
+        tifffile.imwrite(original, pixels, ome=calibrated, metadata=metadata)
+
+        result = visium(tmp_path, fullres_image_file=original)
+
+        table = result.tables["table"]
+        expected_xy = [[-0.5, 90.25], [99, -2], [60, 50]]
+        np.testing.assert_array_equal(table.obsm["spatial_pixels"], expected_xy)
+        circles = result.shapes["sample"]
+        np.testing.assert_array_equal(np.column_stack((circles.geometry.x, circles.geometry.y)), expected_xy)
+        assert table.obs["spot_id"].tolist() == circles.index.tolist()
+        if calibrated:
+            expected_um = [[-0.25, 45.125], [49.5, -1], [30, 25]]
+            np.testing.assert_array_equal(table.obsm["spatial"], expected_um)
+            in_um = transform(circles, to_coordinate_system="global")
+            np.testing.assert_array_equal(np.column_stack((in_um.geometry.x, in_um.geometry.y)), expected_um)
+        else:
+            assert set(table.obsm) == {"spatial_pixels"}
+
+    def test_isotropic_original_rejects_nonfinite_calibrated_centres(self, tmp_path: Path) -> None:
+        pixels = np.zeros((80, 96), dtype=np.uint8)
+        _write_calibrated_grid(tmp_path, pixels)
+        positions_path = tmp_path / "spatial" / "tissue_positions.csv"
+        positions_path.write_text(positions_path.read_text().replace(",10,20", ",10,1e308"))
+        original = tmp_path / "original.ome.tif"
+        tifffile.imwrite(original, pixels, ome=True, metadata={"PhysicalSizeX": 2, "PhysicalSizeY": 2})
+
+        with pytest.raises(ReaderFormatError, match="finite spot centres in micrometres") as caught:
+            visium(tmp_path, fullres_image_file=original)
+
+        assert caught.value.context.artifact == "tissue positions"
+        assert caught.value.path == positions_path
 
     @pytest.mark.parametrize(
         ("kind", "expected"),

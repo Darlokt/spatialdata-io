@@ -402,6 +402,32 @@ class TestXenium:
         assert result.attrs["xenium"]["protein"] == {"scaling_factor": 10, "metric": "MEAN_PER_CELL_STAIN"}
         assert result.attrs["xenium"]["protein_panel"]["panel_type"] == "PANEL_TYPE_PROTEIN"
 
+    def test_gene_coverage_preserves_sources_and_missing_values(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_4_0)
+        result = xenium(bundle.root, feature_types="all", include_transcripts=False)
+        table = result.tables["table"]
+        var = _frame(table.var)
+        columns = ["gene_coverage_base", "gene_coverage_current"]
+
+        assert var.index.tolist() == list(bundle.features)
+        assert var.loc["GeneA", "gene_coverage_base"] == 2
+        assert var.loc["GeneA", "gene_coverage_current"] == 5
+        assert pd.isna(var.loc["GeneB", "gene_coverage_base"])
+        assert var.loc["GeneB", "gene_coverage_current"] == 6
+        assert var.loc[var["feature_types"] != "Gene Expression", columns].isna().all().all()
+        assert var[columns].dtypes.tolist() == [pd.UInt64Dtype(), pd.UInt64Dtype()]
+        assert result.attrs["xenium"]["gene_panel"]["design_id"] == "synthetic_v1"
+        np.testing.assert_array_equal(
+            _x(table).toarray(), _expected_x(bundle, tuple(dict.fromkeys(bundle.feature_types)))
+        )
+
+        h5ad = tmp_path / "table.h5ad"
+        table.write_h5ad(h5ad)
+        pd.testing.assert_frame_equal(_frame(ad.read_h5ad(h5ad).var)[columns], var[columns])
+        destination = tmp_path / "xenium.zarr"
+        result.write(destination)
+        pd.testing.assert_frame_equal(_frame(read_zarr(destination).tables["table"].var)[columns], var[columns])
+
     @pytest.mark.parametrize(
         "feature_types", ["all", ("Negative Control Probe", "Gene Expression")], ids=["all", "explicit"]
     )

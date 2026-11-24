@@ -10,7 +10,7 @@ from scipy.sparse import csr_array, csr_matrix
 from spatialdata import read_zarr
 
 from spatialdata_io._cli.commands.visium_hd import visium_hd_command
-from tests.integration.readers.visium_hd._fixtures import write_bundle
+from tests.integration.readers.visium_hd._fixtures import PROBE_COUNTS, PROBE_IDS, write_bundle, write_probe_counts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,6 +48,38 @@ class TestVisiumHDCommand:
         assert table.var_names.tolist() == ["Gene", "Gene-1", "Other"]
         assert table.obs["instance_id"].tolist() == restored.shapes["square_008um"].index.tolist()
         assert restored.coordinate_systems == ["global"]
+
+    def test_native_probe_cli_to_zarr(self, tmp_path: Path) -> None:
+        bundle = write_bundle(tmp_path / "outs", version="3.0.0", sizes=(2,), segmented=False)
+        path = write_probe_counts(bundle.root)
+        (bundle.root / "feature_slice.h5").unlink()
+        (path.parent / "filtered_feature_bc_matrix.h5").unlink()
+        (path.parent / "raw_feature_bc_matrix.h5").unlink()
+        output = tmp_path / "probes.zarr"
+        invoked = CliRunner().invoke(
+            visium_hd_command,
+            [
+                "--input",
+                str(bundle.root),
+                "--output",
+                str(output),
+                "--bin-sizes",
+                "2",
+                "--bin-counts-kind",
+                "raw_probe",
+                "--no-include-images",
+            ],
+        )
+        assert invoked.exit_code == 0, invoked.output
+        restored = read_zarr(output)
+        assert "spatialdata_io_format_version" not in restored.attrs
+        table = restored.tables["square_002um_table"]
+        assert isinstance(table.X, csr_array | csr_matrix)
+        assert_array_equal(table.X.toarray(), PROBE_COUNTS)
+        assert table.var_names.tolist() == list(PROBE_IDS)
+        assert table.var["filtered_probes"].tolist() == [True, False, True]
+        assert table.obs["filtered_barcodes"].tolist() == [False, True, True]
+        assert table.obs["instance_id"].tolist() == restored.shapes["square_002um"].index.tolist()
 
     def test_rejects_image_options_when_images_disabled(self, tmp_path: Path) -> None:
         bundle = write_bundle(tmp_path / "outs", sizes=(2,), segmented=False)

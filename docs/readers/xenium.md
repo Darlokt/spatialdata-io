@@ -76,7 +76,7 @@ Every element is in the `global` coordinate system in micrometres, with its orig
 | `cell_boundaries`, `nucleus_boundaries` | `Translation([pixel_size / 2, pixel_size / 2])` |
 | `cell_circles`, `transcripts` | `Identity()` |
 | `he_image`, `if_image` | `Affine(diag(pixel_size, pixel_size, 1) @ M)` with a matrix or H&E keypoint fit, otherwise `Scale([pixel_size, pixel_size])` |
-| Explorer selections | `Identity()` |
+| Explorer selections | `Identity()` for CSV, the selected image's transform for GeoJSON |
 
 `pixel_size` is the `experiment.xenium` value (0.2125 µm in the public bundles). 10x writes polygon vertices through the centres of boundary pixels in pixel-index coordinates, half a pixel up and left of the corner frame shared by masks, centroids and transcripts. The half-pixel translation registers the unchanged vertices: in samples of ten public bundles from XOA 1.0.2 to 4.0, more than 99.5 % of registered vertices fall on their own cell's mask pixels, against at most 96 % without it. Transcript `z` is in micrometres too.
 
@@ -93,6 +93,8 @@ Each required archive member must occur exactly once. A transcript-only read can
 `X` is an eager canonical CSR sparse array in the feature order of `cell_feature_matrix`. `feature_types=None` selects Gene Expression and, when present, Protein Expression; `"all"` keeps every feature type (negative controls, unassigned and deprecated codewords, genomic controls); a sequence selects exactly the named types, each of which must exist. Observation names are the matrix barcodes. Source feature names must be unique; duplicates raise rather than being renamed. `var` retains all selected source feature annotations, including `gene_ids`, `feature_types`, and available HDF5 fields such as `genome`. Matrix Market sources supply only their own feature annotations. Feature annotation names that a SpatialData table does not accept are renamed with a warning, as described for `obs` below.
 
 Selected protein features add `long_name`, `clone` and `codeword_index` from `protein_panel.json`. The panel codeword annotation is nullable uint64, with missing values for nonprotein features; present values are nonnegative integers. If any of those columns already exists in the source, panel enrichment raises rather than overwriting it. Without panel enrichment, those source columns are retained unchanged.
+
+With a spec 0.1.0 `gene_panel.json` that contains gene coverage records, `var` adds `gene_coverage_base` and `gene_coverage_current` when gene expression features are selected. Both use unsigned 64-bit integers, with missing values for absent source entries, unmatched gene features, and non-gene features. The reader matches the exact gene ID and name and retains the vendor's `base` and `current` source categories. A boosted gene can have both values. A standalone panel reports its own coverage under `current`. Conflicting records within one source category or existing columns with the same names raise an error. The reported `gene_coverage` comes from the panel's coverage field, which can differ from the number of codewords. [10x boosted-gene outputs](https://www.10xgenomics.com/support/software/xenium-onboard-analysis/latest/advanced/boosted-gene-outputs)
 
 Integer source counts use float32 through 2²⁴ and float64 through 2⁵³. Duplicate HDF5 entries for one barcode and feature fail. Matrix Market records are validated before repeated coordinates are summed. These checks precede feature selection. Protein division follows this conversion and retains fractional measurement values.
 
@@ -172,7 +174,7 @@ The [10x output descriptions](https://www.10xgenomics.com/support/software/xeniu
 
 Compressed cell and boundary CSVs are read sequentially. They may contain concatenated gzip members and zero padding. Corrupt gzip data raises `ReaderFormatError` with the artifact path.
 
-Arrow parses CSV twins, a plain `transcripts.csv`, the secondary-analysis CSVs, `metrics_summary.csv`, alignment matrices and Explorer selection exports directly into declared types. CSV twins and Parquet columns normalize to the same declared types; integer-family `cell_id` is positive uint64 in cells and boundaries, and signed int64 in transcripts to preserve `-1`; other families use text IDs. Arrow's CSV grammar is the contract:
+Arrow parses CSV twins, a plain `transcripts.csv`, the secondary-analysis CSVs, `metrics_summary.csv`, alignment matrices and Explorer selection CSVs directly into declared types. CSV twins and Parquet columns normalize to the same declared types; integer-family `cell_id` is positive uint64 in cells and boundaries, and signed int64 in transcripts to preserve `-1`; other families use text IDs. Arrow's CSV grammar is the contract:
 
 - spaces and tabs around a number are trimmed, and integers may be hexadecimal (`0x10` reads as 16);
 - an integer field rejects `2.0`, `2e0`, `+2` and values outside its type, except that the integer-family transcript `cell_id` accepts only decimal digits or `-1` (see above);
@@ -231,7 +233,29 @@ Axes come from the TIFF metadata, including `YXS` interleaved samples and `SYX` 
 
 Three channels are never assumed to be RGB from their count: the Breast IDC H&E, stored as Hematoxylin, Eosin and Residual channels, keeps those names. An OME channel count that does not match a corresponding channel axis raises.
 
-{func}`~spatialdata_io.xenium_explorer_selection` reads a Xenium Explorer coordinates export (`Selection,X,Y`, or `X,Y` with the name in the first comment line) as polygons in µm with `Identity()`, indexed by selection name in file order. Clicked cells are named `Cell <id>`. The result can be added to the `SpatialData` object or used with {func}`spatialdata.polygon_query`.
+{func}`~spatialdata_io.xenium_explorer_selection` reads Xenium Explorer coordinates exports as eager polygons indexed by selection name in file order. The export format determines the source coordinates and registration.
+
+| Export | Polygon coordinates | Transform to `global` |
+| --- | --- | --- |
+| CSV | Xenium morphology positions in µm | `Identity()` |
+| GeoJSON | Full-resolution XY pixels of the image chosen at export | Required `image_to_global` |
+
+CSV reads `Selection,X,Y,Class,Color`, `Selection,X,Y`, or `X,Y` with the name in the first comment line. The first form retains `annotation_class` and `color` as text. Clicked cells are named `Cell <id>`.
+
+For GeoJSON, use the transform of the same image chosen in Explorer. A morphology-relative export uses the morphology pixel calibration. A post-instrument export uses the post-instrument image's alignment and morphology calibration together. The reader keeps the export's polygon coordinates, stores its RGB color as `#rrggbb` in `color`, and keeps a class name and class color in `annotation_class` and `annotation_class_color` when present. An exported `geometry.plane.z` is retained as a `z_plane` annotation for the 2D polygon.
+
+GeoJSON files are decoded in memory. Each annotation must have a unique name and one closed 2D ring.
+
+```python
+from spatialdata.transformations import get_transformation
+
+from spatialdata_io import xenium_explorer_selection
+
+he_to_global = get_transformation(sdata.images["he_image"], to_coordinate_system="global")
+sdata["annotated_regions"] = xenium_explorer_selection("he_annotations.geojson", image_to_global=he_to_global)
+```
+
+The returned shapes represent the annotation regions. Cell membership is a separate spatial query. Explorer's reported cell count uses fully contained cells. [10x annotation export and selection statistics](https://www.10xgenomics.com/support/software/xenium-explorer/latest/tutorials/xe-selecting-multiple-regions-of-interest)
 
 ### Locate a cell in the H&E image
 

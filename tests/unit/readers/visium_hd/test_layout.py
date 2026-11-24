@@ -61,6 +61,12 @@ class TestDiscoverLayout:
         assert layout.nucleus_counts.barcode_mappings.parent.name == "segmented_outputs"
         assert layout.nucleus_counts.raw_two_micron_counts.name == "raw_feature_bc_matrix.h5"
 
+    def test_probe_request_requires_the_probe_artifact(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path, sizes=(2, 8), segmented=False)
+        selection = replace(_DEFAULT, bin_sizes=(2,), bin_counts_kind="raw_probe")
+        with pytest.raises(FileNotFoundError, match=r"raw_probe_bc_matrix\.h5"):
+            discover_layout(tmp_path, selection)
+
     def test_root_mappings(self, tmp_path: Path) -> None:
         write_bundle(tmp_path)
         nested = tmp_path / "segmented_outputs/barcode_mappings.parquet"

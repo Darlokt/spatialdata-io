@@ -35,22 +35,26 @@ raise ``ValueError`` with a note naming the image.
 A TIFF has one series unless ``tiff_series`` selects one of several; the
 full-resolution level of that series is read. Only the full-resolution image
 gets generated pyramid levels; the PNGs are already downsampled.
+The original image can calibrate its full-resolution grid when OME pixel
+sizes describe both spatial axes and agree after conversion to micrometres.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isclose, isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from spatialdata.models import Image2DModel
-from spatialdata.transformations import Identity
+from spatialdata.transformations import BaseTransformation, Identity
 
-from spatialdata_io.readers._utils.errors import ReaderErrorContext
+from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image import (
     inspect_tiff,
     make_raster_options,
     normalize_cyx_image,
+    ome_pixel_sizes_um,
     read_jpeg,
     read_png,
     read_tiff,
@@ -58,12 +62,13 @@ from spatialdata_io.readers._utils.image import (
     validate_data_axes,
     validate_tiff_index,
 )
+from spatialdata_io.readers._utils.image._ome import PIXEL_SIZE_RTOL
+from spatialdata_io.readers.visium._geometry import isotropic_scale
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from dask.array import Array
-    from spatialdata.transformations import BaseTransformation
     from xarray import DataArray, DataTree
 
     from spatialdata_io.readers._utils.image import RasterOptions
@@ -91,6 +96,15 @@ class ImageOptions:
     raster: RasterOptions
     data_axes: str | None
     tiff_series: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CalibratedGrid:
+    """Level-zero XY grid of the selected original image."""
+
+    height: int
+    width: int
+    microns_per_pixel: float
 
 
 def image_kind(path: str | Path) -> ImageKind:
@@ -156,9 +170,9 @@ def _read_fullres(
     path: ArtifactFile,
     *,
     options: ImageOptions,
-    transformations: dict[str, BaseTransformation],
+    frame: str,
     version: str | None,
-) -> DataArray | DataTree:
+) -> tuple[DataArray | DataTree, _CalibratedGrid | None]:
     """Read bounded metadata of the full-resolution image and build it without pixel tasks."""
     context = ReaderErrorContext("visium", "full-resolution image", version)
     tiff = None
@@ -175,28 +189,34 @@ def _read_fullres(
 
     image, channels = normalize_cyx_image(raster, options.data_axes, tiff=tiff, context=context, path=path)
     options.raster.validate_image_pyramid(image, element="the full-resolution image")
-    return _parse(
+    calibration = None
+    transformations: dict[str, BaseTransformation] = {frame: Identity()}
+    # Reinterpreting the spatial axes invalidates their association with the OME sizes.
+    declared = tuple(axis.lower() for axis in raster.axes)
+    axes = declared if options.data_axes is None else tuple(options.data_axes)
+    if tiff is not None and all(axis in declared and axes.index(axis) == declared.index(axis) for axis in ("x", "y")):
+        metadata, series = tiff
+        x, y = ome_pixel_sizes_um(metadata, series=series, axes=("x", "y"), context=context)
+        if x is not None and y is not None and isclose(x, y, rel_tol=PIXEL_SIZE_RTOL):
+            height, width = (int(size) for size in image.shape[1:])
+            if not isfinite(x * max(height, width)):
+                raise ReaderFormatError(
+                    context=context,
+                    path=path,
+                    found=f"{x} µm/pixel for a {width} by {height} pixel grid",
+                    expected="a finite full-resolution extent in micrometres",
+                )
+            calibration = _CalibratedGrid(height=height, width=width, microns_per_pixel=x)
+            transformations["global"] = isotropic_scale(x)
+
+    parsed = _parse(
         image,
         channels=channels,
         transformations=transformations,
         raster=options.raster,
         scale_factors=options.raster.model_scale_factors,
     )
-
-
-def _read_png(
-    path: ArtifactFile,
-    *,
-    artifact: str,
-    raster: RasterOptions,
-    transformations: dict[str, BaseTransformation],
-    version: str | None,
-) -> DataArray | DataTree:
-    """Build one single-scale downsampled Space Ranger PNG."""
-    context = ReaderErrorContext("visium", artifact, version)
-    # PNG components are interleaved samples, so a declared colour type names them.
-    image, channels = normalize_cyx_image(read_png(path, context=context), None, tiff=None, context=context, path=path)
-    return _parse(image, channels=channels, transformations=transformations, raster=raster)
+    return parsed, calibration
 
 
 def read_images(
@@ -205,15 +225,16 @@ def read_images(
     dataset_id: str,
     frames: VisiumFrames,
     options: ImageOptions,
-) -> dict[str, DataArray | DataTree]:
-    """Construct every available image element without executing pixel tasks."""
+) -> tuple[dict[str, DataArray | DataTree], float | None]:
+    """Return the lazy image elements and the full-resolution pixel size, if calibrated."""
     images: dict[str, DataArray | DataTree] = {}
     version = layout.format_version
+    calibration = None
     if layout.fullres_image is not None:
-        images[f"{dataset_id}_full_image"] = _read_fullres(
+        images[f"{dataset_id}_full_image"], calibration = _read_fullres(
             layout.fullres_image,
             options=options,
-            transformations={frames.fullres: Identity()},
+            frame=frames.fullres,
             version=version,
         )
 
@@ -222,13 +243,39 @@ def read_images(
         ("hires", layout.hires_image, frames.hires, frames.hires_scale),
         ("lowres", layout.lowres_image, frames.lowres, frames.lowres_scale),
     ):
-        if path is not None:
-            images[f"{dataset_id}_{name}_image"] = _read_png(
-                path,
-                artifact=f"{name} image",
-                raster=options.raster,
-                transformations={frame: Identity(), frames.fullres: scale.inverse()},
-                version=version,
-            )
+        if path is None:
+            continue
+        context = ReaderErrorContext("visium", f"{name} image", version)
+        source = read_png(path, context=context)
+        image, channels = normalize_cyx_image(source, None, tiff=None, context=context, path=path)
+        transformations: dict[str, BaseTransformation] = {
+            frame: Identity(),
+            frames.fullres: isotropic_scale(1 / scale),
+        }
+        if calibration is not None:
+            height, width = (int(size) for size in image.shape[1:])
+            expected_width, expected_height = calibration.width * scale, calibration.height * scale
+            # The PNG has integer dimensions and Space Ranger serializes the scale with finite precision.
+            if abs(width - expected_width) > 1 or abs(height - expected_height) > 1:
+                raise ReaderFormatError(
+                    context=context,
+                    path=path,
+                    found=f"{width} by {height} pixels",
+                    expected=(
+                        f"the full-resolution image grid scaled by {scale} ({expected_width:g} by {expected_height:g})"
+                    ),
+                )
+            spacing = calibration.microns_per_pixel / scale
+            if not isfinite(spacing * max(height, width)) or spacing <= 0:
+                raise ReaderFormatError(
+                    context=context,
+                    path=path,
+                    found=f"{spacing} µm/pixel for a {width} by {height} pixel grid",
+                    expected="a positive finite scale and finite extent derived from the full-resolution image",
+                )
+            transformations["global"] = isotropic_scale(spacing)
+        images[f"{dataset_id}_{name}_image"] = _parse(
+            image, channels=channels, transformations=transformations, raster=options.raster
+        )
 
-    return images
+    return images, None if calibration is None else calibration.microns_per_pixel

@@ -33,6 +33,10 @@ FEATURE_IDS = ("gene-a", "gene-b", "gene-c")
 FEATURE_NAMES = ("Gene", "Gene", "Other")
 GENOMES = ("mouse", "human", "mouse")
 CELL_IDS = ("cellid_000000001-1", "cellid_000000002-1", "cellid_000000003-1")
+PROBE_IDS = ("gene-a|Gene|abc", "gene-a|Gene|def", "gene-b|Other|xyz")
+PROBE_NAMES = ("Gene|abc", "Gene|def", "Other|xyz")
+PROBE_ROWS = (1, 17, 20)
+PROBE_COUNTS = np.array([[2, 5, 0], [0, 0, 8], [3, 0, 1]], dtype=np.int32)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,14 +57,15 @@ def barcode(size: int, row: int, col: int) -> str:
     return f"s_{size:03d}um_{row:05d}_{col:05d}-1"
 
 
-def write_counts(path: Path, values: NDArray[np.int32], barcodes: list[str], version: str) -> None:
+def write_counts(path: Path, values: NDArray[np.int32], barcodes: list[str], version: str | None) -> None:
     """Write a v3 10x HDF5 matrix using native sparse arrays and byte strings."""
     matrix = csr_array(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as handle:
-        handle.attrs["software_version"] = f"spaceranger-{version}"
-        handle.attrs["filetype"] = "matrix"
-        handle.attrs["version"] = 2
+        if version is not None:
+            handle.attrs["software_version"] = f"spaceranger-{version}"
+            handle.attrs["filetype"] = "matrix"
+            handle.attrs["version"] = 2
         group = handle.create_group("matrix")
         group.create_dataset("data", data=matrix.data.astype(np.int32))
         group.create_dataset("indices", data=matrix.indices.astype(np.int64))
@@ -76,6 +81,29 @@ def write_counts(path: Path, values: NDArray[np.int32], barcodes: list[str], ver
             ("_all_tag_keys", ("genome",)),
         ):
             features.create_dataset(name, data=np.asarray(content, dtype="S32"))
+
+
+def write_probe_counts(root: Path) -> Path:
+    """Write the probe-based assay's native HDF5 layout with a subset of grid barcodes."""
+    path = root / "binned_outputs/square_002um/raw_probe_bc_matrix.h5"
+    write_counts(path, PROBE_COUNTS, [barcode(2, *divmod(row, 17)) for row in PROBE_ROWS], None)
+    with h5py.File(path, "r+") as handle:
+        del handle["matrix/features"]
+        features = handle.create_group("matrix/features")
+        for name, content in (
+            ("id", PROBE_IDS),
+            ("name", PROBE_NAMES),
+            ("gene_id", ("gene-a", "gene-a", "gene-b")),
+            ("gene_name", ("Gene", "Gene", "Other")),
+            ("genome", ("mouse", "mouse", "mouse")),
+            ("feature_type", ("Gene Expression",) * 3),
+            ("probe_region", ("spliced", "unspliced", "none")),
+        ):
+            features.create_dataset(name, data=np.asarray(content, dtype="S256"))
+        features.create_dataset("filtered_probes", data=[True, False, True])
+        features.create_dataset("target_sets/capture", data=np.array([0, 1], dtype=np.uint32))
+        handle.create_dataset("matrix/filtered_barcodes", data=[False, True, True])
+    return path
 
 
 def _pixels(col: NDArray[np.float64], row: NDArray[np.float64]) -> NDArray[np.float64]:

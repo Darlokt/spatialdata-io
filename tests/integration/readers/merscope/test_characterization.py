@@ -243,6 +243,18 @@ class TestMerscopeCharacterization:
         )
         assert list(result.images) == ["slide_region_z0", "slide_region_z2"]
 
+    def test_selected_stain_matches_full_image_and_skips_other_tiffs(self, tmp_path: Path) -> None:
+        fixture = write_merscope_dataset(tmp_path)
+        full = _read(fixture)
+        for path in (fixture.root / "images").glob("mosaic_Cyto_*.tif"):
+            path.write_bytes(b"unreadable TIFF")
+        selected = merscope(fixture.root, stains=["DAPI"], z_layers=(2, 0))
+        assert list(selected.images) == list(full.images)
+        for name, image in selected.images.items():
+            assert image.coords["c"].to_numpy().tolist() == ["DAPI"]
+            np.testing.assert_array_equal(image.to_numpy(), full.images[name].sel(c=["DAPI"]).to_numpy())
+            assert get_transformation(image, get_all=True) == get_transformation(full.images[name], get_all=True)
+
     def test_all_products_disabled_needs_no_affine(self, tmp_path: Path) -> None:
         fixture = write_merscope_dataset(tmp_path)
         (fixture.root / "images" / "micron_to_mosaic_pixel_transform.csv").unlink()

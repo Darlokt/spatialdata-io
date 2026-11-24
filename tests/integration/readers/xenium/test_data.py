@@ -364,6 +364,20 @@ class TestXeniumData:
         assert table.var_names.tolist() == ["PD-1", "VISTA", "PD-L1", "LAG-3"]
         assert result.attrs["xenium"]["protein"] == {"scaling_factor": factor, "metric": "MEAN_PER_CELL_STAIN"}
 
+    def test_boosted_panel_coverage(self, require_test_dataset: Callable[[str], Path]) -> None:
+        root = require_test_dataset("xenium_protein_kidney")
+        table = xenium(root, include_transcripts=False, include_morphology_focus=False).tables["table"]
+        var = table.var
+        assert isinstance(var, pd.DataFrame)
+
+        columns = ["gene_coverage_base", "gene_coverage_current"]
+        assert var.loc["ACTA2", "gene_ids"] == "ENSG00000107796"
+        assert var.loc["ACTA2", "gene_coverage_base"] == 4
+        assert var.loc["ACTA2", "gene_coverage_current"] == 8
+        sizes = var[columns].notna()
+        assert sizes.sum().tolist() == [377, 53]
+        assert sizes.all(axis=1).sum() == 25
+
     def test_aligned_he_image(self, require_test_dataset: Callable[[str], Path]) -> None:
         root = require_test_dataset("xenium_heart")
         matrix = np.loadtxt(root / "he_imagealignment.csv", delimiter=",")

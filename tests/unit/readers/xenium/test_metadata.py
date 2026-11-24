@@ -10,6 +10,7 @@ import pytest
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._metadata import (
+    GeneCoverage,
     read_experiment,
     read_gene_panel,
     read_metrics,
@@ -157,7 +158,19 @@ class TestReadMetrics:
 
 
 class TestReadGenePanel:
-    """The gene panel contributes its identity only."""
+    """Gene panels contribute scalar identity and optionally source-specific coverage."""
+
+    @staticmethod
+    def _target(category: str, count: object, *, name: str = "A") -> dict[str, object]:
+        return {
+            "type": {"descriptor": "gene", "data": {"id": "ENSG001", "name": name}},
+            "source": {"category": category},
+            "info": {"gene_coverage": count},
+        }
+
+    @staticmethod
+    def _panel(path: Path, targets: object, *, spec: str = "0.1.0") -> ArtifactFile:
+        return _json(path, {"payload": {"panel": {}, "spec_version": spec, "targets": targets}})
 
     def test_identity_only(self, tmp_path: Path) -> None:
         panel = {
@@ -174,9 +187,9 @@ class TestReadGenePanel:
             },
         }
 
-        identity = read_gene_panel(_json(tmp_path / "gene_panel.json", panel), context=PANEL)
+        result = read_gene_panel(_json(tmp_path / "gene_panel.json", panel), include_coverage=False, context=PANEL)
 
-        assert identity == {
+        assert result.identity == {
             "design_id": "hBreast_v1",
             "name": "Breast",
             "version": "1.0.0",
@@ -185,10 +198,72 @@ class TestReadGenePanel:
             "tissue": "Breast",
             "spec_version": "0.1.0",
         }
+        assert not result.coverage
+
+    def test_boosted_targets_are_matched_by_id_name_and_source(self, tmp_path: Path) -> None:
+        targets = [
+            self._target("current", 8),
+            {"type": {"descriptor": "negative_control"}},
+            self._target("current", 0, name="Different name"),
+            self._target("base", 4),
+        ]
+        result = read_gene_panel(
+            self._panel(tmp_path / "gene_panel.json", targets), include_coverage=True, context=PANEL
+        )
+
+        assert result.coverage == {
+            ("ENSG001", "A"): GeneCoverage(base=4, current=8),
+            ("ENSG001", "Different name"): GeneCoverage(current=0),
+        }
+
+    def test_unknown_spec_keeps_identity(self, tmp_path: Path) -> None:
+        result = read_gene_panel(
+            self._panel(tmp_path / "gene_panel.json", None, spec="future"), include_coverage=True, context=PANEL
+        )
+        assert result.identity == {"spec_version": "future"}
+        assert not result.coverage
+
+    def test_missing_targets_keeps_identity(self, tmp_path: Path) -> None:
+        path = _json(tmp_path / "gene_panel.json", {"payload": {"panel": {}, "spec_version": "0.1.0"}})
+        result = read_gene_panel(path, include_coverage=True, context=PANEL)
+        assert result.identity == {"spec_version": "0.1.0"}
+        assert not result.coverage
+
+    @pytest.mark.parametrize(
+        ("targets", "message"),
+        [
+            (None, "payload.targets as a list"),
+            (["record"], "target as a JSON object"),
+            ([{"type": {"descriptor": "gene"}}], "gene target.type.data as a JSON object"),
+        ],
+    )
+    def test_invalid_target_structure(self, tmp_path: Path, targets: object, message: str) -> None:
+        with pytest.raises(ReaderFormatError, match=message):
+            read_gene_panel(self._panel(tmp_path / "gene_panel.json", targets), include_coverage=True, context=PANEL)
+
+    @pytest.mark.parametrize(("category", "coverage"), [("other", 1), ("base", -1), ("current", True), ("", 2**64)])
+    def test_invalid_coverage_record(self, tmp_path: Path, category: str, coverage: object) -> None:
+        with pytest.raises(ReaderFormatError, match="uint64 gene_coverage"):
+            read_gene_panel(
+                self._panel(tmp_path / "gene_panel.json", [self._target(category, coverage)]),
+                include_coverage=True,
+                context=PANEL,
+            )
+
+    @pytest.mark.parametrize("category", ["base", "current"])
+    def test_duplicate_within_one_source(self, tmp_path: Path, category: str) -> None:
+        with pytest.raises(ReaderFormatError, match=f"duplicate {category} coverage"):
+            read_gene_panel(
+                self._panel(tmp_path / "gene_panel.json", [self._target(category, 4), self._target(category, 8)]),
+                include_coverage=True,
+                context=PANEL,
+            )
 
     def test_requires_payload_panel(self, tmp_path: Path) -> None:
         with pytest.raises(ReaderFormatError, match=r"payload\.panel as a JSON object"):
-            read_gene_panel(_json(tmp_path / "gene_panel.json", {"payload": {"panel": []}}), context=PANEL)
+            read_gene_panel(
+                _json(tmp_path / "gene_panel.json", {"payload": {"panel": []}}), include_coverage=True, context=PANEL
+            )
 
 
 class TestReadProteinPanel:
