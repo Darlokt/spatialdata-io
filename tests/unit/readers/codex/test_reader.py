@@ -30,6 +30,7 @@ class TestCodex:
             "image_file",
             "regions",
             "read_tables",
+            "compensation",
             "pixel_size_um",
             "experiment_file",
             "image_to_table",
@@ -37,9 +38,12 @@ class TestCodex:
             "tiff_series",
             "scale_factors",
             "chunks",
+            "labels",
+            "labels_to_image",
             "path_policy",
         ]
         assert parameters["scale_factors"].default == DEFAULT_SCALE_FACTORS
+        assert parameters["compensation"].default is None
         assert parameters["chunks"].default == DEFAULT_CHUNKS
         assert all(
             parameter.kind == inspect.Parameter.KEYWORD_ONLY for name, parameter in parameters.items() if name != "path"

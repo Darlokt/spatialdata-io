@@ -534,6 +534,62 @@ url = "https://raw.githubusercontent.com/akoyabio/phenoptr/7d5dceaacdc1af3e2ff59
 known_hash = "sha256:c3e6b38fc9547eb9cabab77f5a5a9d479e2759f0ae395656978a65574552daf1"
 target = "FIHC4__0929309_HP_IM3_2_component_data.tif"
 
+# Figshare file 44359775, Fusion 1.0.5. 888,168,933 bytes.
+# https://doi.org/10.25452/figshare.plus.25123538
+[[datasets]]
+key = "phenocycler_fusion1_aml"
+group = "phenocycler_scans"
+extracted_dir = "figshare_25123538"
+source = "Acute Myeloid Leukemia and Negative Staging Marrow CODEX Images, Figshare 25123538, CC0"
+opt_in = true
+
+[[datasets.assets]]
+url = "https://ndownloader.figshare.com/files/44359775"
+known_hash = "sha256:1f31a08a95c90c62e40f02bd041244abec17c28c6ff0c3704fe8b0c9518b4964"
+target = "AML2_183_Scan1.qptiff"
+
+# Fusion 2.3.1 Opal human tonsil control. 379,294,521 bytes.
+# https://www.ebi.ac.uk/biostudies/BioImages/studies/S-BIAD3467
+[[datasets]]
+key = "phenocycler_fusion2_opal"
+group = "phenocycler_scans"
+extracted_dir = "bia_S-BIAD3467"
+source = "A tonsil organoid model reveals Epstein-Barr virus infected germinal center B cell states during primary infection, BioImage Archive S-BIAD3467, CC BY 4.0"
+opt_in = true
+
+[[datasets.assets]]
+url = "https://ftp.ebi.ac.uk/biostudies/fire/S-BIAD/467/S-BIAD3467/Files/Tonsil-ctrl_Scan1.qptiff"
+known_hash = "sha256:2ff257e1e41b9a1cb28368337e877a34d3dfbb287b85298946a604c06e5b61e2"
+target = "Tonsil-ctrl_Scan1.qptiff"
+
+# CODEX Instrument Manager 1.30.0.12, 43-plex tonsil. 3,427,580,388 bytes.
+# https://doi.org/10.5281/zenodo.22107401
+[[datasets]]
+key = "phenocycler_cim_tonsil"
+group = "phenocycler_scans"
+extracted_dir = "zenodo_22107401"
+source = "Multiplex and Hyperplex Immunofluorescence Imaging Dataset of Human Tonsil Tissue, Zenodo 22107401, CC BY 4.0"
+opt_in = true
+
+[[datasets.assets]]
+url = "https://zenodo.org/api/records/22107401/files/Arlene_Tonsil_9x9.qptiff/content"
+known_hash = "sha256:097b9c979149b5918499d0e70ee593883a7c18058700ef7795bd7ca4f0a4bc3c"
+target = "Arlene_Tonsil_9x9.qptiff"
+
+# PerkinElmer Vectra Polaris 1.0, JPEG-compressed brightfield RGB. 421,825,729 bytes.
+# https://downloads.openmicroscopy.org/images/Vectra-QPTIFF/perkinelmer/COPYING
+[[datasets]]
+key = "phenocycler_vectra_brightfield"
+group = "phenocycler_scans"
+extracted_dir = "ome_vectra_qptiff"
+source = "PerkinElmer Vectra Polaris sample scans, Open Microscopy, CC BY 4.0"
+opt_in = true
+
+[[datasets.assets]]
+url = "https://downloads.openmicroscopy.org/images/Vectra-QPTIFF/perkinelmer/PKI_scans/HandEcompressed_Scan1.qptiff"
+known_hash = "sha256:e2f5fae28409da7ca208ac0d53af988696313df67c3b0b6d6e0ac3ce7dfbe0d9"
+target = "HandEcompressed_Scan1.qptiff"
+
 # https://github.com/igordot/phenomenalist/tree/c35f531d0035ac6ea879bfe1b0340c6b5cc6b09e/inst/extdata
 [[datasets]]
 key = "codex_tonsil"

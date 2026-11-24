@@ -36,8 +36,11 @@ from spatialdata_io.readers._utils.paths import (
     require_metadata_directory,
     require_metadata_file,
 )
+from spatialdata_io.readers.phenocycler._labels import MaskSource, bind_masks, resolve_mask_files
 
 if TYPE_CHECKING:
+    from spatialdata.transformations import Affine
+
     from spatialdata_io.readers._utils.paths import ArtifactFile, DatasetRoot, PathPolicy
 
 _LAYOUT = ReaderErrorContext("phenocycler", "QPI scan layout")
@@ -68,6 +71,7 @@ class RegionFiles:
     scan: ScanFiles
     xpd: ArtifactFile | None
     channels_csv: ArtifactFile | None
+    mask: MaskSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,12 +278,19 @@ def _single_source(
     return root, neighbors, artifacts
 
 
-def discover_layout(
-    path: str | Path, *, regions: tuple[str, ...] | None, read_all_bit_depths: bool, path_policy: PathPolicy
+def discover_layout(  # noqa: PLR0913 - Scan selection and explicit label registrations.
+    path: str | Path,
+    *,
+    regions: tuple[str, ...] | None,
+    read_all_bit_depths: bool,
+    path_policy: PathPolicy,
+    labels: str | Path | Mapping[str, str | Path] | None = None,
+    labels_to_image: Affine | Mapping[str, Affine] | None = None,
 ) -> QpiLayout:
     """Find the selected QPI scans and their bounded sidecar inputs."""
     source = Path(path).expanduser()
-    if source.is_dir():
+    directory = source.is_dir()
+    if directory:
         root = normalize_dataset_root(source, context=_LAYOUT, path_policy=path_policy)
         entries = _visible_entries(root)
         artifacts = {entry: require_metadata_file(root, entry, context=_IMAGE) for entry in entries if is_qptiff(entry)}
@@ -288,6 +299,13 @@ def discover_layout(
             source, read_all_bit_depths=read_all_bit_depths, path_policy=path_policy
         )
 
+    mask_files = resolve_mask_files(root, labels, context=ReaderErrorContext("phenocycler", "segmentation mask"))
+    if mask_files:
+        excluded = {file.resolve() for file in mask_files.values()}
+        if not directory and source.resolve() in excluded:
+            message = "The same file cannot supply the image and labels."
+            raise ValueError(message)
+        artifacts = {path: file for path, file in artifacts.items() if file.resolve() not in excluded}
     if not artifacts:
         raise ReaderFormatError(
             context=_LAYOUT, path=root.path, found="no processed QPTIFF scans", expected="at least one .qptiff scan"
@@ -313,6 +331,12 @@ def discover_layout(
             found=f"derived bit-depth names colliding with region names {clashes}",
             expected="distinct region names including the _8bit companion name",
         )
+    masks = bind_masks(
+        mask_files,
+        labels_to_image,
+        image_regions=[scan.region for scan in selected_scans],
+        region_count=len(selected_scans),
+    )
     result = []
     for scan in selected_scans:
         entry = by_name[scan.image, scan.name]
@@ -320,5 +344,5 @@ def discover_layout(
         channels = _match_sidecar(root, entry, by_parent, _CHANNELS, "channels.csv") or _generic_channels(
             root, entry, by_parent, processed_counts
         )
-        result.append(RegionFiles(scan, xpd, channels))
+        result.append(RegionFiles(scan, xpd, channels, masks.get(scan.region)))
     return QpiLayout(root, tuple(result))

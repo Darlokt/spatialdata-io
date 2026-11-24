@@ -6,8 +6,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
+import tifffile
 from dask.callbacks import Callback
 from scipy import sparse
+from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
 from spatialdata.transformations import Affine, BaseTransformation, get_transformation
 from xarray import DataArray
@@ -18,6 +20,8 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from tests.integration.readers.codex._fixtures import (
     cell_frame,
     write_csv,
+    write_fcs,
+    write_image,
     write_processor_markers,
     write_processor_table,
     write_uploader_montage,
@@ -118,6 +122,41 @@ class TestCodexNativeLayouts:
         assert not no_tables.shapes
         explicit = codex(tmp_path, cell_table_file=selected)
         assert list(explicit.tables) == ["reg001_table"]
+
+    def test_compensation_selects_one_signal_product_across_regions(self, tmp_path: Path) -> None:
+        paired = write_processor_table(tmp_path, 1)
+        write_fcs(paired.with_suffix(".fcs"))
+        write_processor_table(tmp_path, 2)
+        for number in (1, 2):
+            raw = write_processor_table(tmp_path, number, compensation="uncompensated")
+            write_csv(raw, cell_frame().assign(region=number, cyc002_ch001=[1.0, 4.0, 2.0]))
+        write_processor_markers(tmp_path, "reg003")
+
+        compensated = codex(tmp_path, compensation="compensated")
+        uncompensated = codex(tmp_path, compensation="uncompensated")
+
+        assert list(compensated.tables) == list(uncompensated.tables) == ["reg001_table", "reg002_table"]
+        assert list(uncompensated.images) == ["reg003_image"]
+        for name in uncompensated.tables:
+            assert compensated.tables[name].uns["spatialdata_io_compensation"] == "compensated"
+            assert uncompensated.tables[name].uns["spatialdata_io_compensation"] == "uncompensated"
+            compensated_x = compensated.tables[name].X
+            uncompensated_x = uncompensated.tables[name].X
+            assert isinstance(compensated_x, sparse.csr_array)
+            assert isinstance(uncompensated_x, sparse.csr_array)
+            assert compensated_x.dtype == np.dtype(np.float64)
+            np.testing.assert_array_equal(compensated_x.data, [2, 3.25, -1.5, 5.5])
+            np.testing.assert_array_equal(uncompensated_x.data, [1, 2, 4, 2, 5.5])
+
+    def test_missing_compensation_variant_does_not_skip_a_region(self, tmp_path: Path) -> None:
+        write_processor_table(tmp_path, 1)
+        write_processor_table(tmp_path, 2, compensation="uncompensated")
+
+        with pytest.raises(ReaderFormatError, match=r"'compensated'.*reg002_uncompensated"):
+            codex(tmp_path, compensation="compensated")
+
+        selected = codex(tmp_path, regions=("reg001",), compensation="compensated")
+        assert list(selected.tables) == ["reg001_table"]
 
     def test_cim_scan_uses_its_own_calibration(self, tmp_path: Path) -> None:
         path = tmp_path / "example_reg002.qptiff"
@@ -237,3 +276,68 @@ class TestCodexNativeLayouts:
             positions = table.obsm["spatial"]
             assert isinstance(positions, np.ndarray)
             np.testing.assert_allclose(positions, [[8, 0.6], [1, 12], [5.2, 3.2]])
+
+
+class TestLabelLinkage:
+    def test_flat_mask_owns_instances_after_round_trip(self, tmp_path: Path) -> None:
+        write_csv(tmp_path / "cells.csv")
+        write_image(tmp_path / "stitched.tif")
+        pixels = np.zeros((16, 20), dtype=np.uint32)
+        pixels[2, 1:4] = [11, 2, 7]
+        tifffile.imwrite(tmp_path / "instances.tif", pixels)
+        xy = ("x", "y")
+        tasks: list[str] = []
+        with Callback(pretask=lambda key, *_: tasks.append(str(key))):
+            result = codex(
+                tmp_path,
+                labels="instances.tif",
+                labels_to_image=Affine(np.diag([2, 2, 1]), xy, xy),
+                image_to_table=Affine(np.array([[1, 0, 10], [0, 1, 20], [0, 0, 1]]), xy, xy),
+                pixel_size_um=0.5,
+                scale_factors=(2,),
+            )
+        assert not tasks
+        output = tmp_path / "result.zarr"
+        result.write(output)
+        stored = read_zarr(output)
+        assert list(stored.labels) == ["labels"]
+        assert not stored.shapes
+        table = stored.tables["table"]
+        assert table.uns["spatialdata_io_source_region"] == "1"
+        assert list(table.obs["region"].cat.categories) == ["labels"]
+        assert table.obs["region"].tolist() == ["labels"] * 3
+        assert table.obs["cell_id"].tolist() == [7, 2, 11]
+        assert table.uns["spatialdata_attrs"]["instance_key"] == "cell_id"
+        mask = stored.labels["labels"]["scale0"]["image"]
+        np.testing.assert_array_equal(mask.values, pixels)
+        matrix = get_transformation(mask, "global")
+        assert not isinstance(matrix, dict)
+        np.testing.assert_allclose(matrix.to_affine_matrix(xy, xy), [[1, 0, 5], [0, 1, 10], [0, 0, 1]])
+
+    @pytest.mark.parametrize("bad_id", [0, 256])
+    def test_link_requires_nonbackground_representable_ids(self, tmp_path: Path, bad_id: int) -> None:
+        cells = cell_frame()
+        cells.loc[0, "cell_id"] = bad_id
+        write_csv(tmp_path / "cells.csv", cells)
+        write_image(tmp_path / "stitched.tif")
+        tifffile.imwrite(tmp_path / "mask.tif", np.zeros((32, 40), dtype=np.uint8))
+        with pytest.raises(ReaderFormatError, match="nonzero cell IDs representable"):
+            codex(tmp_path, labels="mask.tif")
+
+    def test_mixed_mask_and_circle_targets_remain_regional(self, tmp_path: Path) -> None:
+        for index in (1, 2):
+            write_processor_markers(tmp_path, f"reg{index:03d}")
+            write_processor_table(tmp_path, index)
+        path = tmp_path / "reg001_labels.tif"
+        # This mask contains the same IDs used by both regional tables.
+        pixels = np.zeros((32, 40), dtype=np.uint16)
+        pixels[0, :3] = [2, 11, 7]
+        tifffile.imwrite(path, pixels)
+        result = codex(tmp_path, labels={"reg001": path})
+        assert list(result.labels) == ["reg001_labels"]
+        assert list(result.shapes) == ["reg002"]
+        assert result.tables["reg001_table"].obs["region"].tolist() == ["reg001_labels"] * 3
+        assert result.tables["reg002_table"].obs["region"].tolist() == ["reg002"] * 3
+        assert get_transformation(result.labels["reg001_labels"], get_all=True) == get_transformation(
+            result.images["reg001_image"], get_all=True
+        )

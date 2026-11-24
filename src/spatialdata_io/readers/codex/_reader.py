@@ -6,18 +6,20 @@ QPI scan. Each image keeps its source channel order and calibration according
 to its layout. An explicit image-to-table transform registers a raster to
 the table's native region pixels.
 
-For each selected table, cell positions become radius-one circles and
-cycle/channel expression becomes a sparse observation-by-feature array.
-Final linkage associates each cell with the circle of the same regional
-identifier. Image-only imports build no cell products.
+Each selected table carries sparse cycle/channel expression. Its cell IDs
+annotate radius-one display circles at the measured centroids, or a supplied
+instance mask registered to the regional image. Mask linkage preserves cell
+IDs and their native table positions. All raster pixels remain lazy.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast
 
+import numpy as np
 from spatialdata import SpatialData
 from spatialdata.transformations import Identity, Scale
+from xarray import DataTree
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
@@ -30,18 +32,19 @@ from spatialdata_io.readers.codex._images import read_image, validate_image_opti
 from spatialdata_io.readers.codex._layout import MarkerSet, discover_layout, validate_region_options
 from spatialdata_io.readers.codex._tables import read_cell_table, set_positions
 from spatialdata_io.readers.phenocycler._images import inspect_scan, read_scan, scan_attributes
+from spatialdata_io.readers.phenocycler._labels import read_mask
 from spatialdata_io.readers.phenocycler._layout import ScanFiles
 from spatialdata_io.readers.phenocycler._transforms import scan_transformations, validate_companion
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     import pandas as pd
     from anndata import AnnData
     from geopandas import GeoDataFrame
     from spatialdata.transformations import Affine
-    from xarray import DataArray, DataTree
+    from xarray import DataArray
 
     from spatialdata_io.readers._utils.image import RasterOptions
     from spatialdata_io.readers.codex._calibration import Calibration
@@ -55,6 +58,7 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     image_file: str | Path | None = None,
     regions: Sequence[str] | None = None,
     read_tables: bool = True,
+    compensation: Literal["compensated", "uncompensated"] | None = None,
     pixel_size_um: float | None = None,
     experiment_file: str | Path | None = None,
     image_to_table: Affine | None = None,
@@ -62,6 +66,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     tiff_series: int | None = None,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    labels: str | Path | Mapping[str, str | Path] | None = None,
+    labels_to_image: Affine | Mapping[str, Affine] | None = None,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read a flat CODEX region or one or more named CODEX regions.
@@ -69,7 +75,7 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     Supported layout (one region, unversioned processor output)::
 
         region/
-        ├── reg001_compensated.csv  # or .fcs (FCS 3.1); exactly one table
+        ├── reg001_compensated.csv  # or equivalent .fcs (FCS 3.1)
         ├── stitched.tif            # optional TIFF, OME-TIFF, BigTIFF or BTF
         └── experiment.json         # optional Akoya experiment, only read when selected
 
@@ -97,10 +103,9 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         mode sibling images and tables are not discovered, and the file's
         parent directory is used for relative overrides.
     cell_table_file
-        CSV or FCS table to read when the directory holds several (for example
-        compensated and uncompensated). Relative paths resolve against
-        the dataset directory; absolute paths may point elsewhere. Requires
-        exactly one selected region and ``read_tables=True``.
+        Explicit CSV or FCS table to use for one selected region. Relative
+        paths resolve against the dataset directory. Absolute paths may point
+        elsewhere. Requires ``read_tables=True``.
     image_file
         Stitched image to read when the directory holds several. Resolved like
         ``cell_table_file``. Requires exactly one selected region.
@@ -108,8 +113,15 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         Distinct named regions to read, in output order. The default reads
         all named regions in lexical order. A flat region has no selector.
     read_tables
-        Read available tables and their cell shapes. Set to false for images
-        alone, including when the directory contains several table variants.
+        Read available cell tables and build centroid circles for regions
+        without supplied masks. Set to false to read only the requested rasters.
+    compensation
+        Select ``"compensated"`` or ``"uncompensated"`` tables by filename
+        suffix for every selected region that has table candidates. With
+        ``None``, both compensation variants are eligible. An eligible CSV/FCS
+        pair with the same stem in the same directory is read from CSV to
+        preserve precision. Other multiple matches are ambiguous. Requires
+        ``read_tables=True``, at least one table and automatic table discovery.
     pixel_size_um
         Positive finite micrometres per native table pixel, representable as
         float64. Requires a table. The caller asserts that it belongs to
@@ -144,6 +156,17 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         One positive size for every axis or three ``c, y, x`` sizes; by default
         one channel per chunk and square 1024-pixel tiles. Nondefault values
         require an image.
+    labels
+        Integer instance-label TIFF for one selected image, or a mapping from
+        selected region names to files. Relative paths resolve against the
+        input directory (the parent for a direct file). Supplying a mask
+        asserts it segments that image. The key for a flat image is ``"images"``.
+        On the same grid their YX extents must agree. Zero is background. Only singleton nonspatial axes are removed.
+    labels_to_image
+        Optional invertible XY affine mapping mask pixel coordinates into
+        full-resolution image pixels. Supply the measured registration for
+        cropped, rotated or resized masks. A mapping can specify different
+        affines by mask region. An omitted affine declares the same grid.
     path_policy
         How symlinks inside the dataset directory are treated. ``"strict"``
         requires every discovered artifact and relative file option to resolve
@@ -156,7 +179,7 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     Returns
     -------
     SpatialData
-        One linked table and shapes element per available cell table and one
+        One linked table per available cell population, and one
         lazy image per available image source. Flat layouts use ``"table"``
         and ``"images"``. Named layouts use ``"<region>_table"`` and
         ``"<region>_image"``.
@@ -171,6 +194,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
               compensated intensities are kept. CSV is parsed in bounded
               batches, so the dense expression of the whole table never
               exists at once.
+            - ``uns["spatialdata_io_compensation"]``: signal product when
+              the table filename identifies compensated or uncompensated data.
             - ``var``: indexed by the cycle field names; ``var["marker"]``
               holds FCS ``$PnS`` labels or Akoya long labels when present.
             - ``obs``: every non-cycle field. ``cell_id`` is uint64
@@ -185,7 +210,14 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
             - ``obsm["spatial"]`` (only with a calibration): float64 ``x, y``
               in micrometres, described in ``uns["spatialdata_io_positions"]``.
 
-        ``shapes[region]``
+        ``labels["<region>_labels"]`` (flat layout: ``labels["labels"]``)
+            Lazy YX integer instances on the registered image frame. The supplied
+            table must identify cells by their positive mask values. The reader
+            checks the dtype range and preserves the normalized region name in
+            ``table.uns["spatialdata_io_source_region"]``. Membership is a caller
+            assertion: collecting IDs would require reading the mask pixels.
+
+        ``shapes[region]`` (without a supplied mask)
             Radius-one circles at the native cell positions, indexed by
             uint64 ``cell_id`` and linked to the table. The element is named after
             the region: literal CSV strings, or positive FCS integers as
@@ -265,15 +297,20 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
     """
     validate_calibration(pixel_size_um, image_to_table)
     validate_image_options(data_axes, tiff_series)
-    selected = validate_region_options(regions, read_tables=read_tables, table_selected=cell_table_file is not None)
+    selected = validate_region_options(
+        regions, read_tables=read_tables, table_selected=cell_table_file is not None, compensation=compensation
+    )
     raster = make_raster_options(scale_factors, chunks)
     layout = discover_layout(
         path,
         cell_table_file=cell_table_file,
         image_file=image_file,
         experiment_file=experiment_file,
+        labels=labels,
+        labels_to_image=labels_to_image,
         regions=selected,
         read_tables=read_tables,
+        compensation=compensation,
         path_policy=path_policy,
     )
     _validate_sources(
@@ -291,19 +328,35 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
 
     tables: dict[str, AnnData] = {}
     shapes: dict[str, GeoDataFrame] = {}
+    masks: dict[str, DataArray | DataTree] = {}
     for source in layout.regions:
+        mask_name = "labels" if source.name is None else f"{source.name}_labels"
+        mask_target = None
+        if source.mask is not None:
+            image_name = "images" if source.name is None else f"{source.name}_image"
+            mask = read_mask(
+                source.mask,
+                images[image_name],
+                options=raster,
+                context=ReaderErrorContext("codex", "segmentation mask"),
+            )
+            masks[mask_name] = mask
+            full_mask = mask["scale0"]["image"] if isinstance(mask, DataTree) else mask
+            mask_target = (mask_name, full_mask.dtype)
         if source.cell_table is None:
             continue
         region, table, geometry = _read_region_table(
             source.cell_table,
             region=source.name,
+            mask_target=mask_target,
             frame=_table_frame(source.name, multiple=len(layout.regions) > 1, calibrated=calibration is not None),
             calibration=calibration,
         )
-        shapes[region] = geometry
+        if geometry is not None:
+            shapes[region] = geometry
         tables["table" if source.name is None else f"{region}_table"] = table
 
-    result = SpatialData(images=images, tables=tables, shapes=shapes)
+    result = SpatialData(images=images, labels=masks, tables=tables, shapes=shapes)
     if metadata:
         result.attrs["akoya"] = {"regions": metadata}
     version: str | None = calibration.version if calibration is not None else None
@@ -348,12 +401,33 @@ def _table_frame(region: str | None, *, multiple: bool, calibrated: bool) -> str
 
 
 def _read_region_table(
-    source: CellTableSource, *, region: str | None, frame: str, calibration: Calibration | None
-) -> tuple[str, AnnData, GeoDataFrame]:
+    source: CellTableSource,
+    *,
+    region: str | None,
+    frame: str,
+    calibration: Calibration | None,
+    mask_target: tuple[str, np.dtype[np.integer]] | None = None,
+) -> tuple[str, AnnData, GeoDataFrame | None]:
     cells = read_cell_table(source, expected_region=region)
     table = cells.table
+    if source.compensation is not None:
+        table.uns["spatialdata_io_compensation"] = source.compensation
     transformation = Identity() if calibration is None else Scale([calibration.pixel_size_um] * 2, axes=("x", "y"))
-    shapes = make_shapes(cells.cell_ids, cells.coordinates, frame=frame, transformation=transformation)
+    target = cells.region
+    shapes = None
+    if mask_target is None:
+        shapes = make_shapes(cells.cell_ids, cells.coordinates, frame=frame, transformation=transformation)
+    else:
+        target, dtype = mask_target
+        if cells.cell_ids.min() == 0 or int(cells.cell_ids.max()) > np.iinfo(dtype).max:
+            raise ReaderFormatError(
+                context=ReaderErrorContext("codex", "linked cell table"),
+                path=source.path,
+                found=f"cell IDs outside the positive range of {dtype}",
+                expected="nonzero cell IDs representable by the supplied label mask",
+            )
+        table.obs["region"] = table.obs["region"].cat.rename_categories({cells.region: target})
+        table.uns["spatialdata_io_source_region"] = cells.region
     if calibration is not None:
         set_positions(
             table,
@@ -372,10 +446,10 @@ def _read_region_table(
     prepare_anndata_dataframe(cast("pd.DataFrame", table.var), context=ReaderErrorContext("codex", "cycle features"))
     table = parse_linked_table(
         table,
-        TableLinkage((cells.region,), "region", "cell_id"),
+        TableLinkage((target,), "region", "cell_id"),
         context=ReaderErrorContext("codex", "linked cell table"),
         path=source.path,
-        expected_instance_ids={cells.region: shapes.index},
+        expected_instance_ids=None if shapes is None else {target: shapes.index},
     )
     return cells.region, table, shapes
 

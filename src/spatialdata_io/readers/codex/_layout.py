@@ -1,7 +1,7 @@
 """Resolve flat CODEX regions and named Processor, Uploader, and CIM artifacts.
 
-Flat directories hold at most one table and one image, or explicit choices.
-Native Processor layouts group marker planes in ``stitched/regNNN`` and
+Flat directories may hold a cell table and an image. Native Processor
+layouts group marker planes in ``stitched/regNNN`` and
 regional tables in the segmentation output tree. Uploader montages can
 appear in ``bestFocus`` or ``stitched``. CIM scans use the shared QPI
 filenames and bit-depth variant rules. Discovery visits supported directory
@@ -16,9 +16,9 @@ For example, these two Processor artifacts belong to the same region.
 
 Processor/Uploader names are case-insensitive. Their numeric region index
 uses at least three decimal digits in the output name. Named results follow
-lexical order or the caller's explicit sequence. Compensated, uncompensated,
-CSV, and FCS tables are scientific alternatives that require explicit
-selection when several match. QPI scan names follow the QPI layout rules.
+lexical order or the caller's explicit sequence. Compensated and uncompensated
+tables are distinct signal products. An equivalent CSV/FCS pair in the same
+folder is read from CSV. QPI scan names follow the QPI layout rules.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -42,10 +42,13 @@ from spatialdata_io.readers._utils.paths import (
     require_metadata_file,
     require_unique_path,
 )
+from spatialdata_io.readers.phenocycler._labels import MaskSource, bind_masks, resolve_mask_files
 from spatialdata_io.readers.phenocycler._layout import ScanFiles, discover_scans, is_qptiff
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
+
+    from spatialdata.transformations import Affine
 
     from spatialdata_io.readers._utils.paths import DatasetRoot, PathPolicy
 
@@ -72,6 +75,7 @@ class CellTableSource:
 
     path: ArtifactFile
     kind: Literal["csv", "fcs"]
+    compensation: Literal["compensated", "uncompensated"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,7 @@ class RegionSource:
     name: str | None
     cell_table: CellTableSource | None
     image: ImageSource | None
+    mask: MaskSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,11 +194,20 @@ def _channel_file(root: DatasetRoot, image: Path, names_by_directory: dict[Path,
     return None
 
 
+def _compensation(path: Path) -> Literal["compensated", "uncompensated"] | None:
+    """Identify the Processor signal product from the declared filename suffix."""
+    match path.stem.casefold().rsplit("_", maxsplit=1)[-1]:
+        case "compensated" | "uncompensated" as product:
+            return product
+        case _:
+            return None
+
+
 def _table_source(path: ArtifactFile, suffix: str) -> CellTableSource:
     kind = _CELL_FORMATS.get(suffix.lower())
     if kind is None:
         raise ReaderFormatError(context=_CELL_CONTEXT, path=path, found=suffix, expected="a .csv or .fcs cell table")
-    return CellTableSource(path, kind)
+    return CellTableSource(path, kind, _compensation(path))
 
 
 def _is_cell_candidate(path: Path) -> bool:
@@ -217,11 +231,37 @@ def _group_tables(root: DatasetRoot, entries: Iterable[Path]) -> tuple[dict[str,
     return named, flat
 
 
-def _table(root: DatasetRoot, candidates: Iterable[Path], override: str | Path | None) -> CellTableSource | None:
+def _table(
+    root: DatasetRoot,
+    candidates: Iterable[Path],
+    override: str | Path | None,
+    compensation: Literal["compensated", "uncompensated"] | None,
+) -> CellTableSource | None:
     if override is not None:
         path = require_caller_file(root, override, context=_CELL_CONTEXT)
         return _table_source(path, path.suffix)
-    candidate = optional_unique_path(candidates, context=_CELL_CONTEXT, search_path=root.path)
+
+    matches = tuple(candidates)
+    if compensation is not None and matches:
+        eligible = tuple(path for path in matches if _compensation(path) == compensation)
+        if not eligible:
+            raise ReaderFormatError(
+                context=_CELL_CONTEXT,
+                path=root.path,
+                found=f"table candidates {[str(path) for path in sorted(matches)]!r}",
+                expected=f"a cell table with the {compensation!r} filename suffix",
+            )
+        matches = eligible
+
+    match matches:
+        case (first, second) if (
+            first.parent == second.parent
+            and first.stem.casefold() == second.stem.casefold()
+            and {first.suffix.casefold(), second.suffix.casefold()} == {".csv", ".fcs"}
+        ):
+            # Processor writes equivalent exports side by side. CSV can preserve precision lost in FCS floats.
+            matches = (first if first.suffix.casefold() == ".csv" else second,)
+    candidate = optional_unique_path(matches, context=_CELL_CONTEXT, search_path=root.path)
     if candidate is None:
         return None
     path = require_metadata_file(root, candidate, context=_CELL_CONTEXT)
@@ -376,6 +416,7 @@ def _named_sources(  # noqa: PLR0913 - Each option selects a specific artifact.
     *,
     regions: tuple[str, ...] | None,
     read_tables: bool,
+    compensation: Literal["compensated", "uncompensated"] | None,
     cell_table_file: str | Path | None,
     image_override: tuple[str | None, ImageSource] | None,
 ) -> tuple[RegionSource, ...]:
@@ -413,7 +454,9 @@ def _named_sources(  # noqa: PLR0913 - Each option selects a specific artifact.
     return tuple(
         RegionSource(
             region,
-            _table(root, (*tables.get(region, ()), *flat_tables), cell_table_file) if read_tables else None,
+            _table(root, (*tables.get(region, ()), *flat_tables), cell_table_file, compensation)
+            if read_tables
+            else None,
             override_image
             or _native_image(
                 root,
@@ -436,6 +479,9 @@ def discover_layout(  # noqa: PLR0913 - Public format choices select independent
     experiment_file: str | Path | None = None,
     regions: tuple[str, ...] | None = None,
     read_tables: bool = True,
+    compensation: Literal["compensated", "uncompensated"] | None = None,
+    labels: str | Path | Mapping[str, str | Path] | None = None,
+    labels_to_image: Affine | Mapping[str, Affine] | None = None,
     path_policy: PathPolicy = "strict",
 ) -> CodexLayout:
     """Resolve the selected directory or direct input file and its stable region order."""
@@ -449,8 +495,8 @@ def discover_layout(  # noqa: PLR0913 - Public format choices select independent
     if direct:
         selected = supplied if supplied.is_absolute() else Path(supplied.name)
         if supplied.suffix.casefold() in _CELL_FORMATS:
-            if cell_table_file is not None or not read_tables:
-                message = "A direct cell table input requires read_tables=True and no cell_table_file override."
+            if cell_table_file is not None or not read_tables or compensation is not None:
+                message = "A direct cell table input requires read_tables=True and no cell_table_file or compensation."
                 raise ValueError(message)
             cell_table_file = selected
         else:
@@ -463,27 +509,53 @@ def discover_layout(  # noqa: PLR0913 - Public format choices select independent
         )
 
     entries = top_level if direct else _entries(root, top_level, read_tables=read_tables)
+    mask_files = resolve_mask_files(root, labels, context=ReaderErrorContext("codex", "segmentation mask"))
+    if mask_files:
+        excluded = {file.resolve() for file in mask_files.values()}
+        if image_file is not None and (root.path / Path(image_file).expanduser()).resolve() in excluded:
+            message = "The same file cannot supply the image and labels."
+            raise ValueError(message)
+        mask_entries = {path for path in entries if path.resolve() in excluded}
+        top_level = tuple(path for path in top_level if path not in mask_entries)
+        entries = tuple(path for path in entries if path not in mask_entries)
     image_override = None if image_file is None else _image_override(root, image_file, _names_by_directory(entries))
     named = _named_sources(
         root,
         entries,
         regions=regions,
         read_tables=read_tables,
+        compensation=compensation,
         cell_table_file=cell_table_file,
         image_override=image_override,
     )
-    if named:
-        return CodexLayout(root, named, experiment)
-
-    table = (
-        _table(root, (path for path in top_level if _is_cell_candidate(path)), cell_table_file) if read_tables else None
+    if not named:
+        table = (
+            _table(root, (path for path in top_level if _is_cell_candidate(path)), cell_table_file, compensation)
+            if read_tables
+            else None
+        )
+        image = None if image_override is None else image_override[1]
+        named = (_flat_region(root, top_level, table, image),)
+    if compensation is not None and not any(source.cell_table is not None for source in named):
+        message = "compensation requires a CODEX cell table in at least one selected region."
+        raise ValueError(message)
+    masks = bind_masks(
+        mask_files,
+        labels_to_image,
+        image_regions=[source.name or "images" for source in named if source.image is not None],
+        region_count=len(named),
     )
-    image = None if image_override is None else image_override[1]
-    return CodexLayout(root, (_flat_region(root, top_level, table, image),), experiment)
+    return CodexLayout(
+        root, tuple(replace(source, mask=masks.get(source.name or "images")) for source in named), experiment
+    )
 
 
 def validate_region_options(
-    regions: Sequence[str] | None, *, read_tables: bool, table_selected: bool
+    regions: Sequence[str] | None,
+    *,
+    read_tables: bool,
+    table_selected: bool,
+    compensation: Literal["compensated", "uncompensated"] | None = None,
 ) -> tuple[str, ...] | None:
     """Normalize selection once without interpreting a string as a sequence of regions."""
     if not isinstance(read_tables, bool):
@@ -492,6 +564,16 @@ def validate_region_options(
     if not read_tables and table_selected:
         message = "cell_table_file requires read_tables=True."
         raise ValueError(message)
+    if compensation is not None:
+        if not isinstance(compensation, str):
+            message = "compensation must be a string or None."
+            raise TypeError(message)
+        if compensation not in ("compensated", "uncompensated"):
+            message = "compensation must be 'compensated' or 'uncompensated'."
+            raise ValueError(message)
+        if not read_tables or table_selected:
+            message = "compensation requires read_tables=True and no cell_table_file override."
+            raise ValueError(message)
     if regions is None:
         return None
     if isinstance(regions, (str, bytes)) or not isinstance(regions, Sequence):

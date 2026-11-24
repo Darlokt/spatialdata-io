@@ -61,6 +61,22 @@ class TestProfileChannels:
             ProfileChannel("CD3", 1, 2, 100.0, 520.0),
         )
 
+    def test_cim_dye_and_marker_class_from_named_fields(self, tmp_path: Path) -> None:
+        profile = (
+            "<ScanProfile><ExperimentV4><Cycles><Cycle><Index>2</Index><Channels>"
+            "<Channel><Index>1</Index><MarkerName>DAPI-01</MarkerName><MarkerClass>Nuclear</MarkerClass>"
+            "<DyeName>CH1 Fluor DAPI</DyeName></Channel>"
+            "<Channel><MarkerName>Unused</MarkerName><MarkerClass>Blank</MarkerClass><DyeName>CY5</DyeName></Channel>"
+            "<Channel><Index>3</Index><MarkerName>CD20</MarkerName><MarkerClass>Marker</MarkerClass>"
+            "<DyeName>CH2 Fluor FITC/CY7</DyeName></Channel>"
+            "</Channels></Cycle></Cycles></ExperimentV4></ScanProfile>"
+        )
+        document, _ = parse_description(_description(profile), context=_CONTEXT, path=tmp_path, page_index=0)
+        assert profile_channels(document, context=_CONTEXT, path=tmp_path) == (
+            ProfileChannel("DAPI-01", 2, 1, None, dye="CH1 Fluor DAPI", marker_class="Nuclear"),
+            ProfileChannel("CD20", 2, 3, None, dye="CH2 Fluor FITC/CY7", marker_class="Marker"),
+        )
+
     def test_fusion_preserves_one_based_order_after_excluding_blanks(self, tmp_path: Path) -> None:
         description = _description(f"<ScanProfile>{FUSION_PROFILE}</ScanProfile>")
         document, _ = parse_description(description, context=_CONTEXT, path=tmp_path, page_index=0)
@@ -84,6 +100,54 @@ class TestFusionProtocol:
         assert protocol.cycles == 2
         assert protocol.channels == (ProfileChannel("CD3", 2, 3, None),)
 
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            pytest.param(None, id="null"),
+            pytest.param("", id="empty"),
+            pytest.param("None", id="vendor-placeholder"),
+            pytest.param(12, id="number"),
+            pytest.param(False, id="boolean"),
+            pytest.param(["BX003"], id="list"),
+            pytest.param({"id": "BX003"}, id="object"),
+            pytest.param("/private/panel", id="absolute-path"),
+            pytest.param("../panel", id="relative-path"),
+            pytest.param("C:\\private\\panel", id="windows-path"),
+            pytest.param("file:///private/panel", id="file-url"),
+            pytest.param("https://example.test/panel", id="https-url"),
+            pytest.param("first\nsecond", id="newline"),
+        ],
+    )
+    def test_reagent_fields_use_named_text_only(self, missing: object) -> None:
+        protocol = fusion_protocol(
+            {
+                "wells": [
+                    {
+                        "items": [
+                            {
+                                "markerName": "DAPI",
+                                "clone": missing,
+                                "barcode": missing,
+                                "reporter": missing,
+                                "dye": "DAPI",
+                            },
+                            {
+                                "markerName": "CD4",
+                                "clone": " EPR6855 ",
+                                "barcode": "BX003",
+                                "reporter": "RX003",
+                                "dye": "CY5",
+                            },
+                        ]
+                    }
+                ]
+            }
+        )
+        assert protocol.channels == (
+            ProfileChannel("DAPI", 1, 1, None, dye="DAPI"),
+            ProfileChannel("CD4", 1, 2, None, clone="EPR6855", reporter="RX003", reagent_barcode="BX003", dye="CY5"),
+        )
+
 
 class TestMatchProfile:
     def test_match_by_marker_then_occurrence_leaves_missing_markers_unassigned(self) -> None:
@@ -98,6 +162,11 @@ class TestMatchProfile:
         first = ProfileChannel("F4/80", 1, 2, 10)
         second = ProfileChannel("F480", 2, 1, 20)
         assert match_profile(("F4-80", "F480"), (first, second)) == (None, second)
+
+    def test_unmatched_names_are_never_assigned_by_position(self) -> None:
+        first = ProfileChannel("CD3", 1, 2, 10, clone="BC3")
+        second = ProfileChannel("CD4", 2, 1, 20, clone="BC4")
+        assert match_profile(("CD8", "CD3"), (first, second)) == (None, first)
 
 
 class TestPageQuantities:

@@ -50,6 +50,8 @@ class TestPhenoCyclerCommand:
             read_all_bit_depths=True,
             chunks=64,
             scale_factors=(),
+            labels=None,
+            labels_to_image=None,
             path_policy="strict",
         )
         reader.return_value.write.assert_called_once_with(output)
@@ -65,5 +67,7 @@ class TestPhenoCyclerCommand:
             read_all_bit_depths=False,
             chunks=DEFAULT_CHUNKS,
             scale_factors=DEFAULT_SCALE_FACTORS,
+            labels=None,
+            labels_to_image=None,
             path_policy="strict",
         )

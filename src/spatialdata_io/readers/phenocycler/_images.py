@@ -74,7 +74,7 @@ _PATH_LIKE_TEXT = re.compile(r"^[/\\~]|^(?:[A-Z]:[/\\]|file:)", re.IGNORECASE)
 
 @dataclass(frozen=True, slots=True)
 class QpiChannel:
-    """One output channel and its allowlisted quantitative information."""
+    """One measured channel and its selected quantitative and reagent metadata."""
 
     channel_id: str
     source_name: str
@@ -287,6 +287,11 @@ def _channels(
                     "profile_channel": profile.channel,
                     "profile_exposure_ms": profile.exposure_ms,
                     "profile_wavelength_nm": profile.wavelength_nm,
+                    "profile_clone": profile.clone,
+                    "profile_reporter": profile.reporter,
+                    "profile_reagent_barcode": profile.reagent_barcode,
+                    "profile_dye": profile.dye,
+                    "profile_marker_class": profile.marker_class,
                 }
             )
         result.append(

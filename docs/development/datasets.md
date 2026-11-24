@@ -39,7 +39,8 @@ hatch test -- tests/integration/readers/xenium/test_data.py -k 'morphology_focus
 | --- | --- |
 | Fetch one dataset | `--dataset xenium_prime_mouse_ileum` |
 | Fetch a reader's registered datasets | `--group xenium` |
-| Combine selections | Repeat either option. The downloader takes their union in registry order. Without selectors it downloads **all** datasets. |
+| Combine selections | Repeat either option. The downloader takes their union in registry order. Without selectors it downloads datasets that are enabled by default. |
+| Fetch large opt-in fixtures | Use `--group phenocycler_scans` for all four PhenoCycler whole-slide scans (5.1 GB), or `--dataset KEY` for one. Scheduled CI skips opt-in datasets. |
 | Share downloads between checkouts | Pass `--output /path/to/test-data` and set `SPATIALDATA_IO_TEST_DATA_DIR=/path/to/test-data` for pytest. The default for both is `data/` from the repository root. |
 | Refresh an existing dataset | Add `--force` to the selected download. By default an existing destination is skipped without re-verification. |
 
@@ -63,7 +64,8 @@ downloads are attempted and the command reports failed keys with exit status 1.
    for the reader. A test refers to the stable `key`. The CLI also accepts
    the reader-oriented `group`. Both start with a lowercase letter or digit
    and may contain lowercase letters, digits, underscores and hyphens.
-   Choose a unique key and a unique, single-component `extracted_dir`.
+   Choose a unique key and a unique, single-component `extracted_dir`. For
+   large fixtures that should require an explicit selector, set `opt_in = true`.
    Set `test_path` if the reader's input directory is nested inside it.
    Paths are relative and cannot contain `..`.
 3. **Choose one source form** from the table below. For each direct URL,

@@ -10,14 +10,17 @@ uncalibrated scan uses ``image_pixels``.
 
 An ordinary 8-bit companion inherits the extended-range scan's transform
 after their shapes, ordered channel identities, acquisition generation,
-slide identifier, calibration and stage position have been checked.
+slide identifier, calibration and stage position have been checked. Explicit
+mask-to-image and CODEX image-to-table registrations require invertible XY
+affines with a finite float64 inverse.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from spatialdata.transformations import Identity, Scale, Sequence, Translation
+import numpy as np
+from spatialdata.transformations import Affine, Identity, Scale, Sequence, Translation
 
 from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers.phenocycler._images import matching_pixel_sizes, matching_stage_positions
@@ -25,12 +28,47 @@ from spatialdata_io.readers.phenocycler._images import matching_pixel_sizes, mat
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from numpy.typing import NDArray
     from spatialdata.transformations import BaseTransformation
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
     from spatialdata_io.readers.phenocycler._images import QpiScan
 
 _XY = ("x", "y")
+
+
+def has_finite_inverse(matrix: NDArray[np.floating]) -> bool:
+    """Check the inverse used to map XY back into this image, including its translation."""
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        try:
+            inverse = np.linalg.inv(matrix)
+        except np.linalg.LinAlgError:
+            return False
+    return bool(np.isfinite(inverse).all())
+
+
+def validate_xy_affine(affine: Affine, *, option: str) -> None:
+    """Require a finite, invertible XY registration with an exact affine bottom row."""
+    if not isinstance(affine, Affine):
+        msg = f"{option} must be an Affine."
+        raise TypeError(msg)
+    if affine.input_axes != _XY or affine.output_axes != _XY:
+        msg = f"{option} must map exactly XY input axes to XY output axes."
+        raise ValueError(msg)
+    # The general transform conversion reconstructs its bottom row; inspect
+    # the caller's original matrix so near-projective terms cannot disappear.
+    matrix = affine.matrix
+    if (
+        matrix.shape != (3, 3)
+        or matrix.dtype != np.dtype(np.float64)
+        or not np.isfinite(matrix).all()
+        or not np.array_equal(matrix[2], [0, 0, 1])
+    ):
+        msg = f"{option} must be a finite float64 3-by-3 affine matrix."
+        raise ValueError(msg)
+    if not has_finite_inverse(matrix):
+        msg = f"{option} must be invertible."
+        raise ValueError(msg)
 
 
 def scan_transformations(scans: Mapping[str, QpiScan]) -> dict[str, dict[str, BaseTransformation]]:

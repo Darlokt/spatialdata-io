@@ -10,11 +10,14 @@ from typing import TYPE_CHECKING
 
 import click
 
+from spatialdata_io._cli._akoya import mask_options
 from spatialdata_io._cli._common import chunks_option, path_policy_option, scale_factors_option, scan_io_options
 
 if TYPE_CHECKING:
     from pathlib import Path
     from typing import Literal, TypedDict, Unpack
+
+    from spatialdata.transformations import Affine
 
     class _PhenoCyclerOptions(TypedDict):
         regions: tuple[str, ...]
@@ -22,6 +25,8 @@ if TYPE_CHECKING:
         read_all_bit_depths: bool
         scale_factors: tuple[int, ...]
         chunks: int | tuple[int, int, int]
+        labels: str | dict[str, str] | None
+        labels_to_image: Affine | dict[str, Affine] | None
         path_policy: Literal["strict", "relaxed"]
 
 
@@ -37,6 +42,7 @@ if TYPE_CHECKING:
 )
 @scale_factors_option
 @chunks_option
+@mask_options
 @path_policy_option
 def phenocycler_command(input_path: Path, output_path: Path, **options: Unpack[_PhenoCyclerOptions]) -> None:
     """Read PhenoCycler-Fusion, Instrument Manager or quantitative pathology scans."""
@@ -49,6 +55,8 @@ def phenocycler_command(input_path: Path, output_path: Path, **options: Unpack[_
         read_all_bit_depths=options["read_all_bit_depths"],
         chunks=options["chunks"],
         scale_factors=options["scale_factors"],
+        labels=options["labels"],
+        labels_to_image=options["labels_to_image"],
         path_policy=options["path_policy"],
     )
     result.write(output_path)

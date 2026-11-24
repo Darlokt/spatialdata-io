@@ -1,9 +1,9 @@
 # CODEX
 
 {func}`spatialdata_io.codex` reads processed CODEX images and regional cell
-tables. For a flat export with one table and an optional stitched image, use
-`cell_table_file` to choose between compensated and uncompensated tables, or
-`image_file` to choose among images.
+tables. For a flat export with a table and an optional stitched image, use
+`cell_table_file` to choose an explicit table or `image_file` to choose among
+images.
 
 ```text
 region/
@@ -36,7 +36,7 @@ processed_run/
 Cycle and channel are one-based. Both `ch001` and `cha001` occur in Akoya's
 documentation. Planes are stacked in numeric cycle/channel order. The marker
 suffix identifies the measured target. The tiles used to construct a stitched
-image and masks named `*_mask.tif` or `*_labels.tif` are separate products.
+image and segmentation masks are separate products. Supply a mask explicitly with `labels`.
 The channel records in `sdata.attrs["akoya"]["regions"][region]["channels"]`
 retain the original biomarker and one-based cycle and channel, in image order.
 [Akoya Processor outputs](https://help.codex.bio/codex/processor/technical-notes/expected-output)
@@ -56,6 +56,22 @@ actual registration to align regional cell positions to a montage.
 [Nolan montage writer](https://github.com/nolanlab/CODEX/blob/529ea4a2ebc796c7a51698f8f695ad2365021f4b/src/main/java/org/nolanlab/codex/upload/driffta/MakeMontage.java#L38-L156)
 
 ## Cell table
+
+Set `compensation="compensated"` or `compensation="uncompensated"` to select the
+same signal product across regions. The corresponding CLI option is
+`--compensation compensated` or `--compensation uncompensated`. Selection uses
+the filename suffix, such as `reg001_compensated.csv`. Every selected region
+that supplies table candidates must have the requested variant. Regions that
+supply only images still return their images. With the default `None`, both
+variants are eligible and a region with both requires a selection. A recognized
+filename suffix is recorded in `table.uns["spatialdata_io_compensation"]`.
+
+When the eligible outputs are a CSV and an FCS with the same stem in the same
+folder, CODEX reads the CSV. The Processor exports both formats for the same
+measurements, and CSV can retain precision lost in FCS numeric storage. The
+stem and extension match case-insensitively. Tables with distinct stems or from
+different folders still require disambiguation. Select an explicit file for a
+single region with `cell_table_file` or pass the table directly. [Akoya FCS format](https://help.codex.bio/codex/processor/technical-notes/fcs-format)
 
 Supply one row per cell and one region per file. Named columns may be reordered.
 
@@ -92,8 +108,8 @@ zero) and must be finite.
 
 - A flat export uses `tables["table"]` and `images["images"]`. A named region
   such as `reg001` uses `tables["reg001_table"]` and `images["reg001_image"]`.
-  A table's `region` column names its shapes element in both layouts. An
-  image-only region produces just the image.
+  A table's `region` column names its mask or centroid shapes element.
+  Each supplied mask also contributes a labels element.
 - Each table contains eager CSR expression in source row and feature
   order. CSV intensities are float64, and FCS preserves native numeric widths
   where possible. Observation names are zero-based row positions. `obs["cell_id"]`
@@ -113,6 +129,26 @@ colour names. Other channels use unique OME names, OME IDs or positional
 indexes. Non-RGB OME samples within one channel get a `:sample:<index>` suffix.
 Reinterpreting another axis as channels gives positional indexes. Retain the
 source while computing or writing the image. [Raster options](../user/rasters.md)
+
+## Link segmented cells to a mask
+
+Pass `labels="cells.tif"` for one selected region or a mapping such as
+`labels={"reg001": "segm/reg001_mask.tif"}` for named regions. The
+reader returns `labels["reg001_labels"]`. A flat export uses `labels["labels"]`
+and accepts a single path or the mapping key `"images"`.
+Supplying a mask associates its instance values with the table's
+`cell_id`. The table links to the labels and keeps the normalized region name in
+`uns["spatialdata_io_source_region"]`. Cell IDs must be positive and fit
+the mask dtype. The reader checks those constraints without scanning label
+pixels, so the caller must verify that both exports use the same IDs.
+Regions without a mask retain their centroid circles.
+
+The mask belongs to the selected image. Matching grids require an explicit
+association and equal YX extents. Supply `labels_to_image` for a cropped
+or resampled mask. The optional `image_to_table` independently registers
+image pixels to table coordinates. Supplying mask IDs alone establishes
+cell identity and leaves the centroid calibration independent.
+[Mask coordinates and CLI example](phenocycler.md#segmentation-masks)
 
 ## Calibration and registration
 

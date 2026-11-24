@@ -110,7 +110,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     if args.list:
         for dataset in DATASETS:
-            print(f"{dataset.key}\t{dataset.group}\t{dataset.extracted_dir}\t{dataset.source}")
+            selection = " (opt-in)" if dataset.opt_in else ""
+            print(f"{dataset.key}\t{dataset.group}\t{dataset.extracted_dir}\t{dataset.source}{selection}")
         return
 
     failures: list[DatasetDownloadError] = []
@@ -138,7 +139,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--dataset",
         action="append",
         choices=dataset_keys,
-        help="Dataset key to download. May be passed multiple times. Defaults to all datasets.",
+        help="Dataset key to download. May be passed multiple times. Without selectors, opt-in datasets are skipped.",
     )
     parser.add_argument(
         "--group",
@@ -152,11 +153,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _selected_datasets(dataset_keys: list[str] | None, groups: list[str] | None) -> list[TestDataset]:
-    """Select the union of explicit keys and groups in manifest order."""
+    """Select explicit keys and groups, or the default datasets, in manifest order."""
     selected_keys = set(dataset_keys or ())
     selected_groups = set(groups or ())
     if not selected_keys and not selected_groups:
-        return list(DATASETS)
+        return [dataset for dataset in DATASETS if not dataset.opt_in]
     return [dataset for dataset in DATASETS if dataset.key in selected_keys or dataset.group in selected_groups]
 
 

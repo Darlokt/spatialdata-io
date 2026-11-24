@@ -4,6 +4,8 @@ Each selected region contributes a lazy ``<region>_image`` in channel, row,
 column order. Inspecting the primary scans together establishes their
 coordinate systems. A requested ordinary 8-bit companion contributes a
 second image on the primary scan's grid once the pair has been validated.
+An explicitly paired segmentation TIFF adds one lazy YX labels element in
+the primary image's coordinate system.
 
 The region entries in ``attrs["akoya"]["regions"]`` preserve measured channel
 metadata and summaries of any acquisition sidecars. Reader provenance
@@ -23,12 +25,16 @@ from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
 from spatialdata_io.readers.phenocycler._images import inspect_scan, read_scan, scan_attributes
+from spatialdata_io.readers.phenocycler._labels import read_mask
 from spatialdata_io.readers.phenocycler._layout import discover_layout, normalize_regions
 from spatialdata_io.readers.phenocycler._sidecars import read_sidecars
 from spatialdata_io.readers.phenocycler._transforms import scan_transformations, validate_companion
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
+
+    from spatialdata.transformations import Affine
 
 _CONTEXT = ReaderErrorContext("phenocycler", "QPI scan")
 
@@ -60,6 +66,8 @@ def phenocycler(  # noqa: PLR0913 - explicit reader options share the repository
     read_all_bit_depths: bool = False,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
+    labels: str | Path | Mapping[str, str | Path] | None = None,
+    labels_to_image: Affine | Mapping[str, Affine] | None = None,
     path_policy: Literal["strict", "relaxed"] = "strict",
 ) -> SpatialData:
     """Read processed PhenoCycler-Fusion, CODEX Instrument Manager, or other Akoya QPI imagery.
@@ -108,6 +116,17 @@ def phenocycler(  # noqa: PLR0913 - explicit reader options share the repository
         Positive integer chunk size or three sizes in `c, y, x` order.
         Defaults to one channel and 1024 by 1024 pixels per chunk. The
         source graph uses TIFF-native geometry before rechunking.
+    labels
+        Integer instance-label TIFF for one selected image, or a mapping from
+        selected region names to files. Relative paths resolve against the
+        input directory (the parent for a direct file). Supplying a mask
+        asserts it segments that image. On the same grid their YX extents must
+        agree. Zero is background. Only singleton nonspatial axes are removed.
+    labels_to_image
+        Optional invertible XY affine mapping mask pixel coordinates into
+        full-resolution image pixels. Supply the measured registration for
+        cropped, rotated or resized masks. A mapping can specify different
+        affines by mask region. An omitted affine declares the same grid.
     path_policy
         `"strict"` keeps discovered and relative sources inside the dataset
         directory or explicit file's parent directory. `"relaxed"` also
@@ -123,6 +142,10 @@ def phenocycler(  # noqa: PLR0913 - explicit reader options share the repository
         values and dtypes, including unsigned integer and floating point
         signal. RGB samples become the leading channel axis. Thumbnail,
         overview, label, and reduced-resolution TIFF pages are excluded.
+
+        A supplied mask adds `<region>_labels`, a lazy YX raster with the
+        source integer dtype. It belongs to the primary scan. Generated label
+        pyramids preserve discrete IDs and require at most 32-bit labels.
 
         A calibrated single scan uses `global` in micrometres. An uncalibrated
         single scan uses `image_pixels`. Multiple scans use `global` when
@@ -142,6 +165,9 @@ def phenocycler(  # noqa: PLR0913 - explicit reader options share the repository
         milliseconds. The TIFF sample minimum and maximum describe stored
         pixel values. Signal unit codes and normalization factors describe
         the acquisition and do not rescale the data.
+
+        Matched Fusion profiles can identify the antibody clone, reporter, reagent
+        barcode and dye. CIM profiles can identify the dye and marker class.
 
         An XPD protocol's cycle and distinct marker counts and a channel CSV's
         optional `Marker` list are summarized there. HuBMAP annotation files
@@ -179,7 +205,12 @@ def phenocycler(  # noqa: PLR0913 - explicit reader options share the repository
         raise TypeError(message)
     options = make_raster_options(scale_factors, chunks)
     layout = discover_layout(
-        path, regions=selected_regions, read_all_bit_depths=read_all_bit_depths, path_policy=path_policy
+        path,
+        regions=selected_regions,
+        read_all_bit_depths=read_all_bit_depths,
+        path_policy=path_policy,
+        labels=labels,
+        labels_to_image=labels_to_image,
     )
     scans = {files.scan.region: inspect_scan(files.scan.image, context=_CONTEXT) for files in layout.regions}
     transformations = scan_transformations(scans)
@@ -204,7 +235,17 @@ def phenocycler(  # noqa: PLR0913 - explicit reader options share the repository
         )
         for region, scan in scans.items()
     }
-    result = SpatialData(images=images, attrs={"akoya": {"regions": region_attrs}})
+    masks = {
+        f"{files.scan.region}_labels": read_mask(
+            files.mask,
+            images[f"{files.scan.region}_image"],
+            options=options,
+            context=ReaderErrorContext("phenocycler", "segmentation mask"),
+        )
+        for files in layout.regions
+        if files.mask is not None
+    }
+    result = SpatialData(images=images, labels=masks, attrs={"akoya": {"regions": region_attrs}})
     versions = {scan.format_version for scan in scans.values()}
     set_reader_provenance(
         result.attrs, reader="phenocycler", format_version=next(iter(versions)) if len(versions) == 1 else None

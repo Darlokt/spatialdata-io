@@ -11,6 +11,9 @@ names and requires equal occurrence counts for repeated names. A spelling
 difference caused by punctuation is accepted only for an unambiguous match.
 Unmatched channels retain their measured page metadata.
 
+Fusion profiles can identify the clone, reporter, reagent barcode and dye.
+CIM profiles can identify the dye and marker class.
+
 Page exposure is recorded in microseconds and protocol exposure in
 milliseconds. Signal units and normalization factors describe the stored
 values. The nominal pixel size from XML is recorded separately from the
@@ -42,6 +45,7 @@ _XML_DTD = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 _XML_ROOT = "PerkinElmer-QPI-ImageDescription"
 _FUSION_VERSION = re.compile(r"Fusion\s+([12])(?:\.[0-9]+)*(?=$|\s)", re.IGNORECASE)
 _IMAGE_TYPES = {"FullResolution", "ReducedResolution", "Thumbnail", "Overview", "Label"}
+_PATH_LIKE_TEXT = re.compile(r"^(?:[/\\~]|\.{1,2}[/\\]|[A-Z]:[/\\]|file:)", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +57,11 @@ class ProfileChannel:
     channel: int | None
     exposure_ms: float | None
     wavelength_nm: float | None = None
+    clone: str | None = None
+    reporter: str | None = None
+    reagent_barcode: str | None = None
+    dye: str | None = None
+    marker_class: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +80,13 @@ def text(element: ET.Element, tag: str) -> str | None:
     """Return the stripped nonempty text of a single XML field."""
     value = element.findtext(tag)
     return value.strip() or None if value is not None else None
+
+
+def _profile_text(value: str | None) -> str | None:
+    """Return printable source text while excluding path-like values and URLs."""
+    return (
+        value if value and value.isprintable() and "://" not in value and _PATH_LIKE_TEXT.match(value) is None else None
+    )
 
 
 def _nonnegative_integer(value: str | None, *, maximum: int | None = None) -> int | None:
@@ -177,7 +193,15 @@ def _marker(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     marker = value.strip()
-    return marker if marker.lower() not in {"", "--", "blank", "empty"} else None
+    return _profile_text(marker) if marker.casefold() not in {"--", "blank", "empty"} else None
+
+
+def _reagent_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    label = value.strip()
+    # Fusion writes "None" when a reagent field does not apply.
+    return _profile_text(label) if label.casefold() != "none" else None
 
 
 def fusion_protocol(experiment: dict[str, object]) -> FusionProtocol:
@@ -199,7 +223,18 @@ def fusion_protocol(experiment: dict[str, object]) -> FusionProtocol:
                 if isinstance(exposure, int | float) and not isinstance(exposure, bool) and exposure >= 0
                 else None
             )
-            channels.append(ProfileChannel(marker, cycle_index, channel_index, exposure_ms))
+            channels.append(
+                ProfileChannel(
+                    marker,
+                    cycle_index,
+                    channel_index,
+                    exposure_ms,
+                    clone=_reagent_text(record.get("clone")),
+                    reporter=_reagent_text(record.get("reporter")),
+                    reagent_barcode=_reagent_text(record.get("barcode")),
+                    dye=_reagent_text(record.get("dye")),
+                )
+            )
     return FusionProtocol(version if type(version) is int and version >= 0 else None, len(wells), tuple(channels))
 
 
@@ -213,6 +248,8 @@ def profile_channels(root: ET.Element, *, context: ReaderErrorContext, path: Pat
                 _nonnegative_integer(text(channel, "Index")),
                 _number(text(channel, "ExposureTime_ms")),
                 _positive(text(channel, "Wavelength_nm")),
+                dye=_reagent_text(text(channel, "DyeName")),
+                marker_class=_reagent_text(text(channel, "MarkerClass")),
             )
             for cycle in experiment.iterfind("Cycles/Cycle")
             for channel in cycle.iterfind("Channels/Channel")

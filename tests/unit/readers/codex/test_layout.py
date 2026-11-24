@@ -17,6 +17,14 @@ if TYPE_CHECKING:
 class TestDiscoverLayout:
     """Reject missing, ambiguous, wrong-kind, and escaping artifacts."""
 
+    def test_scan_cannot_be_its_own_mask(self, tmp_path: Path) -> None:
+        scan = tmp_path / "scan.qptiff"
+        scan.touch()
+        alias = tmp_path / "instances.tif"
+        alias.symlink_to(scan)
+        with pytest.raises(ValueError, match="same file"):
+            discover_layout(scan, image_file=None, cell_table_file=None, labels=alias)
+
     def test_immutable_canonical_layout_and_ignored_backups(self, tmp_path: Path) -> None:
         write_csv(tmp_path / "cells.CSV")
         (tmp_path / "cells.csv.bak").touch()
@@ -165,6 +173,23 @@ class TestDiscoverLayout:
         assert layout.regions[0].image is None
         with pytest.raises(ValueError, match="read_tables=True"):
             discover_layout(selected, cell_table_file=None, image_file=None, read_tables=False)
+        with pytest.raises(ValueError, match="compensation"):
+            discover_layout(selected, cell_table_file=None, image_file=None, compensation="compensated")
+
+    def test_tables_with_different_runs_remain_ambiguous(self, tmp_path: Path) -> None:
+        for run, suffix in [("segm-1", ".csv"), ("segm-2", ".fcs")]:
+            directory = tmp_path / "segm" / run / "fcs" / "compensated"
+            directory.mkdir(parents=True)
+            (directory / f"reg001_compensated{suffix}").touch()
+
+        with pytest.raises(ReaderFormatError, match="2 candidates"):
+            discover_layout(tmp_path, cell_table_file=None, image_file=None, compensation="compensated")
+
+    def test_compensation_requires_a_table_in_at_least_one_region(self, tmp_path: Path) -> None:
+        (tmp_path / "reg001_cyc001_ch001_DAPI.tif").touch()
+
+        with pytest.raises(ValueError, match="compensation requires a CODEX cell table"):
+            discover_layout(tmp_path, cell_table_file=None, image_file=None, compensation="compensated")
 
     def test_direct_relative_file_uses_its_parents_path_policy(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -214,3 +239,18 @@ class TestValidateRegionOptions:
     def test_table_option_requires_table_discovery(self) -> None:
         with pytest.raises(ValueError, match="requires read_tables"):
             validate_region_options(None, read_tables=False, table_selected=True)
+
+    @pytest.mark.parametrize(("read_tables", "table_selected"), [(False, False), (True, True)])
+    def test_compensation_requires_automatic_table_selection(self, *, read_tables: bool, table_selected: bool) -> None:
+        with pytest.raises(ValueError, match="compensation requires read_tables=True and no cell_table_file"):
+            validate_region_options(
+                None, read_tables=read_tables, table_selected=table_selected, compensation="compensated"
+            )
+
+    def test_compensation_rejects_unsupported_value(self) -> None:
+        with pytest.raises(ValueError, match="'compensated' or 'uncompensated'"):
+            validate_region_options(None, read_tables=True, table_selected=False, compensation="raw")  # pyrefly: ignore[bad-argument-type] - Untyped caller input.
+
+    def test_compensation_rejects_wrong_type(self) -> None:
+        with pytest.raises(TypeError, match="compensation must be a string"):
+            validate_region_options(None, read_tables=True, table_selected=False, compensation=True)  # pyrefly: ignore[bad-argument-type] - Untyped caller input.

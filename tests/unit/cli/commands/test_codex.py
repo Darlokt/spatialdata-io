@@ -60,6 +60,7 @@ class TestCodexCommand:
             tmp_path,
             regions=None,
             read_tables=True,
+            compensation=None,
             cell_table_file=Path("cells.fcs"),
             image_file=Path("stitched.tif"),
             pixel_size_um=None,
@@ -69,6 +70,8 @@ class TestCodexCommand:
             tiff_series=1,
             scale_factors=(2, 4),
             chunks=(1, 16, 32),
+            labels=None,
+            labels_to_image=None,
             path_policy="strict",
         )
         reader_result.write.assert_called_once_with(output)
@@ -83,6 +86,7 @@ class TestCodexCommand:
             tmp_path,
             regions=None,
             read_tables=True,
+            compensation=None,
             cell_table_file=None,
             image_file=None,
             pixel_size_um=None,
@@ -92,6 +96,8 @@ class TestCodexCommand:
             tiff_series=None,
             scale_factors=DEFAULT_SCALE_FACTORS,
             chunks=DEFAULT_CHUNKS,
+            labels=None,
+            labels_to_image=None,
             path_policy="strict",
         )
 
@@ -127,6 +133,16 @@ class TestCodexCommand:
         assert result.exit_code == 0, result.output
         assert reader.call_args.kwargs["chunks"] == 16
 
+    def test_selects_table_compensation(self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture) -> None:
+        reader = mocker.patch("spatialdata_io.readers.codex.codex")
+
+        result = runner.invoke(
+            codex_command, ["-i", str(tmp_path), "-o", str(tmp_path / "out"), "--compensation", "uncompensated"]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert reader.call_args.kwargs["compensation"] == "uncompensated"
+
     @pytest.mark.parametrize(
         "values",
         [
@@ -134,6 +150,7 @@ class TestCodexCommand:
             ["--chunks", "0"],
             ["--scale-factors", "1"],
             ["--tiff-series", "-1"],
+            ["--compensation", "raw"],
             ["--fcs", "false"],
             ["--imread-kwargs", "{}"],
         ],
@@ -156,6 +173,7 @@ class TestCodexCommand:
             "output_path",
             "regions",
             "read_tables",
+            "compensation",
             "cell_table_file",
             "image_file",
             "pixel_size_um",
@@ -165,6 +183,8 @@ class TestCodexCommand:
             "tiff_series",
             "scale_factors",
             "chunks",
+            "labels",
+            "labels_to_image",
             "path_policy",
         ]
         for name in ("cell_table_file", "image_file"):

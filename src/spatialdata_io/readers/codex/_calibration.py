@@ -28,10 +28,9 @@ from spatialdata.transformations import Affine, Identity
 
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.metadata import read_json_object
+from spatialdata_io.readers.phenocycler._transforms import has_finite_inverse, validate_xy_affine
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
     from spatialdata_io.readers._utils.paths import ArtifactFile
 
 type AkoyaVersion = Literal["1.5.0.38", "1.7.0.6"]
@@ -61,16 +60,6 @@ class Calibration:
     version: AkoyaVersion | None
 
 
-def _has_finite_inverse(matrix: NDArray[np.floating]) -> bool:
-    """Check the inverse used to map XY back into this image, including its translation."""
-    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-        try:
-            inverse = np.linalg.inv(matrix)
-        except np.linalg.LinAlgError:
-            return False
-    return bool(np.isfinite(inverse).all())
-
-
 def validate_calibration(pixel_size_um: float | None, image_to_table: Affine | None) -> None:
     """Validate the public scale and affine before any I/O."""
     if pixel_size_um is not None:
@@ -86,26 +75,7 @@ def validate_calibration(pixel_size_um: float | None, image_to_table: Affine | N
             msg = "pixel_size_um must be a positive finite number representable as float64 or None."
             raise ValueError(msg)
     if image_to_table is not None:
-        if not isinstance(image_to_table, Affine):
-            msg = "image_to_table must be an Affine or None."
-            raise TypeError(msg)
-        if image_to_table.input_axes != _XY_AXES or image_to_table.output_axes != _XY_AXES:
-            msg = "image_to_table must map exactly XY input axes to XY output axes."
-            raise ValueError(msg)
-        # The general transform conversion reconstructs its bottom row; inspect
-        # the caller's original matrix so near-projective terms cannot disappear.
-        matrix = image_to_table.matrix
-        if (
-            matrix.shape != (3, 3)
-            or matrix.dtype != np.dtype(np.float64)
-            or not np.isfinite(matrix).all()
-            or not np.array_equal(matrix[2], [0, 0, 1])
-        ):
-            msg = "image_to_table must be a finite float64 3-by-3 affine matrix."
-            raise ValueError(msg)
-        if not _has_finite_inverse(matrix):
-            msg = "image_to_table must be invertible."
-            raise ValueError(msg)
+        validate_xy_affine(image_to_table, option="image_to_table")
 
 
 def read_experiment(path: ArtifactFile) -> Calibration:
@@ -162,7 +132,7 @@ def image_transformation(image_to_table: Affine | None, calibration: Calibration
     matrix = image_to_table.matrix.copy()
     with np.errstate(over="ignore", under="ignore"):
         matrix[:2] *= calibration.pixel_size_um
-    if not np.isfinite(matrix).all() or not _has_finite_inverse(matrix):
+    if not np.isfinite(matrix).all() or not has_finite_inverse(matrix):
         message = "image_to_table and the pixel size must produce a finite and invertible physical image transform."
         raise ValueError(message)
     return Affine(matrix, input_axes=_XY_AXES, output_axes=_XY_AXES)

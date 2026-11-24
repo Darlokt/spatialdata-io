@@ -360,16 +360,36 @@ class TestCodex:
         assert decode.call_args.args[1] == (slice(0, 1), slice(0, 16), slice(0, 16))
 
     def test_multiple_sources_require_explicit_selection(self, tmp_path: Path) -> None:
-        """Require a caller selection when more than one cell table is present."""
+        """Require a caller selection for unrelated table exports."""
         write_csv(tmp_path / "cells.csv")
-        write_fcs(tmp_path / "cells.fcs")
+        write_fcs(tmp_path / "other.fcs")
 
         with pytest.raises(ReaderFormatError, match="2 candidates"):
             codex(tmp_path)
 
-        result = codex(tmp_path, cell_table_file="cells.fcs")
+        result = codex(tmp_path, cell_table_file="other.fcs")
 
         assert result.tables["table"].var["marker"].tolist() == ["CD45", "DNA"]
+
+    def test_csv_is_preferred_for_a_matching_fcs_export(self, tmp_path: Path) -> None:
+        csv = tmp_path / "cells_compensated.csv"
+        fcs = tmp_path / "Cells_Compensated.FCS"
+        precise = 3.2500000000000004
+        write_csv(csv, cell_frame().assign(cyc002_ch001=[0.0, precise, -1.5]))
+        write_fcs(fcs)
+
+        selected = codex(tmp_path, compensation="compensated").tables["table"].X
+        default = codex(tmp_path).tables["table"].X
+        overridden = codex(tmp_path, cell_table_file=fcs).tables["table"].X
+
+        assert isinstance(selected, sparse.csr_array)
+        assert isinstance(default, sparse.csr_array)
+        assert isinstance(overridden, sparse.csr_array)
+        assert selected.dtype == default.dtype == np.dtype(np.float64)
+        np.testing.assert_array_equal(default.data, selected.data)
+        assert selected[1, 0] == precise
+        assert overridden.dtype == np.dtype(np.float32)
+        assert overridden[1, 0] == np.float32(3.25)
 
     def test_absolute_overrides_and_source_axes(self, tmp_path: Path) -> None:
         """Honor external file overrides, explicit axes, and requested output chunks."""

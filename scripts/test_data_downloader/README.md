@@ -9,8 +9,9 @@ hatch run python scripts/test_data_downloader --list
 ```
 
 Replace `--list` with `--dataset KEY` or `--group GROUP` to install the
-selection under `data/`. The [dataset registry](datasets.toml) records the
-producer, version, source terms and files for each entry.
+selection under `data/`. Large opt-in datasets require an explicit key or
+group. The [dataset registry](datasets.toml) records the producer, version,
+source terms and files for each entry.
 
 The [developer guide](../../docs/development/datasets.md) covers shared download
 locations, checksum verification, registering a ZIP, DOI or selected files,

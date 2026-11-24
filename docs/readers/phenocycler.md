@@ -59,14 +59,24 @@ the source TIFF page, its source-derived ID, and the displayed channel name.
 Available fields include `biomarker`, `band_name`, `signal_units_code`, and
 `scale_factor`. Repeated marker names receive distinct channel coordinates.
 Setting `channel_names` changes display names while retaining source identity.
+
+Matched embedded acquisition profiles can add `profile_clone`,
+`profile_reporter`, `profile_reagent_barcode` and `profile_dye` for Fusion, or
+`profile_dye` and `profile_marker_class` for CODEX Instrument Manager.
+Reporter and barcode values are reagent identifiers. The reader matches
+profile records to measured marker names and pairs repeated markers in
+occurrence order when their counts agree. A punctuation difference is accepted
+only for an unambiguous match. Missing fields are omitted.
+[Akoya PhenoCycler-Fusion user guide](https://www.akoyabio.com/wp-content/uploads/2023/04/PhenoCycler-Fusion-User-Guide_1.0.7_-RevJ.pdf)
+and [CODEX Instrument Manager tonsil scan](https://zenodo.org/records/22107401).
+
 XPD and `Marker`-column CSV summaries report marker agreement with the scan.
 A HuBMAP channel CSV instead records one row per QPTIFF channel, with its
 source `channel id`, two segmentation-use flags and an antibody flag. These
 rows are available under `channels_csv["annotations"]` in the region metadata,
 in submitted order. Their IDs can use a different convention from the QPI
 marker names. Segmentation-use flags describe how channels were used in
-analysis. The reader returns images, and the flags themselves supply no cell
-boundaries. Extra CSV columns, raw image descriptions and operator records
+analysis. Cell boundaries can be supplied separately as a label TIFF. Extra CSV columns, raw image descriptions and operator records
 are excluded from the output metadata.
 [HuBMAP channel definition](https://docs.google.com/spreadsheets/d/1JikzRNyDErspgPSel4P9Y6gx6N_mrAGIMDcJZd8TucA/edit#gid=0)
 
@@ -85,6 +95,31 @@ micrometre frames. With unknown calibration, a single scan uses `image_pixels`
 and multiple scans use `<region>_pixels`. The nominal scan-profile resolution,
 when available, is retained as acquisition metadata.
 [Akoya’s field geometry implementation](https://github.com/akoyabio/phenoptr/blob/7d5dceaacdc1af3e2ff595bf0aeb09172fd546c2/R/read_components.R#L102-L123)
+
+## Segmentation masks
+
+Supply `labels="cells.tif"` when a separate integer TIFF contains instances
+for the selected scan. For several regions, use a mapping such as
+`labels={"Tonsil": "tonsil_cells.tif", "Thymus": "thymus_cells.tif"}`.
+Keys identify selected primary regions. Relative paths resolve against the
+input directory or the parent of an explicitly selected scan. Each
+`<region>_labels` keeps its source IDs and dtype in a lazy YX raster, with
+zero as background. A mask with multiple non-singleton planes requires an
+explicitly prepared 2D export.
+
+Supplying a mask without a transform declares the same pixel grid, including
+origin and orientation. The reader checks the full-resolution YX extents and
+any comparable OME physical pixel sizes. For a crop, rotation or resampling,
+pass `labels_to_image` as a SpatialData XY `Affine` or a mapping keyed by region.
+It maps mask pixel centres into full-resolution image pixel coordinates. For
+example, a twofold downsample of an image crop starting at column 100, row 40
+uses the matrix below. The scan's physical transform then places both rasters
+in the same frame.
+
+```bash
+python -m spatialdata_io phenocycler -i Tonsil.qptiff -o tonsil.zarr \
+  --labels cells.tif --labels-to-image '[[2,0,100],[0,2,40],[0,0,1]]'
+```
 
 ## Read a region
 

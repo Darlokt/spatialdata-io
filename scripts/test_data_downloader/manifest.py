@@ -12,7 +12,7 @@ from typing import Any
 DATASETS_TOML = Path(__file__).with_name("datasets.toml")
 COMMON_REQUIRED_FIELDS = ("key", "group", "extracted_dir", "source")
 STRING_SOURCE_FIELDS = ("test_path", "url", "known_hash", "doi")
-ALLOWED_FIELDS = frozenset(COMMON_REQUIRED_FIELDS) | frozenset(STRING_SOURCE_FIELDS) | {"assets"}
+ALLOWED_FIELDS = frozenset(COMMON_REQUIRED_FIELDS) | frozenset(STRING_SOURCE_FIELDS) | {"assets", "opt_in"}
 ASSET_REQUIRED_FIELDS = frozenset({"url", "known_hash", "target"})
 ASSET_OPTIONAL_FIELDS = frozenset({"extract"})
 ASSET_ALLOWED_FIELDS = ASSET_REQUIRED_FIELDS | ASSET_OPTIONAL_FIELDS
@@ -77,6 +77,8 @@ class TestDataset:
         file in the repository's published registry.
     assets
         Independently downloaded and verified files assembled into one dataset.
+    opt_in
+        Whether a download requires explicit selection by key or group.
     """
 
     key: str
@@ -88,6 +90,7 @@ class TestDataset:
     known_hash: str = ""
     doi: str = ""
     assets: tuple[DatasetAsset, ...] = ()
+    opt_in: bool = False
 
 
 def load_datasets(path: str | Path = DATASETS_TOML) -> tuple[TestDataset, ...]:
@@ -151,6 +154,9 @@ def validate_datasets(datasets: tuple[TestDataset, ...] | None = None) -> None:
     seen_extracted_dirs: set[str] = set()
     for dataset in datasets:
         _validate_dataset_strings(dataset)
+        if not isinstance(dataset.opt_in, bool):
+            msg = f"Dataset {dataset.key!r} field 'opt_in' must be a boolean."
+            raise ValueError(msg)
         _validate_identifier(dataset.key, dataset_key=dataset.key, field="key")
         _validate_identifier(dataset.group, dataset_key=dataset.key, field="group")
         _validate_relative_path(

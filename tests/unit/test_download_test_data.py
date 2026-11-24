@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -229,6 +230,7 @@ key = "example"
 group = "group"
 extracted_dir = "example"
 source = "example source"
+opt_in = true
 test_path = "nested"
 url = "https://example.com/example.zip"
 known_hash = "{SHA256}"
@@ -247,6 +249,7 @@ known_hash = "{SHA256}"
                 test_path="nested",
                 url="https://example.com/example.zip",
                 known_hash=SHA256,
+                opt_in=True,
             ),
         )
 
@@ -606,6 +609,29 @@ class TestDownloadDataset:
 
 
 class TestMain:
+    def test_opt_in_data_requires_an_explicit_selector(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        default = _make_dataset("default")
+        large = replace(_make_dataset("large", group="large-scans"), opt_in=True)
+        attempted: list[str] = []
+
+        def download_dataset(dataset: TestDatasetType, output: Path, *, force: bool) -> None:
+            assert output == tmp_path
+            assert not force
+            attempted.append(dataset.key)
+
+        monkeypatch.setattr(download_test_data, "DATASETS", (default, large))
+        monkeypatch.setattr(download_test_data, "download_dataset", download_dataset)
+
+        download_test_data.main(["--output", str(tmp_path)])
+        download_test_data.main(["--output", str(tmp_path), "--dataset", "large"])
+        download_test_data.main(["--output", str(tmp_path), "--group", "large-scans"])
+        download_test_data.main(["--list"])
+
+        assert attempted == ["default", "large", "large"]
+        assert "large\tlarge-scans\tlarge\texample (opt-in)" in capsys.readouterr().out
+
     def test_downloads_multiple_selected_datasets(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         first = _make_dataset("first")
         second = _make_dataset("second")

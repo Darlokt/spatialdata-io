@@ -15,6 +15,14 @@ if TYPE_CHECKING:
 
 
 class TestDiscoverLayout:
+    def test_scan_cannot_be_its_own_mask(self, tmp_path: Path) -> None:
+        scan = tmp_path / "scan.qptiff"
+        scan.touch()
+        alias = tmp_path / "instances.tif"
+        alias.symlink_to(scan)
+        with pytest.raises(ValueError, match="same file"):
+            discover_layout(scan, regions=None, read_all_bit_depths=False, path_policy="strict", labels=alias)
+
     def test_retains_scan_suffix_when_needed_and_normalizes_codex_region(self, tmp_path: Path) -> None:
         names = ("dataset_REG0007.qptiff", "A_Scan1.qptiff", "A_scan2.qptiff")
         for name in names:

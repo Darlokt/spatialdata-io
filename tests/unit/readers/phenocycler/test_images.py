@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from xml.sax.saxutils import escape
 
 import numpy as np
 import pytest
@@ -137,6 +139,74 @@ class TestReadScan:
 
 
 class TestScanAttributes:
+    def test_reagent_metadata_only_enriches_matched_measured_channels(self, tmp_path: Path) -> None:
+        profile = escape(
+            json.dumps(
+                {
+                    "experimentDescription": {
+                        "operatorName": "private-operator",
+                        "wells": [
+                            {
+                                "items": [
+                                    {"markerName": "CD4", "clone": "EPR6855", "barcode": "BX003", "dye": "CY5"},
+                                    {"markerName": "CD3", "clone": "../private", "reporter": "RX002", "exposure": 20},
+                                    {"markerName": "Other", "clone": "unmatched-clone"},
+                                ]
+                            },
+                        ],
+                    },
+                }
+            )
+        )
+        path = tmp_path / "channels.qptiff"
+        write_pages(
+            path,
+            [
+                replace(_BASE, scan_profile=profile, extra_xml="<ExposureTime>12000</ExposureTime>"),
+                replace(_BASE, marker="CD4"),
+                replace(_BASE, marker="CD8"),
+            ],
+        )
+        scan = inspect_scan(require_file(path, context=_CONTEXT), context=_CONTEXT)
+        attrs = scan_attributes(scan, ("first", "second", "third"))
+        assert attrs["channels"] == [
+            {
+                "id": "CD3",
+                "source_name": "CD3",
+                "name": "first",
+                "page_index": 0,
+                "biomarker": "CD3",
+                "band_name": "Fluor",
+                "exposure_us": 12000,
+                "profile_cycle": 1,
+                "profile_channel": 2,
+                "profile_exposure_ms": 20.0,
+                "profile_reporter": "RX002",
+            },
+            {
+                "id": "CD4",
+                "source_name": "CD4",
+                "name": "second",
+                "page_index": 1,
+                "biomarker": "CD4",
+                "band_name": "Fluor",
+                "profile_cycle": 1,
+                "profile_channel": 1,
+                "profile_clone": "EPR6855",
+                "profile_reagent_barcode": "BX003",
+                "profile_dye": "CY5",
+            },
+            {
+                "id": "CD8",
+                "source_name": "CD8",
+                "name": "third",
+                "page_index": 2,
+                "biomarker": "CD8",
+                "band_name": "Fluor",
+            },
+        ]
+        assert "private" not in repr(attrs)
+
     def test_rejects_override_with_incorrect_length(self, tmp_path: Path) -> None:
         path = tmp_path / "channels.qptiff"
         write_pages(path, [_BASE])

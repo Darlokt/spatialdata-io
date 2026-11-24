@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force_all:
-        description: "Download all registered datasets. Set to false to use dataset_keys."
+        description: "Download the default datasets. Set to false to select keys, including opt-in datasets."
         required: true
         type: boolean
         default: true
