@@ -15,7 +15,7 @@ dataset/
 
 `table_file`, `barcode_positions_file`, and `image_file` override discovery. Relative overrides resolve against `path`; absolute overrides may point outside that directory. Missing or ambiguous required artifacts fail. An explicitly requested image must exist; when the default image is absent, the reader returns the table and shapes without an image. Image overrides support TIFF, OME-TIFF, BigTIFF/BTF, PNG, and JPEG.
 
-The selected H5AD name supplies the default `dataset_id` and the selected image name determines its format, including for symlinks. Discovered artifacts, including symlink targets, must remain inside the dataset root unless `path_policy="relaxed"`. [Dataset paths and symlinks](dataset_paths.md)
+The selected H5AD name supplies the default `dataset_id` and the selected image name determines its format, including for symlinks. Discovered artifacts, including symlink targets, must remain inside the dataset root unless `path_policy="relaxed"`. [Dataset paths and symlinks](../user/paths.md)
 
 The barcode map is a headerless, tab-separated file with exactly two columns and at most fifty A and fifty B positions:
 
@@ -61,7 +61,7 @@ OME spacing or nominal channel width alone cannot establish the barcode pitch, o
 
 `invalid_geometries="keep"`, `"drop"` and `"raise"` produce identical supported squares and linkage because this geometry is valid by construction. No topology scan is performed. The option is validated before I/O, and floating-point collapse of a positive square width fails in every mode.
 
-`table.obsm["spatial_grid"]` retains the one-based uint16 `(array_A, array_B)` coordinates. The same uint16 domain covers the shape index and `pixel_id` values through 2499 on a full 50 × 50 grid. IDs are the consecutive positions of observed rows after sorting by A and then B; a partial grid does not reserve IDs for unobserved locations. These generated fields previously used int64; imported arrays retain their source dtypes. These values are barcode positions, not polygon centers or image-pixel coordinates.
+`table.obsm["spatial_grid"]` retains the one-based uint16 `(array_A, array_B)` coordinates. The same uint16 domain covers the shape index and `pixel_id` values through 2499 on a full 50 × 50 grid. IDs are the consecutive positions of observed rows after sorting by A and then B; a partial grid does not reserve IDs for unobserved locations. These values are barcode positions, not polygon centers or image-pixel coordinates.
 
 `uns["spatialdata_io_positions"]` describes `spatial_grid` as one-based grid ordinals in the `grid_pixels` frame. Existing `spatial_grid` or `spatialdata_io_positions` destinations raise. Imported `obsm["spatial"]` moves exactly to `spatial_source` before sorting, preserving dtype and shape; an occupied destination raises when this move is required. No physical `spatial` is produced. Channel widths and fitting display polygons to an image do not establish physical table calibration.
 
@@ -69,9 +69,9 @@ OME spacing or nominal channel width alone cannot establish the barcode pitch, o
 
 TIFF metadata supplies source axes when they are unambiguous. Use `data_axes`, one case-insensitive string such as `"CYX"` or `"YXS"`, when an explicit interpretation is required; other types raise `TypeError`. Declared axes that cannot become `c, y, x` raise `ReaderFormatError`; `data_axes` that do not fit the file raise `ValueError` naming the image. By default the reader reads the TIFF's only series; a file with several series raises `ReaderFormatError` unless `tiff_series` selects one. `tiff_level=0` selects the full-resolution level of that series; other nonnegative indices select an existing stored pyramid level. PNG and JPEG use their encoded image layout and do not accept `data_axes`, `tiff_series` (not even `0`) or a nonzero `tiff_level`. Wrongly typed indexes raise `TypeError`, negative ones `ValueError`.
 
-Image channels are named `r, g, b`, or `r, g, b, a` with a declared alpha sample, when the image's samples become its channels and the file itself declares them RGB: TIFF `PhotometricInterpretation` RGB (alpha through `ExtraSamples`) or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6 (alpha through colour type 6 or `tRNS`), and three-component JPEG. Viewers composite such images as colour. Otherwise reliable scientific channel names from OME metadata are retained in source order; OME declares an interleaved image as one channel with several samples per pixel, so its samples are named `<name or ID>:sample:0`, `:sample:1`, … (for example `Channel:0:0:sample:0`). Images without either declaration, such as grayscale PNG or non-OME `MinIsBlack` TIFF samples, keep positional channel coordinates, as do channels that `data_axes` reads from an axis the file declares otherwise (for example Z), whose OME channel records describe another axis; such a reinterpretation previously failed the OME channel count. The channel count or dtype never makes an image RGB.
+Image channels are named `r, g, b`, or `r, g, b, a` with a declared alpha sample, when the image's samples become its channels and the file itself declares them RGB: TIFF `PhotometricInterpretation` RGB (alpha through `ExtraSamples`) or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6 (alpha through colour type 6 or `tRNS`), and three-component JPEG. Viewers composite such images as colour. Otherwise reliable scientific channel names from OME metadata are retained in source order; OME declares an interleaved image as one channel with several samples per pixel, so its samples are named `<name or ID>:sample:0`, `:sample:1`, … (for example `Channel:0:0:sample:0`). Images without either declaration, such as grayscale PNG or non-OME `MinIsBlack` TIFF samples, keep positional channel coordinates, as do channels that `data_axes` reads from an axis the file declares otherwise (for example Z), whose OME channel records describe another axis. The channel count or dtype never makes an image RGB.
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A pyramid is generated only when `scale_factors` requests one, and factors whose product exceeds the smaller image side raise `ValueError`; the grid scale always uses the full-resolution extent of the selected TIFF level. Image options other than their defaults require an image. Metadata inspection is eager, while pixel decoding stays lazy until the returned image is computed or written. TIFF tasks decode the tiles or strips that overlap the computed chunks. PNG and JPEG can require decoding the entire encoded frame even for a small selection; rechunking does not change that codec limitation.
+`scale_factors` and `chunks` follow the shared [raster options](../user/rasters.md): by default a single scale and images in `(1, 1024, 1024)` chunks. A pyramid is generated only when `scale_factors` requests one, and factors whose product exceeds the smaller image side raise `ValueError`; the grid scale always uses the full-resolution extent of the selected TIFF level. Image options other than their defaults require an image. Metadata inspection is eager, while pixel decoding stays lazy until the returned image is computed or written. TIFF tasks decode the tiles or strips that overlap the computed chunks. PNG and JPEG can require decoding the entire encoded frame even for a small selection; rechunking does not change that codec limitation.
 
 Missing or wrong-kind paths raise the corresponding filesystem exception. Malformed or ambiguous layouts, barcode schemas, and identifier relationships raise `ReaderFormatError`, a `ValueError` subclass, with reader and artifact context. Invalid option values raise `ValueError`, and unsupported option types raise `TypeError`. The reader does not return partial results after a validation failure.
 
@@ -101,18 +101,6 @@ python -m spatialdata_io dbit --input dataset --output sample.zarr \
   --image-file registered.tif --no-include-border \
   --scale-factors 2 --scale-factors 2 --chunks 1 --chunks 512 --chunks 512
 ```
-
-`--include-border/--no-include-border` is a boolean flag pair. The previous `anndata_path`, `barcode_position`, `image_path`, and `border` arguments and their CLI options have been removed.
-
-Images are now chunked `(1, 1024, 1024)` by default instead of keeping the storage-aligned chunks of the source, and `chunks=None` is no longer accepted. Pass `chunks` explicitly to choose another layout. The new `scale_factors` option builds pyramid levels.
-
-Shapes and images are no longer placed in `global`. The polygons are stored in grid units in `grid_pixels`; with an image they reach the image's `image_pixels` frame through `Scale([s, s])`, where earlier versions stored the scaled vertices directly. The overlay in `image_pixels` is unchanged up to one floating-point rounding step. The position declaration names the `grid_pixels` frame instead of `barcode_grid`.
-
-A filename stem that is not a valid element name is now repaired with a warning (for example `my run.h5ad` gives `my_run`) instead of raising.
-
-`tiff_series` now defaults to `None` (and `--tiff-series` has no default): a TIFF with several series raises instead of silently reading the first one. Pass `tiff_series=0` to keep the previous selection. PNG and JPEG images reject any `tiff_series`. A non-string `dataset_id` raises `TypeError` instead of `ValueError`.
-
-Images whose file declares RGB samples (RGB TIFF and OME-TIFF, RGB, RGBA and palette PNG, three-component JPEG) now have channel coordinates `r, g, b` or `r, g, b, a` instead of positional indexes or `<name or ID>:sample:<k>`.
 
 ## Complete synthetic example
 

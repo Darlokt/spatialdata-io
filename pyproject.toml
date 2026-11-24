@@ -39,6 +39,8 @@ dependencies = [
   "pyyaml",
   "readfcs",
   "scipy>=1.15",
+  # Included for environment reports in the bug report template.
+  "session-info2",
   "shapely",
   "spatialdata>=0.7.3a0",
   "tifffile>=2026.5.2",

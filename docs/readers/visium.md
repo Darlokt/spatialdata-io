@@ -38,7 +38,7 @@ Discovery looks only at the dataset root and `spatial/`:
 - Other files in `spatial/` (QC images, CytAssist images, enrichment tables) are ignored.
 - The full-resolution tissue image is an input of Space Ranger, not part of `outs/`; pass it as `fullres_image_file`.
 - `counts_source`, `positions_file`, `scale_factors_file` and `fullres_image_file` replace the discovered artifacts. Relative paths resolve against the dataset root; absolute paths may point elsewhere. `counts_source` is read as HDF5 when its suffix is `.h5` or `.hdf5`, otherwise as a MEX directory, for example `counts_source="raw_feature_bc_matrix.h5"` to keep spots outside the tissue.
-- Symlinks follow `path_policy` ([Dataset paths and symlinks](dataset_paths.md)), including the three MEX member files.
+- Symlinks follow `path_policy` ([Dataset paths and symlinks](../user/paths.md)), including the three MEX member files.
 
 The HDF5 matrix's `software_version` attribute (`spaceranger-2.1.0`) gives the format version `2.1.0`, recorded as `attrs["spatialdata_io_format_version"]` and named in later format errors. Other spellings and MEX sources give no format version. The layout does not depend on the version.
 
@@ -60,7 +60,7 @@ ACGCCTGACACGCGCT-1,0,0,0,1234.5,2345.6
 
 A header names the fields, so they may come in any order and extra columns are ignored. Empty or duplicate names raise. A quoted extra header name may contain a newline. A headerless file has exactly these six fields. The first record is parsed with strict CSV quoting to recognize the header. When a six-field first record uses a header name only in its first field, the reader treats that value as a literal barcode. Arrow parses the remaining fields in the positional order shown above. An error names the position file and gives the expected field order. Later records must have the same number of fields, but a malformed quote there may be accepted and read as a different value. Every count barcode needs one position row. Position rows without counts are omitted from the result.
 
-The six fields are parsed directly with their Arrow types. Barcode strings remain literal, including leading zeros, whitespace, `NA` and `NULL`; empty or NUL-containing barcodes fail. Numeric fields cannot be empty and have no implicit missing-value spellings. Spaces and tabs around numbers are accepted. Unsigned integers accept hexadecimal (`0x10`) and reject negative values, a leading plus sign, decimal/exponent spellings (`2.0`, `2e0`) and digit separators. Tissue values outside zero and one fail even when they fit uint8. Values outside the declared unsigned width fail conversion. Floats are rounded directly to float64: `9007199254740993` rounds to `9007199254740992` and `1e-400` to zero; negative zero is preserved. Parsed `nan`/`inf` and negative pixel coordinates fail semantic validation. Source number text is not decoded a second time to impose extra precision restrictions.
+The six fields are parsed directly with their Arrow types. Barcode strings remain literal, including leading zeros, whitespace, `NA` and `NULL`; empty or NUL-containing barcodes fail. Numeric fields cannot be empty and have no implicit missing-value spellings. Spaces and tabs around numbers are accepted. Unsigned integers accept hexadecimal (`0x10`) and reject negative values, a leading plus sign, decimal/exponent spellings (`2.0`, `2e0`) and digit separators. Tissue values outside zero and one fail even when they fit uint8. Values outside the declared unsigned width fail conversion. Floats are rounded directly to float64: `9007199254740993` rounds to `9007199254740992` and `1e-400` to zero; negative zero is preserved. Parsed `nan`/`inf` and negative pixel coordinates fail semantic validation.
 
 `scalefactors_json.json` must be strict JSON (no `NaN` or `Infinity`) and give positive numeric `tissue_hires_scalef`, `tissue_lowres_scalef` and `spot_diameter_fullres`. The whole object, including `fiducial_diameter_fullres` and any other key, is kept in `uns["spatial"]`.
 
@@ -77,17 +77,15 @@ The circle radius is the display size Space Ranger draws, not a measured capture
 
 The table has one row per count-matrix barcode in matrix order, including spots outside the tissue when raw counts are read, and every feature type (gene expression, antibody capture, ...) in matrix order:
 
-- `X` is a canonical finite CSR sparse array under the [completed-count dtype policy](table_contracts.md#completed-raw-counts). Integer counts retain their source precision through conversion. Duplicate HDF5 entries for one barcode and feature fail. Repeated Matrix Market records add exactly.
-- `var` holds `gene_ids`, `feature_types` and, when present, `genome`; `var_names` are the feature names, made unique with `-1`, `-2`, ... unless `make_var_names_unique=False`.
-- `obs` holds uint8 `in_tissue` and uint64 `array_row`/`array_col`, the barcode again as `spot_id` (string) and categorical `region` (`dataset_id`); `spot_id` and `region` link the table to the circles.
+- `X` is a canonical finite CSR sparse array under the [completed-count dtype policy](../user/tables.md#raw-count-precision). Integer counts retain their source precision through conversion. Duplicate HDF5 entries for one barcode and feature fail. Repeated Matrix Market records add exactly.
+- `var` holds `gene_ids`; modern sources also provide `feature_types` and available feature annotations such as `genome`. Legacy HDF5 leaves unavailable annotations absent. Feature names are made unique with `-1`, `-2`, … unless `make_var_names_unique=False`.
+- `obs` contains, in order, uint8 `in_tissue`, uint64 `array_row` and `array_col`, string `spot_id` (the barcode), and categorical `region` (`dataset_id`). `spot_id` and `region` link the table to the circles.
 - `obsm["spatial_pixels"]` holds float64 spot centres `x, y` in full-resolution pixels, declared in `uns["spatialdata_io_positions"]`. There is no physical `obsm["spatial"]`.
 - `uns["spatial"][dataset_id]` holds `scalefactors` and `metadata` (the HDF5 `chemistry_description` and `software_version` attributes when present).
 
-See also the [table contract](table_contracts.md#visium).
-
 ## Images and channels
 
-Every image is two-dimensional `c, y, x` with the source dtype and channel order. Image pixels are read only when computed: TIFF computations decode only the tiles or strips they overlap, PNG and JPEG decode the whole frame. `chunks` applies to every image, `scale_factors` only to the full-resolution image ([raster options](raster_options.md)).
+Every image is two-dimensional `c, y, x` with the source dtype and channel order. Image pixels are read only when computed: TIFF computations decode only the tiles or strips they overlap, PNG and JPEG decode the whole frame. `chunks` applies to every image, `scale_factors` only to the full-resolution image ([raster options](../user/rasters.md)).
 
 The full-resolution image may be a TIFF, OME-TIFF, BigTIFF (`.tif`, `.tiff`, `.btf`), PNG or JPEG (`.jpg`, `.jpeg`); the suffix is checked before any file is read.
 
@@ -151,21 +149,6 @@ sdata = visium(
 ```
 
 ```bash
-spatialdata-io visium --input outs --output sample.zarr \
+python -m spatialdata_io visium --input outs --output sample.zarr \
   --fullres-image-file /data/images/tissue.tif --scale-factors 2 --scale-factors 2
 ```
-
-## Changes from earlier releases
-
-| Change | Reason |
-| --- | --- |
-| Position CSV fields use declared Arrow types: uint8 tissue state, uint64 array coordinates and float64 pixels. Native integer grammar and direct float rounding replace text-to-number conversion and source-lexeme precision checks. | Preserve the complete unsigned grid domain and make scalar types explicit at ingestion |
-| Coordinate systems are `<dataset_id>_pixels`, `<dataset_id>_hires_pixels` and `<dataset_id>_lowres_pixels` (were `<dataset_id>`, `<dataset_id>_downscaled_hires` and `<dataset_id>_downscaled_lowres`), and the positions declaration names `<dataset_id>_pixels`. Replace `coordinate_systems="<dataset_id>"` with `"<dataset_id>_pixels"` in rendering and query code. | Frame names state their pixel unit; `global` is reserved for micrometres |
-| Image channels are `r, g, b(, a)` only when the file declares RGB; OME-TIFF channels use their OME names. Before, every three- or four-channel image was labelled RGB(A). | A fluorescence image was mislabelled RGBA |
-| `data_axes` accepts only a string such as `"CYX"` | One form across readers; the CLI already took a string |
-| `chunks` no longer accepts a mapping; use one integer or a `(c, y, x)` tuple | One form across readers and the CLI |
-| A multi-series TIFF without `tiff_series` raises `ReaderFormatError`; a non-integer `tiff_series` raises `TypeError` | Contextual format errors; type errors for wrong types |
-| `data_axes`, `tiff_series` and `scale_factors` without a suitable full-resolution image, and an unsupported image suffix, raise before any file is read | Early option validation |
-| An explicit `dataset_id` must be a valid element name; a derived one is repaired with a warning | Invalid names failed late when written |
-| `attrs["spatialdata_io_format_version"]` is `2.1.0` rather than `spaceranger-2.1.0`; `uns["spatial"]` keeps the raw text | Same normalization as Visium HD |
-| Discovered artifacts that are symlinks to targets outside the dataset directory are rejected by default; pass `path_policy="relaxed"` for git-annex or DVC datasets | Safe default ([Dataset paths and symlinks](dataset_paths.md)) |

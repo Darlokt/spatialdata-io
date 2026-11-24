@@ -11,133 +11,64 @@ the [scientific Python tutorials][], or the [scanpy developer guide][].
 [scientific Python tutorials]: https://learn.scientific-python.org/development/tutorials/
 [scanpy developer guide]: https://scanpy.scverse.org/page/dev/
 
-:::{tip} The *hatch* project manager
+For a reader or converter contribution, see [Contributing readers and converters](#contributing-readers-and-converters), including [public data and permissive licenses](#the-importance-of-public-data-and-permissive-licenses) and the [submission checklist](#wrap-up-checklist).
 
-We highly recommend to familiarize yourself with [`hatch`][hatch].
-Hatch is a Python project manager that
-
-- manages virtual environments, separately for development, testing and building the documentation.
-  Separating the environments is useful to avoid dependency conflicts.
-- allows to run tests locally in different environments (e.g. different python versions)
-- allows to run tasks defined in `pyproject.toml`, e.g. to build documentation.
-
-While the project is setup with `hatch` in mind,
-it is still possible to use different tools to manage dependencies, such as `uv` or `pip`.
-
-:::
+This package is part of scverse and shares the SpatialData development stack. Use uv for a local checkout. Hatch also manages isolated documentation environments and the Python test matrix used by CI. You can use pip in your own virtual environment. [scverse project and governance](https://scverse.org/about/roles), [SpatialData contribution guide](https://github.com/scverse/spatialdata/blob/main/docs/contributing.md), [scverse project template](https://github.com/scverse/cookiecutter-scverse)
 
 [hatch]: https://hatch.pypa.io/latest/
 
+(set-up-a-development-checkout)=
+
 ## Installing dev dependencies
 
+Clone your fork and change into its root directory. Use Python 3.12 or newer.
 In addition to the packages needed to _use_ this package,
 you need additional python packages to [run tests](#writing-tests) and [build the documentation](#docs-building).
 
 :::::{tab-set}
-::::{tab-item} Hatch
-:sync: hatch
-
-On the command line, you typically interact with hatch through its command line interface (CLI).
-Running one of the following commands will automatically resolve the environments for testing and
-building the documentation in the background:
-
-```bash
-hatch test  # defined in the table [tool.hatch.envs.hatch-test] in pyproject.toml
-hatch run docs:build  # defined in the table [tool.hatch.envs.docs]
-```
-
-### VS Code
-
-If you are using VS code, install the [hatch-code][] extension.
-Additionally, make sure that the `vscode-python-environments` extension is installed (should be by default)
-and `"python.useEnvironmentsExtension": true` is activated in your `settings.json`.
-
-Next, open the "Python Environment Managers" sidebar.
-You can do so by opening the command palette (Ctrl+Shift+P) and searching for `Python: Focus on Environment Managers View`.
-It will show a collapsible list where you can expand "Hatch"
-and activate an environment by clicking on the checkmark next to it.
-As the main development environment, we recommend to use `hatch-test` with the latest supported Python version.
-
-### Other IDEs
-
-For other IDEs, you’ll have to point the editor at the paths to the virtual environments manually.
-To get a list of all environments for your projects, run
-
-```bash
-hatch env show -i
-```
-
-This will list “Standalone” environments and a table of “Matrix” environments like the following:
-
-```
-+------------+---------+--------------------------+----------+---------------------------------+-------------+
-| Name       | Type    | Envs                     | Features | Dependencies                    | Scripts     |
-+------------+---------+--------------------------+----------+---------------------------------+-------------+
-| hatch-test | virtual | hatch-test.py3.12-stable | dev      | coverage-enable-subprocess==1.0 | cov-combine |
-|            |         | hatch-test.py3.14-stable | test     | coverage[toml]~=7.4             | cov-report  |
-|            |         | hatch-test.py3.14-pre    |          | pytest-mock~=3.12               | run         |
-|            |         |                          |          | pytest-randomly~=3.15           | run-cov     |
-|            |         |                          |          | pytest-rerunfailures~=14.0      |             |
-|            |         |                          |          | pytest-xdist[psutil]~=3.5       |             |
-|            |         |                          |          | pytest~=8.1                     |             |
-+------------+---------+--------------------------+----------+---------------------------------+-------------+
-```
-
-From the `Envs` column, select the environment name you want to use for development.
-As the main development environment, we recommend to use `hatch-test` with the latest supported Python version.
-In this example, it would be `hatch-test.py3.14-stable`.
-
-Next, create the environment with
-
-```bash
-hatch env create hatch-test.py3.14-stable
-```
-
-Then, obtain the path to the environment using
-
-```bash
-hatch env find hatch-test.py3.14-stable
-```
-
-and manually point it to the python binary.
-
-
-::::
-
 ::::{tab-item} uv
 :sync: uv
 
-A popular choice for managing virtual environments is [uv][].
-The main disadvantage compared to hatch is that it supports only a single environment per project at a time,
-which requires you to mix the dependencies for running tests and building docs.
-This can have undesired side-effects,
-such as requiring to install a lower version of a library your project depends on,
-only because an outdated sphinx plugin pins an older version.
-
-To initialize a virtual environment in the `.venv` directory of your project, simply run
+[uv][] creates a project environment in `.venv`. Install the development and test dependency groups and select `.venv` as your interpreter in VS Code or your preferred editor. Include the `doc` group when building the documentation.
 
 ```bash
-uv sync --all-extras
+uv sync --group dev --group test
+uv run --no-sync python -m spatialdata_io --help
+uv run --no-sync python -c "import sys; print(sys.executable)"
 ```
 
-The `.venv` directory is typically automatically discovered by IDEs such as VS Code.
+::::
+
+::::{tab-item} Hatch
+:sync: hatch
+
+[Hatch][] creates the development and test environments specified in `pyproject.toml`. To set up the checkout and locate the test environment for your editor, run:
+
+```bash
+hatch env create
+hatch run python -m spatialdata_io --help
+hatch env show -i
+hatch env create hatch-test.py3.14-stable
+hatch env find hatch-test.py3.14-stable
+```
+
+Select the returned environment's Python interpreter in your IDE. In VS Code, the [Hatch extension][hatch-code] lists environments under **Python Environment Managers**.
 
 ::::
 
 ::::{tab-item} Pip
 :sync: pip
 
-Pip is nowadays mostly superseded by environment manager such as [hatch][].
-However, for the sake of completeness, and since it’s ubiquitously available,
-we describe how you can manage environments manually using `pip`:
+Create a virtual environment and install the checkout in editable mode. pip 25.1 and newer can install the dependency groups from `pyproject.toml`.
 
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev,test,doc]"
+python -m pip install --upgrade pip
+python -m pip install -e . --group dev --group test --group doc
 ```
 
-The `.venv` directory is typically automatically discovered by IDEs such as VS Code.
+Select `.venv` in your editor. On Windows, use `.venv\Scripts\activate` in Command Prompt.
 
 ::::
 :::::
@@ -152,47 +83,53 @@ This package uses [pre-commit][]-style hooks to enforce consistent code-styles.
 Run them with [prek][], which reads `.pre-commit-config.yaml` and provides built-in file checks.
 On every commit, the checks will either automatically fix issues with the code, or raise an error message.
 
-Install the development and test dependencies before enabling the hooks:
+The hooks run the tools installed in the repository's `.venv`. Create or refresh that environment before installing or running the hooks, including when invoking them through Hatch. Review any fixes before committing.
+
+:::::{tab-set}
+::::{tab-item} uv
+:sync: uv
 
 ```bash
 uv sync --group dev --group test
 uv run --no-sync prek install
+uv run --no-sync prek run --all-files
 ```
+::::
 
-Run these commands in the repository root. Hooks use prek's built-ins and run local tools with `uv run --no-sync`,
-reusing the project's `.venv` without creating separate hook environments.
-Run `uv sync --group dev --group test` again after development dependencies change.
-
-Run all checks manually with `uv run --no-sync prek run --all-files`.
-
-The `priorities` block at the top of `.pre-commit-config.yaml` defines the execution order.
-Hooks reference these names; hooks with the same priority may run concurrently:
-
-| Priority | Hooks | File access |
-| --- | --- | --- |
-| `line-endings` | `mixed-line-ending` | Normalizes text files to LF line endings. |
-| `trailing-whitespace` | `trailing-whitespace` | Removes trailing whitespace from text files. |
-| `final-newline` | `end-of-file-fixer` | Fixes final newlines in text files. |
-| `project-config` | `pyproject-fmt` | Formats project TOML files before other `uv run` hooks read the configuration. |
-| `fixes` | `ruff-check`, `pretty-format-json`, `zizmor` | Apply fixes to Python/notebooks, JSON and GitHub Actions YAML respectively; their target files do not overlap. |
-| `format` | `ruff-format` | Formats Python, stubs, notebooks and Python code blocks in Markdown after Ruff's lint fixes. |
-| `checks` | `pyrefly`, `detect-private-key`, `check-case-conflict`, `check-merge-conflict` | Read source files or filenames after all file edits finish. |
-
-The text fixers run separately because they can modify the same files.
-`require_serial` prevents concurrent batches of a single hook; priorities control concurrency between different hooks.
-
-Ruff's strict linting and formatting settings and Pyrefly's strict type-checking settings live in `pyproject.toml`.
-Pyrefly is the project's only type checker and checks `benchmarks`, `src`, and `tests` with `uv run --no-sync pyrefly check`.
-
-After the same dependency setup, Hatch's check commands use these tools and settings from the project's `.venv`:
+::::{tab-item} Hatch
+:sync: hatch
 
 ```bash
-hatch check code   # Ruff lint checks; add --fix to apply fixes
-hatch check fmt    # Ruff formatting checks, including Python code blocks in Markdown
-hatch check types  # Pyrefly type checks
+hatch run uv sync --no-active --group dev --group test
+hatch run prek install
+hatch run prek run --all-files
 ```
+::::
+:::::
 
-The older `hatch fmt` command also uses the project tools.
+For read-only checks, run the linter, formatter check and type checker. The configurations for Ruff and Pyrefly live in `pyproject.toml`.
+
+:::::{tab-set}
+::::{tab-item} uv
+:sync: uv
+
+```bash
+uv run --no-sync ruff check --no-fix .
+uv run --no-sync ruff format --check .
+uv run --no-sync pyrefly check
+```
+::::
+
+::::{tab-item} Hatch
+:sync: hatch
+
+```bash
+hatch check code
+hatch check fmt
+hatch check types
+```
+::::
+:::::
 
 If you didn’t run the checks locally, the `Pre-commit checks` job of the GitHub Actions CI runs them on your pull request and reports any failures.
 We strongly encourage installing and running the checks locally first to understand their usage.
@@ -204,14 +141,14 @@ JSONC and CSS files are not automatically formatted.
 
 [pre-commit]: https://pre-commit.com/
 [prek]: https://prek.j178.dev/
-[ruff-editors]: https://docs.astral.sh/ruff/integrations/
+[ruff-editors]: https://docs.astral.sh/ruff/editors/
 
 (writing-tests)=
 
 ## Writing tests
 
 This package uses [pytest][] for automated testing.
-Please write {doc}`scanpy:dev/testing` for every function added to the package.
+Write tests for new or changed behavior. See the [reader testing guide](development/testing.md) for fixtures, public datasets and coverage, and {doc}`scanpy:dev/testing` for background on testing scverse code.
 
 Most IDEs integrate with pytest and provide a GUI to run tests.
 If you set up your virtual environments as described in [installing dev dependencies](#installing-dev-dependencies),
@@ -220,22 +157,25 @@ test cases should be automatically discovered by your IDE.
 Alternatively, you can run all tests from the command line by executing
 
 :::::{tab-set}
-::::{tab-item} Hatch
-:sync: hatch
-
-```bash
-hatch test  # test with the highest supported Python version
-# or
-hatch test --all  # test with all supported Python versions
-```
-
-::::
-
 ::::{tab-item} uv
 :sync: uv
 
 ```bash
-uv run pytest
+uv run --no-sync pytest
+# Run the stable CI versions in isolated environments.
+uv run --isolated --python 3.12 --group dev --group test pytest
+uv run --isolated --python 3.14 --group dev --group test pytest
+```
+
+::::
+
+::::{tab-item} Hatch
+:sync: hatch
+
+```bash
+hatch test  # run in a compatible test environment
+# or
+hatch test --all  # test with all supported Python versions
 ```
 
 ::::
@@ -257,17 +197,7 @@ in the root of the repository.
 
 ### Continuous integration
 
-Continuous integration via GitHub actions will automatically run the tests on all pull requests and test
-against the minimum and maximum supported Python version.
-
-Additionally, there’s a CI job that tests against pre-releases of all dependencies (if there are any).
-The purpose of this check is to detect incompatibilities of new package versions early on and
-gives you time to fix the issue or reach out to the developers of the dependency before the package
-is released to a wider audience.
-
-The CI job is defined in `.github/workflows/test.yaml`,
-however the single point of truth for CI jobs is the Hatch test matrix defined in `pyproject.toml`.
-This means that local testing via hatch and remote testing on CI tests against the same python versions and uses the same environments.
+Pull requests run the stable-dependency suite on Python 3.12 and 3.14. An advisory job on Python 3.14 also installs pre-release dependencies to catch incompatibilities before release. The matrix is defined in `pyproject.toml` and run by `.github/workflows/test.yaml`.
 
 ## Publishing a release
 
@@ -284,6 +214,26 @@ Add the release notes to `CHANGELOG.md` and pick the tag according to [Semantic 
 >
 > Additional labels for pre-release and build metadata are available as extensions to the MAJOR.MINOR.PATCH format.
 
+Build the distributions locally before tagging.
+
+:::::{tab-set}
+::::{tab-item} uv
+:sync: uv
+
+```bash
+uv build
+```
+::::
+
+::::{tab-item} Hatch
+:sync: hatch
+
+```bash
+hatch build
+```
+::::
+:::::
+
 Once you are done, commit and push your changes and navigate to the "Releases" page of this project on GitHub.
 Specify `vX.X.X` as a tag name and create a release.
 For more information, see [managing GitHub releases][].
@@ -296,11 +246,11 @@ This will automatically create a git tag and trigger a Github workflow that crea
 
 ## Writing documentation
 
-Please write documentation for new or changed features and use-cases.
+Please write documentation for new or changed features and use cases. Put reader input and output contracts in `docs/readers/`, user tasks in `docs/user/`, and contributor workflows in `docs/development/`. The site distinguishes tutorials, how-to guides, reference and explanation. [Diátaxis](https://diataxis.fr/)
 This project uses [sphinx][] with the following features:
 
 - The [myst][] extension allows to write documentation in markdown/Markedly Structured Text
-- [Numpy-style docstrings][numpydoc] (through the [napoloen][numpydoc-napoleon] extension).
+- [Numpy-style docstrings][numpydoc] (through the [Napoleon][numpydoc-napoleon] extension).
 - Jupyter notebooks as tutorials through [myst-nb][] (See [Tutorials with myst-nb](#tutorials-with-myst-nb-and-jupyter-notebooks))
 - [sphinx-autodoc-typehints][], to automatically reference annotated input and output types
 - Citations (like {cite:p}`Virshup_2023`) can be included with [sphinxcontrib-bibtex](https://sphinxcontrib-bibtex.readthedocs.io/)
@@ -316,7 +266,7 @@ See scanpy’s {doc}`scanpy:dev/documentation` for more information on how to wr
 
 ### Tutorials with myst-nb and jupyter notebooks
 
-The documentation is set-up to render jupyter notebooks stored in the `docs/notebooks` directory using [myst-nb][].
+Use [MyST-NB][myst-nb] for notebook tutorials. Place the notebook under `docs/` and add it to the appropriate toctree.
 Currently, only notebooks in `.ipynb` format are supported that will be included with both their input and output cells.
 It is your responsibility to update and re-run the notebook whenever necessary.
 
@@ -337,6 +287,17 @@ please check out [this feature request][issue-render-notebooks] in the `cookiecu
 ### Building the docs locally
 
 :::::{tab-set}
+::::{tab-item} uv
+:sync: uv
+
+```bash
+uv sync --group dev --group test --group doc
+uv run --no-sync sphinx-build -M html docs docs/_build -W
+uv run --no-sync python -m webbrowser -t docs/_build/html/index.html
+```
+
+::::
+
 ::::{tab-item} Hatch
 :sync: hatch
 
@@ -347,25 +308,13 @@ hatch run docs:open
 
 ::::
 
-::::{tab-item} uv
-:sync: uv
-
-```bash
-cd docs
-uv run sphinx-build -M html . _build -W
-(xdg-)open _build/html/index.html
-```
-
-::::
-
 ::::{tab-item} Pip
 :sync: pip
 
 ```bash
 source .venv/bin/activate
-cd docs
-sphinx-build -M html . _build -W
-(xdg-)open _build/html/index.html
+python -m sphinx -M html docs docs/_build -W
+python -m webbrowser -t docs/_build/html/index.html
 ```
 
 ::::
@@ -403,11 +352,11 @@ The advantage of a public specification is that it makes contributions and bugfi
 
 #### Reader architecture
 
-Dataset readers use the same core files for public orchestration, artifact discovery, column schemas and tables. The package template explains when to split product modules, where to validate inputs, and how to test the scientific contract from source to output. [Reader package template](reader_architecture.md)
+Dataset readers take `path`, discover their layout once, build the requested elements and link their tables. The developer guide explains how to register and test a new reader. A worked example traces a Visium dataset from its files to a linked table and images. [Adding a reader](development/readers.md), [Visium walkthrough](development/visium-walkthrough.md), [Shared utilities](development/contracts.md)
 
 ##### Experimental readers
 
-If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. Keep experimental readers under `spatialdata_io.experimental` and document their supported artifact contracts with executable workflows. The experimental [`iss()`](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/experimental/iss/_reader.py) reader, for example, supports explicitly selected TIFF images, integer segmentation labels, and a linked h5ad table.
+If a specification is not available, a reader has less guarantee to work out-of-the-box. This is, for instance, the case for spatial omics datasets generated with in-house technologies. Even in this case, users may find a reader beneficial: they may still have to adapt the reader for their use cases, but it could provide a good starting point to parse their data. Keep experimental readers under `spatialdata_io.experimental` and document their supported artifact contracts with executable workflows. The experimental [ISS reader](readers/iss.md) reader, for example, supports explicitly selected TIFF images, integer segmentation labels, and a linked h5ad table.
 
 ### Adding tests: small data vs real data
 
@@ -415,7 +364,7 @@ An effective way to make a specification easier to understand and to improve the
 
 #### When small public test datasets are available
 
-Our preferred way to test a reader is by using (very) small test datasets (e.g. 100kB-10MB). By being small, we can afford to use the datasets in continuous integration tests that are run via GitHub actions. See here the [GitHub workflow](https://github.com/scverse/spatialdata-io/blob/main/.github/workflows/prepare_test_data.yaml) that we use to download the test datasets, and here an [example of a test](https://github.com/LucaMarconato/spatialdata-io/blob/d2fe0bc18349093ad2cafce752590117729baee8/tests/test_xenium.py#L47) using the small datasets.
+Prefer small public datasets (roughly 100 kB–10 MB when practical) that contributors and CI can download and exercise. The preparation workflow fetches registered fixtures. For an example of tests that compare reader output with original vendor files, see `tests/integration/readers/xenium/test_data.py`. [Register and download a test dataset](development/datasets.md), [CI data preparation](https://github.com/scverse/spatialdata-io/blob/main/.github/workflows/prepare_test_data.yaml)
 
 Notes:
 
@@ -434,11 +383,9 @@ To streamline the usage of datasets, we kindly ask you to provide two scripts vi
 
 Please create a folder in the [root directory of `spatialdata-sandbox`](https://github.com/giovp/spatialdata-sandbox/tree/main) named after your technology. Please include a format version if available. We also add the suffix `_io`: we use this to distinguish between scripts that reuse `spatialdata_io` for converting the data to SpatialData Zarr and scripts that parse the data from scratch.
 
-
 A note: `spatialdata-sandbox` is primarily used by scverse developers and, as the name suggests, we mainly use it as a sandbox for experimenting and for small scripts. We do not have pre-commit installed nor CI set up, so feel free not to worry about the code style.
 
 ##### The `download.py` script
-
 
 When the data does not follow any specification (for instance, for in-house data), it sometimes also performs some manipulation on the data and, in such cases, stores the result in any convenient way. Example [`download.py`](https://github.com/giovp/spatialdata-sandbox/blob/main/merfish/download.py) for in-house MERFISH data.
 
@@ -465,46 +412,37 @@ If the `download.py` and `to_zarr.py` scripts require Python imports for package
 
 We encourage testing the reader function and any helper function.
 
-Tests are split by scope:
+Keep fast unit tests under `tests/unit/` and reader, CLI and Zarr workflows under `tests/integration/`. A small deterministic fixture for each supported layout lets anyone run the offline tests.
 
-- Unit tests live in `tests/unit/` and should not require downloaded test data.
-- Integration tests live in `tests/integration/` and cover reader workflows, CLI commands, file I/O, and zarr roundtrips.
-- Integration tests that require external datasets use dataset keys from `scripts/test_data_downloader/datasets.toml`.
-  They resolve data under `SPATIALDATA_IO_TEST_DATA_DIR` when set, otherwise `data/` in the repository root. If the required dataset is unavailable, the test should skip with a clear message.
-- Reader tests are marked by reader name. When modifying one reader, use `pytest -m <reader>` to run the tests
-  specific to that reader, including shared parametrized checks for that reader.
+#### Download and contribute test data
 
-Useful local commands:
+Register public examples by name in `scripts/test_data_downloader/datasets.toml` with provenance, licence and checksums. The downloader verifies files with Pooch and accepts a dataset key or reader group.
 
-```bash
-pytest tests/unit
-pytest tests/integration
-pytest -m "integration and data"
-pytest -m xenium
-pytest -m "xenium and data"
-pytest -m "xenium and not slow"
-pytest -m "xenium and cli"
-uv run python scripts/test_data_downloader --group xenium
-SPATIALDATA_IO_TEST_DATA_DIR=/path/to/data pytest -m data
-```
-
-To download the same optional datasets used by CI, run:
+:::::{tab-set}
+::::{tab-item} uv
+:sync: uv
 
 ```bash
-uv run python scripts/test_data_downloader
+uv run --no-sync pytest -m "xenium and not data"
+uv run --no-sync python scripts/test_data_downloader --list
+uv run --no-sync python scripts/test_data_downloader --dataset xenium_prime_mouse_ileum
+uv run --no-sync pytest -m "xenium and data"
 ```
+::::
 
-By default, the downloader skips datasets that already exist. Use `--force` to redownload selected datasets, `--dataset` for a single dataset key, and `--list` to show the available keys.
-The downloader verifies every downloaded file with [Pooch](https://www.fatiando.org/pooch/). The dataset manifest lives in
-`scripts/test_data_downloader/datasets.toml`; append new entries there when adding or updating test datasets. This manifest
-stores project-specific metadata such as dataset keys, groups, output directories, and sources; it is not a separate Pooch
-registry. Prefer a stable repository DOI when one is available. For DOI entries, Pooch loads the repository's per-file hashes
-at runtime and verifies every downloaded file. Otherwise, register the archive URL and its SHA-256 hash as
-`known_hash = "sha256:..."`.
+::::{tab-item} Hatch
+:sync: hatch
 
-The [optional test-data downloader guide](https://github.com/scverse/spatialdata-io/blob/main/scripts/test_data_downloader/README.md)
-extends this section with the downloader's installation model, all selection and output options, the ZIP/DOI/multi-asset
-manifest forms, checksum generation, and the complete process for adding a dataset or adding files to an existing dataset.
+```bash
+hatch test -- -m "xenium and not data"
+hatch run python scripts/test_data_downloader --list
+hatch run python scripts/test_data_downloader --dataset xenium_prime_mouse_ileum
+hatch test -- -m "xenium and data"
+```
+::::
+:::::
+
+Keep the downloaded files under `data/`, or pass `--output` and set `SPATIALDATA_IO_TEST_DATA_DIR` to the same parent for pytest. To contribute a dataset, record its producer, software version and licence, choose a ZIP, DOI or individually checksummed files, then verify the fixture from a clean download. The [dataset guide](development/datasets.md) includes the manifest fields, checksum command and an integration test example. See [testing readers](development/testing.md) for numerical and linkage checks.
 
 #### Testing multiple versions
 
@@ -516,16 +454,14 @@ Using `spatialdata-plot` and/or `napari-spatialdata` to visualize the data is a 
 
 We encourage manually checking the visualization of the data. Please refer to the [documentation of `spatialdata-plot`](https://spatialdata.scverse.org/projects/plot/en/stable/api.html), to [its example notebooks](https://spatialdata.scverse.org/en/stable/tutorials/notebooks/notebooks.html#technology-specific), and to the [documentation of `napari-spatialdata`](https://spatialdata.scverse.org/projects/napari/en/stable/notebooks/spatialdata.html). Please add such scripts to `spatialdata-sandbox` so that they are reproducible by others.
 
-In `napari-spatialdata` and `spatialdata-plot`, we have tests that visually compare programmatic visualizations with reference images. We may consider adding such tests also for `spatialdata-io`, but for the moment these are not available. We recommend the two following proxy tests:
+Two numerical checks make this visual review reproducible:
 
-1. Proxy test to check that the spatial alignment is correct. This can be achieved by testing that the data extent (i.e. the visual bounds of the data) is correct. The extent can be computed with [`spatialdata.get_extent()`](https://spatialdata.scverse.org/en/stable/api/operations.html#spatialdata.get_extent). Here is an [example of such a test](https://github.com/LucaMarconato/spatialdata-io/blob/1df4a2261ee7f82469fa67cb83bdb856d69f6dac/tests/test_xenium.py#L51).
-2. Proxy test to check that the coloring of the spatial entities is correct. This can be achieved by checking that for each element, and for a small set of instance ids (i.e. data indices), and for a few feature columns, the values are correct. Here is an [example of such a test](https://github.com/LucaMarconato/spatialdata-io/blob/1df4a2261ee7f82469fa67cb83bdb856d69f6dac/tests/test_xenium.py#L79).
-
-Note: writing these tests requires some manual work to explore the data. If you find this too time-consuming, we could consider adding some external scripts to create these tests automatically: if you are interested, please reach out to us.
+1. Check registration against a known landmark, spatial extent or mask pixel. For example, `test_registered_vertices_fall_on_their_mask_pixels` in `tests/integration/readers/xenium/test_reader.py` checks a transformed polygon against its own label.
+2. Check annotations by matching a few known cell IDs and feature values to the source. The public Xenium tests in `tests/integration/readers/xenium/test_data.py` compare assigned transcripts with the gene counts. This catches cases where an image looks plausible but the wrong row supplies the colour.
 
 #### Testing auxiliary functions
 
-Some technologies make use of auxiliary functions to parse the data. We encourage testing these functions as well. Here is an [example of such an auxiliary function for Xenium data](https://github.com/LucaMarconato/spatialdata-io/blob/4ee33da99781ccb2ea284be0614bdaaf69bfb2ed/src/spatialdata_io/readers/xenium.py#L771) and the [corresponding test](https://github.com/LucaMarconato/spatialdata-io/blob/4ee33da99781ccb2ea284be0614bdaaf69bfb2ed/tests/test_xenium.py#L19).
+Exercise the parser or transformation at the module that owns it, then check the combined result in one reader workflow. For example, `tests/unit/readers/visium/test_layout.py` covers artifact discovery and `tests/integration/readers/visium/test_visium.py` checks the returned table, spots and images together. [Worked Visium example](development/visium-walkthrough.md)
 
 ### Adding a new converter
 
@@ -536,14 +472,22 @@ Converters are not the primary scope of `spatialdata-io`, so we will just give s
 
 ### Updating the CLI for readers and converters
 
-The readers and converters from `spatialdata-io` can be invoked via the command line (see the [CLI documentation](https://spatialdata.scverse.org/projects/io/en/stable/cli.html)). This Python file defines the CLI: [src/spatialdata_io/**main**.py](https://github.com/scverse/spatialdata-io/blob/main/src/spatialdata_io/__main__.py). Please, if you add or modify a reader or converter, update the CLI accordingly.
-
-**Technical notes**
-
-- In the future, we may consider automatically generating the CLI from the readers and converters, [see more here](https://github.com/scverse/spatialdata-io/pull/239#issuecomment-2588005228).
-- Keeping the CLI code up-to-date could be a good task for the GitHub Copilot code agent. We will experiment with this in the future.
+Register a reader command under `src/spatialdata_io/_cli/commands/` and in the lazy CLI group. Keep the command's options consistent with the public Python reader, add its help and conversion tests, and check the generated reference. [CLI registration](development/readers.md#expose-document-and-verify-the-reader), [Command-line reference](cli.md)
 
 ## Bug tracking
+
+When reporting a bug, include the reader call, a minimal input or public dataset
+key, the producer version and the traceback. Run the following in the Python
+session where you reproduced it and paste the output into the issue form.
+`session-info2` is installed with spatialdata-io and reports the loaded
+packages, their dependencies, Python version and operating system.
+
+```python
+import spatialdata_io
+import session_info2
+
+print(session_info2.session_info(dependencies=True))
+```
 
 To see current open [issues](https://github.com/scverse/spatialdata-io/issues?q=sort%3Aupdated-desc+is%3Aissue+is%3Aopen) and [PRs](https://github.com/scverse/spatialdata-io/pulls?q=sort%3Aupdated-desc+is%3Apr+is%3Aopen) for a particular technology, please filter the issues/PRs by label. Not all the issues have been labeled yet, so additional issues/PRs for a particular technology may be present.
 
@@ -551,29 +495,9 @@ To provide an overview of the open bugs and to help prioritize them, we set up a
 
 The issues in the project board need to be added manually, so the board may not be complete and we invite you to consult also the issues/PRs list. Due to the redundant nature of the project board, we are still experimenting with it, so please give us feedback if you find it useful or not.
 
-## Limitations and possible improvements
+## Supported technologies and specifications
 
-We are aware of some limitations of the current implementation of `spatialdata-io`.
-
-### Unsupported technologies
-
-Certain highly-used technologies, or certain versions for a particular technology, are not supported yet, and we encourage community contributions to help with implementations.
-
-### Naming consistency across readers
-
-The naming of the arguments of the readers is not fully consistent across technologies. An improvement would be to standardize the naming of the arguments across readers, for instance always using `path` for the path to the raw data, `sample_id` for the sample identifier, etc.
-
-### Pixel space vs physical space
-
-For certain use cases, the "pixel" space is more convenient, for others the "physical" space. Thanks to the flexibility of coordinate transformations, one can easily handle the data in both spaces. However, for some technologies, the first coordinate system (i.e. the default one) is the "pixel" space, for others the "physical" space. An improvement would be to standardize this across technologies.
-
-### Transformations between coordinate systems
-
-Coordinate transformations are currently only available from elements to coordinate systems. We are working (initially in a separate repository) on a large refactoring of coordinate transformations to allow transformations also between coordinate systems. This will make it easier to work with multiple samples and multiple coordinate systems and simplify the process of dealing with transformations in `spatialdata-io` readers.
-
-### Summary table of supported technologies and specifications
-
-In our README, we list the supported technologies but do not list the supported versions for each technology. An overview table could be helpful.
+See the [reader index](readers/index.md) for supported formats, experimental readers and links to version-specific layouts. For a new technology or version, include the producer's specification and representative files in the proposal. The [coordinate guide](user/coordinates.md) explains physical and pixel units, transformations and independent samples.
 
 ## Wrap-up: checklist
 
@@ -605,6 +529,6 @@ As a wrap-up, here is a checklist of the main points to consider when contributi
     - [ ] Add tests for auxiliary/helper functions if present
 
 - Extra
-    - [ ] Update CLI in `src/spatialdata_io/__main__.py` if reader/converter is added/modified
+    - [ ] Update the command and lazy registration under `src/spatialdata_io/_cli/` when the public reader or CLI changes
     - [ ] Consider contributing to the public project board (currently view only, please reach out for edits)
     - [ ] Provide feedback on this contribution guide to improve it further

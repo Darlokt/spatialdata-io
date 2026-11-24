@@ -82,15 +82,35 @@ Every element is in the `global` coordinate system in micrometres, with its orig
 
 ## Table
 
-MatrixMarket archives must contain exactly one of each required `cell_feature_matrix/{features,barcodes}.tsv.gz` and `cell_feature_matrix/matrix.mtx.gz`. Transcript-only reads extract the two metadata files without writing the matrix to temporary storage; traversing the compressed archive may still be necessary.
+The reader looks for gene counts in this order:
 
-`X` is an eager canonical CSR sparse array (float32 for official int32 HDF5 and MTX inputs) in the feature order of `cell_feature_matrix`. `feature_types=None` selects Gene Expression and, when present, Protein Expression; `"all"` keeps every feature type (negative controls, unassigned and deprecated codewords, genomic controls); a sequence selects exactly the named types, each of which must exist. Observation names are the matrix barcodes. Source feature names must be unique; duplicates raise rather than being renamed. `var` retains all selected source feature annotations, including `gene_ids`, `feature_types`, and available HDF5 fields such as `genome`. MatrixMarket sources supply only their own feature annotations. Feature annotation names that a SpatialData table does not accept are renamed with a warning, as described for `obs` below.
+1. `cell_feature_matrix.h5`
+2. A Matrix Market directory named `cell_feature_matrix/` containing `matrix.mtx.gz`, `barcodes.tsv.gz` and `features.tsv.gz`
+3. `cell_feature_matrix.tar.gz` containing those same three files under `cell_feature_matrix/`
+
+Each required archive member must occur exactly once. A transcript-only read can use the barcodes and feature names without extracting the matrix. For a deposit with only a Zarr count matrix, obtain one of the count sources above. The separate `cells.zarr.zip` supplies segmentation and cell-ID mappings.
+
+`X` is an eager canonical CSR sparse array in the feature order of `cell_feature_matrix`. `feature_types=None` selects Gene Expression and, when present, Protein Expression; `"all"` keeps every feature type (negative controls, unassigned and deprecated codewords, genomic controls); a sequence selects exactly the named types, each of which must exist. Observation names are the matrix barcodes. Source feature names must be unique; duplicates raise rather than being renamed. `var` retains all selected source feature annotations, including `gene_ids`, `feature_types`, and available HDF5 fields such as `genome`. Matrix Market sources supply only their own feature annotations. Feature annotation names that a SpatialData table does not accept are renamed with a warning, as described for `obs` below.
 
 Selected protein features add `long_name`, `clone` and `codeword_index` from `protein_panel.json`. The panel codeword annotation is nullable uint64, with missing values for nonprotein features; present values are nonnegative integers. If any of those columns already exists in the source, panel enrichment raises rather than overwriting it. Without panel enrichment, those source columns are retained unchanged.
 
 Integer source counts use float32 through 2²⁴ and float64 through 2⁵³. Duplicate HDF5 entries for one barcode and feature fail. Matrix Market records are validated before repeated coordinates are summed. These checks precede feature selection. Protein division follows this conversion and retains fractional measurement values.
 
-`obs` holds the `cells` table columns in source order with documented types: integer IDs are positive uint64, counts are uint64, other IDs are text, `nucleus_area` is NaN for cells without a nucleus. A CSV twin is parsed by Arrow directly into these types (see [CSV twins](#csv-twins)); its undocumented columns stay text. With `cells.zarr.zip`, `label_id` (uint32), `nucleus_centroid_x` and `nucleus_centroid_y` are added; XOA 2.0 cells tables lack `nucleus_count` and `segmentation_method`, which then also come from the store. `obsm["spatial"]` holds the float64 µm centroids.
+`obs` holds the `cells` columns in source order. Cell IDs must agree in exact
+order across the cells file, count matrix and native store when used.
+
+| Field | Type and meaning |
+| --- | --- |
+| `cell_id` | Positive uint64 in early integer-ID bundles, text otherwise. |
+| `x_centroid`, `y_centroid` | Float64 XY micrometres. These values also appear in `obsm["spatial"]`. |
+| `cell_area`, `nucleus_area` | Float64 square micrometres. Cells without a nucleus have NaN nucleus area. |
+| `transcript_counts`, `control_probe_counts`, `control_codeword_counts`, `total_counts` | Required uint64 summaries. |
+| `unassigned_codeword_counts`, `deprecated_codeword_counts`, `genomic_control_counts`, `nucleus_count` | Optional nullable uint64 summaries. |
+
+CSV twins follow the declared [CSV types](#csv-twins), with undocumented
+columns kept as text. With `cells.zarr.zip`, uint32 `label_id` and float64 µm
+`nucleus_centroid_x` and `nucleus_centroid_y` are added. XOA 2.0 stores
+`nucleus_count` and `segmentation_method` in this archive as well.
 
 Additional `cells` columns whose names a SpatialData table does not accept are renamed once with a warning: invalid characters become `_` (`CD45 RO` becomes `CD45_RO`), `_index` becomes `index`, and a name equal to another column ignoring letter case gets a `_1`, `_2`, ... suffix. The documented columns and the reader's own `label_id`, nucleus centroids and `region` keep their names; a `cells` column named exactly like a reader column raises.
 
@@ -109,9 +129,9 @@ The table annotates one returned element, chosen with `table_target`:
 
 A target that is not returned fails before any file is read.
 
-Protein Expression values (XOA 4.0) are the mean stain intensity per cell after the 100-count offset was removed. The HDF5 matrix stores them multiplied by the root attribute `protein_scaling_factor` (10 in the public protein bundle); the reader divides once in the selected floating dtype, widening to float64 when needed to represent the divisor exactly, and records `{"scaling_factor", "metric"}` in `attrs["xenium"]["protein"]`. `protein_metric` must be `MEAN_PER_CELL_STAIN`. The factor must be a positive integer exactly representable in float64. The MatrixMarket twins lack the factor, so protein features from them fail.
+Protein Expression values (XOA 4.0) are the mean stain intensity per cell after the 100-count offset was removed. The HDF5 matrix stores them multiplied by the root attribute `protein_scaling_factor` (10 in the public protein bundle); the reader divides once in the selected floating dtype, widening to float64 when needed to represent the divisor exactly, and records `{"scaling_factor", "metric"}` in `attrs["xenium"]["protein"]`. `protein_metric` must be `MEAN_PER_CELL_STAIN`. The factor must be a positive integer exactly representable in float64. The Matrix Market twins lack the factor, so protein features from them fail.
 
-With `include_analysis=True`, 10x secondary analysis from `analysis/` or `analysis.tar.gz` is added: each clustering becomes a categorical `obs` column named by its method (`gene_expression_graphclust`, ...) with text categories in numeric order, and PCA and UMAP projections become float64 `obsm["pca_<method>"]` and `obsm["umap_<method>"]`. Cells that 10x filtered before clustering are missing values. Each `(kind, method)` must identify exactly one recognized CSV, including in archives with repeated filenames or alternate `analysis/` prefixes; methods that differ only in letter case count as the same method, because SpatialData compares names ignoring case. A clustering named exactly like a `cells` column raises; other unusable method names are renamed with a warning as above. Extracted files and archive members stream directly into Arrow. After checking identities, the reader processes archive members in storage order and returns their annotations in filename order. Malformed or truncated archives raise `ReaderFormatError` with the analysis artifact path. Source handles close after parsing, including on failure. Returned annotations and projection arrays are eager.
+With `include_analysis=True`, 10x secondary analysis from `analysis/` or `analysis.tar.gz` is added: each clustering becomes a categorical `obs` column named by its method (`gene_expression_graphclust`, ...) with text categories in numeric order, and PCA and UMAP projections become float64 `obsm["pca_<method>"]` and `obsm["umap_<method>"]`. Cells that 10x filtered before clustering are missing values. Each `(kind, method)` must identify exactly one recognized CSV, including in archives with repeated filenames or alternate `analysis/` prefixes; methods that differ only in letter case count as the same method, because SpatialData compares names ignoring case. A clustering named exactly like a `cells` column raises; other unusable method names are renamed with a warning as above. Returned annotations and projection arrays are eager. Malformed or truncated archives raise a contextual format error.
 
 When labels are requested without a table or boundary polygons, the reader inspects the native mask metadata and calibration without loading cell IDs, summary vectors, segmentation methods or polygon membership arrays. It still checks the bundle family, named polygon-set structure, mask dtypes and matching grids, and the mask transform against `pixel_size`. Single-set transcript-assignment imports cannot return labels. Unused identity and summary arrays are neither loaded nor validated in this mode. Table and polygon reads retain their identity, label and polygon-membership cross-checks. Label pixels always remain lazy, and the native store closes before return.
 
@@ -125,7 +145,7 @@ and are preserved for table construction.
 
 ## Transcripts
 
-Points have NumPy `x`, `y`, `z` (float32 µm), a categorical `feature_name` whose known categories are the count-matrix features in source order, `cell_id` with the vendor sentinel for unassigned transcripts (`UNASSIGNED`, or `-1` with integer IDs), `transcript_id`, `overlaps_nucleus`, `qv` and, when present, `fov_name`, `nucleus_distance`, `codeword_index`, `codeword_category` and `is_gene`. These other columns are Arrow-backed (`uint64[pyarrow]` `transcript_id`, `uint8[pyarrow]` `overlaps_nucleus`, `float[pyarrow]` `qv`, `int64[pyarrow]` or `string[pyarrow]` `cell_id`, ...); the coordinates are NumPy because `PointsModel` requires it. Binary columns of early bundles are decoded strictly as UTF-8. Every transcript is kept: the count matrix contains assigned transcripts with `qv >= 20`, so `points[points.qv >= 20]` reproduces it.
+Points have NumPy `x`, `y`, `z` (float32 µm), a categorical `feature_name` whose known categories are the count-matrix features in source order, `cell_id` with the vendor sentinel for unassigned transcripts (`UNASSIGNED`, or `-1` with integer IDs), `transcript_id`, `overlaps_nucleus`, `qv` and, when present, `fov_name`, `nucleus_distance`, `codeword_index`, `codeword_category` and `is_gene`. These other columns are Arrow-backed (`uint64[pyarrow]` `transcript_id`, `uint8[pyarrow]` `overlaps_nucleus`, `float[pyarrow]` `qv`, `int64[pyarrow]` or `string[pyarrow]` `cell_id`, ...); the coordinates are NumPy because `PointsModel` requires it. Binary columns of early bundles are decoded strictly as UTF-8. The reader keeps every transcript. Gene counts use assigned transcripts with `qv >= 20`.
 
 Cell-ID indexes on cell polygons and circles, and owning `cell_id` annotations on nucleus polygons, also retain Arrow storage (`uint64[pyarrow]` or `string[pyarrow]`). Nucleus indexes derived from mask labels retain their NumPy integer type. Identifier values and order are unchanged.
 
@@ -180,7 +200,7 @@ Without `cell_boundaries` no cell is dropped. Rings with fewer than four coordin
 - a transcript-assignment import has one polygon set and no masks or nuclei: pass `include_cell_labels=False`, `include_nucleus_labels=False`, `include_nucleus_boundaries=False` and a shapes `table_target`;
 - a cells-only import has an empty nucleus set: pass `include_nucleus_boundaries=False`.
 
-Public deposits often keep only the CSV twins and MatrixMarket counts. Without `cells.zarr.zip`, labels are unavailable, so choose `include_cell_labels=False`, `include_nucleus_labels=False` and `table_target="cell_boundaries"` or `None`. Hexadecimal-ID nucleus boundaries carry their labels only in `cells.zarr.zip` and then need `include_nucleus_boundaries=False`. The remaining products equal the full bundle's.
+Public deposits often keep only the CSV twins and Matrix Market counts. Without `cells.zarr.zip`, labels are unavailable, so choose `include_cell_labels=False`, `include_nucleus_labels=False` and `table_target="cell_boundaries"` or `None`. Hexadecimal-ID nucleus boundaries carry their labels only in `cells.zarr.zip` and then need `include_nucleus_boundaries=False`. The remaining products equal the full bundle's.
 
 Some deposits keep only `transcripts.zarr.zip`, the tiled transcript store that Xenium Explorer displays, and neither `transcripts.parquet` nor `transcripts.csv`. The reader does not read transcripts from that store: it records no `cell_id` or `overlaps_nucleus`, so its transcripts cannot be assigned to cells as the transcripts element requires. Pass `include_transcripts=False` to read the remaining products, or obtain the transcript table from the depositors.
 
@@ -205,7 +225,7 @@ Axes come from the TIFF metadata, including `YXS` interleaved samples and `SYX` 
 
 - interleaved samples of a TIFF that declares an RGB colour model (photometric RGB, or JPEG-compressed YCbCr as in typical H&E scans) become `r, g, b`, with `a` for declared alpha;
 - other channels keep their OME channel names, or their OME channel IDs when names are missing or repeated, when the channel axis is the declared OME channel or samples axis; samples without a colour model are named `<name or ID>:sample:<index>`;
-- without OME metadata, or when `data_axes` reads another declared axis (for example Z) as the channels, channels are numbered `0, 1, ...`; such a reinterpretation previously failed the OME channel count.
+- without OME metadata, or when `data_axes` reads another declared axis (for example Z) as the channels, channels are numbered `0, 1, ...`.
 
 Three channels are never assumed to be RGB from their count: the Breast IDC H&E, stored as Hematoxylin, Eosin and Residual channels, keeps those names. An OME channel count that does not match a corresponding channel axis raises.
 
@@ -217,11 +237,11 @@ Three channels are never assumed to be RGB from their count: the Breast IDC H&E,
 
 ## Options and execution
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks; `xenium_aligned_image` takes the same options. Scale factors whose product exceeds the smaller side of an image or mask raise a `ValueError` before any pixel is read.
+`scale_factors` and `chunks` follow the shared [raster options](../user/rasters.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks; `xenium_aligned_image` takes the same options. Scale factors whose product exceeds the smaller side of an image or mask raise a `ValueError` before any pixel is read.
 
 Format errors are `ReaderFormatError`s that name the artifact (`cells table`, `transcripts`, `morphology focus image`, ...), the detected `experiment.xenium` format version and the path. Each label task opens the zip store, reads its chunk and closes it, so graphs hold paths, not open files. Constructing the result executes no pixel or transcript tasks; the table and shapes are eager.
 
-`path_policy="relaxed"` reads git-annex and DVC bundles whose files are symlinks to targets elsewhere, including a single-file XOA 1.x `morphology_focus.ome.tif`. A multi-file `morphology_focus/` set whose members link to separate targets is the exception: tifffile looks for the other channel files beside the real location of the opened file, so the read fails with `RasterFormatError` instead of returning zero-filled channels. See [Dataset paths and symlinks](dataset_paths.md#known-limitation-multi-file-ome-tiff-sets).
+`path_policy="relaxed"` reads git-annex and DVC bundles whose files are symlinks to targets elsewhere, including a single-file XOA 1.x `morphology_focus.ome.tif`. A multi-file `morphology_focus/` set whose members link to separate targets is the exception: tifffile looks for the other channel files beside the real location of the opened file, so the read fails with `RasterFormatError` instead of returning zero-filled channels. See [Dataset paths and symlinks](../user/paths.md#keep-multi-file-ome-tiff-images-together).
 
 ## Python and command line
 
@@ -235,28 +255,3 @@ sdata.write("outs.zarr")
 ```bash
 python -m spatialdata_io xenium --input outs --output outs.zarr --feature-types all --no-include-transcripts
 ```
-
-## Changes from earlier releases
-
-| Earlier argument or behavior | Now |
-| --- | --- |
-| `cells_boundaries`, `nucleus_boundaries`, `cells_labels`, `nucleus_labels`, `transcripts`, `morphology_focus`, `aligned_images`, `cells_table` | `include_*` options |
-| `cells_as_circles` | `cell_geometry` and `table_target` |
-| `morphology_mip=True` | `include_morphology_mip=False` |
-| `gex_only=True` | `feature_types=None`, which includes protein |
-| `n_jobs`, `imread_kwargs`, `image_models_kwargs`, `labels_models_kwargs`, deprecated aliases | removed; use `scale_factors` and `chunks` |
-| five-level pyramids and `(1, 4096, 4096)` chunks | single scale and `(1, 1024, 1024)` chunks |
-| `global` in morphology pixels | `global` in micrometres, including `z` |
-| instance column `cell_labels` | `label_id` or `cell_id` |
-| `cell_id_str_from_prefix_suffix_uint32`, `prefix_suffix_uint32_from_cell_id_str` | removed; the string `cell_id` is in every table |
-| `xenium_aligned_image(image_path, alignment_file, imread_kwargs, image_models_kwargs, dims, rgba, c_coords)` | `xenium_aligned_image(image_file, alignment_file=None, *, pixel_size, data_axes=None, scale_factors=(), chunks=(1, 1024, 1024))`; `data_axes` is a string such as `"YXS"` |
-| aligned images: any three- or four-sample image named `r, g, b(, a)`; missing or repeated OME names gave `0, 1, ...` | `r, g, b(, a)` only for a declared RGB colour model; otherwise OME names or IDs; a channel-count mismatch raises |
-| unusable `cells` column, HDF5 feature annotation and clustering method names failed when the table was linked | renamed with a warning |
-| `xenium_explorer_selection(path, pixel_size, return_list)` | `xenium_explorer_selection(path, *, invalid_geometries="keep")` returning shapes in µm |
-| CSV numbers parsed by a strict text parser (alignment, selection) or by Arrow with its default missing-value spellings (cells and boundary twins, analysis) | Arrow with declared types throughout; empty numeric fields are missing only in `cells.csv(.gz)`, `NA` and `null` no longer mean missing |
-| `metrics_summary.csv` values typed by their spelling: `+2` an integer, `0x10`, `NaN` and `inf` text | types inferred by Arrow: `+2` is `2.0`, `0x10` is 16, `NaN` and `inf` are floats, `true`/`false` are booleans |
-| integer-family transcript `cell_id` in `transcripts.csv` followed Arrow's integer grammar (`0x10` read as 16, `0xffffffffffffffff` as the unassigned -1) | decimal digits or `-1` only |
-| `transcripts.csv` quoted fields could span lines, with a result depending on block boundaries; stray quotes were kept | a line with an odd number of double quotes fails when its partition is computed |
-| transcript columns other than `x, y, z` and `feature_name` as NumPy (`uint64`, `float32`, ...) | Arrow-backed (`uint64[pyarrow]`, `float[pyarrow]`, ...) |
-| shape cell-ID indexes and annotations as NumPy integers or pandas text | Arrow-backed integers or text; mask-label indexes retain their NumPy type |
-| out-of-root symlinked artifacts accepted | rejected by default; `path_policy="relaxed"` accepts them, except a multi-file `morphology_focus/` set whose members link to separate targets ([Dataset paths and symlinks](dataset_paths.md#known-limitation-multi-file-ome-tiff-sets)) |

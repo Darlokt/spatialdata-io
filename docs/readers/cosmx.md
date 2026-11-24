@@ -40,7 +40,7 @@ The count matrix needs `fov` and `cell_ID` columns. Every other column is an exp
 
 Arrow's typed CSV grammar applies: spaces and tabs around numbers are trimmed; integers accept hexadecimal (`0x10`) and reject `2.0`, `2e0`, `+1` and `1_0`. The unsigned `fov`, `cell_ID` and count fields reject negative values and values above `2**64 - 1`. The signed transcript `z` rejects decimal values outside int64, but Arrow reads hexadecimal spellings from `0x8000000000000000` to `0xffffffffffffffff` as two's complement, so `0xffffffffffffffff` becomes -1; because `z` may be negative, the reader cannot detect this. Float fields round directly to float64, so underflow such as `1e-400` becomes zero. `nan` and `inf` parse but fail coordinate and numeric-annotation finiteness checks. Cell-centre and pixel FOV position spellings remain plain decimal text for their printed rounding intervals; those half-widths must remain finite and positive. Other numeric fields retain no source lexemes.
 
-Table rows follow metadata order. Observation names are the vendor `cell` IDs when the metadata provides them (AtoMx) and row positions `"0"`, `"1"`, ... otherwise. `fov` and `cell_ID` are uint64, preserving values through `2**64 - 1`. A table with int64 instance IDs, such as `spatialdata.aggregate` output or a store written by an earlier release, does not concatenate with this table: NumPy promotes uint64 and int64 IDs to float64, which SpatialData rejects as instance IDs. `Area`, `Area.um2`, `AspectRatio`, `Width`, `Height` and every `Mean.*`/`Max.*` intensity are float64, with empty fields and `NA` as missing values. All other metadata columns stay exact text. An AtoMx `cell_id` column that is an exact copy of `cell` is dropped; independent values remain annotations. Other column names that a SpatialData table does not accept are repaired with one warning listing every change: invalid characters become `_` (`Mean.CD45 RO` becomes `Mean.CD45_RO`), and a name equal to another ignoring letter case, including the reader's `fov`, `cell_ID`, `cell`, `region` and `spatial_pixel_frame`, gets a `_1`, `_2`, ... suffix (`Region` becomes `Region_1`). Exact source `region` and `spatial_pixel_frame` columns are rejected.
+Table rows follow metadata order. Observation names are the vendor `cell` IDs when the metadata provides them (AtoMx) and row positions `"0"`, `"1"`, ... otherwise. `fov` and `cell_ID` are uint64, preserving values through `2**64 - 1`. A table with int64 instance IDs, such as `spatialdata.aggregate` output or the output of another reader with int64 instance IDs, does not concatenate with this table: NumPy promotes uint64 and int64 IDs to float64, which SpatialData rejects as instance IDs. `Area`, `Area.um2`, `AspectRatio`, `Width`, `Height` and every `Mean.*`/`Max.*` intensity are float64, with empty fields and `NA` as missing values. All other metadata columns stay exact text. An AtoMx `cell_id` column that is an exact copy of `cell` is dropped; independent values remain annotations. Other column names that a SpatialData table does not accept are repaired with one warning listing every change: invalid characters become `_` (`Mean.CD45 RO` becomes `Mean.CD45_RO`), and a name equal to another ignoring letter case, including the reader's `fov`, `cell_ID`, `cell`, `region` and `spatial_pixel_frame`, gets a `_1`, `_2`, ... suffix (`Region` becomes `Region_1`). Exact source `region` and `spatial_pixel_frame` columns are rejected.
 
 Cell positions:
 
@@ -64,7 +64,7 @@ With a `CellLabels` directory, `region` links every cell to `<fov>_labels` with 
 | `labels["<fov>_labels"]` | `fov_<fov>_pixels`, `global_pixels` | `fov_<fov>_pixels`, `global` |
 | `points["<dataset_id>_transcripts"]` | `global_pixels` (identity), local frames of placed FOVs | `global` (scale), local frames of placed FOVs |
 
-The `fov_<fov>_pixels` systems (for example `fov_2_pixels`) are each FOV's local pixel frame. CosMx local coordinates are pixel indices with a reversed vertical axis: the raster pixel at row `r` and column `c` of an `H`-row FOV has local coordinates `(c, H - r)`. This was measured on the public 2021 Lung5_Rep2 release and on an AtoMx mouse-brain export, from label pixels against cell metadata and polygon extremes. Raster pixels are returned exactly as stored; the reflection is part of each raster's transformation.
+The `fov_<fov>_pixels` systems (for example `fov_2_pixels`) are each FOV's local pixel frame. CosMx local coordinates are pixel indices with a reversed vertical axis: the raster pixel at row `r` and column `c` of an `H`-row FOV has local coordinates `(c, H - r)`. Raster pixels are returned exactly as stored; the reflection is part of each raster's transformation.
 
 An optional FOV-position CSV requires one `fov` or `FOV` field and at least one
 complete coordinate pair. The pixel pairs are `x_px`/`y_px` and
@@ -84,7 +84,7 @@ Printed rounding half-widths are rounded once to the nearest float64 value and m
 
 Calibrated cell positions must remain finite.
 
-No scale is inferred automatically from headers, stage-only positions, paired pixel/mm fields, image dimensions or instrument guesses. Releases documenting 0.18, 0.12 and 0.12028 µm/pixel remain distinct. The current AtoMx 3.10.5 pancreas cell coordinates violate the supported signed unit-translation contract; supplying a scale does not make that profile supported. Automatic paired-FOV and TIFF optical-metadata profiles require associated source evidence and their own coordinate contracts.
+No scale is inferred automatically from headers, stage-only positions, paired pixel/mm fields, image dimensions or instrument guesses. Releases documenting 0.18, 0.12 and 0.12028 µm/pixel remain distinct. The current AtoMx 3.10.5 pancreas cell coordinates violate the supported signed unit-translation contract; supplying a scale does not make that profile supported.
 
 ## Transcripts
 
@@ -94,26 +94,21 @@ A UTF-8 byte-order mark at the start of the CSV header is removed. A literal
 U+FEFF at the start of a data field is preserved in plain and gzip transcripts,
 including at partition boundaries.
 
-Construction reads the CSV header, with small gzip decoder read-ahead; it does not decode a complete first member to discover boundaries. Each record must occupy one physical line. Plain CSV sources are split into newline-delimited blocks of about 8 MiB.
+Transcript rows are lazy. Plain CSV partitions target about 8 MiB, with boundaries extended to keep physical records together.
 
-Compressed `.csv.gz` sources support concatenated, independently compressed members as emitted by AtoMx. Each member must be nonempty and end with a complete newline-terminated record; the first may contain both the header and rows. A single-stream gzip file is also accepted. Lazy tasks read consecutive members from byte zero, using the exact end offset verified by the preceding task. Every member's deflate stream, CRC and size trailer is checked; corrupt members and trailing garbage fail instead of being skipped. Source decoding is sequential, and computing a later partition requires its predecessors. There is no preliminary full-file scan or temporary conversion.
+Compressed `.csv.gz` sources support concatenated, independently compressed members as emitted by AtoMx. Each member must be nonempty and end with a complete newline-terminated record; the first may contain both the header and rows. A single-stream gzip file is also accepted. Gzip decoding is sequential. Computing a later partition also reads the preceding members. Corrupt members and trailing garbage raise when the affected partition is computed.
 
-One task owns members beginning in about 8 MiB of compressed data, including the complete final member crossing that range. Decoder buffers use 1 MiB chunks, but complete members accumulate before CSV parsing, and projected Arrow fields and the returned pandas partition require additional storage. The compressed range target does not bound decoded partition size. A single-stream gzip file forms one nonempty partition containing all its rows; use plain CSV for independently readable partitions of a large single stream. Unknown targets and malformed values also fail when their partition is computed.
-
-The same typed CSV decoder handles plain and gzip transcript partitions. Its
-parser block grows when a physical record exceeds 1 MiB, so a long record's
-acceptance does not depend on which neighboring records share the partition.
-An oversized record can still use memory beyond the partition size target.
+Each compressed partition covers whole members and targets about 8 MiB of compressed data, so decoded partitions can be larger. A single-stream gzip file reads all its rows in one partition. Use plain CSV for independently readable partitions. Oversized records can exceed the partition target in either format.
 
 ## Options and execution
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale. Interleaved samples (TIFF `S`, PNG and JPEG components) become image channels. Channels are named `r, g, b` (or `r, g, b, a`) only when the file declares RGB(A) samples: TIFF `PhotometricInterpretation` RGB or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6, and three-component JPEG. Other images, including three-sample grayscale TIFFs, get positional channels `0, 1, ...`. JPEG and PNG composites decode their whole frame for any selection. TIFF sources read the native tiles, or whole-row strips grouped into bands with a 16 MiB decoded-byte target, that intersect the selected output chunks. A native strip larger than that target remains a single source chunk. Requested output chunks may span several source tiles or bands, so even a small selection can decode all source chunks needed for its output chunk. Construction executes no raster or transcript tasks.
+`scale_factors` and `chunks` follow the shared [raster options](../user/rasters.md): by default a single scale, images in `(1, 1024, 1024)` chunks and labels in `(1024, 1024)` chunks. Generated label pyramids require labels of at most 32 bits; 64-bit labels need the default single scale. Interleaved samples (TIFF `S`, PNG and JPEG components) become image channels. Channels are named `r, g, b` (or `r, g, b, a`) only when the file declares RGB(A) samples: TIFF `PhotometricInterpretation` RGB or JPEG-compressed YCbCr, PNG colour types 2, 3 and 6, and three-component JPEG. Other images, including three-sample grayscale TIFFs, get positional channels `0, 1, ...`. JPEG and PNG composites decode their whole frame for any selection. TIFF computations decode the tiles or strips needed by the output chunks. A small selection can require neighbouring source tiles or strips. Keep raster and transcript sources available until computation or writing finishes.
 
-Count parsing uses 1 MiB source blocks with internal Arrow threads disabled. A batch can include the preceding unfinished record and the current source block: required uint64 numerical values occupy at most eight times that source target, excluding parser/annotation storage, allocator alignment, the row-major tensor and sparse output. Records should fit one block; records spanning two block boundaries fail. Sparse arrays and eager metadata scale with the complete output.
+Counts are read in 1 MiB source blocks and converted to sparse arrays in batches. Keep each record within one block for reliable parsing. The source block size does not bound total memory.
 
 Every CSV record must have the header's full width, including ignored fields. Eager tables permit quoted multiline fields. In both plain and gzip transcript files, a line with an odd number of `"` (an embedded newline in a quoted field, or a stray quote) raises a `ReaderFormatError` when its partition is computed. Line endings must be LF or CRLF. Arrow may accept some malformed quoting within a single line. Required numeric keys and transcript coordinates cannot be empty. Only optional numeric metadata accepts empty fields and `NA` as missing; string fields preserve these spellings literally.
 
-All options are validated in signature order before any file is read; `path_policy` (see [dataset paths](dataset_paths.md)) is checked last. Errors name the artifact by its role (`count matrix`, `cell metadata`, `FOV positions`, `transcripts`, `composite images`, `cell labels`) and give its path.
+Errors name the artifact by its role (`count matrix`, `cell metadata`, `FOV positions`, `transcripts`, `composite images`, `cell labels`) and give its path.
 
 ## Python and command line
 
@@ -129,21 +124,3 @@ sdata.write("Lung5_Rep2.zarr")
 python -m spatialdata_io cosmx --input Lung5_Rep2 --output Lung5_Rep2.zarr --no-include-transcripts
 python -m spatialdata_io cosmx --input export --output lung5.zarr --file-prefix "Lung 5" --dataset-id lung5
 ```
-
-The former `transcripts`, `imread_kwargs` and `image_models_kwargs` arguments have been removed; use `include_transcripts`, `scale_factors` and `chunks`. Compared with earlier releases, the reader:
-
-- defaults to `(1, 1024, 1024)` image and `(1024, 1024)` label chunks instead of storage-aligned chunks, and takes `scale_factors=()` instead of `None` for a single scale;
-- places each FOV by an exact translation instead of an affine fitted to filtered cells;
-- keeps raster pixels unflipped and applies the measured half-pixel-exact pixel convention;
-- returns one global transcript element instead of one element per FOV, without writing temporary files or printing progress;
-- rejects mismatched count and metadata populations;
-- names the linkage column `region` and uses vendor or positional observation names;
-- removes the redundant `global_only_image` and `global_only_labels` coordinate systems;
-- selects files with `file_prefix`; `dataset_id` now only names the transcripts element, must be a valid element name, and defaults to the repaired file prefix, so exports whose prefix contains a space can be read;
-- names the local FOV coordinate systems `fov_<fov>_pixels` (for example `fov_2_pixels`) instead of the bare FOV number `2`, also in `obs["spatial_pixel_frame"]`;
-- places uncalibrated rasters and transcripts in `global_pixels` instead of `global`, and renames the global pixel cell centres from `obsm["global"]` to `obsm["spatial_global_pixels"]`;
-- names channels `r, g, b(, a)` only for declared RGB(A) samples, not for any 8-bit image with three or four channels;
-- repairs metadata column names SpatialData cannot store, with a warning, instead of failing on case variants;
-- names artifacts by role, not file name, in errors;
-- parses uint64 counts and keys, and signed int64 transcript `z`, directly with Arrow instead of custom text decoders; integer fields accept hexadecimal and reject decimal/exponent spellings, while float fields use native rounding;
-- retains original decimal placement coordinates solely for printed uncertainty, without changing placement intervals or coordinate transforms.

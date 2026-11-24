@@ -438,7 +438,7 @@ class TestDocumentationExamples:
     def test_guide_examples_execute_on_their_documented_input_kinds(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        guide = Path(__file__).parents[3] / "docs" / "legacy_anndata.md"
+        guide = Path(__file__).parents[3] / "docs" / "user" / "legacy_anndata.md"
         snippets = re.findall(r"```python\n(.*?)```", guide.read_text(encoding="utf-8"), flags=re.DOTALL)
         assert snippets
         monkeypatch.chdir(tmp_path)

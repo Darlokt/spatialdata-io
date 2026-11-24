@@ -85,9 +85,9 @@ The reader name and, when all returned channels agree, the MACSiQView software v
 
 ## Options and execution
 
-`scale_factors` and `chunks` follow the shared [raster options](raster_options.md): by default a single scale and images in `(1, 1024, 1024)` chunks. Vendor-written pyramid levels are not used.
+`scale_factors` and `chunks` follow the shared [raster options](../user/rasters.md): by default a single scale and images in `(1, 1024, 1024)` chunks. Vendor-written pyramid levels are not used.
 
-Each TIFF is inspected once; construction reads metadata only and executes no pixel tasks. The shared TIFF reader initially follows native tiles or whole-row bands targeting 16 MiB of decoded pixels. A native strip larger than that target is kept whole, so a source with one whole-plane strip can require whole-plane decoding. Output rechunking, including the default chunks, can make a small region depend on neighboring tiles or bands beyond those it directly intersects. The target is not a hard allocation cap. The source files must remain available for later raster computation.
+Pixels remain lazy. Computing a small region can require adjacent TIFF tiles or strips, and a whole-plane strip can require the whole plane. Keep source files available until computation or writing finishes.
 
 ## Python and command line
 
@@ -104,28 +104,3 @@ The CLI mirrors the reader. Repeat list options, and pass `none` to never split 
 python -m spatialdata_io macsima --input experiment --output experiment.zarr \
     --parsing-style processed_multiple_folders --exclude-cycles 15 --split-threshold-nuclei-channel none
 ```
-
-## Changes from earlier releases
-
-Renamed and removed options:
-
-- `filter_folder_names` is now `exclude_folder_names` and matches exact folder names.
-- `skip_rounds` is now `exclude_cycles`, which rejects negative cycles, and `include_cycle_in_channel_name` is now `include_cycle_in_channel_names`.
-- The `transformations` and `include_transformations` switches are removed. Calibrated physical coordinates are always attached; source pixel arrays remain unchanged.
-- `max_chunk_size` and `c_chunks_size` are replaced by `chunks`.
-- `multiscale` and `default_scale_factor` are replaced by `scale_factors`, which no longer defaults to an automatic pyramid.
-- `scale_factors` defaults to `()` instead of `None` for a single scale; `None` is no longer accepted.
-- `subset`, `c_subset`, `imread_kwargs`, the unimplemented `raw` style and `MACSimaParsingStyle` have been removed; slice the returned lazy images instead.
-
-Corrections and contract changes that change results:
-
-- Channels with different plane positions are now aligned even when their shapes are equal.
-- Nuclear channels are matched by exact marker name among stain images.
-- `split_threshold_nuclei_channel=0` now splits whenever a nuclear stain channel exists; use `None` to never split.
-- The `name` column of the channel table holds the marker; numbered or cycle-prefixed channel names remain in `var_names`.
-- `cycle` and `ROI` use uint64 and nullable UInt64, respectively, extending their former signed int64 range through `2**64 - 1`. Missing ROI values stay missing through H5AD and Zarr storage.
-- Multiple-folder results keep their provenance.
-- Malformed metadata now fails instead of being skipped or silently becoming missing.
-- A dangling `.tif` or `.tiff` symlink now fails instead of being skipped.
-- A folder name that is not a valid element name is repaired as before, but now with a warning.
-- Discovered artifacts that are symlinks to targets outside the dataset directory are now rejected by default; earlier releases accepted them. Pass `path_policy="relaxed"` for git-annex or DVC datasets ([Dataset paths and symlinks](dataset_paths.md)).

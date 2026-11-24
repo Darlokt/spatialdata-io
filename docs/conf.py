@@ -46,7 +46,37 @@ templates_path = ["_templates"]
 nitpicky = True  # Warn about broken links
 needs_sphinx = "4.0"
 
+# Keep bookmarks to the previous flat guide layout working on static hosts.
+redirects = {
+    name: f"readers/{name}"
+    for name in (
+        "codex",
+        "cosmx",
+        "dbit",
+        "generic",
+        "macsima",
+        "mcmicro",
+        "merscope",
+        "seqfish",
+        "stereoseq",
+        "visium",
+        "visium_hd",
+        "xenium",
+    )
+}
+redirects.update(
+    calibration="user/coordinates",
+    contributing_io="contributing",
+    dataset_paths="user/paths",
+    legacy_anndata="user/legacy_anndata",
+    raster_options="user/rasters",
+    reader_architecture="development/readers",
+    table_contracts="user/tables",
+)
+html_additional_pages = dict.fromkeys(redirects, "redirect.html")
+
 html_context = {
+    "redirects": redirects,
     "display_github": True,  # Integrate GitHub
     "github_user": "scverse",
     "github_repo": project,

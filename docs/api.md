@@ -1,18 +1,17 @@
-# API
+# Python API reference
 
-This section documents the Application Programming Interface (API) for the `spatialdata_io` package.
+Use the [reader guides](readers/index.md) to identify a supported input layout,
+then select a function below for its parameters and return values. Dataset
+readers take a local input directory as `path` and return a SpatialData
+object. Relative file options use that directory as their base. See
+[dataset paths](user/paths.md), [raster options](user/rasters.md) and
+[AnnData table conventions](user/tables.md) for behavior shared across readers.
 
 ```{eval-rst}
 .. module:: spatialdata_io
 ```
 
-## spatialdata-io
-
-I/O for the `spatialdata` project.
-
-### Readers
-
-#### Spatial technologies
+## Technology readers
 
 ```{eval-rst}
 .. autosummary::
@@ -33,7 +32,7 @@ I/O for the `spatialdata` project.
     xenium
 ```
 
-#### Data types
+## Single-file readers
 
 ```{eval-rst}
 .. autosummary::
@@ -44,7 +43,7 @@ I/O for the `spatialdata` project.
     geojson
 ```
 
-### Experimental readers
+## Experimental readers
 
 The ISS reader imports a caller-selected image, segmentation and H5AD table
 from an in situ sequencing workflow. Its entry point is
@@ -57,10 +56,10 @@ from an in situ sequencing workflow. Its entry point is
     experimental.iss
 ```
 
-### Conversion functions
+## Conversion functions
 
 For direct table access, explicit table/centroid position selection and importing
-legacy image libraries, see [AnnData access and legacy conversion](legacy_anndata.md).
+legacy image libraries, see [AnnData access and legacy conversion](user/legacy_anndata.md).
 The exporter returns one coordinate frame per call and does not export images.
 
 ```{eval-rst}
@@ -74,7 +73,7 @@ The exporter returns one coordinate frame per call and does not export images.
     generic_to_zarr
 ```
 
-### Utility functions
+## Xenium images and selections
 
 ```{eval-rst}
 .. currentmodule:: spatialdata_io
@@ -84,4 +83,17 @@ The exporter returns one coordinate frame per call and does not export images.
 
     xenium_aligned_image
     xenium_explorer_selection
+```
+
+## Format errors
+
+```{eval-rst}
+.. currentmodule:: spatialdata_io.readers._utils.errors
+
+.. py:exception:: ReaderFormatError
+
+   A :exc:`ValueError` raised when a dataset violates a reader's format
+   requirements. The message identifies the reader and artifact, what the
+   reader expected and what it found. When available, it includes the file
+   path and detected format version.
 ```

@@ -1,6 +1,6 @@
 # Visium HD
 
-`spatialdata_io.visium_hd()` reads Space Ranger HD outputs (tested with 3.0–4.1). All available
+{func}`spatialdata_io.visium_hd` reads Space Ranger HD outputs (tested with 3.0–4.1). All available
 bin sizes are selected by default. Cell and nucleus boundaries are included
 when present; nucleus counts are a separate opt-in. Expression remains sparse,
 and image pixels are decoded only when computed or written.
@@ -48,7 +48,8 @@ Loose downloads may prefix `feature_slice.h5`, `hd_feature_slice.h5`,
 `barcode_mappings.parquet`, and `tissue_image.{btf,tif,tiff}` with a dataset name.
 Discovery uses the root and documented directories, with no recursive fallback
 into neighbouring runs. Multiple candidates raise. Relative image overrides
-resolve against the dataset root; absolute overrides are allowed.
+resolve against the dataset root; absolute overrides are allowed. Discovered
+files use the [dataset path policy](../user/paths.md).
 
 The 2 µm positions and scale factors calibrate every read, even if only larger
 bins or segmentations are returned. Grid dimensions come from feature-slice
@@ -85,9 +86,8 @@ Feature-slice metadata validates the outer JSON and the consumed grid and
 transform fields (`nrows`, `ncols`, `spot_pitch`, `transform_matrices`); other
 keys such as `sample_id` and `hd_layout_json` are ignored.
 
-A null microscope matrix pair does not prevent loading: the registration is
-fitted directly from 2 µm positions. This is tested synthetically; no real
-CytAssist-only producer output was available for validation. CytAssist placement
+A null microscope matrix pair is supported by fitting registration directly
+from 2 µm positions. CytAssist placement
 requires the feature slice and its non-null CytAssist matrix pair. Analysis,
 probe-level matrices, molecule information and 4.1 cell-type annotations are
 outside this reader's contract.
@@ -128,7 +128,7 @@ populations cannot form a linked SpatialData table and raise a contextual error.
 `bin_counts_kind` and `cell_counts_kind` independently select `"filtered"` or
 `"raw"`. The original observation and feature order is preserved, including
 spatially unsorted filtered barcodes. Feature annotations retain `gene_ids`,
-`feature_types`, and `genome`. Duplicate symbols are made unique consistently
+`feature_types` and other available fields such as `genome`. Duplicate symbols are made unique consistently
 unless `make_var_names_unique=False`.
 
 Cell and nucleus polygon indexes and their linked table `instance_id` columns
@@ -137,41 +137,38 @@ ID in the canonical `cellid_<id:09d>-1` barcodes; source order is preserved.
 Zero, alternate barcode spellings, duplicate polygon IDs and IDs outside that
 range raise before conversion.
 
+Bin table `obs` contains uint8 `in_tissue`, uint32 `array_row` and
+`array_col`, float64 `pxl_row_in_fullres` and `pxl_col_in_fullres`, uint32
+`instance_id` and categorical `region`. Cell and nucleus tables have uint32
+`instance_id` and categorical `region`. Concatenation with tables using int64
+instance identifiers retains an integer dtype.
+
 10x supplies cell matrices but no nucleus matrix. The nucleus table sums **raw
 2 µm counts** over bins with `in_nucleus=True`, including bins outside the tissue
 mask, in the selected cell population's order. Returned counts follow the
-[completed-count dtype policy](table_contracts.md#completed-raw-counts).
+[completed-count dtype policy](../user/tables.md#raw-count-precision).
 Both matrices must provide `gene_ids`, `genome`, and `feature_types` in their
 feature annotations. A missing column raises an error that identifies its
 matrix. The feature identity values must match in source order.
 Duplicate HDF5 entries for one barcode and feature fail. Counts must be
 finite, nonnegative and integer-valued.
 Nucleus reconstruction accumulates decoded bins without converting them to
-integers. Before addition, a Python-integer bound (maximum decoded count times
+integers. Before addition, the precision bound (maximum decoded count times
 maximum contributing bins) selects float32 arithmetic when at most 2**24,
-otherwise float64 when at most 2**53. The operands select that arithmetic
-dtype before multiplication, proving every nonnegative integer partial sum
-exact. Failure raises a precision error; this conservative bound can reject
-exceptional inputs whose actual sums would still be safe.
+otherwise float64 when at most 2**53. This keeps partial sums exact. Exceeding the bound raises a precision error
+even if the completed sums would fit.
 Completed nucleus values use float32 through 2²⁴ and float64 above that threshold.
 Linkage uses the returned shape indexes or derived grid-label IDs after filtering.
 
 The raw 2 µm matrix and its barcode annotations stay in memory until aggregation
-finishes. The reader projects barcode mappings in batches of up to 65,536 rows.
-When all literal barcodes in a batch match the corresponding matrix rows, their
-row positions identify the bins directly. Reordered rows require an exact lookup
-that can use more memory. Every raw barcode must occur once. Arrow-backed strings
-preserve null cell assignments. Unassigned bins and bins assigned to cells outside
+finishes. Every raw barcode must occur once in the mapping. Reordered mapping rows are
+matched by barcode. Missing cell assignments are allowed. Unassigned bins and bins assigned to cells outside
 the selected population contribute to no returned nucleus.
-Grid coordinates convert directly from uint32 into float64 XY arrays before
-registration and nominal-centre arithmetic.
-
 `invalid_geometries="keep"` preserves source topology. `"drop"` removes an invalid
 returned cell polygon with its cell table row and associated nucleus; an invalid
 nucleus removes only its nucleus polygon and nucleus table row. `"raise"` rejects
 invalid geometry. Missing or malformed geometries, holes, MultiPolygons, duplicate
-IDs and nonfinite coordinates raise in every mode. GeoJSON properties are
-projected during ingestion; the returned geometry vector is eager.
+IDs and nonfinite coordinates raise in every mode. Returned geometries are eager.
 
 ## Physical coordinates
 
@@ -209,25 +206,22 @@ carry exact scale and rigid orientation transforms, without a half-bin shift.
 
 Segmentation vertices and vendor centroids are reprojected through the inverse
 homography fitted from 2 µm positions. The fit is checked against every position
-at a maximum error of 1e-9 pixels. The first calibration pass verifies the
-complete grid and aligns any selected 2 µm count barcodes. The second reads
-only the coordinate columns to check the homography and measure the affine
-residual. For pre-4.1 boundaries without vendor centroids no centroid is invented.
+at a maximum error of 1e-9 pixels. Pre-4.1 boundaries can lack vendor centroids.
 
 Microscope pixels retain their source values and carry a least-squares affine
 into the physical frame. Projective registration makes this approximate:
 `attrs["visium_hd"]["image_affine_max_residual_um"]` and
 `image_affine_rms_residual_um` report its error over the complete capture grid.
-They do not bound extrapolation beyond that grid. `microns_per_pixel` is retained
-as nominal vendor metadata, not used as a replacement for the physical ruler.
+The residuals describe the capture grid. To retrieve the nominal size of a
+full-resolution microscopy pixel, use `sdata.attrs["visium_hd"]["microns_per_pixel"]`.
+For positions and measurements in the calibrated slide frame, use the image's
+transformation to `global`.
 Hires and lowres transforms compose the affine with the supplied inverse scale
 factor; padded short dimensions do not change that scale.
 
-
-
 Each final table describes float64 XY micrometres in `uns["spatialdata_io_positions"]`, distinguishing nominal bin centres, vendor cell centroids and vendor nucleus centroids in the calibrated `global` slide frame. Missing centroid properties yield no canonical array or declaration for that product. Nucleus tables never inherit cell positions; polygon centroids are not substituted.
 
-## Images, ownership and memory
+## Images and memory
 
 Full-resolution images are discovered among root `tissue_image` TIFF names and
 supported files directly inside `microscope_image/`; more than one is ambiguous.
@@ -253,7 +247,7 @@ of falling back. Hires and lowres are optional; requested CytAssist is required
 in one of these two locations.
 
 All images use `(c, y, x)`, preserve source channel order and dtype, and use the
-shared [raster options](raster_options.md). `scale_factors` applies only to the
+shared [raster options](../user/rasters.md). `scale_factors` applies only to the
 full-resolution image and must not reduce it below one pixel. `chunks` controls
 image chunks and the spatial chunks of labels. TIFF tasks decode overlapping
 tiles/strips; PNG/JPEG may decode the whole encoded frame. Returned lazy
@@ -287,10 +281,10 @@ for that uint32 grid, plus model, graph, table and serialization overhead. The
 11 mm grid has 30.5 million bins. Polygon construction batches limit temporary
 vertex buffers. The returned geometries are eager.
 
-## CLI and migration
+## Command line
 
 ```bash
-spatialdata-io visium-hd --input outs --output slide.zarr \
+python -m spatialdata_io visium-hd --input outs --output slide.zarr \
   --bin-sizes 8 --bin-geometry labels --no-include-images
 ```
 
@@ -299,43 +293,8 @@ bins. Inclusion flags use `--include-…` / `--no-include-…`. `--data-axes` ta
 one string such as `CYX`. Reader and CLI names, choices, defaults and option
 order agree.
 
-| Removed option | Replacement |
-| --- | --- |
-| `bin_size` | `bin_sizes` |
-| `load_segmentations_only` | `bin_sizes=()` and explicit boundary selection |
-| `load_nucleus_segmentations` | `include_nucleus_boundaries`, `include_nucleus_table` |
-| `filtered_counts_file` | `bin_counts_kind`, `cell_counts_kind` |
-| `bins_as_squares`, `annotate_table_by_labels` | `bin_geometry` |
-| `load_all_images` | `include_images`, `include_cytassist_image` |
-| `var_names_make_unique` | `make_var_names_unique` |
-| Generic decoder/model/count mappings | Explicit raster and count options |
-| `dataset_id` | Fixed element names; concatenate by sample |
-| `gex_only` | All source features retained |
-
-Changes to the reader's contract:
-
-| Change | Migration |
-| --- | --- |
-| `data_axes` is one string such as `"CYX"` (`--data-axes CYX`); a sequence raises `TypeError` | Join the axis letters |
-| Channels are `r, g, b(, a)` only for declared RGB, else OME names or positions; earlier releases labelled any 3- or 4-channel image RGB(A) | Select fluorescence channels by OME name or position |
-| A multi-series TIFF without `tiff_series` raises `ReaderFormatError` (a `ValueError`) | Pass `tiff_series` |
-| Wrongly typed options raise `TypeError`, invalid values `ValueError`, all before any file is read | — |
-| `make_var_names_unique` precedes `invalid_geometries` in the signature and the CLI | Keyword arguments are unaffected |
-| Invalid UTF-8 in HDF5 text attributes raises; feature-slice `sample_id` is no longer checked | — |
-| Requested boundaries without `segmented_outputs/` raise `FileNotFoundError` for that directory | — |
-| Bin, cell and nucleus `instance_id` columns and shape indexes are uint32: bins count from 1, cells and nuclei use the nine-digit barcode ID. Earlier releases used int64 bin positions from 0 and barcode-string cell IDs | Match cells by the integer ID; concatenation with int64 tables stays int64 |
-| Any `[spaceranger-]X.Y.Z` release is read (a release other than 3.0, 3.1, 4.0 or 4.1 warns that it is untested); other spellings and a missing `software_version` record no format version instead of raising | — |
-
-Discovered artifacts that are symlinks to targets outside the dataset directory are now rejected by default; earlier releases accepted them. Pass `path_policy="relaxed"` for git-annex or DVC datasets ([Dataset paths and symlinks](dataset_paths.md)).
-
 For multiple samples, use `spatialdata.concatenate({"sample_a": a, "sample_b": b})`
 to suffix element names and update table regions and observation names together.
 Separate coordinate systems are needed if samples are not physically aligned.
 
-## Format errors
-
-```{eval-rst}
-.. autoclass:: spatialdata_io.readers._utils.errors.ReaderErrorContext
-
-.. autoexception:: spatialdata_io.readers._utils.errors.ReaderFormatError
-```
+Malformed layouts, inconsistent identity or calibration, and invalid source data raise a contextual `ReaderFormatError` identifying the affected artifact.

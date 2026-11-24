@@ -1,8 +1,8 @@
 # Generic images and GeoJSON
 
-`generic()` reads one caller-selected file as one SpatialData image or shapes
-element; the case-insensitive suffix selects the kind. `image()` and
-`geojson()` read one kind directly. `generic_to_zarr()` creates a store or
+{func}`spatialdata_io.generic` reads one caller-selected file as one SpatialData image or shapes
+element; the case-insensitive suffix selects the kind. {func}`spatialdata_io.image` and
+{func}`spatialdata_io.geojson` read one kind directly. {func}`spatialdata_io.generic_to_zarr` creates a store or
 appends one element, and the `generic` CLI exposes the same options. There is
 no dataset root: no filename convention, layout or software version is
 inferred, and `~` in a path is expanded.
@@ -33,7 +33,7 @@ fails instead of silently returning the first. `tiff_level` selects a stored
 pyramid level (default `0`). Neither applies to PNG or JPEG. Pixel decoding
 remains lazy. TIFF selection reads source tiles or
 strips; PNG and JPEG computations decode the whole encoded frame. Chunking and
-generated pyramids follow the [raster options](raster_options.md); generated
+generated pyramids follow the [raster options](../user/rasters.md); generated
 levels may not shrink the image below one pixel.
 
 For the selected level-zero OME series, complete positive physical sizes in
@@ -72,12 +72,6 @@ When the axes do correspond, OME channel records that disagree with the raster
 channel count, or duplicate OME IDs, are corrupt metadata and fail rather than
 falling back, even when a colour declaration supplies the names.
 
-RGB TIFF and OME-TIFF, RGB, RGBA and palette PNG, and three-component JPEG
-images previously had positional or `<name or ID>:sample:<k>` channel
-coordinates; they now use `r, g, b(, a)`. `data_axes` previously also accepted
-a sequence of axis names such as `("c", "y", "x")`; join the letters into one
-string such as `"cyx"`, the form every reader and the CLI accept.
-
 ## GeoJSON
 
 GeoJSON supports `FeatureCollection` and `GeometryCollection` documents with
@@ -87,8 +81,7 @@ silently. Output rows retain source order and positional integer IDs; source
 Feature IDs, properties and CRS declarations are discarded. Coordinates become
 float64; holes and multipart order follow the source. Units remain those of the source,
 potentially unknown; geographic coordinates are never reprojected or described
-as micrometres. Shapes are necessarily eager; the document is decoded once and
-its geometries are built in one vectorized step.
+as micrometres. Shapes are eager.
 
 `invalid_geometries="keep"` preserves invalid topology. `"drop"` removes entire
 invalid feature rows without renumbering survivors; `"raise"` reports invalid
@@ -126,3 +119,11 @@ generic_to_zarr(
 Library calls print no status messages and do not mutate caller-owned options.
 Lazy raster computation continues to require the source image. Files close
 after parsing or inside individual raster tasks; no temporary source is retained.
+
+The CLI can create a store from an image and append shapes with their frame
+explicitly named:
+
+```bash
+python -m spatialdata_io generic --input image.ome.tif --output sample.zarr --data-axes CYX
+python -m spatialdata_io generic --input regions.geojson --output sample.zarr --coordinate-system source_pixels
+```

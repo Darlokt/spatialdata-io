@@ -1,11 +1,11 @@
-![SpatialData banner](https://github.com/scverse/spatialdata/blob/main/docs/_static/img/spatialdata_horizontal.png?raw=true)
+![SpatialData banner](https://raw.githubusercontent.com/scverse/spatialdata/main/docs/_static/img/spatialdata_horizontal.svg)
 
 # spatialdata-io: convenient readers for loading common formats into SpatialData
 
 [![Tests][badge-tests]][link-tests]
 [![Documentation][badge-docs]][link-docs]
 [![DOI](https://zenodo.org/badge/544045123.svg)](https://zenodo.org/badge/latestdoi/544045123)
-[![Documentation][badge-pypi]][link-pypi]
+[![PyPI][badge-pypi]][link-pypi]
 [![Anaconda-Server Badge](https://anaconda.org/conda-forge/spatialdata-io/badges/version.svg)](https://anaconda.org/conda-forge/spatialdata-io)
 
 [badge-tests]: https://github.com/scverse/spatialdata-io/actions/workflows/test.yaml/badge.svg
@@ -14,98 +14,54 @@
 [badge-pypi]: https://badge.fury.io/py/spatialdata-io.svg
 [link-pypi]: https://pypi.org/project/spatialdata-io/
 
-_We encourage contributions from the community and from developers of spatial technologies. Please see the "How to Contribute" section below._
+spatialdata-io loads spatial omics exports into [SpatialData](https://spatialdata.scverse.org/).
+Use it to keep images, labels, transcripts, shapes and expression tables together
+in a Zarr store. The [reader guides](docs/readers/index.md) describe supported
+inputs, versions, output elements and coordinate units for each technology.
 
-This package contains reader functions to load common spatial omics formats into SpatialData. Currently, we provide support for:
+Readers cover Visium, Visium HD, Xenium, CODEX, CosMx, Curio Seeker, DBiT-seq,
+MACSima, MCMICRO, MERSCOPE, seqFISH, Steinbock and Stereo-seq. There is also
+an experimental ISS reader and support for individual image and GeoJSON files.
+Third-party readers also produce SpatialData objects. Sopa supports imaging
+platforms including PhenoCycler, MACSima and Hyperion. For mass spectrometry
+imaging, METASPACE provides a converter and Thyra supports ion mobility and
+MS/MS data from Bruker, Waters, PHI and imzML.
+[Sopa](https://github.com/gustaveroussy/sopa), [METASPACE converter](https://github.com/metaspace2020/metaspace-converter), [Thyra](https://github.com/M4i-Imaging-Mass-Spectrometry/thyra)
 
-- 10x Genomics Visium®
-- 10x Genomics Visium HD®
-- 10x Genomics Xenium®
-- Akoya PhenoCycler® (formerly CODEX®)
-- Curio Seeker®
-- DBiT-seq
-- MCMICRO (output data)
-- NanoString CosMx®
-- Spatial Genomics GenePS® (seqFISH)
-- Steinbock (output data)
-- STOmics Stereo-seq® (SAW 7.0/7.1 and 8.0/8.1/8.2 transcriptomic products)
-- Vizgen MERSCOPE® (MERFISH)
-- MACSima® (MACS® iQ View output)
+## Get started
 
-Note: all mentioned technologies are registered trademarks of their respective companies.
-
-Please refer to the list of [open Pull Requests](https://github.com/scverse/spatialdata-io/pulls?q=sort%3Aupdated-desc+is%3Apr+is%3Aopen) for readers that are currently being developed. The list of [closed but unmerged PRs](https://github.com/scverse/spatialdata-io/pulls?q=sort%3Aupdated-desc+is%3Apr+is%3Aunmerged+is%3Aclosed) may also contain useful code from old drafts of readers. Please get in touch if you would like to [contribute](https://github.com/scverse/spatialdata-io/blob/main/docs/contributing.md) and iterate on a PR, or reopen a closed one.
-
-## Known limitations
-
-Contributions for addressing the below limitations are very welcomed.
-
-- Stereo-seq protein, H5MU/OMNI and microorganism products are outside the supported contract. See the [Stereo-seq guide](https://spatialdata.scverse.org/projects/io/en/latest/stereoseq.html) for supported layouts and explicit product selection.
-
-### How to Contribute
-
-1. **Open a GitHub Issue**: Start by opening a new issue or commenting on an existing one in the repository. Clearly describe the problem and your proposed changes to avoid overlapping efforts with others.
-
-2. **Submit a Pull Request (PR)**: Once the issue is discussed, submit a PR to the `spatialdata-io` repository. If you are contributing a new reader, or extending the reader for a new versions of a technologies, please consult our [contribution guide](https://spatialdata.scverse.org/projects/io/en/latest/contributing.html), which describes the steps to ensure that the pull request can be tested on suitable example data and reviewed efficiently.
-
-## Getting started
-
-Please refer to the [documentation][link-docs]. In particular, the
-
-- [API documentation][link-api].
-- [CLI documentation][link-cli].
-
-## Installation
-
-You need to have Python 3.12 or newer installed on your system. If you don't have
-Python installed, we recommend installing [Miniconda](https://docs.conda.io/en/latest/miniconda.html).
-
-There are several alternative options to install spatialdata-io:
-
-1. Install the latest release of `spatialdata-io` from [PyPI](https://pypi.org/project/spatialdata-io/):
+Install the published package in a Python 3.12 or newer environment:
 
 ```bash
-pip install spatialdata-io
+python -m pip install spatialdata-io
 ```
 
-2. Install the latest development version:
-
-```bash
-pip install git+https://github.com/scverse/spatialdata-io.git@main
-```
-
-## Contact
-
-For questions and help requests, you can reach out in the [scverse discourse][scverse-discourse].
-If you found a bug, please use the [issue tracker][issue-tracker].
-
-## Readers from third-party libraries
-
-Technologies that can be read into `SpatialData` objects using third-party libraries:
-
-- METASPACE (MALDI, ...): [metaspace-converter](https://github.com/metaspace2020/metaspace-converter)
-- PhenoCycler®: [SOPA](https://github.com/gustaveroussy/sopa)
-- MACSima®: [SOPA](https://github.com/gustaveroussy/sopa)
-- Hyperion® (Imaging Mass Cytometry): [SOPA](https://github.com/gustaveroussy/sopa)
-
-## Disclaimer
-
-This library is community maintained and is not officially endorsed by the aforementioned spatial technology companies. As such, we cannot offer any warranty of the correctness of the representation. Furthermore, we cannot ensure the correctness of the readers for every data version as the technologies evolve and update their formats. If you find a bug or notice a misrepresentation of the data please report it via our [Bug Tracking System](https://github.com/scverse/spatialdata-io/issues?q=sort%3Aupdated-desc+is%3Aissue+is%3Aopen) so that it can be addressed either by the maintainers of this library or by the community.
-
-## Solutions to common problems
-
-### Problem: I cannot visualize the data, everything is slow
-
-Solution: after parsing the data with `spatialdata-io` readers, you need to write it to Zarr and read it again. Otherwise the performance advantage given by the SpatialData Zarr format will not available.
+From a supported Xenium output directory, for example:
 
 ```python
-from spatialdata_io import xenium
 from spatialdata import read_zarr
 
+from spatialdata_io import xenium
+
 sdata = xenium("raw_data")
-sdata.write("data.zarr")
-sdata = read_zarr("sdata.zarr")
+sdata.write("sample.zarr")
+reopened = read_zarr("sample.zarr")
 ```
+
+Follow [Convert your first dataset](docs/user/first-conversion.md) to download
+a small public Xenium experiment and verify its counts after writing. An
+[offline image tutorial](docs/user/first-image.md) creates its own TIFF. The published
+documentation includes the [Python API][link-api] and [command-line reference][link-cli].
+See the [changelog](CHANGELOG.md) when upgrading.
+
+## Help and contributions
+
+Ask usage questions on [scverse Discourse][scverse-discourse] and report bugs
+in the [issue tracker][issue-tracker]. For a data-format issue, include the
+producer version, directory layout and the output you expected. To add or
+extend a reader, see the [contributing guide](docs/contributing.md).
+
+The community maintains these readers independently of the technology vendors.
 
 ## Citation
 
@@ -113,7 +69,6 @@ Marconato, L., Palla, G., Yamauchi, K.A. et al. SpatialData: an open and univers
 
 [scverse-discourse]: https://discourse.scverse.org/
 [issue-tracker]: https://github.com/scverse/spatialdata-io/issues
-[changelog]: https://spatialdata.scverse.org/projects/io/en/stable/changelog.html
 [link-docs]: https://spatialdata.scverse.org/projects/io/en/stable/
 [link-api]: https://spatialdata.scverse.org/projects/io/en/stable/api.html
 [link-cli]: https://spatialdata.scverse.org/projects/io/en/stable/cli.html
