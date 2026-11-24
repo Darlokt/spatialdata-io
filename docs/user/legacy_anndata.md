@@ -46,8 +46,8 @@ See [Coordinate systems and calibration](coordinates.md).
 
 Use `to_legacy_anndata()` for an independent table with an explicit position
 source. Select a table if the dataset contains several and pass
-`coordinate_system` when observations occupy multiple frames. Rows in a
-selected frame keep their relative order.
+`coordinate_system` when stored observations occupy multiple frames. Rows in a
+selected table frame keep their relative order.
 
 ```python
 from spatialdata_io.converters.legacy_anndata import to_legacy_anndata
@@ -78,6 +78,26 @@ In a native pixel or grid frame the result goes in `spatial_centroids`. An
 occupied preservation key raises an error. Computing label centroids can
 require reading the complete label image, and points can require a full scan.
 Vendor cell centres and geometry centroids can describe different positions.
+
+After registering multiple regions into a new frame, pass its name and units
+to export all rows in one AnnData. Every linked target referenced by the
+table must have a finite, invertible XY transformation to that frame.
+
+```python
+registered = to_legacy_anndata(
+    sdata,
+    table_name="table",
+    coordinate_system="integrated",
+    position_source="centroids",
+    coordinate_system_units="micrometer",
+)
+```
+
+Use `"pixel"` or `"grid"` when the registration uses those units. The supplied
+units describe the destination of the existing transformations. A table
+declaration for the destination must agree with the supplied units. Export
+records the destination frame, units and contributing targets, and keeps
+observation order, feature order and the original position snapshots.
 
 ## Import an older spatial AnnData
 

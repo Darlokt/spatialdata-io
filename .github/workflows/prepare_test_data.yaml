@@ -73,7 +73,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: data
+          name: ${{ github.event_name == 'workflow_dispatch' && !inputs.force_all && 'data-selected' || 'data-default' }}-${{ hashFiles('scripts/test_data_downloader/datasets.toml') }}
           path: ./data
           if-no-files-found: error
           retention-days: 64

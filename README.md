@@ -52,7 +52,7 @@ Trademarks belong to their respective owners.
 1. Open a GitHub issue or comment on an existing one to describe the format and
    proposed change. See the [issue tracker][issue-tracker].
 2. Submit a pull request with an example dataset or instructions for obtaining
-   one so the reader can be tested and reviewed. See the [contributing guide](docs/contributing.md).
+   one so the reader can be tested and reviewed. See the [reader submission guide](docs/contributing_io.md).
 
 To find a reader in development or pick up an earlier draft, browse the
 [open pull requests][open-prs] and [closed, unmerged pull requests][unmerged-prs].

@@ -163,15 +163,12 @@ class TestReadImages:
         image = read_images(Mosaics((layer,), None), dataset_id="region", options=NATIVE_CHUNKS)["region_z0"]
         assert isinstance(image, DataArray)
         with tifffile.TiffFile(layer.channels[0].path) as source:
-            store = source.aszarr(series=0, level=0, squeeze=True)
-            close = mocker.spy(store, "close")
-            mocker.patch.object(source, "aszarr", return_value=store)
             mocker.patch.object(tiff_dask.tifffile, "TiffFile", return_value=source)
             if fail:
-                mocker.patch.object(tiff_dask.zarr, "open_array", side_effect=RuntimeError("injected"))
+                mocker.patch.object(tiff_dask, "read_single_tile", side_effect=RuntimeError("injected"))
                 with pytest.raises(RuntimeError, match="injected"):
                     image.data[:1, :4, :6].compute(scheduler="synchronous")
             else:
                 image.data[:1, :4, :6].compute(scheduler="synchronous")
-            close.assert_called_once()
+            assert source.filehandle.closed
             assert source.filehandle.closed

@@ -1,6 +1,6 @@
 # Xenium
 
-{func}`spatialdata_io.xenium` reads a 10x Genomics Xenium Onboard Analysis (XOA) output bundle from XOA 1.0 to 4.x, or a Xenium Ranger output of the same layout. It returns the cell table, the segmentation masks, the cell and nucleus boundaries, lazy transcript points and the morphology images, all in one micrometre coordinate system. {func}`spatialdata_io.xenium_aligned_image` reads post-Xenium H&E or immunofluorescence images aligned in Xenium Explorer, and {func}`spatialdata_io.xenium_explorer_selection` reads Xenium Explorer selection exports.
+{func}`spatialdata_io.xenium` reads a 10x Genomics Xenium Onboard Analysis (XOA) output bundle from XOA 1.0 to 4.x, or a Xenium Ranger output of the same layout. It returns the cell table, the segmentation masks, the cell and nucleus boundaries, lazy transcript points and the morphology images, all in one micrometre coordinate system. {func}`spatialdata_io.xenium_aligned_image` reads post-Xenium H&E or immunofluorescence images with a known registration to Xenium morphology, and {func}`spatialdata_io.xenium_explorer_selection` reads Xenium Explorer selection exports.
 
 ## Bundle families
 
@@ -56,7 +56,7 @@ Each tabular artifact uses Parquet when present. Cells and boundaries otherwise 
 | --- | --- | --- |
 | `morphology_focus` | image | `c, y, x`, OME channel names (for example `DAPI`, `ATP1A1/CD45/E-Cadherin`, `18S`, `alphaSMA/Vimentin`, protein markers), source dtype |
 | `morphology_mip` | image | XOA 1.x maximum-intensity projection, `include_morphology_mip=True` |
-| `he_image`, `if_image` | image | aligned post-Xenium images, see below |
+| `he_image`, `if_image` | image | post-Xenium images in `global` when registered, otherwise in their own pixel frames |
 | `cell_labels`, `nucleus_labels` | labels | uint32 masks of `cells.zarr.zip`, the exact 10x segmentation |
 | `cell_boundaries` | shapes | cell polygons indexed by `cell_id` |
 | `cell_circles` | shapes | centroid circles indexed by `cell_id`, column `radius` |
@@ -68,14 +68,14 @@ Labels are never derived from polygons. Circles have radius `sqrt(cell_area / pi
 
 ## Coordinates
 
-Every element is in the `global` coordinate system in micrometres, with its origin at the top-left corner of the morphology image.
+Xenium measurements share the `global` coordinate system in micrometres, with its origin at the top-left corner of the morphology image. A post-Xenium H&E or IF image joins this frame when its registration is known.
 
 | Element | Transformation to `global` |
 | --- | --- |
 | morphology images, labels | `Scale([pixel_size, pixel_size])` |
 | `cell_boundaries`, `nucleus_boundaries` | `Translation([pixel_size / 2, pixel_size / 2])` |
 | `cell_circles`, `transcripts` | `Identity()` |
-| `he_image`, `if_image` | `Affine(diag(pixel_size, pixel_size, 1) @ M)` with a matrix or H&E keypoint fit, otherwise `Scale([pixel_size, pixel_size])` |
+| `he_image`, `if_image` | `Affine(diag(pixel_size, pixel_size, 1) @ M)` with a matrix or H&E keypoint fit. Without registration, the image has only an identity transform to `he_image_pixels` or `if_image_pixels`. |
 | Explorer selections | `Identity()` for CSV, the selected image's transform for GeoJSON |
 
 `pixel_size` is the `experiment.xenium` value (0.2125 µm in the public bundles). 10x writes polygon vertices through the centres of boundary pixels in pixel-index coordinates, half a pixel up and left of the corner frame shared by masks, centroids and transcripts. The half-pixel translation registers the unchanged vertices: in samples of ten public bundles from XOA 1.0.2 to 4.0, more than 99.5 % of registered vertices fall on their own cell's mask pixels, against at most 96 % without it. Transcript `z` is in micrometres too.
@@ -223,7 +223,11 @@ sdata["he_image"] = xenium_aligned_image(
 )
 ```
 
-The alignment matrix `M` maps image pixels to morphology pixels. For a bundle's `<sample>_he_image.ome.tif`, `xenium()` uses `<sample>_keypoints.csv` when the matrix CSV is absent. It fits a least-squares similarity with a common scale and allows reflection, as described by [10x Genomics](https://www.10xgenomics.com/support/software/xenium-explorer/latest/tutorials/xe-image-alignment#image-alignment-algorithm). The required float64 fields `alignmentX`, `alignmentY`, `fixedX` and `fixedY` may appear in any order. At least three finite, noncollinear pairs are required, and an unusable file raises `ReaderFormatError`. Without an alignment source the image is assumed to share the morphology grid.
+The alignment matrix `M` maps image pixels to morphology pixels. For a bundle's `<sample>_he_image.ome.tif`, `xenium()` uses `<sample>_keypoints.csv` when the matrix CSV is absent. It fits a least-squares similarity with a common scale and allows reflection. The required float64 fields `alignmentX`, `alignmentY`, `fixedX` and `fixedY` may appear in any order. At least three finite, noncollinear pairs are required, and an unusable file raises `ReaderFormatError`. [10x Genomics image alignment](https://www.10xgenomics.com/support/software/xenium-explorer/latest/tutorials/xe-image-alignment#image-alignment-algorithm)
+
+Without a matrix or matching H&E keypoints, `xenium()` keeps each image in its own full-resolution pixel frame, `he_image_pixels` or `if_image_pixels`, with an identity transform. OME pixel spacing describes the image's sampling. Registration establishes the mapping to the Xenium morphology grid.
+
+If you have verified that an image already shares the Xenium morphology grid's pixel origin, spacing and orientation, pass `already_registered=True` to `xenium_aligned_image()` in place of `alignment_file`. The reader then uses the Xenium pixel size to map the image to `global`. The standalone reader requires exactly one of these registration inputs.
 
 Axes come from the TIFF metadata, including `YXS` interleaved samples and `SYX` planar samples. `data_axes` overrides them with one string of distinct letters including `X` and `Y`, such as `"YXS"` (any letter case, with either `S` or `C` for channels). Declared axes that cannot become `c, y, x` raise a contextual `ReaderFormatError`. A `data_axes` value that does not fit the image raises `ValueError` naming it. Channel names follow the file metadata.
 
@@ -242,7 +246,7 @@ Three channels are never assumed to be RGB from their count: the Breast IDC H&E,
 
 CSV reads `Selection,X,Y,Class,Color`, `Selection,X,Y`, or `X,Y` with the name in the first comment line. The first form retains `annotation_class` and `color` as text. Clicked cells are named `Cell <id>`.
 
-For GeoJSON, use the transform of the same image chosen in Explorer. A morphology-relative export uses the morphology pixel calibration. A post-instrument export uses the post-instrument image's alignment and morphology calibration together. The reader keeps the export's polygon coordinates, stores its RGB color as `#rrggbb` in `color`, and keeps a class name and class color in `annotation_class` and `annotation_class_color` when present. An exported `geometry.plane.z` is retained as a `z_plane` annotation for the 2D polygon.
+For GeoJSON, use the `global` transform of the same image chosen in Explorer. A morphology-relative export uses the morphology pixel calibration. A post-instrument export requires registration of the post-instrument image to Xenium morphology. The reader keeps the export's polygon coordinates, stores its RGB color as `#rrggbb` in `color`, and keeps a class name and class color in `annotation_class` and `annotation_class_color` when present. An exported `geometry.plane.z` is retained as a `z_plane` annotation for the 2D polygon.
 
 GeoJSON files are decoded in memory. Each annotation must have a unique name and one closed 2D ring.
 

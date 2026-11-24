@@ -39,6 +39,12 @@ class DatasetDownloadError(RuntimeError):
         super().__init__(f"{dataset.key}: {reason}")
 
 
+def _require_test_directory(dataset: TestDataset, extracted_path: Path) -> None:
+    path = extracted_path / dataset.test_path
+    if not path.is_dir() or not any(path.iterdir()):
+        raise DatasetDownloadError(dataset, f"expected directory with test data at {path}")
+
+
 def download_dataset(dataset: TestDataset, output: Path, *, force: bool) -> None:
     """Download, verify, and install one dataset.
 
@@ -64,6 +70,7 @@ def download_dataset(dataset: TestDataset, output: Path, *, force: bool) -> None
         validate_datasets((dataset,))
         target = output / dataset.extracted_dir
         if (target.exists() or target.is_symlink()) and not force:
+            _require_test_directory(dataset, target)
             print(f"Skipping {dataset.key}: {target} already exists")
             return
 
@@ -76,9 +83,7 @@ def download_dataset(dataset: TestDataset, output: Path, *, force: bool) -> None
             # Stage work in a temporary directory so interrupted downloads do not leave partial datasets.
             _fetch_dataset(dataset, tmp_path, extracted_path)
 
-            if not any(extracted_path.iterdir()):
-                reason = f"download did not produce expected directory {dataset.extracted_dir!r}"
-                raise DatasetDownloadError(dataset, reason)
+            _require_test_directory(dataset, extracted_path)
 
             if target.is_symlink() or target.is_file():
                 target.unlink()

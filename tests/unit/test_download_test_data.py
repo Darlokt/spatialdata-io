@@ -520,7 +520,9 @@ class TestDownloadDataset:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         dataset = _make_dataset("existing")
-        (tmp_path / dataset.extracted_dir).mkdir()
+        target = tmp_path / dataset.extracted_dir
+        target.mkdir()
+        (target / "payload.txt").touch()
 
         def unexpected_fetch(_dataset: TestDatasetType, _temporary_path: Path, _extracted_path: Path) -> None:
             pytest.fail("download should have been skipped")
@@ -530,6 +532,24 @@ class TestDownloadDataset:
         download_test_data.download_dataset(dataset, tmp_path, force=False)
 
         assert "Skipping existing" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("existing", [False, True])
+    def test_requires_nested_reader_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, existing: bool
+    ) -> None:
+        dataset = _make_dataset("nested", test_path="reader-input")
+        target = tmp_path / dataset.extracted_dir
+
+        def fetch(_dataset: TestDatasetType, _temporary_path: Path, extracted_path: Path) -> None:
+            (extracted_path / "README").touch()
+
+        monkeypatch.setattr(download_test_data, "_fetch_dataset", fetch)
+        if existing:
+            target.mkdir()
+            (target / "README").touch()
+        with pytest.raises(download_test_data.DatasetDownloadError, match="reader-input"):
+            download_test_data.download_dataset(dataset, tmp_path, force=False)
+        assert target.exists() == existing
 
     def test_replaces_existing_dataset_with_force(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         dataset = _make_dataset("force")

@@ -52,6 +52,7 @@ _SCAN_SUFFIX = re.compile(r"_Scan[0-9]+$", re.IGNORECASE)
 _REGION = re.compile(r"(?<![a-z])reg([0-9]+)", re.IGNORECASE)
 _ACQUISITION_DIR = ("raw", "images", "phenocycler")
 _GENERIC_CHANNELS = "qptiff.channels.csv"
+_SIDECAR_SUFFIX = re.compile(r"\.xpd$|[._-]channels\.csv$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,19 +181,31 @@ def _processed_dir(scan: Path, root: DatasetRoot) -> Path | None:
     return None
 
 
+def _index_sidecars(entries: Sequence[Path]) -> dict[tuple[Path, str, str], list[Path]]:
+    sidecars: dict[tuple[Path, str, str], list[Path]] = defaultdict(list)
+    for path in entries:
+        name = path.name.lower()
+        if name == _GENERIC_CHANNELS:
+            sidecars[path.parent, "", "channels.csv"].append(path)
+        elif match := _SIDECAR_SUFFIX.search(name):
+            scan = _EXTENSION.sub("", name[: match.start()])
+            sidecars[path.parent, scan, name[match.start() + 1 :]].append(path)
+    return sidecars
+
+
 def _match_sidecar(
-    root: DatasetRoot, image: Path, candidates: Mapping[Path, Sequence[Path]], context: ReaderErrorContext, suffix: str
+    root: DatasetRoot,
+    image: Path,
+    candidates: Mapping[tuple[Path, str, str], Sequence[Path]],
+    context: ReaderErrorContext,
+    suffix: str,
 ) -> ArtifactFile | None:
-    pattern = re.compile(rf"^{re.escape(_base(image))}(?![a-z0-9]).*{re.escape(suffix)}$", re.IGNORECASE)
+    name = _base(image).lower()
     processed = _processed_dir(image, root)
     for directory in (image.parent, processed):
         if directory is None:
             continue
-        matches = [
-            path
-            for path in candidates.get(directory, ())
-            if pattern.fullmatch(path.name) and (directory != processed or path.name.lower() != _GENERIC_CHANNELS)
-        ]
+        matches = candidates.get((directory, name, suffix), ())
         if len(matches) > 1:
             raise ReaderFormatError(
                 context=context,
@@ -206,12 +219,15 @@ def _match_sidecar(
 
 
 def _generic_channels(
-    root: DatasetRoot, image: Path, candidates: Mapping[Path, Sequence[Path]], scan_counts: Counter[Path]
+    root: DatasetRoot,
+    image: Path,
+    candidates: Mapping[tuple[Path, str, str], Sequence[Path]],
+    scan_counts: Counter[Path],
 ) -> ArtifactFile | None:
     processed = _processed_dir(image, root)
     if processed is None:
         return None
-    matches = [path for path in candidates.get(processed, ()) if path.name.lower() == _GENERIC_CHANNELS]
+    matches = candidates.get((processed, "", "channels.csv"), ())
     if not matches:
         return None
     if len(matches) != 1 or scan_counts[processed] != 1:
@@ -310,9 +326,7 @@ def discover_layout(  # noqa: PLR0913 - Scan selection and explicit label regist
         raise ReaderFormatError(
             context=_LAYOUT, path=root.path, found="no processed QPTIFF scans", expected="at least one .qptiff scan"
         )
-    by_parent: dict[Path, list[Path]] = defaultdict(list)
-    for entry in entries:
-        by_parent[entry.parent].append(entry)
+    sidecars = _index_sidecars(entries)
     by_name = {(artifact, path.name): path for path, artifact in artifacts.items()}
     scans = discover_scans(artifacts, context=_LAYOUT)
     processed_counts = Counter(
@@ -340,9 +354,9 @@ def discover_layout(  # noqa: PLR0913 - Scan selection and explicit label regist
     result = []
     for scan in selected_scans:
         entry = by_name[scan.image, scan.name]
-        xpd = _match_sidecar(root, entry, by_parent, _XPD, ".xpd")
-        channels = _match_sidecar(root, entry, by_parent, _CHANNELS, "channels.csv") or _generic_channels(
-            root, entry, by_parent, processed_counts
+        xpd = _match_sidecar(root, entry, sidecars, _XPD, "xpd")
+        channels = _match_sidecar(root, entry, sidecars, _CHANNELS, "channels.csv") or _generic_channels(
+            root, entry, sidecars, processed_counts
         )
         result.append(RegionFiles(scan, xpd, channels, masks.get(scan.region)))
     return QpiLayout(root, tuple(result))

@@ -25,7 +25,7 @@ from click.testing import CliRunner
 from scipy import sparse
 from spatialdata import read_zarr
 from spatialdata.models import get_table_keys
-from spatialdata.transformations import Affine, BaseTransformation, Scale, Translation, get_transformation
+from spatialdata.transformations import Affine, BaseTransformation, Identity, Scale, Translation, get_transformation
 from xarray import DataArray
 
 from spatialdata_io._cli.commands.xenium import xenium_command
@@ -407,6 +407,30 @@ class TestXeniumData:
         assert ome is not None
         declared = float(ome.split('PhysicalSizeX="')[1].split('"')[0])
         np.testing.assert_allclose(np.sqrt(abs(np.linalg.det(linear[:2, :2]))), declared, rtol=1e-3)
+        rows, columns = slice(5000, 5016), slice(12000, 12032)
+        expected = _window(root / "he_image.ome.tif", channel=None, rows=rows, columns=columns)
+        np.testing.assert_array_equal(image.data[:, rows, columns].compute(), np.moveaxis(expected, -1, 0))
+
+    def test_he_image_without_its_alignment(self, require_test_dataset: Callable[[str], Path], tmp_path: Path) -> None:
+        root = require_test_dataset("xenium_heart").resolve()
+        shutil.copyfile(root / "experiment.xenium", tmp_path / "experiment.xenium")
+        for name in ("he_image.ome.tif", "morphology_focus.ome.tif"):
+            (tmp_path / name).symlink_to(root / name)
+
+        result = xenium(
+            tmp_path,
+            include_table=False,
+            include_cell_labels=False,
+            include_nucleus_labels=False,
+            include_cell_boundaries=False,
+            include_nucleus_boundaries=False,
+            include_transcripts=False,
+            path_policy="relaxed",
+        )
+
+        image = _array(result.images["he_image"])
+        assert get_transformation(image, get_all=True) == {"he_image_pixels": Identity()}
+        assert sorted(result.filter_by_coordinate_system("global").images) == ["morphology_focus"]
         rows, columns = slice(5000, 5016), slice(12000, 12032)
         expected = _window(root / "he_image.ome.tif", channel=None, rows=rows, columns=columns)
         np.testing.assert_array_equal(image.data[:, rows, columns].compute(), np.moveaxis(expected, -1, 0))

@@ -278,8 +278,8 @@ def _morphology(root: DatasetRoot, experiment: Experiment, key: str, purpose: st
 
 
 def _aligned(root: DatasetRoot, experiment: Experiment) -> tuple[AlignedImage, ...]:
-    """Pair aligned images with their matrix, falling back to matching H&E keypoints."""
-    context = experiment.context("aligned images")
+    """Discover post-Xenium images and their optional registration artifacts."""
+    context = experiment.context("post-Xenium images")
     entries = list_directory(root.path, context=context)
     images: list[AlignedImage] = []
     for suffix, kind in _ALIGNED_SUFFIXES:
@@ -340,7 +340,7 @@ def discover_layout(path: str | Path, selection: Selection, *, path_policy: Path
     ReaderFormatError
         If ``experiment.xenium`` is malformed or unsupported, a twin is
         ambiguous, transcripts exist only as gzip CSV, a requested image entry is
-        absent, or aligned images are ambiguous.
+        absent, or post-Xenium images are ambiguous.
     """
     root = normalize_dataset_root(path, context=ReaderErrorContext("xenium", "dataset root"), path_policy=path_policy)
     experiment = read_experiment(

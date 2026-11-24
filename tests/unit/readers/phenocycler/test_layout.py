@@ -15,6 +15,26 @@ if TYPE_CHECKING:
 
 
 class TestDiscoverLayout:
+    @pytest.mark.parametrize("location", ["local", "hubmap"])
+    def test_sidecars_belong_to_the_named_scan(self, tmp_path: Path, location: str) -> None:
+        images = tmp_path if location == "local" else tmp_path / "raw/images"
+        sidecars = images if location == "local" else tmp_path / "lab_processed/images"
+        images.mkdir(parents=True, exist_ok=True)
+        sidecars.mkdir(parents=True, exist_ok=True)
+        first = images / "Tonsil.qptiff"
+        repeat = images / "Tonsil_repeat.qptiff"
+        protocol = sidecars / "Tonsil_repeat.xpd"
+        channels = sidecars / "Tonsil_repeat.qptiff.channels.csv"
+        for path in (first, repeat, protocol, channels):
+            path.touch()
+        layout = discover_layout(tmp_path, regions=None, read_all_bit_depths=False, path_policy="strict")
+        assert [(r.xpd, r.channels_csv) for r in layout.regions] == [(None, None), (protocol, channels)]
+        selected = discover_layout(tmp_path, regions=("Tonsil",), read_all_bit_depths=False, path_policy="strict")
+        assert (selected.regions[0].xpd, selected.regions[0].channels_csv) == (None, None)
+        if location == "local":
+            direct = discover_layout(first, regions=None, read_all_bit_depths=False, path_policy="strict")
+            assert (direct.regions[0].xpd, direct.regions[0].channels_csv) == (None, None)
+
     def test_scan_cannot_be_its_own_mask(self, tmp_path: Path) -> None:
         scan = tmp_path / "scan.qptiff"
         scan.touch()
@@ -112,6 +132,11 @@ class TestDiscoverLayout:
         specific.touch()
         scoped = discover_layout(tmp_path, regions=("sample",), read_all_bit_depths=False, path_policy="strict")
         assert scoped.regions[0].channels_csv == specific
+
+        local = images / "sample.er.qptiff_CHANNELS.CSV"
+        local.touch()
+        scoped = discover_layout(tmp_path, regions=("sample",), read_all_bit_depths=True, path_policy="strict")
+        assert scoped.regions[0].channels_csv == local
 
 
 class TestNormalizeRegions:

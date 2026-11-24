@@ -14,6 +14,7 @@ follows one dataset through discovery, calibration, count decoding and linkage.
 :hidden:
 
 ../contributing
+../contributing_io
 readers
 visium-walkthrough
 ```

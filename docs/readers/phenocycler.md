@@ -39,6 +39,12 @@ export may omit these optional fields.
 Use `regions=["Tonsil"]` for a subset of a directory. The reader preserves
 distinct scan suffixes when stripping them would merge scans.
 
+Scan-specific XPD and channel CSV filenames must use the complete scan
+basename. For example, `Tonsil_repeat.xpd` and `Tonsil_repeat.qptiff.channels.csv`
+annotate only `Tonsil_repeat.qptiff`. Ordinary and extended-range variants
+share these annotations. The generic HuBMAP `lab_processed/images/qptiff.channels.csv`
+requires a single scan in the deposit, including when selecting a region.
+
 ## Images and measurements
 
 The reader returns one lazy `(c, y, x)` image per selected scan region. The

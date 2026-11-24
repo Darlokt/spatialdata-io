@@ -8,8 +8,9 @@ Whole-width strips are grouped into bands targeting 16 MiB of decoded data.
 Where inspection verified contiguous uncompressed rows, one file read can
 span many short strips or cover part of a single large strip. Elsewhere the
 decoder works in complete storage chunks, so a compressed strip can exceed
-the band target. Narrow tiles retain their native geometry. Caller-requested
-output chunks can be applied to the resulting Dask array.
+the band target. Narrow tiles retain their native geometry. Tasks confined to
+one local YX or interleaved YXS tile can call tifffile's segment decoder
+directly. Caller-requested output chunks can be applied to the result.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from dask.base import tokenize
 from spatialdata_io.readers._utils.errors import RasterFormatError, add_reader_context
 from spatialdata_io.readers._utils.image._types import LazyRaster
 from spatialdata_io.readers._utils.image.tiff._rows import physical_page, read_contiguous_rows
+from spatialdata_io.readers._utils.image.tiff._tiles import read_single_tile
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -102,15 +104,22 @@ def _read_tiff_selection(source: _TiffArray, selection: ChunkSelection) -> NDArr
         with tifffile.TiffFile(source.path) as tiff:
             if isinstance(index, int):
                 page = physical_page(tiff.pages[index])
-                result = read_contiguous_rows(tiff, page, source.shape, selection) if source.direct_rows else None
+                result = (
+                    read_contiguous_rows(tiff, page, source.shape, selection)
+                    if source.direct_rows
+                    else read_single_tile(tiff, page, source.shape, selection)
+                )
                 if result is None:
                     result = _read_store(page.aszarr(), selection)
             else:
                 series, level_index = index
-                level = tiff.series[series].levels[level_index]
+                selected_series = tiff.series[series]
+                level = selected_series.levels[level_index]
                 if tiff.is_ome:
                     _check_ome_selection(level, source.shape, location, selection)
                 result = read_contiguous_rows(tiff, level, source.shape, selection) if source.direct_rows else None
+                if result is None and selected_series.transform is None:
+                    result = read_single_tile(tiff, level, source.shape, selection)
                 if result is None:
                     # Use the same singleton-axis policy as metadata inspection.
                     result = _read_store(tiff.aszarr(series=series, level=level_index, squeeze=True), selection)
@@ -245,9 +254,9 @@ def read_tiff(
     Notes
     -----
     Rechunking the result is lazy and does not change the source layer. Each
-    source task opens the TIFF and reads its selection either directly
-    (uncompressed contiguous rows) or through a short-lived ``tifffile`` Zarr
-    store, and closes every resource before returning. A computed selection
+    source task opens the TIFF, reads its selection (contiguous rows, a single
+    tile, or through a short-lived ``tifffile`` Zarr store) and closes every
+    resource before returning. A computed selection
     decodes every tile or row band it intersects. An out-of-range selection
     keeps its ``IndexError`` type and gains a note naming ``context`` and the
     TIFF path.

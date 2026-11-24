@@ -16,7 +16,14 @@ from dask.callbacks import Callback
 from scipy.sparse import csr_array
 from spatialdata import SpatialData, read_zarr
 from spatialdata.models import Labels2DModel, PointsModel, ShapesModel, TableModel
-from spatialdata.transformations import Affine, BaseTransformation, get_transformation
+from spatialdata.transformations import (
+    Affine,
+    BaseTransformation,
+    Scale,
+    Translation,
+    get_transformation,
+    set_transformation,
+)
 
 from spatialdata_io import codex, curio
 from spatialdata_io._positions import POSITIONS_KEY
@@ -91,6 +98,29 @@ def _linked(kind: Literal["shapes", "labels", "points"] = "shapes") -> SpatialDa
     pixels[5, 5] = 5
     labels = Labels2DModel.parse(pixels, dims=("y", "x"), chunks=(3, 5), transformations={"global": transform})
     return SpatialData(labels={"cells": labels}, tables={"table": table})
+
+
+def _integrated() -> SpatialData:
+    shapes = _linked().shapes["cells"].loc[[9]].copy()
+    set_transformation(shapes, {"scan_a": Translation([10, 20], axes=("x", "y"))}, set_all=True)
+    set_transformation(shapes, Translation([100, 30], axes=("x", "y")), to_coordinate_system="integrated")
+    points = PointsModel.parse(
+        pd.DataFrame({"x": [5.0, 2.0], "y": [3.0, 1.0]}, index=pd.Index([5, 9])),
+        transformations={
+            "scan_b": Translation([40, 50], axes=("x", "y")),
+            "integrated": Scale([2.0, 3.0], axes=("x", "y")),
+        },
+    )
+    table = _table()
+    table.obs["region"] = pd.Categorical(["detections", "cells", "detections"])
+    table.obs["instance_id"] = [9, 9, 5]
+    table.obs["spatial_frame"] = pd.Categorical(["scan_b", "scan_a", "scan_b"])
+    declaration = table.uns[POSITIONS_KEY]["coordinates"]["spatial"]
+    declaration.pop("frame")
+    declaration["frame_key"] = "spatial_frame"
+    declaration["calibration"] = {"scan_a": "scan a calibration", "scan_b": "scan b calibration"}
+    table = TableModel.parse(table, region=["cells", "detections"], region_key="region", instance_key="instance_id")
+    return SpatialData(shapes={"cells": shapes}, points={"detections": points}, tables={"table": table})
 
 
 def _assert_expression(actual: AnnData, expected: AnnData) -> None:
@@ -214,6 +244,95 @@ class TestToLegacyAnndata:
         np.testing.assert_array_equal(actual.obsm["spatial"], [[26, 8], [14, 17], [20, 11]])
         assert actual.obs_names.tolist() == ["cell9", "cell3", "cell5"]
         _assert_expression(actual, table)
+
+    def test_exports_integrated_centroids_with_prior_snapshots_and_provenance(self, tmp_path: Path) -> None:
+        source = _integrated()
+        original = source.tables["table"].copy()
+
+        actual = to_legacy_anndata(
+            source, position_source="centroids", coordinate_system="integrated", coordinate_system_units="micrometer"
+        )
+
+        _assert_expression(actual, original)
+        assert_equal(actual.obs, original.obs)
+        np.testing.assert_array_equal(actual.obsm["spatial"], [[4, 3], [108, 34], [10, 9]])
+        np.testing.assert_array_equal(actual.obsm["spatial_original"], original.obsm["spatial"])
+        np.testing.assert_array_equal(actual.obsm["spatial_pixels"], original.obsm["spatial_pixels"])
+        assert actual.obsm["spatial"].dtype == np.float64
+        descriptions = actual.uns[POSITIONS_KEY]["coordinates"]
+        assert descriptions["spatial_original"] == original.uns[POSITIONS_KEY]["coordinates"]["spatial"]
+        assert descriptions["spatial"]["frame"] == "integrated"
+        assert descriptions["spatial"]["units"] == "micrometer"
+        assert descriptions["spatial"]["position"] == "linked_element_centroid: detections, cells"
+        assert "caller" in descriptions["spatial"]["calibration"]["integrated"].lower()
+        assert_equal(source.tables["table"], original)
+
+        path = tmp_path / "integrated.h5ad"
+        actual.write_h5ad(path)
+        restored = from_legacy_anndata(read_h5ad(path)).tables["table"]
+        _assert_expression(restored, original)
+        np.testing.assert_array_equal(restored.obsm["spatial"], actual.obsm["spatial"])
+        assert restored.uns[POSITIONS_KEY] == actual.uns[POSITIONS_KEY]
+
+    @pytest.mark.parametrize("units", ["pixel", "grid"])
+    def test_exports_integrated_native_centroids_without_table_unit_declarations(
+        self, units: Literal["pixel", "grid"]
+    ) -> None:
+        source = _integrated()
+        table = source.tables["table"]
+        del table.uns[POSITIONS_KEY]
+
+        actual = to_legacy_anndata(
+            source, position_source="centroids", coordinate_system="integrated", coordinate_system_units=units
+        )
+
+        _assert_expression(actual, table)
+        assert "spatial" not in actual.obsm
+        np.testing.assert_array_equal(actual.obsm["spatial_centroids"], [[4, 3], [108, 34], [10, 9]])
+        np.testing.assert_array_equal(actual.obsm["spatial_source"], table.obsm["spatial"])
+        np.testing.assert_array_equal(actual.obsm["spatial_pixels"], table.obsm["spatial_pixels"])
+        assert actual.uns[POSITIONS_KEY]["coordinates"]["spatial_centroids"] == {
+            "axes": ["x", "y"],
+            "frame": "integrated",
+            "units": units,
+            "position": "linked_element_centroid: detections, cells",
+        }
+
+    def test_integrated_centroids_require_explicit_units(self) -> None:
+        with pytest.raises(ValueError, match=r"integrated.*coordinate_system_units"):
+            to_legacy_anndata(_integrated(), position_source="centroids", coordinate_system="integrated")
+
+    @pytest.mark.parametrize("mapping", ["missing", "singular"])
+    def test_integrated_centroids_validate_every_mapping_before_lazy_reads(self, mapping: str) -> None:
+        source = _integrated()
+        shapes = source.shapes["cells"]
+        if mapping == "singular":
+            set_transformation(shapes, Scale([1.0, 0.0], axes=("x", "y")), to_coordinate_system="integrated")
+        else:
+            set_transformation(shapes, {"scan_a": Translation([10, 20], axes=("x", "y"))}, set_all=True)
+        tasks: list[object] = []
+        expected = "invertible" if mapping == "singular" else "no transformation"
+        with (
+            Callback(pretask=lambda key, *_args: tasks.append(key)),
+            pytest.raises(ValueError, match=f"cells.*{expected}.*integrated"),
+        ):
+            to_legacy_anndata(
+                source,
+                position_source="centroids",
+                coordinate_system="integrated",
+                coordinate_system_units="micrometer",
+            )
+        assert tasks == []
+
+    def test_centroids_in_established_row_frame_select_its_original_population(self) -> None:
+        source = _integrated()
+
+        actual = to_legacy_anndata(source, position_source="centroids", coordinate_system="scan_b")
+
+        original = source.tables["table"][[0, 2]].copy()
+        _assert_expression(actual, original)
+        np.testing.assert_array_equal(actual.obsm["spatial"], [[42, 51], [45, 53]])
+        np.testing.assert_array_equal(actual.obsm["spatial_original"], original.obsm["spatial"])
 
     def test_independent_physical_frames_require_explicit_population_selection(self) -> None:
         table = _table()
@@ -443,7 +562,7 @@ class TestDocumentationExamples:
         assert snippets
         monkeypatch.chdir(tmp_path)
         for snippet in snippets:
-            source = _linked()
+            source = _integrated() if 'coordinate_system="integrated"' in snippet else _linked()
             legacy = _table()
             del legacy.obsm["spatial_pixels"]
             del legacy.uns[POSITIONS_KEY]

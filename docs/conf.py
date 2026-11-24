@@ -66,7 +66,6 @@ redirects = {
 }
 redirects.update(
     calibration="user/coordinates",
-    contributing_io="contributing",
     dataset_paths="user/paths",
     legacy_anndata="user/legacy_anndata",
     raster_options="user/rasters",

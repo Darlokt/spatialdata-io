@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 from spatialdata import SpatialData
+from spatialdata.transformations import Identity
 from xarray import DataTree
 
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
@@ -15,7 +16,7 @@ from spatialdata_io.readers._utils.errors import ReaderFormatError
 from spatialdata_io.readers._utils.geometry import validate_invalid_geometry_policy
 from spatialdata_io.readers._utils.image import make_raster_options
 from spatialdata_io.readers._utils.provenance import set_reader_provenance
-from spatialdata_io.readers.xenium._aligned import read_aligned
+from spatialdata_io.readers.xenium._aligned import read_global_transformation, read_post_xenium_image
 from spatialdata_io.readers.xenium._analysis import read_analysis
 from spatialdata_io.readers.xenium._cells import read_cells_store, read_masks_store
 from spatialdata_io.readers.xenium._geometry import (
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     import anndata as ad
     import dask.dataframe as dd
     import geopandas as gpd
+    from spatialdata.transformations import BaseTransformation
     from xarray import DataArray
 
     from spatialdata_io.readers._utils.errors import ReaderErrorContext
@@ -243,10 +245,15 @@ def _images(layout: XeniumLayout, raster: RasterOptions) -> dict[str, DataArray 
         if image is not None:
             context = layout.experiment.context(artifact)
             images[name] = read_morphology(image, pixel_size=pixel_size, raster=raster, context=context)
-    for aligned in layout.aligned:
-        context = layout.experiment.context(f"aligned {aligned.kind.upper()} image")
-        images[aligned.name] = read_aligned(
-            aligned.file, aligned.alignment, pixel_size=pixel_size, data_axes=None, raster=raster, context=context
+    for image in layout.aligned:
+        context = layout.experiment.context(f"post-Xenium {image.kind.upper()} image")
+        transformations: dict[str, BaseTransformation] = (
+            {f"{image.name}_pixels": Identity()}
+            if image.alignment is None
+            else {"global": read_global_transformation(image.alignment, pixel_size=pixel_size, context=context)}
+        )
+        images[image.name] = read_post_xenium_image(
+            image.file, transformations=transformations, data_axes=None, raster=raster, context=context
         )
     return images
 
@@ -410,8 +417,10 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
         ``*if_image.ome.tif``) at the root, using their optional
         ``*imagealignment.csv``. When the H&E matrix is absent, matching
         ``<sample>_keypoints.csv`` determines a least-squares similarity
-        transform. Invalid keypoints raise ``ReaderFormatError``. Other images
-        can be read with :func:`xenium_aligned_image`.
+        transform. Invalid keypoints raise ``ReaderFormatError``. Images
+        without a matrix or matching keypoints use their own pixel coordinate
+        systems. Use :func:`xenium_aligned_image` to read a post-Xenium image
+        with a known registration independently.
     include_analysis
         Add 10x secondary analysis to the table: clusterings as categorical
         ``obs`` columns named by method, PCA/UMAP projections as ``obsm``.
@@ -435,13 +444,16 @@ def xenium(  # noqa: PLR0913, RUF100 - Explicit supported products and format op
     Returns
     -------
     spatialdata.SpatialData
-        The requested elements, all in the ``global`` coordinate system in
-        micrometres with its origin at the top-left corner of the morphology
-        image. ``pixel_size`` is the ``experiment.xenium`` value.
+        The requested elements. The Xenium morphology coordinate system is
+        ``global`` in micrometres with its origin at the top-left corner of the
+        morphology image. ``pixel_size`` is the ``experiment.xenium`` value.
 
         - Images ``morphology_focus`` and ``morphology_mip``: lazy ``c, y, x``
           in the source dtype with OME channel names, ``Scale(pixel_size)``.
-        - Images ``he_image`` and ``if_image``: as :func:`xenium_aligned_image`.
+        - Images ``he_image`` and ``if_image``: lazy ``c, y, x`` in the source
+          dtype. A matrix or H&E keypoints register the image to ``global``.
+          Otherwise it has an ``Identity()`` transform to its own full-resolution
+          pixel frame, ``he_image_pixels`` or ``if_image_pixels``.
         - Labels ``cell_labels`` and ``nucleus_labels``: lazy uint32 masks,
           ``Scale(pixel_size)``.
         - Shapes ``cell_boundaries`` (index ``cell_id``) and

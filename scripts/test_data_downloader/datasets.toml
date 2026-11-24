@@ -387,7 +387,7 @@ source = "10x Genomics Visium HD 4.0.1, CC BY 4.0"
 [[datasets]]
 key = "seqfish"
 group = "seqfish"
-url = "https://s3.embl.de/spatialdata/raw_data/seqfish-2-test-dataset.zip"
+url = "https://exampledata.scverse.org/spatialdata/raw_data/seqfish-2-test-dataset.zip"
 known_hash = "sha256:553208b2bab71e45fe0fd3799478aa03894270c8e447cecc6366c0bd412256c0"
 extracted_dir = "seqfish-2-test-dataset"
 source = "Spatial Genomics seqFISH v2, public test data"

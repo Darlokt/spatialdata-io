@@ -637,16 +637,41 @@ class TestXenium:
         with pytest.raises(ReaderFormatError, match=r"seg_mask_value labels from cells\.zarr\.zip"):
             xenium(bundle.root, include_cell_labels=False, include_nucleus_labels=False, table_target=None)
 
-    def test_aligned_images(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("with_if_matrix", [False, True])
+    def test_aligned_images(self, tmp_path: Path, *, with_if_matrix: bool) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(aligned=("he", "if")))
+        if with_if_matrix:
+            (tmp_path / "synthetic_if_imagealignment.csv").write_text("2,0,-4\n0,2,3\n0,0,1\n")
 
         result = xenium(bundle.root)
 
         assert sorted(result.images) == ["he_image", "if_image", "morphology_focus"]
         assert isinstance(_transform(result.images["he_image"]), Affine)
-        assert isinstance(_transform(result.images["if_image"]), Scale)
-        assert _array(result.images["if_image"]).coords["c"].to_numpy().tolist() == ["CD20", "DAPI"]
+        immunofluorescence = _array(result.images["if_image"])
+        if with_if_matrix:
+            np.testing.assert_array_equal(
+                _transform(immunofluorescence).to_affine_matrix(("x", "y"), ("x", "y")),
+                np.diag([fx.PIXEL_SIZE, fx.PIXEL_SIZE, 1]) @ [[2, 0, -4], [0, 2, 3], [0, 0, 1]],
+            )
+        else:
+            assert get_transformation(immunofluorescence, get_all=True) == {"if_image_pixels": Identity()}
+        assert immunofluorescence.coords["c"].to_numpy().tolist() == ["CD20", "DAPI"]
         assert sorted(xenium(bundle.root, include_aligned_images=False).images) == ["morphology_focus"]
+
+    def test_unregistered_images_use_separate_pixel_frames(self, tmp_path: Path) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_2_0, fx.Options(aligned=("he", "if")))
+        (tmp_path / "synthetic_he_imagealignment.csv").unlink()
+
+        result = xenium(bundle.root)
+
+        he, immunofluorescence = (_array(result.images[name]) for name in ("he_image", "if_image"))
+        assert get_transformation(he, get_all=True) == {"he_image_pixels": Identity()}
+        assert get_transformation(immunofluorescence, get_all=True) == {"if_image_pixels": Identity()}
+        assert sorted(result.filter_by_coordinate_system("global").images) == ["morphology_focus"]
+        rgb_pixels = np.arange(12 * 16 * 3, dtype=np.uint8).reshape(12, 16, 3)
+        if_pixels = np.arange(2 * 12 * 16, dtype=np.uint16).reshape(2, 12, 16)
+        np.testing.assert_array_equal(he.data[:, :2, :3].compute(), np.moveaxis(rgb_pixels[:2, :3], -1, 0))
+        np.testing.assert_array_equal(immunofluorescence.data[:, :2, :3].compute(), if_pixels[:, :2, :3])
 
     @pytest.mark.parametrize("with_matrix", [False, True])
     def test_he_alignment_keypoints(self, tmp_path: Path, *, with_matrix: bool) -> None:
@@ -668,7 +693,7 @@ class TestXenium:
             np.diag([fx.PIXEL_SIZE, fx.PIXEL_SIZE, 1]) @ expected,
             atol=1e-14,
         )
-        assert isinstance(_transform(result.images["if_image"]), Scale)
+        assert get_transformation(result.images["if_image"], get_all=True) == {"if_image_pixels": Identity()}
 
     @pytest.mark.parametrize("kind", ["directory", "archive"])
     def test_analysis(self, tmp_path: Path, kind: Literal["directory", "archive"]) -> None:

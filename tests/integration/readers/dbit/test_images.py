@@ -67,14 +67,12 @@ class TestDbitImages:
         # Pickle before installing resource trackers: the graph must retain only paths and selection state.
         restored = pickle.loads(pickle.dumps(image.data))  # noqa: S301, RUF100 - Only deserialize this test's own graph.
         close_file = mocker.spy(tifffile.FileHandle, "close")
-        close_store = mocker.spy(ZarrTiffStore, "close")
 
         np.testing.assert_array_equal(restored[:1, 1:3, 2:5].compute(scheduler="synchronous"), source[:1, 1:3, 2:5])
 
         assert decode.call_count == 1
         assert decode.call_args.args[1] == (slice(0, 1), slice(0, 16), slice(0, 16))
         assert close_file.call_count >= 1
-        assert close_store.call_count == 1
 
     @pytest.mark.parametrize("suffix", [".png", ".jpeg"])
     def test_encoded_rgb_is_lazy_and_closes_whole_frame_decode(
@@ -218,8 +216,8 @@ class TestDbitImages:
     ) -> None:
         _write_layout(tmp_path)
         path = tmp_path / "histology.tif"
-        # Compression keeps the task on the Zarr store path whose closure is observed.
-        tifffile.imwrite(path, np.ones((16, 16), dtype=np.uint8), tile=(16, 16), compression="zlib")
+        # Compressed strips use the Zarr store whose closure is observed.
+        tifffile.imwrite(path, np.ones((16, 16), dtype=np.uint8), rowsperstrip=4, compression="zlib")
         image = dbit(tmp_path, image_file=path).images["sample_image"]
 
         # Install trackers after metadata inspection to observe only task-owned resources.

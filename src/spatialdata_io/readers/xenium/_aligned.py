@@ -1,12 +1,12 @@
-"""Read post-Xenium H&E or IF images aligned in Xenium Explorer.
+"""Read post-Xenium H&E or IF images and their Xenium Explorer registration.
 
 The optional alignment CSV is a 3 x 3 row-major similarity matrix ``M`` mapping
 image pixel coordinates (x right, y down) to Xenium morphology pixels. In the
 micrometre ``global`` frame the image therefore carries
 ``Affine(diag(ps, ps, 1) @ M)``, with ``ps`` the Xenium pixel size from
 ``experiment.xenium``. Matching H&E keypoints can supply a least-squares
-similarity transform when the matrix is absent. Without either artifact the
-image is taken to share the Xenium pixel grid and carries ``Scale(ps)``.
+similarity transform when the matrix is absent. Unregistered bundle images
+remain in their own pixel coordinate systems.
 https://kb.10xgenomics.com/hc/en-us/articles/35386990499853-How-can-I-convert-coordinates-between-H-E-image-and-Xenium-data
 
 Level 0 of the first TIFF series is read with its declared axes, or the
@@ -157,16 +157,30 @@ def read_keypoint_alignment(path: ArtifactFile, *, context: ReaderErrorContext) 
     return matrix
 
 
-def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, raster options and context.
-    image: ArtifactFile,
-    alignment: ArtifactFile | AlignmentKeypoints | None,
+def read_global_transformation(
+    alignment: ArtifactFile | AlignmentKeypoints,
     *,
     pixel_size: float,
+    context: ReaderErrorContext,
+) -> Affine:
+    """Read the registration and map image pixels to Xenium morphology micrometres."""
+    matrix = (
+        read_keypoint_alignment(alignment.file, context=replace(context, artifact="image alignment keypoints"))
+        if isinstance(alignment, AlignmentKeypoints)
+        else read_alignment(alignment, context=replace(context, artifact="image alignment"))
+    )
+    return Affine(np.diag([pixel_size, pixel_size, 1.0]) @ matrix, input_axes=("x", "y"), output_axes=("x", "y"))
+
+
+def read_post_xenium_image(
+    image: ArtifactFile,
+    *,
+    transformations: dict[str, BaseTransformation],
     data_axes: str | None,
     raster: RasterOptions,
     context: ReaderErrorContext,
 ) -> DataArray | DataTree:
-    """Return one aligned image as lazy CYX pixels in the micrometre frame.
+    """Return lazy CYX pixels with their supplied SpatialData transformation.
 
     Raises
     ------
@@ -175,24 +189,13 @@ def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, ras
         a note naming it), or ``raster`` requests more downsampling than the
         image extent allows.
     ReaderFormatError
-        If the image metadata, its declared axes, the alignment matrix or the
-        keypoints are malformed.
+        If the image metadata or its declared axes are malformed.
     """
     metadata = inspect_tiff(image, context=context)
     lazy = read_tiff(metadata, series=0, level=0, context=context)
     data, channels = normalize_cyx_image(lazy, data_axes, tiff=(metadata, 0), context=context, path=image)
-    raster.validate_image_pyramid(data, element="the aligned image")
+    raster.validate_image_pyramid(data, element="the post-Xenium image")
 
-    transformation: BaseTransformation = Scale([pixel_size, pixel_size], axes=("y", "x"))
-    if alignment is not None:
-        matrix = (
-            read_keypoint_alignment(alignment.file, context=replace(context, artifact="image alignment keypoints"))
-            if isinstance(alignment, AlignmentKeypoints)
-            else read_alignment(alignment, context=replace(context, artifact="image alignment"))
-        )
-        transformation = Affine(
-            np.diag([pixel_size, pixel_size, 1.0]) @ matrix, input_axes=("x", "y"), output_axes=("x", "y")
-        )
     return Image2DModel.parse(
         data,
         dims=_AXES,
@@ -200,7 +203,7 @@ def read_aligned(  # noqa: PLR0913, RUF100 - Explicit source interpretation, ras
         rgb=False,
         scale_factors=raster.model_scale_factors,
         chunks=raster.image_chunks(),
-        transformations={"global": transformation},
+        transformations=transformations,
     )
 
 
@@ -209,24 +212,29 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
     alignment_file: str | Path | None = None,
     *,
     pixel_size: float,
+    already_registered: bool = False,
     data_axes: str | None = None,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: int | tuple[int, int, int] = DEFAULT_CHUNKS,
 ) -> DataArray | DataTree:
-    """Read an H&E or IF image aligned to a Xenium dataset in Xenium Explorer.
+    """Read an H&E or IF image with a known registration to Xenium morphology.
 
     Parameters
     ----------
     image_file
         Pyramidal OME-TIFF; level 0 of its first series is read lazily.
     alignment_file
-        Optional Xenium Explorer ``*_imagealignment.csv``: a 3 x 3 row-major
-        similarity matrix from image pixels to Xenium morphology pixels. Without
-        it the image must already be registered to the Xenium pixel grid.
+        Xenium Explorer ``*_imagealignment.csv`` containing a 3 x 3 row-major
+        similarity matrix from image pixels to Xenium morphology pixels.
+        Provide this path or set ``already_registered=True``.
     pixel_size
         Xenium morphology pixel size in micrometres, from ``experiment.xenium``
         ``pixel_size`` (``sdata.attrs["xenium"]["experiment"]["pixel_size"]``).
         The image's own OME pixel size is a different quantity and is not used.
+    already_registered
+        Set ``True`` to confirm that image pixels already coincide with the
+        Xenium morphology pixel grid, including its origin, scale and axis
+        orientation. Use this option when omitting ``alignment_file``.
     data_axes
         Axes of the stored array as one string, one distinct letter per
         dimension in any letter case including ``X`` and ``Y``, overriding the
@@ -246,7 +254,8 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
         A ``(c, y, x)`` image in the source dtype. Its ``global``
         transformation maps image pixels to micrometres:
         ``Affine(diag(pixel_size, pixel_size, 1) @ M)`` with an alignment
-        matrix ``M``, otherwise ``Scale(pixel_size)``. Pixels stay lazy.
+        matrix ``M``, or ``Scale(pixel_size)`` when ``already_registered=True``.
+        Pixels stay lazy.
 
         Channel names follow the file's declarations:
 
@@ -265,13 +274,14 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
     Raises
     ------
     TypeError, ValueError
-        If options are invalid, or ``data_axes`` cannot be mapped to CYX for
-        the image (a ``ValueError`` with a note naming it).
+        If options are invalid, if neither or both registration inputs are
+        provided, or if ``data_axes`` cannot be mapped to CYX for the image
+        (a ``ValueError`` with a note naming it).
     FileNotFoundError, IsADirectoryError
         If a file is missing or a directory.
-    ValueError
-        A contextual ``ReaderFormatError`` if the image, its declared axes, its
-        OME channels or the alignment matrix are malformed.
+    ReaderFormatError
+        If the image, its declared axes, its OME channels or the alignment
+        matrix are malformed.
     """
     if isinstance(pixel_size, bool) or not isinstance(pixel_size, int | float):
         message = "pixel_size must be a number of micrometres."
@@ -279,9 +289,25 @@ def xenium_aligned_image(  # noqa: PLR0913, RUF100 - Explicit source interpretat
     if not math.isfinite(pixel_size) or pixel_size <= 0:
         message = "pixel_size must be a finite positive number of micrometres."
         raise ValueError(message)
+    if not isinstance(already_registered, bool):
+        message = "already_registered must be a boolean."
+        raise TypeError(message)
     axes = validate_data_axes(data_axes)
     raster = make_raster_options(scale_factors, chunks)
+    if alignment_file is None and not already_registered:
+        message = "Provide alignment_file or already_registered=True for an image on the Xenium morphology pixel grid."
+        raise ValueError(message)
+    if alignment_file is not None and already_registered:
+        message = "alignment_file and already_registered=True are mutually exclusive."
+        raise ValueError(message)
 
     image = require_file(Path(image_file).expanduser(), context=_CONTEXT)
-    alignment = None if alignment_file is None else require_file(Path(alignment_file).expanduser(), context=_CONTEXT)
-    return read_aligned(image, alignment, pixel_size=float(pixel_size), data_axes=axes, raster=raster, context=_CONTEXT)
+    transformation: BaseTransformation
+    if alignment_file is None:
+        transformation = Scale([pixel_size, pixel_size], axes=("y", "x"))
+    else:
+        alignment = require_file(Path(alignment_file).expanduser(), context=_CONTEXT)
+        transformation = read_global_transformation(alignment, pixel_size=float(pixel_size), context=_CONTEXT)
+    return read_post_xenium_image(
+        image, transformations={"global": transformation}, data_axes=axes, raster=raster, context=_CONTEXT
+    )

@@ -347,7 +347,7 @@ class TestReadTiff:
         assert read_payloads == expected_payloads
         assert len(closed_handles) == 1
         assert closed_handles[0].closed
-        assert len(closed_stores) == 1
+        assert len(closed_stores) == int(options.tile is None)
 
     @pytest.mark.parametrize("compression", [None, "zlib"])
     def test_one_row_strips_form_strip_aligned_bands(
@@ -493,6 +493,22 @@ class TestReadTiff:
 
         np.testing.assert_array_equal(result.data.compute(), np.zeros((16, 8), dtype=np.uint16))
 
+    def test_empty_tile_preserves_fill_and_adjacent_pixels(self, tmp_path: Path) -> None:
+        path = tmp_path / "sparse-tile.tif"
+        source = np.full((16, 25), 7, dtype=np.uint16)
+        tifffile.imwrite(path, source, tile=(16, 16), compression="deflate", extratags=[(42113, "s", 0, "17", False)])
+        with tifffile.TiffFile(path, mode="r+") as tiff:
+            page = tiff.pages.first
+            page.tags["TileOffsets"].overwrite((0, page.dataoffsets[1]))
+            page.tags["TileByteCounts"].overwrite((0, page.databytecounts[1]))
+
+        result = read_tiff(
+            inspect_tiff(ArtifactFile(path), context=_RASTER_CONTEXT), series=0, level=0, context=_RASTER_CONTEXT
+        )
+
+        source[:, :16] = 17
+        np.testing.assert_array_equal(result.data.compute(scheduler="synchronous"), source)
+
     def test_truncated_strip_fails_instead_of_reading_past_it(self, tmp_path: Path) -> None:
         path = tmp_path / "truncated.tif"
         tifffile.imwrite(path, np.full((16, 8), 7, dtype=np.uint16))
@@ -556,7 +572,7 @@ class TestReadTiff:
         )
 
         pyramid_path = tmp_path / "pyramid.tif"
-        base = np.arange(32 * 32, dtype=np.uint16).reshape(32, 32)
+        base = np.arange(38 * 46, dtype=np.uint16).reshape(38, 46)
         reduced = base[::2, ::2]
         with tifffile.TiffWriter(pyramid_path) as writer:
             writer.write(
@@ -564,15 +580,15 @@ class TestReadTiff:
                 tile=(16, 16),
                 subifds=1,
                 photometric="minisblack",
+                compression="deflate",
                 metadata={"axes": "YX"},
             )
-            writer.write(reduced, tile=(16, 16), subfiletype=1, photometric="minisblack")
+            writer.write(reduced, tile=(16, 16), subfiletype=1, photometric="minisblack", compression="deflate")
 
         pyramid_metadata = inspect_tiff(ArtifactFile(pyramid_path), context=_RASTER_CONTEXT)
-        np.testing.assert_array_equal(
-            read_tiff(pyramid_metadata, series=0, level=1, context=_RASTER_CONTEXT).data.compute(),
-            reduced,
-        )
+        result = read_tiff(pyramid_metadata, series=0, level=1, context=_RASTER_CONTEXT)
+        assert result.data.chunks == ((16, 3), (16, 7))
+        np.testing.assert_array_equal(result.data.compute(), reduced)
 
     def test_reads_linked_ome_planes(self, linked_ome_tiff: tuple[Path, NDArray[np.uint16]]) -> None:
         path, expected = linked_ome_tiff
@@ -700,5 +716,5 @@ class TestReadTiff:
 
         with pytest.raises(RasterFormatError, match="does not match inspected metadata"):
             result.data[:1, :16, :16].compute(scheduler="synchronous")
-        assert store_close.call_count >= 1
+        store_close.assert_not_called()
         assert file_close.call_count >= 1

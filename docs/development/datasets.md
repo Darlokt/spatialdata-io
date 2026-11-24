@@ -42,12 +42,19 @@ hatch test -- tests/integration/readers/xenium/test_data.py -k 'morphology_focus
 | Combine selections | Repeat either option. The downloader takes their union in registry order. Without selectors it downloads datasets that are enabled by default. |
 | Fetch large opt-in fixtures | Use `--group phenocycler_scans` for all four PhenoCycler whole-slide scans (5.1 GB), or `--dataset KEY` for one. Scheduled CI skips opt-in datasets. |
 | Share downloads between checkouts | Pass `--output /path/to/test-data` and set `SPATIALDATA_IO_TEST_DATA_DIR=/path/to/test-data` for pytest. The default for both is `data/` from the repository root. |
-| Refresh an existing dataset | Add `--force` to the selected download. By default an existing destination is skipped without re-verification. |
+| Refresh an existing dataset | Add `--force` to the selected download. By default the downloader checks that the reader's input directory exists and is nonempty, then reuses it without hashing its contents. |
 
 Pooch verifies the download before installation. The downloader stages each
 dataset under the output parent. A failed fetch or extraction leaves an
 existing dataset in place. If several datasets are selected, the remaining
 downloads are attempted and the command reports failed keys with exit status 1.
+
+CI looks for the latest successful `data-default-<manifest hash>` artifact
+prepared on `main` for the current registry. A manual download of selected
+keys produces a separate `data-selected-<manifest hash>` artifact.
+Before running pytest, CI installs any missing default datasets
+and checks each registered input directory. Local tests still skip unavailable
+datasets, and opt-in datasets still require an explicit selection.
 
 ## Register a dataset
 
@@ -58,7 +65,7 @@ downloads are attempted and the command reports failed keys with exit status 1.
    or permission in `source`. CC BY 4.0 permits redistribution and adaptation
    with attribution. Public download access alone does not establish those
    permissions. The contribution guide explains the project's data-sharing
-   requirements and how to submit examples. [Example data and licensing](../contributing.md#the-importance-of-public-data-and-permissive-licenses)
+   requirements and how to submit examples. [Example data and licensing](../contributing_io.md#the-importance-of-public-data-and-permissive-licenses)
 2. **Register the layout.** Add a `[[datasets]]` entry to
    `scripts/test_data_downloader/datasets.toml` alongside the other entries
    for the reader. A test refers to the stable `key`. The CLI also accepts

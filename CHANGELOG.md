@@ -56,6 +56,9 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 
 ### Changed
 
+- Tiled TIFF reads can decode a single native tile directly through tifffile.
+  This reduces per-tile overhead for crops and whole-image reads while keeping
+  pixel access lazy. [Raster I/O](docs/development/rasters.md)
 - **Visium HD calibration.** Visium HD uses the manufactured 2 µm grid to place
   bins, segmented cells and registered images in slide micrometres. It reports
   the maximum and RMS registration error for the microscope image’s affine
@@ -157,6 +160,16 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 
 ### Fixed
 
+- Xenium keeps H&E and IF images in separate pixel frames when their registration
+  is unknown. To import an image already on the morphology grid with
+  `xenium_aligned_image()`, pass `already_registered=True`.
+  [Xenium image registration](docs/readers/xenium.md)
+- PhenoCycler associates XPD protocols and channel annotations with the complete
+  scan basename, including when adjacent scans have overlapping names.
+  [PhenoCycler scans](docs/readers/phenocycler.md)
+- Legacy AnnData centroid export accepts a destination frame registered on every
+  linked target. Supply `coordinate_system_units` when the table has no
+  declaration for that frame. [Centroid export](docs/user/legacy_anndata.md), [#318](https://github.com/scverse/spatialdata-io/issues/318)
 - Classic Visium preserves off-image spot centres in CytAssist runs, including
   negative microscope coordinates. [Visium](docs/readers/visium.md)
 - Classic Visium accepts MEX directories with any combination of plain and

@@ -75,10 +75,15 @@ jobs:
         uses: dawidd6/action-download-artifact@07ab29fd4a977ae4d2b275087cf67563dfdf0295 # v9
         with:
           workflow: prepare_test_data.yaml
-          name: data
+          branch: main
+          name: data-default-${{ hashFiles('scripts/test_data_downloader/datasets.toml') }}
+          search_artifacts: true
+          if_no_artifact_found: warn
           path: ./data
       - name: create hatch environment
         run: uvx hatch env create ${{ matrix.env.name }}
+      - name: Ensure all default test datasets are installed
+        run: uvx hatch run ${{ matrix.env.name }}:python scripts/test_data_downloader --output ./data
       - name: list all all installed package versions
         run: uvx hatch run ${{ matrix.env.name }}:uv pip list
       - name: run tests using hatch

@@ -31,48 +31,55 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class FrameSelection:
-    """Identify one established frame and optional original-row selection."""
+    """Identify an export frame, its units and any original-row selection."""
 
-    description: FixedFrame | None
-    rows: NDArray[np.int64] | None
+    frame: str
+    units: Literal["micrometer", "pixel", "grid", "unknown"]
+    rows: NDArray[np.int64] | None = None
+    calibration: dict[str, str] | None = None
 
 
-def _frame_selection(table: AnnData, metadata: PositionsMetadata, frame: str | None) -> FrameSelection:
+def _frame_selection(
+    table: AnnData,
+    metadata: PositionsMetadata,
+    frame: str | None,
+    *,
+    units: Literal["micrometer", "pixel", "grid"] | None = None,
+) -> FrameSelection | None:
     descriptions = metadata["coordinates"]
-    primary = descriptions.get("spatial")
+    primary = descriptions.get("spatial") or next(iter(descriptions.values()), None)
     if frame is None:
         if primary is None:
-            primary = next(iter(descriptions.values()), None)
-        if primary is None:
-            return FrameSelection(None, None)
+            return None
         frames = observed_frames(table, primary)
         if not frames and not table.n_obs:
-            return FrameSelection(None, None)
+            return None
         if len(frames) != 1:
             message = f"Select coordinate_system explicitly for observation frames {frames!r}."
             raise ValueError(message)
         frame = frames[0]
     matches = [description for description in descriptions.values() if frame in observed_frames(table, description)]
     if not matches:
-        message = f"No table position declaration establishes coordinate_system {frame!r}."
-        raise ValueError(message)
-    if len({description["units"] for description in matches}) != 1:
+        if units is None:
+            message = (
+                f"No table position declaration establishes coordinate_system {frame!r}. "
+                "For centroid export in a frame defined on linked elements, pass coordinate_system_units."
+            )
+            raise ValueError(message)
+        calibration = (
+            {frame: "Caller declared coordinate_system_units='micrometer'."} if units == "micrometer" else None
+        )
+        return FrameSelection(frame, units, calibration=calibration)
+    declared_units = {description["units"] for description in matches}
+    if len(declared_units) != 1 or (units is not None and units not in declared_units):
         message = f"Conflicting position units are declared for coordinate_system {frame!r}."
         raise ValueError(message)
-    description = primary if primary is not None and frame in observed_frames(table, primary) else matches[0]
+    description = primary if primary is not None and primary in matches else matches[0]
     rows = None
     if "frame_key" in description:
         observations = cast("pd.DataFrame", table.obs)
         rows = np.flatnonzero(observations[description["frame_key"]].eq(frame).to_numpy(dtype=bool))
-    fixed: FixedFrame = {
-        "axes": ["x", "y"],
-        "units": description["units"],
-        "position": description["position"],
-        "frame": frame,
-    }
-    if "calibration" in description:
-        fixed["calibration"] = description["calibration"]
-    return FrameSelection(fixed, rows)
+    return FrameSelection(frame, description["units"], rows, description.get("calibration"))
 
 
 def _table(sdata: SpatialData, name: str | None) -> AnnData:
@@ -87,30 +94,32 @@ def _table(sdata: SpatialData, name: str | None) -> AnnData:
     return sdata.tables[name]
 
 
-def _derive_positions(sdata: SpatialData, table: AnnData, metadata: PositionsMetadata, description: FixedFrame) -> None:
-    if description["units"] == "unknown":
+def _derive_positions(
+    sdata: SpatialData, table: AnnData, metadata: PositionsMetadata, selection: FrameSelection
+) -> None:
+    if selection.units == "unknown":
         message = "Centroid export requires an established physical, pixel or grid frame; units are unknown."
         raise ValueError(message)
-    physical = description["units"] == "micrometer"
+    physical = selection.units == "micrometer"
     destination = "spatial" if physical else "spatial_centroids"
     preservation = "spatial_original" if physical and "spatial" in table.obsm else None
     if (preservation is not None and preservation in table.obsm) or (not physical and destination in table.obsm):
         message = f"Centroid export destination {preservation or destination!r} is occupied."
         raise ValueError(message)
     targets = linked_targets(sdata, table)
-    coordinates = centroid_coordinates(targets, frame=description["frame"], n_obs=table.n_obs)
+    coordinates = centroid_coordinates(targets, frame=selection.frame, n_obs=table.n_obs)
     descriptions = metadata["coordinates"]
     if preservation is not None:
         table.obsm[preservation] = table.obsm.pop("spatial")
         descriptions[preservation] = descriptions.pop("spatial")
     derived: FixedFrame = {
         "axes": ["x", "y"],
-        "units": description["units"],
-        "frame": description["frame"],
+        "units": selection.units,
+        "frame": selection.frame,
         "position": f"linked_element_centroid: {', '.join(target.name for target in targets)}",
     }
-    if "calibration" in description:
-        derived["calibration"] = description["calibration"]
+    if selection.calibration is not None:
+        derived["calibration"] = selection.calibration
     table.obsm[destination] = coordinates
     descriptions[destination] = derived
     table.uns[POSITIONS_KEY] = metadata
@@ -122,6 +131,7 @@ def to_legacy_anndata(
     table_name: str | None = None,
     coordinate_system: str | None = None,
     position_source: Literal["table", "centroids"] = "table",
+    coordinate_system_units: Literal["micrometer", "pixel", "grid"] | None = None,
 ) -> AnnData:
     """Export an owned AnnData with an explicit position source.
 
@@ -133,15 +143,23 @@ def to_legacy_anndata(
     table_name
         Table to export; inferred only when exactly one table exists.
     coordinate_system
-        Established position frame. Inferred only for a single observed frame;
-        an explicit frame selects its rows in their original order. Stored
-        snapshots are never implicitly reprojected.
+        Destination frame. Inferred only for a single observed table frame.
+        A frame declared by the table selects its rows in their original order.
+        Centroid export to a frame defined only on the linked elements uses
+        every row and requires ``coordinate_system_units``.
     position_source
         ``'table'`` preserves stored positions without computing spatial
         elements. ``'centroids'`` derives XY centres from linked Shapes, Labels
         or Points in the selected frame, matching region and instance IDs.
-        Labels can require a complete raster read; Points can require a full
-        coordinate scan.
+        Each referenced target needs a finite, invertible XY transformation
+        to the selected frame. Labels can require a complete raster read and
+        Points can require a full coordinate scan.
+    coordinate_system_units
+        Destination units for ``position_source='centroids'``. Required when
+        the table has no declaration for the explicitly named frame. Units
+        must agree with existing declarations for the frame. The output
+        calibration records any caller-declared micrometre units for a new
+        frame.
 
     Returns
     -------
@@ -173,21 +191,34 @@ def to_legacy_anndata(
     if position_source not in ("table", "centroids"):
         message = "position_source must be 'table' or 'centroids'."
         raise ValueError(message)
-    if coordinate_system is not None and (not isinstance(coordinate_system, str) or not coordinate_system):
+    if coordinate_system is not None and (not isinstance(coordinate_system, str) or not coordinate_system.strip()):
         message = "coordinate_system must be a nonempty string or None."
         raise TypeError(message)
+    if coordinate_system_units is not None:
+        if not isinstance(coordinate_system_units, str) or coordinate_system_units not in (
+            "micrometer",
+            "pixel",
+            "grid",
+        ):
+            message = "coordinate_system_units must be 'micrometer', 'pixel', 'grid' or None."
+            raise ValueError(message)
+        if position_source != "centroids":
+            message = "coordinate_system_units is supported only with position_source='centroids'."
+            raise ValueError(message)
     source = _table(sdata, table_name)
     validate_in_memory(source)
     metadata = parse_positions(source)
-    selection = _frame_selection(source, metadata, coordinate_system)
-    selected = source if selection.rows is None else source[selection.rows]
+    selection = _frame_selection(source, metadata, coordinate_system, units=coordinate_system_units)
+    selected = source if selection is None or selection.rows is None else source[selection.rows]
     table = selected.copy()
     normalize_positions(table, metadata)
     if position_source == "centroids":
-        if selection.description is None:
-            message = "Centroid export requires an established coordinate frame and units in the table declaration."
+        if selection is None:
+            message = (
+                "Centroid export requires an established coordinate frame or explicit coordinate_system and units."
+            )
             raise ValueError(message)
-        _derive_positions(sdata, table, metadata, selection.description)
+        _derive_positions(sdata, table, metadata, selection)
     return normalize_owned_anndata(table)
 
 
@@ -270,12 +301,12 @@ def from_legacy_anndata(
             raise ValueError(message)
     selected = adata if library.rows is None else adata[library.rows]
     table = selected.copy()
-    selection = _frame_selection(table, metadata, None) if has_positions else FrameSelection(None, None)
+    selection = _frame_selection(table, metadata, None) if has_positions else None
     normalize_positions(table, metadata)
-    if selection.description is None and library.images and has_positions:
+    if selection is None and library.images and has_positions:
         message = "Empty row-frame positions do not establish an image frame; select an explicit input frame."
         raise ValueError(message)
-    frame = selection.description["frame"] if selection.description is not None else f"legacy_{library.name}_pixels"
+    frame = selection.frame if selection is not None else f"legacy_{library.name}_pixels"
     images = read_images(table, library, frame=frame, rgb=rgb)
     table.uns.pop(TableModel.ATTRS_KEY, None)
     context = ReaderErrorContext("from_legacy_anndata", "table")

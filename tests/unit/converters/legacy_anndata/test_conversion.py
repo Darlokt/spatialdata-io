@@ -76,6 +76,15 @@ class TestToLegacyAnndata:
         with pytest.raises(ValueError, match="No table position declaration"):
             to_legacy_anndata(SpatialData(tables={"table": _table()}), coordinate_system="unknown")
 
+    @pytest.mark.parametrize("units", ["", "um", "unknown", True])
+    def test_rejects_unsupported_coordinate_system_units(self, *, units: str | bool) -> None:
+        with pytest.raises(ValueError, match="coordinate_system_units"):
+            to_legacy_anndata(_linked(), position_source="centroids", coordinate_system_units=units)  # pyrefly: ignore[bad-argument-type] - Exercise untrusted public options.
+
+    def test_table_export_does_not_accept_destination_units(self) -> None:
+        with pytest.raises(ValueError, match="only with position_source='centroids'"):
+            to_legacy_anndata(_linked(), coordinate_system="sample", coordinate_system_units="micrometer")
+
     def test_rejects_conflicting_units_for_same_frame(self) -> None:
         table = _table()
         table.obsm["native"] = np.ones((2, 2))
@@ -87,6 +96,16 @@ class TestToLegacyAnndata:
         }
         with pytest.raises(ValueError, match="Conflicting position units"):
             to_legacy_anndata(SpatialData(tables={"table": table}))
+
+    def test_centroid_units_cannot_override_existing_declaration(self) -> None:
+        with pytest.raises(ValueError, match=r"Conflicting position units.*sample"):
+            to_legacy_anndata(_linked(), position_source="centroids", coordinate_system_units="pixel")
+
+    def test_centroid_units_can_confirm_existing_declaration(self) -> None:
+        sdata = _linked()
+        expected = to_legacy_anndata(sdata, position_source="centroids")
+        actual = to_legacy_anndata(sdata, position_source="centroids", coordinate_system_units="micrometer")
+        assert_equal(actual, expected)
 
     def test_selects_explicit_native_frame_while_preserving_physical_positions(self) -> None:
         table = _table()
@@ -220,8 +239,15 @@ class TestPackage:
         assert legacy_anndata.from_legacy_anndata is from_legacy_anndata
         assert legacy_anndata.to_legacy_anndata is to_legacy_anndata
         signature = inspect.signature(to_legacy_anndata)
-        assert tuple(signature.parameters) == ("sdata", "table_name", "coordinate_system", "position_source")
+        assert tuple(signature.parameters) == (
+            "sdata",
+            "table_name",
+            "coordinate_system",
+            "position_source",
+            "coordinate_system_units",
+        )
         assert signature.parameters["position_source"].default == "table"
+        assert signature.parameters["coordinate_system_units"].default is None
         assert all(
             value.kind == inspect.Parameter.KEYWORD_ONLY
             for key, value in signature.parameters.items()

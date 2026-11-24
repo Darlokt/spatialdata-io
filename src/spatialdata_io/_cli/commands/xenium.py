@@ -149,7 +149,8 @@ def _feature_types(
     "--include-aligned-images/--no-include-aligned-images",
     default=True,
     show_default=True,
-    help="Return 10x-named aligned H&E and IF images. H&E can use matching keypoints when no matrix is present.",
+    help="Return 10x-named H&E and IF images. Use matching matrices or H&E keypoints for registration, "
+    "otherwise use separate pixel frames.",
 )
 @click.option(
     "--include-analysis/--no-include-analysis",

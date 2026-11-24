@@ -12,7 +12,7 @@ transcripts and expression tables together in their documented coordinate system
 - **New to spatialdata-io?** [Convert your first dataset](user/first-conversion.md) using a small, public Xenium experiment. For an offline example, [convert a single image](user/first-image.md).
 - **Working with an experiment?** [Find your reader](readers/index.md) by technology. Each guide lists the expected files, supported options and output elements.
 - **Choosing coordinates for analysis?** [Understand frames and units](user/coordinates.md) before comparing positions across images or samples.
-- **Adding support for a format?** Start with the [contributing guide](contributing.md).
+- **Adding support for a format?** Start with the [reader submission guide](contributing_io.md).
 
 For analysis and visualization after conversion, see the [SpatialData documentation](https://spatialdata.scverse.org/en/stable/).
 spatialdata-io belongs to the scverse ecosystem {cite:p}`Virshup_2023`, with fiscal sponsorship from NumFOCUS. [scverse governance](https://scverse.org/about/roles), [NumFOCUS](https://numfocus.org/project/scverse)

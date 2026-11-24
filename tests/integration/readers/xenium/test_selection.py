@@ -87,7 +87,7 @@ def test_matching_explorer_exports_survive_round_trip(tmp_path: Path) -> None:
     tifffile.imwrite(tiff, pixels, ome=True, metadata={"axes": "YX"})
     alignment_file = tmp_path / "he_imagealignment.csv"
     alignment_file.write_text(ALIGNMENT)
-    morphology_image = xenium_aligned_image(tiff, pixel_size=PIXEL_SIZE)
+    morphology_image = xenium_aligned_image(tiff, pixel_size=PIXEL_SIZE, already_registered=True)
     he_image = xenium_aligned_image(tiff, alignment_file, pixel_size=PIXEL_SIZE)
 
     path = tmp_path / "morphology.geojson"

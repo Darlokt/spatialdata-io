@@ -133,12 +133,27 @@ class TestXeniumAlignedImage:
             atol=0,
         )
 
-    def test_named_channels_without_alignment(self, tmp_path: Path) -> None:
+    def test_missing_alignment_requires_confirmation(self, tmp_path: Path) -> None:
+        path = tmp_path / "x.ome.tif"
+        _rgb(path)
+
+        with pytest.raises(ValueError, match="alignment_file or already_registered=True"):
+            xenium_aligned_image(path, pixel_size=PIXEL_SIZE)
+
+    def test_conflicting_registration_choices(self, tmp_path: Path) -> None:
+        path = tmp_path / "x.ome.tif"
+        _rgb(path)
+        alignment = _csv(tmp_path / "x_he_imagealignment.csv", MATRIX)
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            xenium_aligned_image(path, alignment, pixel_size=PIXEL_SIZE, already_registered=True)
+
+    def test_named_channels_on_the_morphology_grid(self, tmp_path: Path) -> None:
         data = np.arange(2 * 12 * 16, dtype=np.uint16).reshape(2, 12, 16)
         path = tmp_path / "x_if_image.ome.tif"
         tifffile.imwrite(path, data, ome=True, metadata={"axes": "CYX", "Channel": {"Name": ["CD20", "DAPI"]}})
 
-        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE)
+        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, already_registered=True)
 
         assert image.coords["c"].to_numpy().tolist() == ["CD20", "DAPI"]
         np.testing.assert_array_equal(image.data.compute(), data)
@@ -156,7 +171,7 @@ class TestXeniumAlignedImage:
             metadata={"axes": "CYX", "Channel": {"Name": ["Hematoxylin", "Eosin", "Residual"]}},
         )
 
-        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE)
+        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, already_registered=True)
 
         assert image.coords["c"].to_numpy().tolist() == ["Hematoxylin", "Eosin", "Residual"]
 
@@ -165,7 +180,9 @@ class TestXeniumAlignedImage:
         path = tmp_path / "plain.tif"
         tifffile.imwrite(path, data.T)
 
-        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, data_axes="xy", chunks=(1, 4, 4), scale_factors=(2,))
+        image = xenium_aligned_image(
+            path, pixel_size=PIXEL_SIZE, already_registered=True, data_axes="xy", chunks=(1, 4, 4), scale_factors=(2,)
+        )
 
         scale0 = image["scale0"]["image"]
         np.testing.assert_array_equal(scale0.data.compute()[0], data)
@@ -180,7 +197,7 @@ class TestXeniumAlignedImage:
             path, data, photometric="minisblack", planarconfig="contig", ome=True, metadata={"axes": "YXS"}
         )
 
-        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE)
+        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, already_registered=True)
 
         assert image.coords["c"].to_numpy().tolist() == [f"Channel:0:0:sample:{index}" for index in range(3)]
         np.testing.assert_array_equal(image.data.compute(), np.moveaxis(data, -1, 0))
@@ -188,7 +205,9 @@ class TestXeniumAlignedImage:
     def test_samples_read_as_channels_keep_rgb_names(self, tmp_path: Path) -> None:
         data = _rgb(tmp_path / "x.ome.tif")
 
-        image = xenium_aligned_image(tmp_path / "x.ome.tif", pixel_size=PIXEL_SIZE, data_axes="yxc")
+        image = xenium_aligned_image(
+            tmp_path / "x.ome.tif", pixel_size=PIXEL_SIZE, already_registered=True, data_axes="yxc"
+        )
 
         assert image.coords["c"].to_numpy().tolist() == ["r", "g", "b"]
         np.testing.assert_array_equal(image.data.compute(), np.moveaxis(data, -1, 0))
@@ -199,7 +218,7 @@ class TestXeniumAlignedImage:
             path, np.zeros((2, 12, 16), np.uint16), ome=True, metadata={"axes": "CYX", "Channel": {"Name": ["A", "A"]}}
         )
 
-        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE)
+        image = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, already_registered=True)
 
         assert image.coords["c"].to_numpy().tolist() == ["Channel:0:0", "Channel:0:1"]
 
@@ -209,8 +228,8 @@ class TestXeniumAlignedImage:
         tifffile.imwrite(path, data, ome=True, metadata={"axes": "ZYX", "Channel": {"Name": ["DAPI"]}})
 
         # The single OME channel record describes neither the Z planes nor the X columns.
-        planes = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, data_axes="cyx")
-        columns = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, data_axes="ycx")
+        planes = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, already_registered=True, data_axes="cyx")
+        columns = xenium_aligned_image(path, pixel_size=PIXEL_SIZE, already_registered=True, data_axes="ycx")
 
         assert planes.coords["c"].to_numpy().tolist() == [0, 1, 2]
         np.testing.assert_array_equal(planes.data.compute(), data)
@@ -221,7 +240,7 @@ class TestXeniumAlignedImage:
         tifffile.imwrite(path, np.zeros((2, 12, 16), np.uint16), ome=True, metadata={"axes": "ZYX"})
 
         with pytest.raises(ReaderFormatError, match="Axis 'z' has length 2") as caught:
-            xenium_aligned_image(path, pixel_size=PIXEL_SIZE)
+            xenium_aligned_image(path, pixel_size=PIXEL_SIZE, already_registered=True)
 
         assert caught.value.context == ReaderErrorContext("xenium", "aligned image")
         assert caught.value.path == path
@@ -230,8 +249,10 @@ class TestXeniumAlignedImage:
     def test_scale_factors_must_fit_the_image(self, tmp_path: Path) -> None:
         _rgb(tmp_path / "x.ome.tif")
 
-        with pytest.raises(ValueError, match=r"exceed the spatial extent of the aligned image \(12 x 16 pixels\)"):
-            xenium_aligned_image(tmp_path / "x.ome.tif", pixel_size=PIXEL_SIZE, scale_factors=(4, 4))
+        with pytest.raises(ValueError, match=r"exceed the spatial extent of the post-Xenium image \(12 x 16 pixels\)"):
+            xenium_aligned_image(
+                tmp_path / "x.ome.tif", pixel_size=PIXEL_SIZE, already_registered=True, scale_factors=(4, 4)
+            )
 
     @pytest.mark.parametrize(
         ("options", "error", "match"),
@@ -240,6 +261,7 @@ class TestXeniumAlignedImage:
             ({"pixel_size": True}, TypeError, "number of micrometres"),
             ({"pixel_size": 0.0}, ValueError, "finite positive"),
             ({"pixel_size": float("nan")}, ValueError, "finite positive"),
+            ({"pixel_size": 0.2, "already_registered": 1}, TypeError, "already_registered must be a boolean"),
             (
                 {"pixel_size": 0.2, "data_axes": ("y", "x", "s")},
                 TypeError,
@@ -265,11 +287,11 @@ class TestXeniumAlignedImage:
         _rgb(tmp_path / "x.ome.tif")
 
         with pytest.raises(ValueError, match="rank 2 does not match array rank 3") as caught:
-            xenium_aligned_image(tmp_path / "x.ome.tif", pixel_size=PIXEL_SIZE, data_axes="yx")
+            xenium_aligned_image(tmp_path / "x.ome.tif", pixel_size=PIXEL_SIZE, already_registered=True, data_axes="yx")
         assert type(caught.value) is ValueError
         context = ReaderErrorContext("xenium", "aligned image")
         assert caught.value.__notes__ == [f"While handling {context.describe(path=tmp_path / 'x.ome.tif')}."]
         with pytest.raises(FileNotFoundError):
-            xenium_aligned_image(tmp_path / "missing.ome.tif", pixel_size=PIXEL_SIZE)
+            xenium_aligned_image(tmp_path / "missing.ome.tif", pixel_size=PIXEL_SIZE, already_registered=True)
         with pytest.raises(FileNotFoundError):
             xenium_aligned_image(tmp_path / "x.ome.tif", tmp_path / "missing.csv", pixel_size=PIXEL_SIZE)

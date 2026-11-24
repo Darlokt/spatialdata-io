@@ -413,15 +413,12 @@ class TestReadLabels:
         image = read_image(reference, frame="Roi1", options=NATIVE_CHUNKS)
         assert isinstance(image, DataArray)
         with tifffile.TiffFile(path) as tiff:
-            store = tiff.aszarr(series=0, level=0, squeeze=True)
-            close_store = mocker.spy(store, "close")
-            mocker.patch.object(tiff, "aszarr", return_value=store)
             mocker.patch.object(tiff_dask.tifffile, "TiffFile", return_value=tiff)
             if fail:
-                mocker.patch.object(tiff_dask.zarr, "open_array", side_effect=RuntimeError("injected"))
+                mocker.patch.object(tiff_dask, "read_single_tile", side_effect=RuntimeError("injected"))
                 with pytest.raises(RuntimeError, match="injected"):
                     image.data[:, :4, :6].compute(scheduler="synchronous")
             else:
                 image.data[:1, :4, :6].compute(scheduler="synchronous")
-            close_store.assert_called_once()
+            assert tiff.filehandle.closed
             assert tiff.filehandle.closed

@@ -2,7 +2,10 @@
 
 Use `image.inspect_tiff()` and `image.read_tiff()` for TIFF-family metadata
 and pixels. The shared loader builds lazy tasks from paths and immutable
-selections. Each task opens and closes its own store. Native tile or strip
+selections. Each task opens and closes its own TIFF. A selection confined
+to one tile of a local YX or interleaved YXS plane can use tifffile's segment
+decoder directly. Sparse tiles and more complex layouts use the TIFF Zarr
+store. Native tile or strip
 alignment lets Dask cull unneeded reads. Apply requested rechunking after
 forming the native graph. `image.read_png()` and `image.read_jpeg()` defer
 whole-frame decoding. Raster construction runs zero pixel tasks.
