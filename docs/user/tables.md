@@ -33,7 +33,6 @@ imported analysis results. A vendor total in `obs` can cover a different
 population or feature set from `X`, for example after feature selection.
 Check the reader guide before using a source summary as a library size.
 
-(completed-raw-counts)=
 ### Raw-count precision
 
 For seqFISH, MERSCOPE, CosMx, raw Stereo-seq and the 10x-backed readers,

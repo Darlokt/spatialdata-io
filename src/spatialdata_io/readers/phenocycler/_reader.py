@@ -106,8 +106,9 @@ def phenocycler(  # noqa: PLR0913 - explicit reader options share the repository
         its counterpart and also returns the ordinary variant as
         `<region>_8bit_image`. A pair needs unsigned 8-bit and higher-bit-depth
         samples, matching channel identities and shapes, and agreement on
-        slide, calibration, and stage metadata. The counterpart uses the
-        primary image's transformations.
+        slide, calibration, and stage metadata. Compare profile cycle, channel
+        number and reagent identifiers wherever both variants declare them.
+        The counterpart uses the primary image's transformations.
     scale_factors
         Integer downsampling factors of at least two for generated pyramid
         levels. Empty for a single scale. The levels derive from the

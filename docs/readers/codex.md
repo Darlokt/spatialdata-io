@@ -65,6 +65,7 @@ that supplies table candidates must have the requested variant. Regions that
 supply only images still return their images. With the default `None`, both
 variants are eligible and a region with both requires a selection. A recognized
 filename suffix is recorded in `table.uns["spatialdata_io_compensation"]`.
+For a symlink, the link's name declares both compensation and file format.
 
 When the eligible outputs are a CSV and an FCS with the same stem in the same
 folder, CODEX reads the CSV. The Processor exports both formats for the same

@@ -10,9 +10,11 @@ uncalibrated scan uses ``image_pixels``.
 
 An ordinary 8-bit companion inherits the extended-range scan's transform
 after their shapes, ordered channel identities, acquisition generation,
-slide identifier, calibration and stage position have been checked. Explicit
-mask-to-image and CODEX image-to-table registrations require invertible XY
-affines with a finite float64 inverse.
+slide identifier, calibration and stage position have been checked. Where
+both profiles identify a channel's acquisition cycle, channel number or
+reagent, their declarations must agree. Either profile may omit these fields.
+Explicit mask-to-image and CODEX image-to-table registrations require
+invertible XY affines with a finite float64 inverse.
 """
 
 from __future__ import annotations
@@ -35,6 +37,15 @@ if TYPE_CHECKING:
     from spatialdata_io.readers.phenocycler._images import QpiScan
 
 _XY = ("x", "y")
+_PROFILE_IDENTITY_FIELDS = (
+    "profile_cycle",
+    "profile_channel",
+    "profile_clone",
+    "profile_reporter",
+    "profile_reagent_barcode",
+    "profile_dye",
+    "profile_marker_class",
+)
 
 
 def has_finite_inverse(matrix: NDArray[np.floating]) -> bool:
@@ -136,6 +147,16 @@ def validate_companion(primary: QpiScan, companion: QpiScan, *, context: ReaderE
             found="an ordinary scan with a different channel or spatial grid",
             expected="same-generation variants with matching channels, XY shape, calibration and stage",
         )
+    for high, low in zip(primary.channels, companion.channels, strict=True):
+        for field in _PROFILE_IDENTITY_FIELDS:
+            if field in high.metadata and field in low.metadata and high.metadata[field] != low.metadata[field]:
+                raise ReaderFormatError(
+                    context=context,
+                    path=companion.tiff.path,
+                    found=f"{high.channel_id!r} has {field} {high.metadata[field]!r} in the extended-range scan "
+                    f"and {low.metadata[field]!r} in the ordinary scan",
+                    expected="matching acquisition and reagent identifiers when declared by both variants",
+                )
 
 
 def _channel_identity(scan: QpiScan) -> tuple[tuple[object, ...], ...]:

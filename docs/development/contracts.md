@@ -56,6 +56,12 @@ access and resource lifetimes belong in `image`. The meanings of
 | `errors` | At external boundaries, bind the reader, artifact and known version with `ReaderErrorContext`. `ReaderFormatError` reports violated layout, format or schema requirements with the observed and expected state. Use an exception note via `add_reader_context()` when preserving the original exception type, or explicit chaining when translating a parser error. |
 | `provenance` | `set_reader_provenance()` writes the reader, package version and reliably detected optional format version to the result's `attrs`. Keep local paths, credentials and eager artifact hashes out of provenance. |
 
+During discovery, interpret the selected filename and carry its meaning alongside
+the validated path. For example, a CODEX link named `reg001_compensated.csv`
+declares both the CSV encoding and the compensated signal product. Table parsing
+and output metadata consume those layout fields. Test with a symlink whose
+target has a different suffix or product name.
+
 Keep the path-kind exceptions and their `errno` and `filename` where
 available. Report invalid public option types or values with the appropriate
 `TypeError` or `ValueError`. Use regular exceptions for external validation,

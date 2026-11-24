@@ -32,6 +32,10 @@ Directory reads prefer the extended-range `.er.qptiff` when both encodings
 of a scan are present. Pass the ordinary file directly to select it. Set
 `read_all_bit_depths=True` to also read the matching 8-bit companion. For
 `Tonsil_Scan1`, the two images are `Tonsil_image` and `Tonsil_8bit_image`.
+The variants must agree on channel order and grid. Where both profiles
+declare a cycle, channel number, clone, reporter, reagent barcode, dye or
+marker class for the same measurement, their values must agree. Either
+export may omit these optional fields.
 Use `regions=["Tonsil"]` for a subset of a directory. The reader preserves
 distinct scan suffixes when stripping them would merge scans.
 

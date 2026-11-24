@@ -36,6 +36,12 @@ contract. Retain the format fields used to interpret measurements in
 writeable metadata and exercise a Zarr round trip. Exporting complete XML or
 sidecar objects can also export operator names, paths and hostnames.
 
+Before pairing alternate encodings of one acquisition, compare the ordered
+measurements as well as the spatial grid. For example, two channels can have
+the same marker and optical band but different reagent barcodes. Compare
+optional identifiers wherever both sources declare them. Test both a conflict
+and an older export that omits the identifier.
+
 Pixel size converts distances within one grid. Registration places two grids
 in the same frame. For a multi-region scan, verify slide identity, units,
 origins and the direction of the coordinate axes before composing scale and

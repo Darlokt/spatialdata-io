@@ -117,7 +117,8 @@ def codex(  # noqa: PLR0913, RUF100 - explicit format choices keep the public bo
         without supplied masks. Set to false to read only the requested rasters.
     compensation
         Select ``"compensated"`` or ``"uncompensated"`` tables by filename
-        suffix for every selected region that has table candidates. With
+        suffix for every selected region that has table candidates. A symlink
+        supplies its own filename for this selection and the table metadata. With
         ``None``, both compensation variants are eligible. An eligible CSV/FCS
         pair with the same stem in the same directory is read from CSV to
         preserve precision. Other multiple matches are ambiguous. Requires

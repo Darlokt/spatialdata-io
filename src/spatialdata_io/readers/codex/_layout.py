@@ -17,8 +17,10 @@ For example, these two Processor artifacts belong to the same region.
 Processor/Uploader names are case-insensitive. Their numeric region index
 uses at least three decimal digits in the output name. Named results follow
 lexical order or the caller's explicit sequence. Compensated and uncompensated
-tables are distinct signal products. An equivalent CSV/FCS pair in the same
-folder is read from CSV. QPI scan names follow the QPI layout rules.
+tables are distinct signal products. The selected directory entry declares
+both encoding and compensation, including when it links to a differently
+named file. An equivalent CSV/FCS pair in the same folder is read from CSV.
+QPI scan names follow the QPI layout rules.
 """
 
 from __future__ import annotations
@@ -71,7 +73,7 @@ _CHANNEL_CONTEXT = ReaderErrorContext("codex", "montage channel names")
 
 @dataclass(frozen=True, slots=True)
 class CellTableSource:
-    """A cell table with the format selected from its logical filename."""
+    """A validated cell table with the encoding and signal product declared by its logical filename."""
 
     path: ArtifactFile
     kind: Literal["csv", "fcs"]
@@ -203,11 +205,13 @@ def _compensation(path: Path) -> Literal["compensated", "uncompensated"] | None:
             return None
 
 
-def _table_source(path: ArtifactFile, suffix: str) -> CellTableSource:
-    kind = _CELL_FORMATS.get(suffix.lower())
+def _table_source(path: ArtifactFile, logical_path: Path) -> CellTableSource:
+    kind = _CELL_FORMATS.get(logical_path.suffix.lower())
     if kind is None:
-        raise ReaderFormatError(context=_CELL_CONTEXT, path=path, found=suffix, expected="a .csv or .fcs cell table")
-    return CellTableSource(path, kind, _compensation(path))
+        raise ReaderFormatError(
+            context=_CELL_CONTEXT, path=path, found=logical_path.suffix, expected="a .csv or .fcs cell table"
+        )
+    return CellTableSource(path, kind, _compensation(logical_path))
 
 
 def _is_cell_candidate(path: Path) -> bool:
@@ -239,7 +243,7 @@ def _table(
 ) -> CellTableSource | None:
     if override is not None:
         path = require_caller_file(root, override, context=_CELL_CONTEXT)
-        return _table_source(path, path.suffix)
+        return _table_source(path, Path(override))
 
     matches = tuple(candidates)
     if compensation is not None and matches:
@@ -265,7 +269,7 @@ def _table(
     if candidate is None:
         return None
     path = require_metadata_file(root, candidate, context=_CELL_CONTEXT)
-    return _table_source(path, candidate.suffix)
+    return _table_source(path, candidate)
 
 
 def _image_override(

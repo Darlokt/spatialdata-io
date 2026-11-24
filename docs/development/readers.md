@@ -15,6 +15,14 @@
    independently verified real data where it can establish behavior the
    synthetic fixture cannot. [Testing workflows](testing.md)
 
+When a specification, a producer implementation and an existing reader disagree,
+record which producer and export each describes. Where a real artifact is
+available, check the disputed behavior against it. Keep a small fixture that
+distinguishes the interpretations and state which behavior has been verified
+only on synthetic input. A directory layout can identify the parser to use while
+leaving the producer release unknown. For example, FCS 3.1 identifies a cell
+table's encoding. A CODEX Processor version needs its own evidence.
+
 ## Use the common reader parameters
 
 Every dataset reader takes `path` (a local `str` or `Path`) as its first argument
@@ -60,7 +68,10 @@ versions or modes separate records when their required artifacts differ. Keep
 parsing and model construction in product modules that accept the validated
 paths and the facts they need. Introduce modules such as `_images.py`,
 `_labels.py`, `_transcripts.py` and `_geometry.py` for products with distinct
-contracts. Omit modules for products the format does not supply.
+contracts. A small reader can keep discovery and assembly in one module.
+Split when a source schema, coordinate transform or resource lifetime needs
+independent testing. Several producer releases can use the same parser.
+Introduce a version-specific parser when required artifacts or their meaning change.
 
 Discovery resolves ambiguity before expensive reads and gives all products the
 same view of the dataset. A schema test can then validate a column role without

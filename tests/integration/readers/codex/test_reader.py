@@ -717,6 +717,19 @@ class TestCodexCalibration:
 class TestCodexPathPolicy:
     """Discovered artifacts follow the dataset root's symlink policy."""
 
+    @pytest.mark.parametrize("target_name", ["payload", "export_uncompensated.fcs"])
+    def test_selected_link_declares_compensation_and_encoding(self, tmp_path: Path, target_name: str) -> None:
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        target = storage / target_name
+        write_csv(target)
+        (tmp_path / "reg001_compensated.csv").symlink_to(target)
+
+        table = codex(tmp_path, compensation="compensated").tables["table"]
+
+        assert table.uns["spatialdata_io_compensation"] == "compensated"
+        assert table.obs["cell_id"].tolist() == [7, 2, 11]
+
     @pytest.mark.parametrize("kind", ["csv", "fcs"])
     def test_in_root_links_preserve_discovered_formats(self, tmp_path: Path, kind: str) -> None:
         cells = tmp_path / f"cells.{kind}"

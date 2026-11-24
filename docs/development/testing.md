@@ -58,6 +58,10 @@ Measure performance changes on identical, representative inputs before and
 after the change, in the same environment and after verifying numerical
 equivalence. Record input dimensions, projection, chunk or batch sizes, wall
 time, peak memory, and task count or bytes read where available.
+Time reader construction, an off-origin crop, or a full write according to
+the workflow the change affects. State which operation was timed and whether
+the cache was warm. For a table parser, compare aligned identifiers and CSR
+values and indices row by row. Equal totals can hide a row or feature swap.
 
 ## Test against a public dataset
 
