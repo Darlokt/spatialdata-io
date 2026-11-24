@@ -18,7 +18,7 @@ import pytest
 from scipy import sparse
 from spatialdata.models import get_table_keys
 
-from spatialdata_io.readers._utils.counts import MtxFiles, read_10x_h5
+from spatialdata_io.readers._utils.counts import MtxFiles, MtxMember, read_10x_h5
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium._analysis import Analysis
@@ -58,10 +58,9 @@ PANEL = ProteinPanel(
 
 def _mtx(directory: Path) -> MtxFiles:
     return MtxFiles(
-        ArtifactFile(directory / "matrix.mtx.gz"),
-        ArtifactFile(directory / "barcodes.tsv.gz"),
-        ArtifactFile(directory / "features.tsv.gz"),
-        compressed=True,
+        MtxMember(ArtifactFile(directory / "matrix.mtx.gz"), compressed=True),
+        MtxMember(ArtifactFile(directory / "barcodes.tsv.gz"), compressed=True),
+        MtxMember(ArtifactFile(directory / "features.tsv.gz"), compressed=True),
     )
 
 

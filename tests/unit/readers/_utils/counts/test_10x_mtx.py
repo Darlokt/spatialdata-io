@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from spatialdata_io.readers._utils.counts import _10x_mtx
+from spatialdata_io.readers._utils.counts import MtxMember, _10x_mtx
 from spatialdata_io.readers._utils.errors import ReaderErrorContext
 from spatialdata_io.readers._utils.paths import ArtifactFile
 
@@ -68,4 +68,6 @@ class TestMtxCounts:
         path = ArtifactFile(tmp_path / "matrix.mtx")
         path.write_text(f"%%MatrixMarket matrix coordinate integer general\n{dimensions}\n{records}\n")
         with pytest.raises(ValueError, match=reason):
-            _10x_mtx._mtx_counts(path, (1, 1), compressed=False, context=ReaderErrorContext("test", "counts"))
+            _10x_mtx._mtx_counts(
+                MtxMember(path, compressed=False), (1, 1), context=ReaderErrorContext("test", "counts")
+            )

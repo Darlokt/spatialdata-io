@@ -2,9 +2,10 @@
 
 Parquet partitions follow row groups; their row counts come from the footer, so
 partitions carry a global, monotonic row index with known divisions. A plain CSV
-is split by the shared CSV block reader into newline-delimited 64 MiB blocks
-whose indexes restart at zero; every numeric field must hold a number, so an
-empty one is a malformed record. Integer cell IDs (XOA 1.0-1.2) are signed to
+is split into newline-aligned blocks with a 64 MiB target.
+Each block assigns unique row labels using its file-order ordinal; divisions
+remain unknown. Every numeric field must hold a number, so an empty one is a
+malformed record. Integer cell IDs (XOA 1.0-1.2) are signed to
 keep ``-1``; they are read as text and must be decimal digits or ``-1``,
 because Arrow's grammar would wrap hexadecimal ``0xffffffffffffffff`` to ``-1``.
 Discovery requires a seekable source. A plain transcript CSV takes precedence
@@ -130,15 +131,18 @@ def _read_row_group(spec: _Partitioning, row_group: int, offset: int) -> pd.Data
     return _normalize(table, spec).set_axis(pd.RangeIndex(offset, offset + table.num_rows))
 
 
-def _normalize_block(block: pd.DataFrame, spec: _Partitioning) -> pd.DataFrame:
-    """Validate one parsed CSV block, whose ``cell_id`` is text."""
+def _normalize_block(block: pd.DataFrame, spec: _Partitioning, *, ordinal: int, block_count: int) -> pd.DataFrame:
+    """Validate a CSV block and assign row labels independent of other blocks."""
     # Arrow-backed columns convert without copying; a thread pool would only add start-up time.
     table = pa.Table.from_pandas(block, preserve_index=False, nthreads=1)
     kind = dict(spec.types)[CELL_ID]
     if pa.types.is_integer(kind):
         ids = decimal_ids(table[CELL_ID], kind, path=spec.source.file, context=spec.context)
         table = table.set_column(table.column_names.index(CELL_ID), CELL_ID, ids)
-    return _normalize(table, spec)
+    frame = _normalize(table, spec)
+    # Every block uses a distinct residue modulo block_count, even if IDs repeat.
+    frame.index = pd.RangeIndex(ordinal, ordinal + len(frame) * block_count, block_count)
+    return frame
 
 
 def _parse(frame: dd.DataFrame, *, known_divisions: bool) -> dd.DataFrame:
@@ -212,5 +216,10 @@ def read_transcripts(
         schema=pa.schema(types | {CELL_ID: STRING}),
         context=context,
         block_bytes=_BLOCK_BYTES,
-    )
-    return _parse(blocks.map_partitions(_normalize_block, shared, meta=meta), known_divisions=False)
+    ).to_delayed()
+    # Freeze the source ordinal so Dask partition selection cannot renumber rows.
+    parts = [
+        dask.delayed(_normalize_block)(block, shared, ordinal=ordinal, block_count=len(blocks))
+        for ordinal, block in enumerate(blocks)
+    ]
+    return _parse(dd.from_delayed(parts, meta=meta), known_divisions=False)

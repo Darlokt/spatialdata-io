@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         tiff_level: int
         scale_factors: tuple[int, ...]
         chunks: tuple[int, ...]
+        use_feature_ids: bool
         invalid_geometries: Literal["keep", "drop", "raise"]
 
 
@@ -79,6 +80,12 @@ if TYPE_CHECKING:
     ),
 )
 @click.option(
+    "--use-feature-ids",
+    is_flag=True,
+    default=False,
+    help="GeoJSON: index shapes by unique Feature IDs, all nonempty strings or all signed 64-bit integers.",
+)
+@click.option(
     "--invalid-geometries",
     type=click.Choice(["keep", "drop", "raise"]),
     default="keep",
@@ -114,6 +121,7 @@ def generic_command(
         tiff_level=options["tiff_level"],
         scale_factors=options["scale_factors"],
         chunks=normalized_chunks,
+        use_feature_ids=options["use_feature_ids"],
         invalid_geometries=options["invalid_geometries"],
     )
 

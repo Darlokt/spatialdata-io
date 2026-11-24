@@ -8,9 +8,10 @@ import imagecodecs
 import numpy as np
 import pytest
 import tifffile
+from anndata import AnnData
 from dask.callbacks import Callback
 from shapely.geometry import Polygon
-from spatialdata import SpatialData, read_zarr
+from spatialdata import SpatialData, match_table_to_element, read_zarr
 from spatialdata.transformations import Identity, get_transformation
 from xarray import DataArray, DataTree
 
@@ -18,6 +19,7 @@ from spatialdata_io._cli.commands.generic import generic_command
 from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
 from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.image.tiff import _dask as tiff_dask
+from spatialdata_io.readers._utils.table import TableLinkage, parse_linked_table
 from spatialdata_io.readers.generic import generic, image
 from tests.integration.readers.generic._fixtures import write_geojson
 
@@ -691,6 +693,53 @@ class TestGenericToZarr:
 
         assert SpatialData.read(output).shapes["shapes"].index.tolist() == [0, 2]
 
+    @pytest.mark.parametrize(
+        ("identifiers", "dtype"),
+        [(["NA", "dropped", "007", "細胞"], "str"), ([2**63 - 1, 8, -(2**63), 2**53 + 1], "int64")],
+    )
+    def test_feature_ids_round_trip_and_link_to_a_table(
+        self, tmp_path: Path, identifiers: list[str | int], dtype: str
+    ) -> None:
+        left = Polygon([(8, 0), (9, 0), (8, 1)])
+        invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
+        middle = Polygon([(4, 0), (5, 0), (4, 1)])
+        right = Polygon([(2, 0), (3, 0), (2, 1)])
+        path = write_geojson(tmp_path / "shapes.geojson", [left, invalid, middle, right], feature_ids=identifiers)
+        output = tmp_path / "output.zarr"
+        retained = [identifiers[0], *identifiers[2:]]
+
+        generic_to_zarr(path, output, use_feature_ids=True, invalid_geometries="drop")
+        stored = SpatialData.read(output)
+        frame = stored.shapes["shapes"]
+        assert frame.index.tolist() == retained
+        assert frame.index.dtype == dtype
+        np.testing.assert_array_equal(frame.bounds["minx"], [8, 4, 2])
+
+        table = AnnData(obs={"region": ["shapes"] * 3, "feature_id": retained[::-1], "score": [30, 20, 10]})
+        table.strings_to_categoricals()
+        stored.tables["table"] = parse_linked_table(
+            table,
+            TableLinkage(("shapes",), "region", "feature_id"),
+            context=ReaderErrorContext("generic", "linkage test"),
+            expected_instance_ids={"shapes": frame.index},
+        )
+        stored.write_element("table")
+
+        reopened = SpatialData.read(output)
+        matched = match_table_to_element(reopened, "shapes")
+        assert matched.obs["feature_id"].tolist() == retained
+        assert matched.obs["score"].tolist() == [10, 20, 30]
+
+    def test_duplicate_feature_ids_do_not_create_a_store(self, tmp_path: Path) -> None:
+        valid = Polygon([(0, 0), (2, 0), (0, 2)])
+        path = write_geojson(tmp_path / "shapes.geojson", [valid, valid], feature_ids=["same", "same"])
+        output = tmp_path / "output.zarr"
+
+        with pytest.raises(ReaderFormatError, match="duplicate Feature id"):
+            generic_to_zarr(path, output, use_feature_ids=True)
+
+        assert not output.exists()
+
     def test_round_trips_exact_pixels_without_stdout(
         self,
         tmp_path: Path,
@@ -824,7 +873,7 @@ class TestReadGenericWrapper:
         assert isinstance(result.exception, ValueError)
         assert "data_axes" in str(result.exception)
 
-    def test_appends_geojson_with_custom_name(self, tmp_path: Path, runner: CliRunner) -> None:
+    def test_appends_geojson_with_custom_name_and_feature_ids(self, tmp_path: Path, runner: CliRunner) -> None:
         image_path = tmp_path / "image.png"
         shapes_path = tmp_path / "shapes.geojson"
         output = tmp_path / "output.zarr"
@@ -848,6 +897,7 @@ class TestReadGenericWrapper:
                 "regions",
                 "--coordinate-system",
                 "global",
+                "--use-feature-ids",
             ],
         )
 
@@ -857,3 +907,4 @@ class TestReadGenericWrapper:
         spatial_data = SpatialData.read(output)
         assert set(spatial_data.images) == {"image"}
         assert set(spatial_data.shapes) == {"regions"}
+        assert spatial_data.shapes["regions"].index.tolist() == ["vendor-0"]

@@ -21,7 +21,7 @@ class MerscopeFixture:
 
     root: Path
     analysis: Path
-    profile: Literal["standard", "cellpose", "watershed"]
+    profile: Literal["standard", "cellpose", "cellpose2", "watershed"]
     cell_ids: tuple[str, ...]
 
 
@@ -86,7 +86,7 @@ def _write_boundaries(path: Path, ids: tuple[str, ...], *, incomplete_z0: bool, 
 def write_merscope_dataset(  # noqa: PLR0913, RUF100 - Independent source layout and geometry variations.
     path: Path,
     *,
-    profile: Literal["standard", "cellpose", "watershed"] = "standard",
+    profile: Literal["standard", "cellpose", "cellpose2", "watershed"] = "standard",
     incomplete_z0: bool = False,
     extra_gene: bool = False,
     reassigned_transcripts: bool = False,
@@ -145,6 +145,9 @@ def write_merscope_dataset(  # noqa: PLR0913, RUF100 - Independent source layout
         incomplete_z0=incomplete_z0,
         invalid_first_cell=invalid_first_cell,
     )
+    if profile == "cellpose2":
+        # VPT also exports mosaic pixel coordinates, which cannot place cells in micrometres.
+        (analysis / "cellpose2_mosaic_space.parquet").touch()
     if reassigned_transcripts:
         transcripts = pd.read_csv(root / "detected_transcripts.csv", index_col=0)
         transcripts["cell_id"] = [9001, 9002, 9003, -1]

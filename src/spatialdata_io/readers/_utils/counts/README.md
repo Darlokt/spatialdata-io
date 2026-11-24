@@ -14,9 +14,11 @@ The reader closes every source before returning.
   inside the file. `read_10x_h5_components()` returns the same owned CSR and
   annotation frames for consumers such as HD nucleus aggregation that use the
   raw matrix as an intermediate. Both entry points skip nested metadata groups.
-- `read_10x_mtx()` takes the three validated paths in `MtxFiles`. The layout
-  declares gzip compression and whether the feature TSV has the two legacy
-  fields or the modern feature-type field. Barcode, feature ID and symbol
+- `read_10x_mtx()` takes the three validated members in `MtxFiles`. The layout
+  declares gzip compression separately for each path, using the source name
+  even when path validation resolves a symlink to a differently named file.
+  It also declares whether the feature TSV has the two legacy fields or the
+  modern feature-type field. Barcode, feature ID and symbol
   fields are literal UTF-8 strings, including quotes, leading zeros
   and null-like text. The optional `make_unique` changes repeated feature names
   using AnnData's naming convention. The reader supports general and

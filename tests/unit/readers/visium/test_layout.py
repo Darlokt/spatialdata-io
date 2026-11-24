@@ -92,8 +92,11 @@ class TestDiscoverLayout:
         counts = _discover(tmp_path).counts
 
         assert isinstance(counts, MtxCounts)
-        assert counts.files.matrix.name == "sample_matrix.mtx" + (".gz" if compressed else "")
-        assert counts.files.compressed is compressed
+        assert counts.files.matrix.file.name == "sample_matrix.mtx" + (".gz" if compressed else "")
+        assert all(
+            member.compressed is compressed
+            for member in (counts.files.matrix, counts.files.barcodes, counts.files.features)
+        )
         assert counts.filename_prefix is None
 
     @pytest.mark.parametrize("prefix", ["", "sample_"])
@@ -131,8 +134,8 @@ class TestDiscoverLayout:
         counts = _discover(tmp_path).counts
 
         assert isinstance(counts, MtxCounts)
-        assert counts.files.matrix.name == f"{prefix}matrix.mtx" + (".gz" if compressed else "")
-        assert counts.files.compressed is compressed
+        assert counts.files.matrix.file.name == f"{prefix}matrix.mtx" + (".gz" if compressed else "")
+        assert counts.files.matrix.compressed is compressed
 
     @pytest.mark.parametrize("kind", ["h5", "mex"])
     def test_legacy_prefixed_count_source_infers_dataset_prefix(self, tmp_path: Path, kind: str) -> None:
@@ -140,7 +143,9 @@ class TestDiscoverLayout:
         if kind == "h5":
             _write_h5(tmp_path / "library_filtered_feature_bc_matrix.h5")
         else:
-            _write_mex(tmp_path / "library_filtered_feature_bc_matrix")
+            mex = tmp_path / "library_filtered_feature_bc_matrix"
+            _write_mex(mex, prefix="member_")
+            (mex / "member_features.tsv.gz").rename(mex / "member_features.tsv")
 
         counts = _discover(tmp_path).counts
 
@@ -206,7 +211,7 @@ class TestDiscoverLayout:
         _write_required_spatial(tmp_path)
         mex = tmp_path / "filtered_feature_bc_matrix"
         _write_mex(mex, prefix="a_")
-        for name in ("matrix.mtx.gz", "barcodes.tsv.gz", "features.tsv.gz"):
+        for name in ("matrix.mtx", "barcodes.tsv.gz", "features.tsv"):
             (mex / f"b_{name}").touch()
 
         with pytest.raises(ReaderFormatError, match="multiple MEX triplets"):
@@ -221,15 +226,15 @@ class TestDiscoverLayout:
         with pytest.raises(ReaderFormatError, match="no complete MEX triplet"):
             _discover(tmp_path)
 
-    def test_rejects_mixed_compression_mex_triplet(self, tmp_path: Path) -> None:
+    def test_rejects_mixed_prefix_mex_triplet(self, tmp_path: Path) -> None:
         _write_required_spatial(tmp_path)
         mex = tmp_path / "filtered_feature_bc_matrix"
         mex.mkdir()
         (mex / "matrix.mtx").touch()
-        (mex / "barcodes.tsv.gz").touch()
+        (mex / "other_barcodes.tsv.gz").touch()
         (mex / "features.tsv.gz").touch()
 
-        with pytest.raises(ReaderFormatError, match="consistently compressed or uncompressed"):
+        with pytest.raises(ReaderFormatError, match="no complete MEX triplet"):
             _discover(tmp_path)
 
     def test_missing_standard_counts_preserves_precise_path_error(self, tmp_path: Path) -> None:
@@ -268,7 +273,9 @@ class TestDiscoverLayout:
         layout = _discover(tmp_path, counts_source="selected")
 
         assert isinstance(layout.counts, MtxCounts)
-        assert layout.counts.files.matrix == tmp_path / "selected" / ("matrix.mtx.gz" if compressed else "matrix.mtx")
+        assert layout.counts.files.matrix.file == tmp_path / "selected" / (
+            "matrix.mtx.gz" if compressed else "matrix.mtx"
+        )
         assert layout.counts.filename_prefix is None
         assert layout.format_version is None
 

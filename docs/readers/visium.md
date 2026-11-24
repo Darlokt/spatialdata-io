@@ -10,7 +10,7 @@ Space Ranger 2.0 and later:
 outs/
 ├── filtered_feature_bc_matrix.h5       # preferred count source
 ├── filtered_feature_bc_matrix/         # MEX alternative
-│   ├── matrix.mtx.gz                   # all three gzip, or all three plain
+│   ├── matrix.mtx.gz                   # each member may be plain or gzipped
 │   ├── barcodes.tsv.gz
 │   └── features.tsv.gz
 ├── raw_feature_bc_matrix.h5            # read only with counts_source
@@ -34,7 +34,7 @@ V1_Adult_Mouse_Brain/
 Discovery looks only at the dataset root and `spatial/`:
 
 - The standard HDF5 matrix wins over the standard MEX directory, which wins over one prefixed source. A prefixed HDF5 matrix beside a prefixed MEX directory is ambiguous and raises.
-- A MEX directory must hold exactly one complete `[<prefix>]matrix.mtx`, `barcodes.tsv`, `features.tsv` triplet, all gzip-compressed or all plain. A matching uncompressed `[<prefix>]genes.tsv` raises, because it introduces an ambiguous feature annotation source.
+- A MEX directory must hold one complete `matrix.mtx`, `barcodes.tsv`, `features.tsv` triplet with the same optional filename prefix. Each member can be plain or gzip-compressed. For example, `matrix.mtx`, `barcodes.tsv.gz`, and `features.tsv.gz` can be read together. Providing both spellings of the same member raises an ambiguity error. A matching uncompressed `[<prefix>]genes.tsv` also raises because it introduces a competing feature annotation source.
 - Other files in `spatial/` (QC images, CytAssist images, enrichment tables) are ignored.
 - The full-resolution tissue image is an input of Space Ranger, not part of `outs/`; pass it as `fullres_image_file`.
 - `counts_source`, `positions_file`, `scale_factors_file` and `fullres_image_file` replace the discovered artifacts. Relative paths resolve against the dataset root; absolute paths may point elsewhere. `counts_source` is read as HDF5 when its suffix is `.h5` or `.hdf5`, otherwise as a MEX directory, for example `counts_source="raw_feature_bc_matrix.h5"` to keep spots outside the tissue.

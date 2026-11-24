@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal
 
-from spatialdata_io.readers._utils.counts import MtxFiles
+from spatialdata_io.readers._utils.counts import MtxFiles, MtxMember
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import (
     list_directory,
@@ -237,10 +237,15 @@ def _counts(root: DatasetRoot, context: ReaderErrorContext) -> CountSource:
     directory = optional_metadata_directory(root, "cell_feature_matrix", context=context)
     if directory is not None:
         return MtxFiles(
-            matrix=require_metadata_file(root, directory / "matrix.mtx.gz", context=context),
-            barcodes=require_metadata_file(root, directory / "barcodes.tsv.gz", context=context),
-            features=require_metadata_file(root, directory / "features.tsv.gz", context=context),
-            compressed=True,
+            matrix=MtxMember(
+                require_metadata_file(root, directory / "matrix.mtx.gz", context=context), compressed=True
+            ),
+            barcodes=MtxMember(
+                require_metadata_file(root, directory / "barcodes.tsv.gz", context=context), compressed=True
+            ),
+            features=MtxMember(
+                require_metadata_file(root, directory / "features.tsv.gz", context=context), compressed=True
+            ),
         )
     archive = optional_metadata_file(root, "cell_feature_matrix.tar.gz", context=context)
     if archive is not None:

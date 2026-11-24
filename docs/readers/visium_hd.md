@@ -221,6 +221,31 @@ factor; padded short dimensions do not change that scale.
 
 Each final table describes float64 XY micrometres in `uns["spatialdata_io_positions"]`, distinguishing nominal bin centres, vendor cell centroids and vendor nucleus centroids in the calibrated `global` slide frame. Missing centroid properties yield no canonical array or declaration for that product. Nucleus tables never inherit cell positions; polygon centroids are not substituted.
 
+### Query bins with a QuPath annotation
+
+For polygons exported in full-resolution pixels of the same microscope image as `full_image`, apply that image's transform to the annotation. This example selects every returned 8 µm bin whose square intersects an annotation, including edge touches. Each selected bin contributes its complete expression row once, even where annotations overlap.
+
+```python
+from spatialdata import transform
+from spatialdata.transformations import get_transformation, set_transformation
+
+from spatialdata_io import geojson, visium_hd
+
+sdata = visium_hd("outs", bin_sizes=(8,), include_cell_boundaries=False, include_nucleus_boundaries=False)
+annotations = geojson("annotations.geojson", coordinate_system="microscope_pixels", invalid_geometries="raise")
+image_to_slide = get_transformation(sdata.images["full_image"], to_coordinate_system="global")
+set_transformation(annotations, image_to_slide, to_coordinate_system="global")
+roi = transform(annotations, to_coordinate_system="global").geometry.union_all()
+
+bins = sdata.shapes["square_008um"]
+hits = bins.sindex.query(roi, predicate="intersects")
+table = sdata.tables["square_008um_table"]
+selected = table[table.obs["instance_id"].isin(bins.index.take(hits)), :]
+max_residual_um = sdata.attrs["visium_hd"]["image_affine_max_residual_um"]
+```
+
+`selected.X` contains per-bin expression in the table's original row and feature order. For a hires or lowres annotation, use that image's transform. For a crop, include its offset and any change in pixel size. With projective registration, `max_residual_um` gives the maximum affine-fit error over the capture grid. Compare it with the precision you need near the annotation boundary.
+
 ## Images and memory
 
 Full-resolution images are discovered among root `tissue_image` TIFF names and

@@ -347,7 +347,7 @@ class TestDiscoverLayout:
             "cell_by_gene.csv",
             "cell_metadata.csv",
             "cellpose_micron_space.parquet",
-            "watershed_micron_space.parquet",
+            "cellpose2_micron_space.parquet",
         )
         with pytest.raises(ReaderFormatError, match="2 candidates") as caught:
             discover_layout(tmp_path, _selection(), vpt_directory="vpt")

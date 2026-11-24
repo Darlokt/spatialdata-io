@@ -75,8 +75,9 @@ def visium(  # noqa: PLR0913, RUF100 - explicit format choices keep the public b
     The HDF5 matrix is preferred over the MEX directory; a 10x sample download
     with a ``<prefix>_filtered_feature_bc_matrix.h5`` (or MEX directory) is
     used when neither standard name exists. A MEX directory holds one
-    ``matrix.mtx``/``barcodes.tsv``/``features.tsv`` triplet, all gzip or all
-    plain. Visium HD output is read by :func:`spatialdata_io.visium_hd`.
+    ``matrix.mtx``/``barcodes.tsv``/``features.tsv`` triplet. Each member can be
+    plain or gzip-compressed, with one spelling per member. Visium HD output
+    is read by :func:`spatialdata_io.visium_hd`.
 
     Positions have one row per capture spot: the barcode, ``in_tissue``
     (``0`` or ``1``), ``array_row`` and ``array_col`` (nonnegative integers),

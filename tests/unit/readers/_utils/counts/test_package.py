@@ -9,6 +9,7 @@ class TestCountsPackage:
     def test_exports_only_typed_10x_sources(self) -> None:
         assert counts.__all__ == [
             "MtxFiles",
+            "MtxMember",
             "read_10x_h5",
             "read_10x_h5_axes",
             "read_10x_h5_components",

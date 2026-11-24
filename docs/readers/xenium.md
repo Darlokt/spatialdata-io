@@ -149,7 +149,9 @@ Points have NumPy `x`, `y`, `z` (float32 µm), a categorical `feature_name` whos
 
 Cell-ID indexes on cell polygons and circles, and owning `cell_id` annotations on nucleus polygons, also retain Arrow storage (`uint64[pyarrow]` or `string[pyarrow]`). Nucleus indexes derived from mask labels retain their NumPy integer type. Identifier values and order are unchanged.
 
-Parquet partitions follow row groups and carry a global row index with known divisions. A plain CSV is split into newline-delimited blocks of 64 MiB whose indexes restart at zero. Construction reads only the parquet footer or the CSV header; unknown features or cells, missing values and nonfinite coordinates, `qv` or `nucleus_distance` fail when their partition is computed. A CSV has no spelling for a missing value: every numeric field must hold a number, so an empty or `NA` field is a malformed record, and `NaN` is a nonfinite value. Each block is parsed directly into the documented types, with the grammar described under [CSV twins](#csv-twins).
+Transcript rows keep file order and have unique integer index labels. Parquet has known divisions from its row groups. CSV has unknown divisions and its labels depend on the partitioning (64 MiB target). To match transcripts across files from the same bundle, join on the source `transcript_id` column and check its uniqueness.
+
+Construction reads only the Parquet footer or the CSV header. Unknown features or cells, missing values and nonfinite coordinates, `qv` or `nucleus_distance` fail when their partition is computed. A CSV has no spelling for a missing value. Every numeric field must hold a number, so an empty or `NA` field is a malformed record, and `NaN` is a nonfinite value. Each block is parsed directly into the documented types, with the grammar described under [CSV twins](#csv-twins).
 
 Integer domains are declared per artifact, so an unassigned transcript does not change a cells-table identifier type:
 
@@ -230,6 +232,24 @@ Axes come from the TIFF metadata, including `YXS` interleaved samples and `SYX` 
 Three channels are never assumed to be RGB from their count: the Breast IDC H&E, stored as Hematoxylin, Eosin and Residual channels, keeps those names. An OME channel count that does not match a corresponding channel axis raises.
 
 {func}`~spatialdata_io.xenium_explorer_selection` reads a Xenium Explorer coordinates export (`Selection,X,Y`, or `X,Y` with the name in the first comment line) as polygons in µm with `Identity()`, indexed by selection name in file order. Clicked cells are named `Cell <id>`. The result can be added to the `SpatialData` object or used with {func}`spatialdata.polygon_query`.
+
+### Locate a cell in the H&E image
+
+To locate a cell centroid in a verified, full-resolution H&E alignment, invert the image transform. It already includes the morphology pixel size.
+
+```python
+import numpy as np
+from spatialdata.transformations import get_transformation
+
+table = sdata.tables["table"]
+cell_id = table.obs_names[0]  # replace with the cell of interest
+x_um, y_um = table[cell_id, :].obsm["spatial"][0]
+image_to_global = get_transformation(sdata.images["he_image"], to_coordinate_system="global")
+matrix = image_to_global.to_affine_matrix(input_axes=("x", "y"), output_axes=("x", "y"))
+column, row, _ = np.linalg.solve(matrix, [x_um, y_um, 1.0])
+```
+
+The result is a fractional pixel position. Check the image bounds before indexing the array as `[row, column]`.
 
 ## Metadata
 

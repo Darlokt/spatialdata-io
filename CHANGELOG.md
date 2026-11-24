@@ -6,6 +6,11 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 
 ### Added
 
+- Generic GeoJSON imports can use top-level Feature IDs as shape indexes.
+  [Generic GeoJSON](docs/readers/generic.md#geojson), [#249](https://github.com/scverse/spatialdata-io/issues/249)
+- The reader guides show how to locate Xenium cells in H&E pixels and query
+  Visium HD expression using QuPath polygons.
+  [Xenium H&E coordinates](docs/readers/xenium.md), [Visium HD region queries](docs/readers/visium_hd.md#query-bins-with-a-qupath-annotation)
 - Generic image readers support 2D and 3D grayscale and multichannel data, BigTIFF (`.btf`),
   explicit TIFF series and stored pyramid levels, and calibration from complete OME spatial
   sizes. [Generic images and GeoJSON](docs/readers/generic.md)
@@ -141,10 +146,9 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 
 ### Fixed
 
-- Classic Visium accepts a 10x Matrix Market (MEX) directory containing
-  `matrix.mtx`, `barcodes.tsv` and `features.tsv`, either all plain or all
-  gzipped. For a deposit with mixed compression, decompress the gzipped members
-  before reading it. [Visium](docs/readers/visium.md), [#408](https://github.com/scverse/spatialdata-io/issues/408)
+- Classic Visium accepts MEX directories with any combination of plain and
+  gzipped matrix, barcode and feature files. Duplicate spellings of the same
+  member raise an ambiguity error. [Visium](docs/readers/visium.md), [#408](https://github.com/scverse/spatialdata-io/issues/408)
 - DBiT reads a grayscale tissue image as one channel and preserves its pixels.
   [#267](https://github.com/scverse/spatialdata-io/issues/267)
 - Visium HD derives nucleus counts from the raw 2 µm matrix and the vendor
@@ -168,7 +172,7 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 - CosMx reads composite TIFF channels from the declared axes in supported FOV
   layouts, including channel-first stacks. [#403](https://github.com/scverse/spatialdata-io/issues/403)
 - MERSCOPE projects valid cell boundaries across all Z slices, including cells
-  absent from z0. It supports the documented VPT Cellpose and Watershed layouts.
+  absent from z0. It supports VPT Cellpose, Cellpose2 and Watershed micron-space boundaries.
   [#256](https://github.com/scverse/spatialdata-io/issues/256), [#208](https://github.com/scverse/spatialdata-io/issues/208)
 - MACSima places planes at the integral pixel offsets declared by the source.
   Fractional positions or unsupported units raise a format error. [#419](https://github.com/scverse/spatialdata-io/issues/419)
@@ -182,8 +186,8 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
   to locate morphology. This also handles versioned bundles whose analysis
   software string is `R&D`. [#361](https://github.com/scverse/spatialdata-io/issues/361), [#362](https://github.com/scverse/spatialdata-io/issues/362)
 - Xenium derives transcript feature categories from the count vocabulary.
-  For a single Parquet file, the row index is unique across row groups.
-  CSV partitions retain local indexes, and `transcript_id` remains a column.
+  Row labels are unique across CSV partitions and Parquet row groups. The
+  vendor identifier remains available in `transcript_id`.
   [#306](https://github.com/scverse/spatialdata-io/issues/306), [#397](https://github.com/scverse/spatialdata-io/issues/397)
 - Visium, Visium HD and Xenium read 10x HDF5 counts directly. Visium and Xenium
   also read their Matrix Market inputs directly. The readers check integer precision

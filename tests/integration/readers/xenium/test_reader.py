@@ -30,7 +30,7 @@ from xarray import DataArray, DataTree
 from spatialdata_io import __version__
 from spatialdata_io._cli.commands.xenium import xenium_command
 from spatialdata_io.readers._utils.errors import RasterFormatError, ReaderFormatError
-from spatialdata_io.readers.xenium import xenium
+from spatialdata_io.readers.xenium import _transcripts, xenium
 from tests.integration.readers.xenium import _fixtures as fx
 
 if TYPE_CHECKING:
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from dask.dataframe import DataFrame as DaskDataFrame
     from geopandas import GeoDataFrame
     from numpy.typing import NDArray
+    from pytest_mock import MockerFixture
     from spatialdata import SpatialData
 
 PROFILES = [fx.XOA_1_0, fx.XOA_1_2, fx.XOA_1_3, fx.XOA_1_9, fx.XOA_2_0, fx.XOA_3_0, fx.XOA_4_0, fx.FORMAT_6_1]
@@ -853,7 +854,7 @@ class TestXenium:
         assert _frame(restored.var)["codeword_index"].dropna().tolist() == [2**64 - 1, 17]
         assert restored.var["codeword_index"].isna().tolist() == [True, True, True, False, False]
 
-    def test_csv_transcript_precision_survives_zarr(self, tmp_path: Path) -> None:
+    def test_csv_transcript_identity_and_precision_survive_zarr(self, tmp_path: Path, mocker: MockerFixture) -> None:
         bundle = fx.write_xenium_bundle(tmp_path / "input", fx.XOA_3_0, fx.Options(transcripts="csv"))
         path = bundle.root / "transcripts.csv"
         with path.open(newline="") as handle:
@@ -864,11 +865,16 @@ class TestXenium:
         with path.open("w", newline="") as handle:
             csv.writer(handle).writerows(rows)
 
+        mocker.patch.object(_transcripts, "_BLOCK_BYTES", 256)
         result = xenium(bundle.root)
+        expected = result.points["transcripts"].compute()
         output = tmp_path / "output.zarr"
         result.write(output)
         restored = read_zarr(output).points["transcripts"].compute()
 
+        assert result.points["transcripts"].npartitions > 1
+        assert restored.index.is_unique
+        pd.testing.assert_index_equal(restored.index, expected.index)
         assert restored["transcript_id"].dtype == pd.ArrowDtype(pa.uint64())
         assert restored["transcript_id"].iloc[:2].tolist() == [2**63 + 1, 2**64 - 1]
         np.testing.assert_array_equal(

@@ -19,7 +19,7 @@ remain exact text. Semantic validation follows typed ingestion.
     entity metadata derived without counts has no transcript count), so
     they are read as float64 and cast exactly. Other fields stay text.
 
-``cell_boundaries.parquet``, ``{cellpose,watershed}_micron_space.parquet``
+``cell_boundaries.parquet``, ``{cellpose,cellpose2,watershed}_micron_space.parquet``
     One row per cell and z slice: ``EntityID`` (integer or text), ``ZIndex``
     (nullable stack index) and ``Geometry`` (WKB Polygon or MultiPolygon in
     micrometres), plus an optional ``Type`` that must be ``Cell``. Other

@@ -14,7 +14,13 @@ if TYPE_CHECKING:
     from shapely.geometry.base import BaseGeometry
 
 
-def write_geojson(path: Path, geometries: Sequence[BaseGeometry | None], *, collection: bool = False) -> Path:
+def write_geojson(
+    path: Path,
+    geometries: Sequence[BaseGeometry | None],
+    *,
+    collection: bool = False,
+    feature_ids: Sequence[object] | None = None,
+) -> Path:
     values = [mapping(geometry) if geometry is not None else None for geometry in geometries]
     document = (
         {"type": "GeometryCollection", "geometries": values}
@@ -23,8 +29,12 @@ def write_geojson(path: Path, geometries: Sequence[BaseGeometry | None], *, coll
             "type": "FeatureCollection",
             "crs": {"type": "name", "properties": {"name": "EPSG:4326"}},
             "features": [
-                {"type": "Feature", "id": f"vendor-{index}", "properties": {"note": "discarded"}, "geometry": value}
-                for index, value in enumerate(values)
+                {"type": "Feature", "id": identifier, "properties": {"note": "discarded"}, "geometry": value}
+                for identifier, value in zip(
+                    feature_ids if feature_ids is not None else [f"vendor-{index}" for index in range(len(values))],
+                    values,
+                    strict=True,
+                )
             ],
         }
     )

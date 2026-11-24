@@ -11,7 +11,7 @@ import pytest
 from spatialdata_io._cli.commands.generic import generic_command
 from spatialdata_io._raster_defaults import DEFAULT_SCALE_FACTORS
 from spatialdata_io.converters.generic_to_zarr import generic_to_zarr
-from spatialdata_io.readers.generic import generic, image
+from spatialdata_io.readers.generic import generic, geojson, image
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,6 +38,17 @@ class TestGenericCommand:
         assert inspect.signature(generic).parameters["data_axes"].annotation == "str | None"
         assert inspect.signature(image).parameters["data_axes"].annotation == "str"
         assert inspect.signature(generic_to_zarr).parameters["data_axes"].annotation == "str | None"
+
+    def test_feature_ids_are_a_boolean_opt_in(self) -> None:
+        option = next(parameter for parameter in generic_command.params if parameter.name == "use_feature_ids")
+
+        assert isinstance(option, click.Option)
+        assert option.is_flag
+        assert option.default is False
+        for entry in (geojson, generic, generic_to_zarr):
+            parameter = inspect.signature(entry).parameters["use_feature_ids"]
+            assert parameter.annotation == "bool"
+            assert parameter.default is False
 
     def test_forwards_options_and_reports_new_output(
         self, tmp_path: Path, runner: CliRunner, mocker: MockerFixture
@@ -88,6 +99,7 @@ class TestGenericCommand:
             tiff_level=1,
             scale_factors=(2, 4),
             chunks=(1, 8, 9),
+            use_feature_ids=False,
             invalid_geometries="keep",
         )
         assert result.output == f"Data written to {output}\n"

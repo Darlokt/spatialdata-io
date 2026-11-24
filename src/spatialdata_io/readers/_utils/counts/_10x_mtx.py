@@ -31,28 +31,36 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class MtxFiles:
-    """Validated matrix, barcode and feature paths in one 10x MEX family."""
+class MtxMember:
+    """A validated MEX file and the compression declared by its source name."""
 
-    matrix: ArtifactFile
-    barcodes: ArtifactFile
-    features: ArtifactFile
+    file: ArtifactFile
     compressed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MtxFiles:
+    """Validated matrix, barcode and feature members in one 10x MEX family."""
+
+    matrix: MtxMember
+    barcodes: MtxMember
+    features: MtxMember
     legacy: bool = False
 
 
 def read_10x_mtx_fields(
-    path: ArtifactFile, fields: Mapping[str, int], /, *, compressed: bool, context: ReaderErrorContext
+    member: MtxMember, fields: Mapping[str, int], /, *, context: ReaderErrorContext
 ) -> pd.DataFrame:
     """Read named projections of zero-based fields in a headerless MEX annotation TSV.
 
     UTF-8 fields retain their literal spelling and the returned Arrow-backed
     columns follow the order of the supplied field names.
     """
+    path = member.file
     types = {f"f{i}": pa.large_string() for i in fields.values()}
     try:
         with (
-            open_csv_stream(path, context=context, compressed=compressed) as stream,
+            open_csv_stream(path, context=context, compressed=member.compressed) as stream,
             csv_errors(context=context, path=path),
         ):
             if not stream.peek(1):
@@ -156,10 +164,9 @@ def _coordinates(
     return rows.to_numpy(), columns.to_numpy(), data.to_numpy()
 
 
-def _mtx_counts(
-    path: ArtifactFile, shape: tuple[int, int], *, compressed: bool, context: ReaderErrorContext
-) -> sparse.csr_array:
-    with open_csv_stream(path, context=context, compressed=compressed) as stream:
+def _mtx_counts(member: MtxMember, shape: tuple[int, int], *, context: ReaderErrorContext) -> sparse.csr_array:
+    path = member.file
+    with open_csv_stream(path, context=context, compressed=member.compressed) as stream:
         banner = stream.readline(_BLOCK_BYTES)
         header = banner.lower().split()
         if (
@@ -214,19 +221,19 @@ def read_10x_mtx(files: MtxFiles, /, *, context: ReaderErrorContext, make_unique
     additive and names are decoded literally. Only feature symbols are made
     unique when requested. All streams close before return.
     """
-    barcodes = read_10x_mtx_fields(files.barcodes, {"barcode": 0}, compressed=files.compressed, context=context)
+    barcodes = read_10x_mtx_fields(files.barcodes, {"barcode": 0}, context=context)
     fields = {"gene_ids": 0, "symbol": 1}
     if not files.legacy:
         fields["feature_types"] = 2
-    var = read_10x_mtx_fields(files.features, fields, compressed=files.compressed, context=context)
+    var = read_10x_mtx_fields(files.features, fields, context=context)
     try:
-        counts = _mtx_counts(files.matrix, (len(var), len(barcodes)), compressed=files.compressed, context=context)
+        counts = _mtx_counts(files.matrix, (len(var), len(barcodes)), context=context)
     except ReaderFormatError:
         raise
     except (ValueError, OverflowError) as error:
         raise ReaderFormatError(
             context=context,
-            path=files.matrix,
+            path=files.matrix.file,
             found=str(error),
             expected="a well-formed 10x integer coordinate matrix aligned to the annotation TSVs",
         ) from error

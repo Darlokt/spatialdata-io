@@ -99,9 +99,9 @@ def _assert_table(table: AnnData, fixture: MerscopeFixture) -> None:
 class TestMerscopeCharacterization:
     """Read actual standard and VPT artifacts through the public transaction."""
 
-    @pytest.mark.parametrize("profile", ["standard", "cellpose", "watershed"])
+    @pytest.mark.parametrize("profile", ["standard", "cellpose", "cellpose2", "watershed"])
     def test_supported_profiles_preserve_values_and_frames(
-        self, tmp_path: Path, profile: Literal["standard", "cellpose", "watershed"]
+        self, tmp_path: Path, profile: Literal["standard", "cellpose", "cellpose2", "watershed"]
     ) -> None:
         fixture = write_merscope_dataset(tmp_path, profile=profile)
         result = _read(fixture)

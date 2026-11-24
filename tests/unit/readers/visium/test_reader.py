@@ -9,7 +9,7 @@ import pytest
 
 import spatialdata_io
 from spatialdata_io._raster_defaults import DEFAULT_CHUNKS, DEFAULT_SCALE_FACTORS
-from spatialdata_io.readers._utils.counts import MtxFiles
+from spatialdata_io.readers._utils.counts import MtxFiles, MtxMember
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.visium import visium
 from spatialdata_io.readers.visium._layout import H5Counts, MtxCounts
@@ -130,10 +130,9 @@ class TestDerivedDatasetId:
         counts = (
             MtxCounts(
                 MtxFiles(
-                    ArtifactFile(tmp_path / "matrix.mtx"),
-                    ArtifactFile(tmp_path / "barcodes.tsv"),
-                    ArtifactFile(tmp_path / "features.tsv"),
-                    compressed=False,
+                    MtxMember(ArtifactFile(tmp_path / "matrix.mtx"), compressed=False),
+                    MtxMember(ArtifactFile(tmp_path / "barcodes.tsv"), compressed=False),
+                    MtxMember(ArtifactFile(tmp_path / "features.tsv"), compressed=False),
                 ),
                 filename_prefix="prefix",
             )
@@ -164,10 +163,9 @@ class TestDerivedDatasetId:
     def test_requires_dataset_id_without_a_source_name(self, tmp_path: Path) -> None:
         counts = MtxCounts(
             MtxFiles(
-                ArtifactFile(tmp_path / "matrix.mtx"),
-                ArtifactFile(tmp_path / "barcodes.tsv"),
-                ArtifactFile(tmp_path / "features.tsv"),
-                compressed=False,
+                MtxMember(ArtifactFile(tmp_path / "matrix.mtx"), compressed=False),
+                MtxMember(ArtifactFile(tmp_path / "barcodes.tsv"), compressed=False),
+                MtxMember(ArtifactFile(tmp_path / "features.tsv"), compressed=False),
             ),
             filename_prefix=None,
         )

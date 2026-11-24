@@ -77,15 +77,22 @@ falling back, even when a colour declaration supplies the names.
 GeoJSON supports `FeatureCollection` and `GeometryCollection` documents with
 2D Polygons or MultiPolygons. The file must be strict UTF-8 JSON: duplicate
 object names and `NaN`/`Infinity` constants fail instead of being resolved
-silently. Output rows retain source order and positional integer IDs; source
-Feature IDs, properties and CRS declarations are discarded. Coordinates become
+silently. Output rows retain source order and use positional integer IDs by
+default. Feature properties and CRS declarations are discarded. Coordinates become
 float64; holes and multipart order follow the source. Units remain those of the source,
 potentially unknown; geographic coordinates are never reprojected or described
 as micrometres. Shapes are eager.
 
+Pass `use_feature_ids=True` to use top-level `Feature.id` values as the shapes index.
+Every feature in the collection must have a unique ID. Use either nonempty UTF-8
+strings throughout (so `"007"` is preserved) or signed 64-bit JSON integers.
+Use the same type for the instance IDs in a linked table. GeometryCollections
+support positional IDs only.
+
 `invalid_geometries="keep"` preserves invalid topology. `"drop"` removes entire
-invalid feature rows without renumbering survivors; `"raise"` reports invalid
-positional IDs. Missing, empty, nonpolygon, nonfinite, nonplanar or malformed
+invalid feature rows and keeps the surviving IDs. `"raise"` reports the IDs of
+invalid geometries. Feature IDs are validated before dropping any geometry.
+Missing, empty, nonpolygon, nonfinite, nonplanar or malformed
 geometries fail under every mode. Open rings are rejected, never closed or
 repaired. Dropping every feature also fails. Coordinates are stored as float64,
 so integers beyond `2**53` may round.
@@ -112,7 +119,7 @@ generic_to_zarr(
     "regions.geojson",
     "sample.zarr",
     coordinate_system="source_pixels",
-    invalid_geometries="keep",
+    use_feature_ids=True,
 )
 ```
 
@@ -120,10 +127,10 @@ Library calls print no status messages and do not mutate caller-owned options.
 Lazy raster computation continues to require the source image. Files close
 after parsing or inside individual raster tasks; no temporary source is retained.
 
-The CLI can create a store from an image and append shapes with their frame
-explicitly named:
+The CLI can create a store from an image and append shapes with an explicit
+frame and Feature IDs.
 
 ```bash
 python -m spatialdata_io generic --input image.ome.tif --output sample.zarr --data-axes CYX
-python -m spatialdata_io generic --input regions.geojson --output sample.zarr --coordinate-system source_pixels
+python -m spatialdata_io generic --input regions.geojson --output sample.zarr --coordinate-system source_pixels --use-feature-ids
 ```

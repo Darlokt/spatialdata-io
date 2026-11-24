@@ -31,6 +31,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
     tiff_level: int = 0,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
+    use_feature_ids: bool = False,
     invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
 ) -> None:
     """Read a generic element and persist it in a SpatialData Zarr store.
@@ -67,6 +68,9 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         or a mapping keyed by exactly the canonical axes. ``None`` selects
         ``(1, 1024, 1024)`` for ``CYX`` and ``(1, 1, 1024, 1024)`` for
         ``CZYX``. Invalid for GeoJSON inputs.
+    use_feature_ids
+        GeoJSON only: store each feature's top-level ``id`` as its index, as
+        described in :func:`spatialdata_io.geojson`. The default uses positional IDs.
     invalid_geometries
         GeoJSON topology policy, forwarded to :func:`generic`. Defaults to
         preserving source polygons; malformed geometry fails in every mode.
@@ -118,6 +122,7 @@ def generic_to_zarr(  # noqa: PLR0913, RUF100
         tiff_level=tiff_level,
         scale_factors=scale_factors,
         chunks=chunks,
+        use_feature_ids=use_feature_ids,
         invalid_geometries=invalid_geometries,
     )
 

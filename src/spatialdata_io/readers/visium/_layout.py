@@ -5,7 +5,7 @@ HDF5 matrix names every later error. Space Ranger 2.0 and later write::
 
     outs/
     ├── filtered_feature_bc_matrix.h5       # preferred count source
-    ├── filtered_feature_bc_matrix/         # MEX alternative, all gzip or all plain
+    ├── filtered_feature_bc_matrix/         # MEX alternative, each member may use gzip
     │   ├── matrix.mtx.gz
     │   ├── barcodes.tsv.gz
     │   └── features.tsv.gz
@@ -28,7 +28,8 @@ recognized when the standard names are absent::
 The standard HDF5 matrix wins over the standard MEX directory, which wins over
 one prefixed source; a prefixed HDF5 file beside a prefixed MEX directory is
 ambiguous. A MEX directory must hold exactly one complete
-``[<prefix>]matrix.mtx``/``barcodes.tsv``/``features.tsv`` triplet; a matching
+``[<prefix>]matrix.mtx``/``barcodes.tsv``/``features.tsv`` triplet. Each member
+can be plain or gzip-compressed; both spellings of a member are ambiguous. A matching
 uncompressed ``[<prefix>]genes.tsv`` declares a competing legacy feature
 family and is rejected. Other files in ``spatial/`` (QC
 images, CytAssist images, enrichment tables) are ignored. The full-resolution
@@ -54,7 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from spatialdata_io.readers._utils.counts import MtxFiles
+from spatialdata_io.readers._utils.counts import MtxFiles, MtxMember
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError, add_reader_context
 from spatialdata_io.readers._utils.paths import (
     list_directory,
@@ -90,7 +91,6 @@ HIRES_IMAGE = "tissue_hires_image.png"
 LOWRES_IMAGE = "tissue_lowres_image.png"
 
 _H5_SUFFIXES = frozenset({".h5", ".hdf5"})
-_MTX_MEMBERS = ("matrix.mtx", "barcodes.tsv", "features.tsv")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +104,7 @@ class H5Counts:
 
 @dataclass(frozen=True, slots=True)
 class MtxCounts:
-    """One complete MEX triplet: its member prefix, compression and any sample-download prefix."""
+    """One complete MEX triplet and any sample-download prefix."""
 
     files: MtxFiles
     filename_prefix: str | None
@@ -112,7 +112,7 @@ class MtxCounts:
     @property
     def path(self) -> ArtifactFile:
         """Return the expression artifact for table diagnostics."""
-        return self.files.matrix
+        return self.files.matrix.file
 
 
 type CountsLayout = H5Counts | MtxCounts
@@ -144,53 +144,61 @@ def _context(artifact: str, version: str | None = None) -> ReaderErrorContext:
 def _inspect_mtx_directory(
     path: ArtifactDirectory, *, root: DatasetRoot | None, filename_prefix: str | None
 ) -> MtxCounts:
-    """Resolve one complete consistently compressed MEX triplet."""
+    """Resolve one complete MEX triplet with unambiguous member spellings."""
     context = _context("count matrix")
     names = frozenset(entry.name for entry in list_directory(path, context=context))
 
-    variants: list[tuple[str | None, bool]] = []
-    for compressed in (True, False):
-        extension = ".gz" if compressed else ""
-        matrix, barcodes, features = (f"{name}{extension}" for name in _MTX_MEMBERS)
-        prefixes = {name[: -len(matrix)] for name in names if name.endswith(matrix)}
-        variants.extend(
-            (prefix or None, compressed)
-            for prefix in sorted(prefixes)
-            if f"{prefix}{barcodes}" in names and f"{prefix}{features}" in names
-        )
+    stems = {name.removesuffix(".gz") for name in names}
+    prefixes = []
+    for stem in stems:
+        if stem.endswith("matrix.mtx"):
+            prefix = stem.removesuffix("matrix.mtx")
+            if f"{prefix}barcodes.tsv" in stems and f"{prefix}features.tsv" in stems:
+                prefixes.append(prefix)
 
-    if len(variants) != 1:
-        found = "no complete MEX triplet" if not variants else f"multiple MEX triplets {variants!r}"
+    if len(prefixes) != 1:
+        found = (
+            "no complete MEX triplet" if not prefixes else f"multiple MEX triplets with prefixes {sorted(prefixes)!r}"
+        )
         raise ReaderFormatError(
             context=context,
             found=found,
-            expected="exactly one matrix/barcodes/features triplet, consistently compressed or uncompressed",
+            expected="exactly one matrix/barcodes/features triplet with a common prefix",
             path=path,
         )
 
-    prefix, compressed = variants[0]
-    legacy_name = f"{prefix or ''}genes.tsv"
+    prefix = prefixes[0]
+    legacy_name = f"{prefix}genes.tsv"
     legacy_path = path / legacy_name
     # A competing legacy feature table makes the feature annotation source ambiguous.
     if legacy_name in names and legacy_path.is_file():
         raise ReaderFormatError(
             context=context,
             found=f"competing legacy feature selector {legacy_name!r}",
-            expected=f"the selected modern {prefix or ''}features.tsv{'.gz' if compressed else ''} family only",
+            expected=f"the selected modern {prefix}features.tsv family only",
             path=legacy_path,
         )
 
-    extension = ".gz" if compressed else ""
-
-    def member(name: str) -> ArtifactFile:
-        candidate = path / f"{prefix or ''}{name}{extension}"
-        return (
+    def member(kind: str) -> MtxMember:
+        plain = f"{prefix}{kind}"
+        gzip_name = f"{plain}.gz"
+        if plain in names and gzip_name in names:
+            raise ReaderFormatError(
+                context=context,
+                found=f"ambiguous MEX member spellings {plain!r} and {gzip_name!r}",
+                expected="one plain or gzip-compressed file per MEX member",
+                path=path,
+            )
+        compressed = gzip_name in names
+        candidate = path / (gzip_name if compressed else plain)
+        file = (
             require_file(candidate, context=context)
             if root is None
             else require_metadata_file(root, candidate, context=context)
         )
+        return MtxMember(file, compressed=compressed)
 
-    files = MtxFiles(member("matrix.mtx"), member("barcodes.tsv"), member("features.tsv"), compressed=compressed)
+    files = MtxFiles(member("matrix.mtx"), member("barcodes.tsv"), member("features.tsv"))
     return MtxCounts(files, filename_prefix)
 
 
@@ -203,9 +211,10 @@ def _explicit_counts(root: DatasetRoot, source: str | Path, *, context: ReaderEr
     """Read the caller's count source as HDF5 by suffix, otherwise as a MEX directory."""
     if Path(source).suffix.lower() in _H5_SUFFIXES:
         return _h5_counts(require_caller_file(root, source, context=context))
-    return _inspect_mtx_directory(
-        require_caller_directory(root, source, context=context), root=None, filename_prefix=None
-    )
+    directory = require_caller_directory(root, source, context=context)
+    # Relative overrides in strict mode also constrain the targets of member symlinks.
+    contained = root.path_policy == "strict" and not Path(source).expanduser().is_absolute()
+    return _inspect_mtx_directory(directory, root=root if contained else None, filename_prefix=None)
 
 
 def _discover_counts(root: DatasetRoot, source: str | Path | None) -> CountsLayout:

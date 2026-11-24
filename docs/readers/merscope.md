@@ -1,6 +1,6 @@
 # MERSCOPE
 
-{func}`spatialdata_io.merscope` reads Vizgen instrument output and the Cellpose or Watershed output layouts of the Vizgen Post-processing Tool (VPT). It returns selected mosaics, transcript points, cell footprints and a linked expression table. Use the directory layout below to identify the export.
+{func}`spatialdata_io.merscope` reads Vizgen instrument output and the Cellpose, Cellpose2 or Watershed output layouts of the Vizgen Post-processing Tool (VPT). It returns selected mosaics, transcript points, cell footprints and a linked expression table. Use the directory layout below to identify the export.
 
 ## Instrument layout
 
@@ -56,6 +56,8 @@ region/
     ├── cellpose_micron_space.parquet # Cellpose layout
     └── detected_transcripts.csv      # optional reassigned events
 ```
+
+The [Vizgen Cellpose2 workflow](https://vizgen.github.io/vizgen-postprocessing/analysis_vignettes/segmentation_heart_dataset_cellpose2.html) uses `cellpose2_micron_space.parquet` in the same directory. VPT can also write mosaic-pixel boundaries for the same cells. The reader selects only the micron-space file and raises if several supported micron-space segmentations are present.
 
 The Watershed layout uses the same instrument root and this analysis directory:
 

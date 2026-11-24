@@ -59,9 +59,10 @@ def merscope(  # noqa: PLR0913, RUF100 - Explicit format choices keep the public
       ``detected_transcripts.csv`` and ``images/`` with
       ``mosaic_<stain>_z<index>.tif`` and an optional
       ``micron_to_mosaic_pixel_transform.csv``;
-    - Vizgen Post-processing Tool (VPT) output with Cellpose or Watershed
+    - Vizgen Post-processing Tool (VPT) output with Cellpose, Cellpose2 or Watershed
       segmentation in ``vpt_directory``: ``cell_by_gene.csv``,
-      ``cell_metadata.csv``, exactly one ``cellpose_micron_space.parquet`` or
+      ``cell_metadata.csv``, exactly one of ``cellpose_micron_space.parquet``,
+      ``cellpose2_micron_space.parquet`` and
       ``watershed_micron_space.parquet``, and optionally reassigned
       ``detected_transcripts.csv``. Mosaics still come from the region.
 

@@ -34,6 +34,10 @@ class TestGeneric:
         with pytest.raises(ValueError, match="only applicable to GeoJSON"):
             generic(tmp_path / "missing.tif", data_axes="yx", invalid_geometries=policy)
 
+    def test_rejects_feature_ids_for_images_before_io(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="use_feature_ids is only applicable to GeoJSON"):
+            generic(tmp_path / "missing.tif", data_axes="yx", use_feature_ids=True)
+
     def test_routes_images_with_normalized_defaults(
         self,
         tmp_path: Path,
@@ -60,10 +64,13 @@ class TestGeneric:
             chunks=None,
         )
 
+    @pytest.mark.parametrize("use_feature_ids", [False, True])
     def test_routes_geojson_without_image_options(
         self,
         tmp_path: Path,
         mocker: MockerFixture,
+        *,
+        use_feature_ids: bool,
     ) -> None:
         path = tmp_path / "shapes.GEOJSON"
         path.touch()
@@ -73,10 +80,12 @@ class TestGeneric:
             return_value=expected,
         )
 
-        result = generic(path, coordinate_system="cells")
+        result = generic(path, coordinate_system="cells", use_feature_ids=use_feature_ids)
 
         assert result is expected
-        parse.assert_called_once_with(path, coordinate_system="cells", invalid_geometries="keep")
+        parse.assert_called_once_with(
+            path, coordinate_system="cells", use_feature_ids=use_feature_ids, invalid_geometries="keep"
+        )
 
     @pytest.mark.parametrize(
         ("data_axes", "tiff_series", "match"),

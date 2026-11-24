@@ -6,6 +6,7 @@ import gzip
 import json
 import shutil
 import warnings
+from itertools import combinations
 from typing import TYPE_CHECKING, Literal, cast
 
 import anndata as ad
@@ -32,6 +33,9 @@ from spatialdata_io.readers.visium import visium
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+
+_MEX_MEMBERS = ("matrix.mtx", "barcodes.tsv", "features.tsv")
 
 
 def _write_h5(path: Path, *, library_id: bytes | None = b"sample") -> None:
@@ -156,6 +160,33 @@ def _assert_table_contract(result: SpatialData) -> None:
 
 class TestVisiumSyntheticWorkflow:
     """Prove every supported count and position layout through the public API."""
+
+    @pytest.mark.parametrize(
+        "gzip_members", [members for size in range(4) for members in combinations(_MEX_MEMBERS, size)]
+    )
+    def test_mex_member_compression(self, tmp_path: Path, gzip_members: tuple[str, ...]) -> None:
+        mex = tmp_path / "filtered_feature_bc_matrix"
+        _write_mex(mex, compressed=False)
+        for name in gzip_members:
+            _gzip(mex / name)
+        _write_spatial(tmp_path, version="v2")
+
+        _assert_table_contract(visium(tmp_path, dataset_id="sample"))
+
+    @pytest.mark.parametrize("name", _MEX_MEMBERS)
+    def test_mex_member_with_plain_and_gzip_spelling(self, tmp_path: Path, name: str) -> None:
+        mex = tmp_path / "filtered_feature_bc_matrix"
+        _write_mex(mex, compressed=False)
+        _write_spatial(tmp_path, version="v2")
+        (mex / f"{name}.gz").write_bytes(gzip.compress((mex / name).read_bytes()))
+
+        with pytest.raises(ReaderFormatError, match="ambiguous MEX member spellings") as caught:
+            visium(tmp_path, dataset_id="sample")
+
+        assert caught.value.path == mex
+        assert caught.value.context.artifact == "count matrix"
+        assert repr(name) in str(caught.value)
+        assert repr(f"{name}.gz") in str(caught.value)
 
     @pytest.mark.parametrize(
         ("source_dtype", "values"),
@@ -462,24 +493,30 @@ class TestVisiumSyntheticWorkflow:
         assert set(result.shapes) == {"legacy"}
         assert result.tables["table"].obs["region"].tolist() == ["legacy", "legacy", "legacy"]
 
-    def test_absolute_artifact_overrides_may_live_outside_root(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("format_name", ["h5", "mex"])
+    def test_absolute_artifact_overrides_may_live_outside_root(self, tmp_path: Path, format_name: str) -> None:
         root = tmp_path / "dataset"
         external = tmp_path / "external"
         root.mkdir()
         external.mkdir()
-        counts = external / "counts.h5"
-        _write_h5(counts)
+        if format_name == "h5":
+            counts = external / "counts.h5"
+            _write_h5(counts)
+        else:
+            counts = external / "counts"
+            _write_mex(counts, compressed=False)
+            _gzip(counts / "features.tsv")
         _write_spatial(external, version="v2")
 
         result = visium(
             root,
+            dataset_id="sample",
             counts_source=counts,
             positions_file=external / "spatial" / "tissue_positions.csv",
             scale_factors_file=external / "spatial" / "scalefactors_json.json",
         )
 
-        assert set(result.shapes) == {"sample"}
-        assert result.tables["table"].n_obs == 3
+        _assert_table_contract(result)
 
     def test_store_roundtrip_preserves_public_elements(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
@@ -676,8 +713,9 @@ class TestVisiumPathPolicy:
             _write_h5(tmp_path / "filtered_feature_bc_matrix.h5")
             linked = [tmp_path / "filtered_feature_bc_matrix.h5"]
         else:
-            _write_mex(tmp_path / "filtered_feature_bc_matrix", compressed=True)
+            _write_mex(tmp_path / "filtered_feature_bc_matrix", compressed=False)
             # The MEX reader opens these three files below the discovered directory.
+            _gzip(tmp_path / "filtered_feature_bc_matrix" / "matrix.mtx")
             linked = [tmp_path / "filtered_feature_bc_matrix" / "matrix.mtx.gz"]
         _write_spatial(tmp_path, version="v2")
         linked += [tmp_path / "spatial" / "tissue_positions.csv", tmp_path / "spatial" / "tissue_hires_image.png"]
@@ -690,6 +728,32 @@ class TestVisiumPathPolicy:
 
         relaxed = visium(tmp_path, dataset_id="sample", path_policy="relaxed")
         assert_spatial_data_objects_are_identical(relaxed, expected)
+
+    def test_mex_compression_uses_the_member_spelling_before_symlink_resolution(self, tmp_path: Path) -> None:
+        mex = tmp_path / "filtered_feature_bc_matrix"
+        _write_mex(mex, compressed=False)
+        _write_spatial(tmp_path, version="v2")
+        _gzip(mex / "barcodes.tsv")
+        for name, canonical_name in (("matrix.mtx", "matrix.payload.gz"), ("barcodes.tsv.gz", "barcodes.payload")):
+            source = mex / name
+            target = source.rename(tmp_path / canonical_name)
+            source.symlink_to(target)
+
+        _assert_table_contract(visium(tmp_path, dataset_id="sample"))
+
+    def test_relative_mex_member_follows_the_path_policy(
+        self, tmp_path: Path, link_outside_root: Callable[[Path], Path]
+    ) -> None:
+        mex = tmp_path / "selected"
+        _write_mex(mex, compressed=False)
+        _gzip(mex / "features.tsv")
+        _write_spatial(tmp_path, version="v2")
+        link_outside_root(mex / "features.tsv.gz")
+
+        with pytest.raises(ReaderFormatError, match="resolving outside the dataset root"):
+            visium(tmp_path, dataset_id="sample", counts_source="selected")
+
+        _assert_table_contract(visium(tmp_path, dataset_id="sample", counts_source="selected", path_policy="relaxed"))
 
     def test_relative_overrides_follow_the_path_policy(
         self, tmp_path: Path, link_outside_root: Callable[[Path], Path]

@@ -37,6 +37,7 @@ import pyarrow.csv as pacsv
 from spatialdata_io._positions import POSITIONS_KEY
 from spatialdata_io.readers._utils.counts import (
     MtxFiles,
+    MtxMember,
     read_10x_h5,
     read_10x_h5_axes,
     read_10x_mtx,
@@ -119,7 +120,7 @@ class FeatureIndex:
 
 
 def _source_path(source: CountSource) -> Path:
-    return source.matrix if isinstance(source, MtxFiles) else source.file
+    return source.matrix.file if isinstance(source, MtxFiles) else source.file
 
 
 def _extract_archive(
@@ -161,10 +162,9 @@ def _read_matrix(source: CountSource, context: ReaderErrorContext) -> ad.AnnData
         directory = _extract_archive(source.file, Path(temporary), context=context)
         return read_10x_mtx(
             MtxFiles(
-                require_file(directory / "matrix.mtx.gz", context=context),
-                require_file(directory / "barcodes.tsv.gz", context=context),
-                require_file(directory / "features.tsv.gz", context=context),
-                compressed=True,
+                MtxMember(require_file(directory / "matrix.mtx.gz", context=context), compressed=True),
+                MtxMember(require_file(directory / "barcodes.tsv.gz", context=context), compressed=True),
+                MtxMember(require_file(directory / "features.tsv.gz", context=context), compressed=True),
             ),
             context=context,
             make_unique=False,
@@ -306,9 +306,9 @@ def read_counts(
     return Counts(table, source_table.var_names, protein)
 
 
-def _mtx_feature_index(features: ArtifactFile, barcodes: ArtifactFile, context: ReaderErrorContext) -> FeatureIndex:
-    names = read_10x_mtx_fields(features, {"symbol": 1}, compressed=True, context=context)
-    ids = read_10x_mtx_fields(barcodes, {"barcode": 0}, compressed=True, context=context)
+def _mtx_feature_index(features: MtxMember, barcodes: MtxMember, context: ReaderErrorContext) -> FeatureIndex:
+    names = read_10x_mtx_fields(features, {"symbol": 1}, context=context)
+    ids = read_10x_mtx_fields(barcodes, {"barcode": 0}, context=context)
     return FeatureIndex(pd.Index(names["symbol"].array, dtype="str"), pd.Index(ids["barcode"].array, dtype="str"))
 
 
@@ -322,8 +322,8 @@ def read_feature_index(source: CountSource, *, context: ReaderErrorContext) -> F
     with TemporaryDirectory(prefix="xenium-mtx-") as temporary:
         directory = _extract_archive(source.file, Path(temporary), context=context, metadata_only=True)
         return _mtx_feature_index(
-            require_file(directory / "features.tsv.gz", context=context),
-            require_file(directory / "barcodes.tsv.gz", context=context),
+            MtxMember(require_file(directory / "features.tsv.gz", context=context), compressed=True),
+            MtxMember(require_file(directory / "barcodes.tsv.gz", context=context), compressed=True),
             context,
         )
 

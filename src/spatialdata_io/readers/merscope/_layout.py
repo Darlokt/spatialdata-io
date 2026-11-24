@@ -18,7 +18,8 @@ the cell products of the region::
     <vpt_directory>/
     ├── cell_by_gene.csv
     ├── cell_metadata.csv
-    ├── cellpose_micron_space.parquet   # exactly one of the two segmentations
+    ├── cellpose_micron_space.parquet   # exactly one micron-space segmentation
+    ├── cellpose2_micron_space.parquet
     ├── watershed_micron_space.parquet
     └── detected_transcripts.csv        # optional, events reassigned to the new cells
 
@@ -67,7 +68,7 @@ if TYPE_CHECKING:
 
 _MOSAIC_NAME = re.compile(r"mosaic_(?P<stain>.+)_z(?P<z>[0-9]+)\.tif")
 _TRANSFORM_FILE = "images/micron_to_mosaic_pixel_transform.csv"
-_SEGMENTATIONS = ("cellpose", "watershed")
+_SEGMENTATIONS = ("cellpose", "cellpose2", "watershed")
 _ROOT_CONTEXT = ReaderErrorContext("merscope", "region root")
 _VPT_CONTEXT = ReaderErrorContext("merscope", "VPT directory")
 _MOSAIC_CONTEXT = ReaderErrorContext("merscope", "mosaic image grid")
@@ -228,7 +229,7 @@ def _file(root: DatasetRoot, name: str, artifact: str) -> ArtifactFile:
 
 
 def _vpt_boundaries(analysis: DatasetRoot) -> ArtifactFile:
-    """Return the only Cellpose or Watershed boundary file of a VPT analysis."""
+    """Return the unique supported micron-space boundary file of a VPT analysis."""
     context = ReaderErrorContext("merscope", BOUNDARIES)
     candidates = [
         candidate

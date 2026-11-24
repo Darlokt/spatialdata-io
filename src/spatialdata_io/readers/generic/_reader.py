@@ -35,6 +35,7 @@ def generic(  # noqa: PLR0913, RUF100
     tiff_level: int = 0,
     scale_factors: Sequence[int] = DEFAULT_SCALE_FACTORS,
     chunks: Chunks | None = None,
+    use_feature_ids: bool = False,
     invalid_geometries: Literal["keep", "drop", "raise"] = "keep",
 ) -> DataArray | DataTree | GeoDataFrame:
     """Read one image or GeoJSON file as a SpatialData element.
@@ -73,6 +74,9 @@ def generic(  # noqa: PLR0913, RUF100
         a tuple in canonical ``CYX``/``CZYX`` order or a mapping keyed by the
         canonical axes. ``None`` selects ``(1, 1024, 1024)`` or
         ``(1, 1, 1024, 1024)``.
+    use_feature_ids
+        GeoJSON only: use each feature's top-level ``id`` as its index, as
+        described in :func:`geojson`. The default uses positional IDs.
     invalid_geometries
         GeoJSON only: ``"keep"`` preserves invalid polygons, ``"drop"`` removes
         their rows without renumbering and ``"raise"`` fails.
@@ -113,9 +117,14 @@ def generic(  # noqa: PLR0913, RUF100
         if factors or chunks is not None:
             message = "scale_factors and chunks cannot be used with GeoJSON inputs."
             raise ValueError(message)
-        return geojson(source, coordinate_system=frame, invalid_geometries=invalid_geometries)
+        return geojson(
+            source, coordinate_system=frame, use_feature_ids=use_feature_ids, invalid_geometries=invalid_geometries
+        )
 
     if suffix in VALID_IMAGE_TYPES:
+        if use_feature_ids is not False:
+            message = "use_feature_ids is only applicable to GeoJSON inputs."
+            raise ValueError(message)
         if data_axes is None:
             message = "data_axes must be provided for image inputs."
             raise ValueError(message)

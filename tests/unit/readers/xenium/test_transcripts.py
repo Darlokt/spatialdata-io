@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,7 @@ from dask.callbacks import Callback
 from spatialdata.models import PointsModel
 from spatialdata.transformations import Identity, get_transformation
 
+from spatialdata_io.readers._utils.csv import _blocks
 from spatialdata_io.readers._utils.errors import ReaderErrorContext, ReaderFormatError
 from spatialdata_io.readers._utils.paths import ArtifactFile
 from spatialdata_io.readers.xenium import _transcripts
@@ -183,6 +184,36 @@ class TestReadTranscripts:
         assert not points.known_divisions
         frame = points.compute()
         pd.testing.assert_frame_equal(frame.reset_index(drop=True), parquet, check_exact=True)
+        assert frame.index.is_unique
+        pd.testing.assert_frame_equal(frame[["x"]].join(frame[["transcript_id"]]), frame[["x", "transcript_id"]])
+
+    def test_csv_row_labels_survive_partition_selection_and_duplicate_ids(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
+        path = bundle.root / "transcripts.parquet"
+        source = pq.read_table(path)
+        # Put the same exact uint64 value into the first and last data blocks.
+        identifiers = pa.array([2**64 - 1] * source.num_rows, pa.uint64())
+        pacsv.write_csv(
+            source.set_column(source.column_names.index("transcript_id"), "transcript_id", identifiers),
+            bundle.root / "transcripts.csv",
+        )
+        mocker.patch.object(_transcripts, "_BLOCK_BYTES", 256)
+        reads = mocker.spy(_blocks, "_read_block")
+        tasks: list[object] = []
+        with Callback(posttask=lambda *args: tasks.append(args)):
+            points = _read(bundle, "csv")
+        assert tasks == []
+
+        last = points.get_partition(points.npartitions - 1).compute()
+        assert reads.call_count == 1
+        assert not last.empty
+
+        frame = points.compute()
+        assert frame.index.is_unique
+        pd.testing.assert_frame_equal(last, frame.loc[last.index])
+        assert frame["transcript_id"].tolist() == identifiers.to_pylist()
 
     def test_projects_documented_columns_only(self, tmp_path: Path) -> None:
         bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0)
@@ -349,9 +380,13 @@ class TestReadTranscripts:
         with pytest.raises(ReaderFormatError, match="qv"):
             _ = _read(bundle)
 
-    def test_graph_holds_paths_not_handles(self, tmp_path: Path) -> None:
-        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcript_row_group=7))
-        points = _read(bundle)
+    @pytest.mark.parametrize("kind", ["csv", "parquet"])
+    def test_graph_holds_paths_not_handles(
+        self, tmp_path: Path, mocker: MockerFixture, kind: Literal["csv", "parquet"]
+    ) -> None:
+        mocker.patch.object(_transcripts, "_BLOCK_BYTES", 256)
+        bundle = fx.write_xenium_bundle(tmp_path, fx.XOA_3_0, fx.Options(transcripts=kind, transcript_row_group=7))
+        points = _read(bundle, kind)
 
         graph = dict(points.__dask_graph__())
 

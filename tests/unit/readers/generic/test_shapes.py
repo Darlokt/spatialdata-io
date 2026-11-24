@@ -72,6 +72,88 @@ class TestGeojson:
         assert result.crs is None
         assert shapely.equals_exact(result.geometry, source, 0).all()
 
+    def test_default_ignores_source_ids_even_when_ambiguous(self, tmp_path: Path) -> None:
+        source = [Polygon([(x, 0), (x + 1, 0), (x, 1)]) for x in (6, 4, 2, 0)]
+        path = write_geojson(tmp_path / "shapes.geojson", source, feature_ids=["007", None, "007", 2**63])
+
+        result = geojson(path, "source")
+
+        assert result.index.tolist() == [0, 1, 2, 3]
+        assert result.columns.tolist() == ["geometry"]
+        assert shapely.equals_exact(result.geometry, source, 0).all()
+
+    @pytest.mark.parametrize("option", [None, 0, 1, "true"])
+    def test_rejects_nonboolean_feature_id_option_before_io(self, tmp_path: Path, option: object) -> None:
+        with pytest.raises(TypeError, match="use_feature_ids"):
+            geojson(tmp_path / "missing.geojson", "source", use_feature_ids=cast("bool", option))
+
+    def test_feature_ids_follow_the_same_geometries_when_reordered(self, tmp_path: Path) -> None:
+        source = [Polygon([(x, 0), (x + 1, 0), (x, 1)]) for x in (6, 4, 2, 0)]
+        identifiers = ["007", "7", "  NA ", "細胞"]
+        first = write_geojson(tmp_path / "first.geojson", source, feature_ids=identifiers)
+        second = write_geojson(tmp_path / "second.geojson", source[::-1], feature_ids=identifiers[::-1])
+
+        original = geojson(first, "source", use_feature_ids=True)
+        reordered = geojson(second, "source", use_feature_ids=True)
+
+        assert original.index.tolist() == identifiers
+        assert reordered.index.tolist() == identifiers[::-1]
+        assert shapely.equals_exact(original.geometry, source, 0).all()
+        assert shapely.equals_exact(reordered.geometry.loc[identifiers], source, 0).all()
+
+    @pytest.mark.parametrize(
+        ("identifiers", "found"),
+        [
+            (["007", None], "at position 1"),
+            (["007", ""], "at position 1"),
+            (["007", 7], "at position 1"),
+            ([7, "007"], "at position 1"),
+            ([1, True], "at position 1"),
+            ([1, 2.0], "at position 1"),
+            ([1, 2**63], "at position 1"),
+            ([1, -(2**63) - 1], "at position 1"),
+            ([1, {"id": 2}], "at position 1"),
+            (["007", "\ud800"], "cannot be encoded as UTF-8"),
+            (["007", "007"], "duplicate Feature id '007'"),
+            ([7, 7], "duplicate Feature id 7"),
+        ],
+    )
+    def test_rejects_invalid_feature_ids_before_geometry_drop(
+        self, tmp_path: Path, identifiers: list[object], found: str
+    ) -> None:
+        valid = Polygon([(0, 0), (2, 0), (0, 2)])
+        invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
+        path = write_geojson(tmp_path / "shapes.geojson", [valid, invalid], feature_ids=identifiers)
+
+        with pytest.raises(ReaderFormatError, match=found) as caught:
+            geojson(path, "source", use_feature_ids=True, invalid_geometries="drop")
+
+        assert caught.value.context.artifact == "GeoJSON shapes"
+        assert caught.value.path == path
+
+    def test_requires_a_top_level_id(self, tmp_path: Path) -> None:
+        path = tmp_path / "shapes.geojson"
+        path.write_text(
+            '{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"id":"007"},'
+            '"geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[0,1],[0,0]]]}}]}'
+        )
+
+        with pytest.raises(ReaderFormatError, match="'id' on every Feature"):
+            geojson(path, "source", use_feature_ids=True)
+
+    def test_feature_ids_require_a_feature_collection(self, tmp_path: Path) -> None:
+        path = write_geojson(tmp_path / "shapes.geojson", [Polygon([(0, 0), (1, 0), (0, 1)])], collection=True)
+
+        with pytest.raises(ReaderFormatError, match="expected a FeatureCollection with Feature IDs"):
+            geojson(path, "source", use_feature_ids=True)
+
+    def test_topology_error_reports_the_feature_id(self, tmp_path: Path) -> None:
+        invalid = Polygon([(0, 0), (2, 2), (2, 0), (0, 2)])
+        path = write_geojson(tmp_path / "shapes.geojson", [invalid], feature_ids=["cell-007"])
+
+        with pytest.raises(ReaderFormatError, match=r"invalid geometries.*cell-007"):
+            geojson(path, "source", use_feature_ids=True, invalid_geometries="raise")
+
     @pytest.mark.parametrize("policy", ["keep", "drop", "raise"])
     def test_topology_policy(self, tmp_path: Path, policy: Literal["keep", "drop", "raise"]) -> None:
         valid = Polygon([(0, 0), (2, 0), (0, 2)])
