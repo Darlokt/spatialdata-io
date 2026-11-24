@@ -190,12 +190,15 @@ def parse_csv_records(
     return table.to_pandas(types_mapper=pd.ArrowDtype)
 
 
-def _read_block(block: bytes, spec: _BlockSpec, *, first: bool) -> pd.DataFrame:
+def _read_block(block: bytes, spec: _BlockSpec, ordinal: int, block_count: int) -> pd.DataFrame:
     """Drop the file header in the first partition and decode the projected records."""
-    if first:
+    if ordinal == 0:
         newline = block.find(b"\n")
         block = block[newline + 1 :] if newline >= 0 else b""
-    return parse_csv_records(block, header=spec.names, schema=spec.schema, context=spec.context, path=spec.path)
+    frame = parse_csv_records(block, header=spec.names, schema=spec.schema, context=spec.context, path=spec.path)
+    # Distinct residues give independent blocks unique labels without counting preceding rows.
+    frame.index = pd.RangeIndex(ordinal, ordinal + len(frame) * block_count, block_count)
+    return frame
 
 
 def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error origin and partition size.
@@ -229,9 +232,9 @@ def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error ori
     Returns
     -------
     dask.dataframe.DataFrame
-        One partition per block, in file order, with unknown divisions and a
-        default index restarting in every partition. A file of ``size`` bytes
-        has ``max(1, size // block_bytes)`` blocks of nearly equal size.
+        One partition per block, in file order, with unknown divisions and
+        unique integer row labels determined by the source partitioning. A file
+        of ``size`` bytes has ``max(1, size // block_bytes)`` blocks of nearly equal size.
         Columns use :class:`pandas.ArrowDtype`.
 
     Notes
@@ -247,5 +250,6 @@ def read_csv_blocks(  # noqa: PLR0913, RUF100 - Explicit file, schema, error ori
     # paths. Escaping keeps one literal path even with glob metacharacters.
     read_blocks = cast("Callable[..., tuple[bytes, list[list[Delayed]]]]", read_bytes)
     _, blocks = read_blocks([glob.escape(str(path))], delimiter=b"\n", blocksize=block_bytes, sample=False)
-    parts = [delayed(_read_block)(block, spec, first=index == 0) for index, block in enumerate(blocks[0])]
+    file_blocks = blocks[0]
+    parts = [delayed(_read_block)(block, spec, ordinal, len(file_blocks)) for ordinal, block in enumerate(file_blocks)]
     return dd.from_delayed(parts, meta=_empty(schema))

@@ -61,6 +61,8 @@ class TestReadTranscripts:
         partitions = [partition.compute() for partition in points.to_delayed()]
         assert all(partition["cell"].dtype == pd.ArrowDtype(pa.uint64()) for partition in partitions)
         result = points.compute()
+        assert result.index.is_unique
+        pd.testing.assert_frame_equal(result[["x"]].join(result[["cell"]]), result[["x", "cell"]])
         assert result["cell"].dtype == pd.ArrowDtype(pa.uint64())
         assert result["cell"].tolist() == assignments
         assert result["z_raw"].dtype == pd.ArrowDtype(pa.uint64())
@@ -115,7 +117,7 @@ class TestReadTranscripts:
         np.testing.assert_array_equal(result[["x", "y"]].to_numpy(), np.tile([1.5, 2.5], (40, 1)))
         assert result["cell"].tolist() == [0] * 40
         assert result["z_raw"].tolist() == [1] * 40
-        assert result.index.duplicated().any()
+        assert result.index.is_unique
 
     def test_optional_annotations_are_absent_and_empty_points_are_supported(self, tmp_path: Path) -> None:
         path = ArtifactFile(tmp_path / "transcripts.csv")

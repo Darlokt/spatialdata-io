@@ -131,8 +131,8 @@ def _read_row_group(spec: _Partitioning, row_group: int, offset: int) -> pd.Data
     return _normalize(table, spec).set_axis(pd.RangeIndex(offset, offset + table.num_rows))
 
 
-def _normalize_block(block: pd.DataFrame, spec: _Partitioning, *, ordinal: int, block_count: int) -> pd.DataFrame:
-    """Validate a CSV block and assign row labels independent of other blocks."""
+def _normalize_block(block: pd.DataFrame, spec: _Partitioning) -> pd.DataFrame:
+    """Normalize the CSV fields and retain the source block's row labels."""
     # Arrow-backed columns convert without copying; a thread pool would only add start-up time.
     table = pa.Table.from_pandas(block, preserve_index=False, nthreads=1)
     kind = dict(spec.types)[CELL_ID]
@@ -140,8 +140,7 @@ def _normalize_block(block: pd.DataFrame, spec: _Partitioning, *, ordinal: int, 
         ids = decimal_ids(table[CELL_ID], kind, path=spec.source.file, context=spec.context)
         table = table.set_column(table.column_names.index(CELL_ID), CELL_ID, ids)
     frame = _normalize(table, spec)
-    # Every block uses a distinct residue modulo block_count, even if IDs repeat.
-    frame.index = pd.RangeIndex(ordinal, ordinal + len(frame) * block_count, block_count)
+    frame.index = block.index
     return frame
 
 
@@ -217,9 +216,5 @@ def read_transcripts(
         context=context,
         block_bytes=_BLOCK_BYTES,
     ).to_delayed()
-    # Freeze the source ordinal so Dask partition selection cannot renumber rows.
-    parts = [
-        dask.delayed(_normalize_block)(block, shared, ordinal=ordinal, block_count=len(blocks))
-        for ordinal, block in enumerate(blocks)
-    ]
+    parts = [dask.delayed(_normalize_block)(block, shared) for block in blocks]
     return _parse(dd.from_delayed(parts, meta=meta), known_divisions=False)

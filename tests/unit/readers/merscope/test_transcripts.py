@@ -73,6 +73,8 @@ class TestReadTranscripts:
 
         restored = pickle.loads(pickle.dumps(points))  # noqa: S301, RUF100 - Test-owned path-backed graph.
         result = restored.compute()
+        assert result.index.is_unique
+        pd.testing.assert_frame_equal(result[["x"]].join(result[["gene"]]), result[["x", "gene"]])
         assert result["gene"].tolist() == ["GeneB"] * 39 + ["Gene,A"]
         assert result["cell_id"].tolist() == ["9007199254740993"] * 39 + ["-1"]
         assert result["transcript_id"].tolist() == ["ENST.1"] * 40

@@ -17,8 +17,10 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 - Xenium can import secondary analysis on request. Run metadata, panel identities
   and selected protein feature annotations are available for supported bundles.
   Gene features retain base and current panel coverage separately. Explorer
-  selections can be read from annotated CSV or registered image-space GeoJSON. When
-  an H&E alignment matrix is missing, matching exported keypoints can supply the
+  selections can be read from annotated CSV or registered image-space GeoJSON.
+  The [Xenium guide](docs/readers/xenium.md#query-cell-expression-in-a-named-explorer-roi)
+  shows how to select expression rows for cells fully contained in a named ROI. [#385](https://github.com/scverse/spatialdata-io/issues/385)
+  When an H&E alignment matrix is missing, matching exported keypoints can supply the
   transformation. XOA 3.0 Prime layouts have also been verified with public bundles.
   [Xenium](docs/readers/xenium.md), [#180](https://github.com/scverse/spatialdata-io/issues/180)
 - Stereo-seq reads selected native GEF counts without an analysis H5AD. The guide
@@ -191,6 +193,8 @@ The format follows [Keep a Changelog][], and the project follows [Semantic Versi
 - Xenium uses the format version and image declarations in `experiment.xenium`
   to locate morphology. This also handles versioned bundles whose analysis
   software string is `R&D`. [#361](https://github.com/scverse/spatialdata-io/issues/361), [#362](https://github.com/scverse/spatialdata-io/issues/362)
+- CosMx, MERSCOPE and seqFISH transcripts have unique row labels across partitions,
+  so joining columns by index preserves one row per transcript. [#397](https://github.com/scverse/spatialdata-io/issues/397)
 - Xenium derives transcript feature categories from the count vocabulary.
   Row labels are unique across CSV partitions and Parquet row groups. The
   vendor identifier remains available in `transcript_id`.

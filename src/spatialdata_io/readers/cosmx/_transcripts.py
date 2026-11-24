@@ -112,23 +112,26 @@ def _decode_member(
     return handle.tell() - len(decoder.unused_data), decoder.unused_data
 
 
-def _gzip_range(projection: _Projection, offset: int, *, start: int, stop: int) -> tuple[int, pd.DataFrame]:
+def _gzip_range(projection: _Projection, cursor: tuple[int, int], *, stop: int) -> tuple[tuple[int, int], pd.DataFrame]:
     """Read contiguously from the predecessor's verified boundary, never resynchronizing.
 
-    The scalar end offset orders source reads without keeping open resources in
-    the graph. A member crossing several ranges belongs wholly to its first task;
+    The cursor carries the next compressed offset and the next transcript row.
+    A member crossing several ranges belongs wholly to its first task;
     those subsequent ranges return empty partitions.
     """
+    offset, first_row = cursor
     payload = bytearray()
     pending = b""
     path = projection.source.path
     with path.open("rb") as handle:
         while offset < stop:
             offset, pending = _decode_member(handle, offset, path, payload, pending)
-    if start == 0:
+    if cursor[0] == 0:
         del payload[: payload.find(b"\n") + 1]
     block = parse_csv_records(payload, header=projection.names, schema=projection.types, context=_CONTEXT, path=path)
-    return offset, normalize_transcript_partition(block, features=projection.features, path=path)
+    next_row = first_row + len(block)
+    block.index = pd.RangeIndex(first_row, next_row)
+    return (offset, next_row), normalize_transcript_partition(block, features=projection.features, path=path)
 
 
 def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
@@ -144,11 +147,11 @@ def _frame(projection: _Projection, meta: pd.DataFrame) -> dd.DataFrame:
         return blocks.map_partitions(normalize_transcript_partition, features=projection.features, path=path, meta=meta)
 
     size = path.stat().st_size
-    offset: int | Delayed = 0
+    cursor: tuple[int, int] | Delayed = (0, 0)
     partitions: list[Delayed] = []
     for start in range(0, size, _GZIP_RANGE_BYTES):
-        task = delayed(_gzip_range, nout=2)(projection, offset, start=start, stop=min(start + _GZIP_RANGE_BYTES, size))
-        offset, partition = task
+        task = delayed(_gzip_range, nout=2)(projection, cursor, stop=min(start + _GZIP_RANGE_BYTES, size))
+        cursor, partition = task
         partitions.append(partition)
     return dd.from_delayed(partitions, meta=meta)
 

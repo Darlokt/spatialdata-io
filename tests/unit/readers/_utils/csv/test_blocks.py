@@ -206,8 +206,12 @@ class TestReadCsvBlocks:
 
         assert path.stat().st_size == 1210
         assert frame.npartitions == len(partitions) == npartitions
-        assert all(partition.index.tolist() == list(range(len(partition))) for partition in partitions)
-        combined = pd.concat(partitions, ignore_index=True)
+        indexed = pd.concat(partitions)
+        assert indexed.index.is_unique
+        assert not frame.known_divisions
+        last = frame.get_partition(npartitions - 1).compute()
+        pd.testing.assert_frame_equal(last, indexed.loc[last.index])
+        combined = indexed.reset_index(drop=True)
         pd.testing.assert_frame_equal(combined, whole.compute(), check_exact=True)
         assert combined["id"].tolist() == [f"{index:03d}" for index in range(100)]
 
@@ -322,10 +326,10 @@ class TestReadBlock:
         spec = _blocks._BlockSpec(ArtifactFile(tmp_path / "transcripts.csv"), _HEADER, schema, _CONTEXT)
 
         if record == b"1,A,0\n":
-            assert _blocks._read_block(record, spec, first=False)["gene"].tolist() == ["A"]
+            assert _blocks._read_block(record, spec, ordinal=1, block_count=2)["gene"].tolist() == ["A"]
         else:
             with pytest.raises(ReaderFormatError):
-                _blocks._read_block(record, spec, first=False)
+                _blocks._read_block(record, spec, ordinal=1, block_count=2)
 
         assert owner.closed
 

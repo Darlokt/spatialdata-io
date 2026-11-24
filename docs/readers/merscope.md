@@ -158,9 +158,10 @@ including controls and zero-count features.
 | `fov`, `barcode_id` | Nonnegative uint64 annotations. |
 | `transcript_id` | Text codebook target, which can repeat across events. |
 
-The reader omits the unnamed source index and local pixel XY. The returned
-partition-local index can repeat. Each CSV record must occupy one physical line
-and match the header width. Quoted commas and doubled quotes are supported.
+The reader omits the unnamed source index and local pixel XY. Transcript rows
+keep file order and have unique integer labels within the points element.
+The labels depend on CSV partitioning. Each CSV record must occupy one physical
+line and match the header width. Quoted commas and doubled quotes are supported.
 Malformed data, unknown genes or invalid current assignments raise when the
 affected partition is computed. Current assignments are checked against the
 complete cell population when a table or boundaries supply one.

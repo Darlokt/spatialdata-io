@@ -257,6 +257,24 @@ sdata["annotated_regions"] = xenium_explorer_selection("he_annotations.geojson",
 
 The returned shapes represent the annotation regions. Cell membership is a separate spatial query. Explorer's reported cell count uses fully contained cells. [10x annotation export and selection statistics](https://www.10xgenomics.com/support/software/xenium-explorer/latest/tutorials/xe-selecting-multiple-regions-of-interest)
 
+### Query cell expression in a named Explorer ROI
+
+With `annotated_regions` registered as above and `cell_boundaries` loaded, select an ROI by its exported name. Transform both sets of polygons to `global` before testing containment. A cell can touch the ROI edge, but its entire polygon must lie within the ROI.
+
+```python
+from spatialdata import transform
+
+regions = transform(sdata.shapes["annotated_regions"], to_coordinate_system="global")
+roi = regions.geometry.loc["Selection 1"]
+cells = transform(sdata.shapes["cell_boundaries"], to_coordinate_system="global")
+cell_ids = cells.index[cells.geometry.covered_by(roi)]
+
+table = sdata.tables["table"]
+selected = table[table.obs["cell_id"].isin(cell_ids), :]
+```
+
+The shape index and `obs["cell_id"]` share the vendor cell IDs. The default table uses `label_id` for its separate link to the mask. `selected.X` keeps complete sparse expression rows in table order. Use valid polygons and restrict the query to one sample, since cell IDs can recur across bundles.
+
 ### Locate a cell in the H&E image
 
 To locate a cell centroid in a verified, full-resolution H&E alignment, invert the image transform. It already includes the morphology pixel size.

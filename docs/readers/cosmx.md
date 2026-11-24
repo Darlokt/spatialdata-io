@@ -106,6 +106,8 @@ Each compressed partition covers whole members and targets about 8 MiB of compre
 
 Counts are read in 1 MiB source blocks and converted to sparse arrays in batches. Keep each record within one block for reliable parsing. The source block size does not bound total memory.
 
+Transcript rows keep file order and have unique integer labels within the points element. Plain CSV labels depend on partitioning, while gzip labels are zero-based row numbers.
+
 Every CSV record must have the header's full width, including ignored fields. Eager tables permit quoted multiline fields. In both plain and gzip transcript files, a line with an odd number of `"` (an embedded newline in a quoted field, or a stray quote) raises a `ReaderFormatError` when its partition is computed. Line endings must be LF or CRLF. Arrow may accept some malformed quoting within a single line. Required numeric keys and transcript coordinates cannot be empty. Only optional numeric metadata accepts empty fields and `NA` as missing; string fields preserve these spellings literally.
 
 Errors name the artifact by its role (`count matrix`, `cell metadata`, `FOV positions`, `transcripts`, `composite images`, `cell labels`) and give its path.

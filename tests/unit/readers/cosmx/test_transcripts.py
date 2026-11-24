@@ -139,6 +139,10 @@ class TestReadTranscripts:
         assert not tasks
         assert points.npartitions > 1
         result = points.compute()
+        assert result.index.is_unique
+        if source == "gzip":
+            pd.testing.assert_index_equal(result.index, pd.RangeIndex(len(_ROWS)))
+        pd.testing.assert_frame_equal(result[["x"]].join(result[["target"]]), result[["x", "target"]])
         expected = _expected()
         np.testing.assert_array_equal(result["x"].to_numpy(), expected["x_global_px"].to_numpy())
         np.testing.assert_array_equal(result["y"].to_numpy(), expected["y_global_px"].to_numpy())
